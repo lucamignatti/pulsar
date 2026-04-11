@@ -1,0 +1,5 @@
+numpy>=1.26
+
+[viz]
+rlgym[rl-rlviser]<3,>=2.0.1
+rocketsim>=2.2.0

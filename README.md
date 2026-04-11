@@ -1,0 +1,102 @@
+# Pulsar
+
+`Pulsar` is a modular Rocket League bot platform built around a high-throughput C++ training runtime and a thin Python evaluation/visualization layer.
+
+## Design Goals
+
+- Mirror the `RLGym` component model in C++ so environment logic stays composable.
+- Run the full `PPO` training loop in C++ with `libtorch`.
+- Use `RocketSim` as the high-throughput simulation backend.
+- Keep one model definition in C++ and expose that same implementation to Python.
+- Use Python only for checkpoint-driven evaluation and `RLViser` rendering.
+
+## Repository Layout
+
+- `cpp/`: C++ runtime, environment modules, model, trainer, tests, and benchmarks.
+- `python/`: Thin visualization package and CLI.
+- `configs/`: Shared JSON experiment definitions.
+- `docs/`: Platform-specific setup notes.
+- `scripts/`: Local helper scripts for environment setup.
+
+## Build
+
+Initialize the `RocketSim` submodule first:
+
+```bash
+git submodule update --init --recursive
+```
+
+Then fetch the collision meshes used by both C++ `RocketSim` and the Python `rocketsim` package:
+
+```bash
+python3 scripts/collision_mesh_downloader.py
+```
+
+The project expects:
+
+- Python 3.10+
+- `torch`
+- `pybind11`
+- `rlgym[rl-rlviser]`
+- `rocketsim`
+
+Configure with:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install torch pybind11
+pip install -e .[viz]
+
+cmake -S . -B build \
+  -DCMAKE_PREFIX_PATH="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')" \
+  -Dpybind11_DIR="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')" \
+  -DPython3_EXECUTABLE="$(which python)"
+cmake --build build
+```
+
+If `Torch` or Python binding dependencies are not available, CMake still builds the core environment/config targets and skips the trainer/bindings targets.
+
+For the intended deployment target, see [docs/rocm_linux.md](/Users/lucamignatti/Projects/pulsar/docs/rocm_linux.md). On ROCm machines, keep using the `cuda` device string in the config because PyTorch ROCm exposes the CUDA device namespace.
+
+## Targets
+
+- `pulsar_core`: Config, action tables, rewards, done conditions, mutators, and environment scaffolding.
+- `pulsar_torch`: Shared actor-critic model, normalization, GPU rollout storage, and PPO trainer.
+- `pulsar_train`: Standalone trainer entry point.
+- `pulsar_native`: Python extension exposing the C++ model and checkpoint helpers.
+- `pulsar_bench`: Lightweight benchmark target for core runtime throughput.
+
+## Python Visualization
+
+The Python package is intentionally thin:
+
+- Loads the same JSON config as the C++ trainer.
+- Loads the shared model through the native extension.
+- Builds an `RLGym` evaluation environment.
+- Runs checkpoint-driven visualization episodes via `RLViser`.
+
+The visualization path is aligned with current `RLGym` defaults:
+
+- `RepeatAction(LookupTableAction(), repeats=tick_skip)`
+- `DefaultObs(zero_padding=team_size)`
+- `RLViserRenderer(tick_rate=tick_rate / tick_skip)`
+
+## Current Status
+
+This repository now contains a working v1 with source-informed defaults:
+
+- The default action space is the 90-action `RLGym` lookup table.
+- The default observation shape is `132`, matching `DefaultObs(zero_padding=2)` for `2v2`.
+- Reward defaults follow the `RLGym` PPO guide direction more closely: goal event reward, touch reward, non-negative speed-to-ball reward, ball-to-goal shaping, and a small face-ball term.
+- Terminal logic includes both goal termination and no-touch truncation.
+- The C++ runtime now uses real `RocketSim` arenas and downloaded soccar collision meshes.
+- The trainer batches policy inference across many independent arenas, writes checkpoints plus optimizer state, and logs per-update metrics to `metrics.jsonl`.
+- The Python evaluator loads the same native C++ model module and refuses config/checkpoint mismatches.
+
+Verified locally in this workspace:
+
+- Core and Torch CMake configure/build/tests pass.
+- `pulsar_bench` runs against real `RocketSim`.
+- `pulsar_train` can run a smoke PPO update and write a checkpoint.
+- Python can load that checkpoint through `pulsar_native`, construct the `RLGym` eval environment, and run a forward pass on live observations.

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pulsar-viz"
+version = "0.1.0"
+description = "Thin Python visualization and evaluation layer for Pulsar"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+viz = [
+  "rlgym[rl-rlviser]>=2.0.1,<3",
+  "rocketsim>=2.2.0",
+]
+
+[project.scripts]
+pulsar-viz = "pulsar_viz.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "python"}
+
+[tool.setuptools.packages.find]
+where = ["python"]

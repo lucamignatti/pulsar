@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: pulsar-viz
+Version: 0.1.0
+Summary: Thin Python visualization and evaluation layer for Pulsar
+Requires-Python: >=3.10
+Requires-Dist: numpy>=1.26
+Provides-Extra: viz
+Requires-Dist: rlgym[rl-rlviser]<3,>=2.0.1; extra == "viz"
+Requires-Dist: rocketsim>=2.2.0; extra == "viz"

@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "obs_schema_version": 1,
+  "env": {
+    "mode": "soccar",
+    "collision_meshes_path": "collision_meshes",
+    "team_size": 2,
+    "tick_skip": 8,
+    "tick_rate": 120,
+    "max_episode_ticks": 2250,
+    "no_touch_timeout_seconds": 10.0,
+    "spawn_opponents": true,
+    "randomize_kickoffs": true,
+    "seed": 7
+  },
+  "reward": {
+    "team_spirit": 0.2,
+    "opponent_scale": 1.0,
+    "terms": [
+      {
+        "name": "goal",
+        "weight": 10.0
+      },
+      {
+        "name": "touch",
+        "weight": 0.1
+      },
+      {
+        "name": "speed_to_ball",
+        "weight": 0.01
+      },
+      {
+        "name": "ball_to_goal",
+        "weight": 0.1
+      },
+      {
+        "name": "face_ball",
+        "weight": 0.002
+      }
+    ]
+  },
+  "action_table": {
+    "builtin": "rlgym_lookup_v1",
+    "actions": []
+  },
+  "model": {
+    "observation_dim": 132,
+    "hidden_sizes": [1024, 1024, 512, 512],
+    "action_dim": 90,
+    "use_layer_norm": true
+  },
+  "ppo": {
+    "num_envs": 256,
+    "rollout_length": 256,
+    "minibatch_size": 32768,
+    "epochs": 3,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "value_clip_range": 0.2,
+    "entropy_coef": 0.01,
+    "value_coef": 1.0,
+    "learning_rate": 0.0002,
+    "max_grad_norm": 1.0,
+    "target_kl": 0.03,
+    "device": "cuda",
+    "checkpoint_interval": 10
+  }
+}
