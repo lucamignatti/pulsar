@@ -17,6 +17,7 @@ viz = [
   "rocketsim>=2.2.0",
 ]
 offline = [
+  "kagglehub>=0.3.10",
   "subtr-actor-py>=0.3.1",
 ]
 

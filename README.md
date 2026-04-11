@@ -97,7 +97,14 @@ The visualization path is aligned with current `RLGym` defaults:
 The offline stage consumes tensor shards, not raw replay files directly. The intended path for the Kaggle high-level replay dataset is:
 
 1. Extract the dataset locally.
-2. Convert the `2v2` replay split into Pulsar tensor shards:
+2. Or download/materialize it through `kagglehub`:
+
+```bash
+.venv/bin/python scripts/download_kaggle_dataset.py \
+  --output /path/to/high-level-rocket-league-replay-dataset
+```
+
+3. Convert the `2v2` replay split into Pulsar tensor shards:
 
 ```bash
 .venv/bin/python scripts/preprocess_kaggle_2v2.py \
