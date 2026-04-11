@@ -70,6 +70,35 @@ For the intended deployment target, see [docs/rocm_linux.md](/Users/lucamignatti
 - `pulsar_native`: Python extension exposing the C++ model and checkpoint helpers.
 - `pulsar_bench`: Lightweight benchmark target for core runtime throughput. It reports both env-steps/sec and agent-steps/sec so comparisons against `RLGym`-style vectorized trainers stay apples-to-apples.
 
+## W&B Logging
+
+Both `pulsar_train` and `pulsar_offline_train` can stream metrics to Weights & Biases while still writing the local JSONL logs.
+
+Set the `wandb` block in your config:
+
+```json
+"wandb": {
+  "enabled": true,
+  "project": "pulsar",
+  "entity": "",
+  "run_name": "",
+  "group": "ppo",
+  "job_type": "ppo_train",
+  "dir": "",
+  "mode": "online",
+  "python_executable": "python3",
+  "script_path": "scripts/wandb_stream.py",
+  "tags": ["ppo", "continuum", "dppo"]
+}
+```
+
+Notes:
+
+- `run_name` can be left empty; Pulsar will use the output/checkpoint directory name.
+- `dir` can be left empty; Pulsar will use the run output directory for local `wandb` files.
+- `mode` can be `online`, `offline`, or `disabled`.
+- The logger uses the same config JSON you pass to the C++ executable, so the run config appears in W&B automatically.
+
 ## Python Visualization
 
 The Python package is intentionally thin:
@@ -112,13 +141,13 @@ The offline stage consumes tensor shards, not raw replay files directly. The int
   /path/to/pulsar_offline_2v2
 ```
 
-This writes:
+This writes sequence-safe shards:
 
 - `train_manifest.json`
 - `val_manifest.json`
-- shard-local `obs.pt`, `actions.pt`, `next_goal.pt`, and `weights.pt` tensor files
+- shard-local `obs.pt`, `actions.pt`, `next_goal.pt`, `weights.pt`, and `episode_starts.pt` tensor files
 
-The preprocessor uses `subtr_actor` for frame extraction, zero-fills unavailable boost-pad state, and derives discrete action labels heuristically from short-horizon car kinematics plus jump state. The resulting labels are good enough for policy warm-starting, but they are not replay-perfect controller reconstruction.
+The preprocessor uses `subtr_actor` for frame extraction, preserves per-player trajectories, writes explicit `episode_starts` markers, and keeps whole trajectories inside a shard so recurrent pretraining does not cross replay boundaries. It zero-fills unavailable boost-pad state and derives discrete action labels heuristically from short-horizon car kinematics plus jump state. The resulting labels are good enough for policy warm-starting, but they are not replay-perfect controller reconstruction.
 
 Then point [configs/2v2_offline.json](/Users/lucamignatti/Projects/pulsar/configs/2v2_offline.json) at those manifests and run:
 
@@ -131,6 +160,8 @@ That produces:
 - `policy/` checkpoint directory compatible with the existing shared C++ model loader
 - `next_goal/` checkpoint directory containing the NGP model plus the same observation normalizer state
 - `offline_metrics.jsonl`
+
+The offline trainer now runs truncated BPTT over real per-player trajectories. `behavior_cloning.sequence_length` controls the chunk length used for recurrent updates.
 
 ## Current Status
 

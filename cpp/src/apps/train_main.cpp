@@ -46,6 +46,6 @@ int main(int argc, char** argv) {
       action_parser,
       reward_fn,
       done_condition);
-  trainer.train(updates, argv[2]);
+  trainer.train(updates, argv[2], argv[1]);
   return 0;
 }

@@ -13,7 +13,7 @@ int main(int argc, char** argv) {
   try {
     const pulsar::ExperimentConfig config = pulsar::load_experiment_config(argv[1]);
     pulsar::OfflinePretrainer pretrainer(config);
-    pretrainer.train(argv[2]);
+    pretrainer.train(argv[2], argv[1]);
     return 0;
   } catch (const std::exception& exc) {
     std::cerr << "pulsar_offline_train failed: " << exc.what() << '\n';

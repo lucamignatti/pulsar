@@ -20,11 +20,15 @@ int main() {
     torch::Tensor actions = torch::randint(action_dim, {rows}, torch::TensorOptions().dtype(torch::kLong));
     torch::Tensor next_goal = torch::randint(3, {rows}, torch::TensorOptions().dtype(torch::kLong));
     torch::Tensor weights = torch::ones({rows});
+    torch::Tensor episode_starts = torch::zeros({rows});
+    episode_starts[0] = 1.0F;
+    episode_starts[32] = 1.0F;
 
     torch::save(obs, (root / "data" / "obs.pt").string());
     torch::save(actions, (root / "data" / "actions.pt").string());
     torch::save(next_goal, (root / "data" / "next_goal.pt").string());
     torch::save(weights, (root / "data" / "weights.pt").string());
+    torch::save(episode_starts, (root / "data" / "episode_starts.pt").string());
 
     std::ofstream manifest(root / "data" / "manifest.json");
     manifest << R"({
@@ -38,6 +42,7 @@ int main() {
       "actions_path": "actions.pt",
       "next_goal_path": "next_goal.pt",
       "weights_path": "weights.pt",
+      "episode_starts_path": "episode_starts.pt",
       "samples": 64
     }
   ]

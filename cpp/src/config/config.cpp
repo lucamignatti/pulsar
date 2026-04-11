@@ -117,6 +117,16 @@ void to_json(json& j, const ModelConfig& value) {
       {"hidden_sizes", value.hidden_sizes},
       {"action_dim", value.action_dim},
       {"use_layer_norm", value.use_layer_norm},
+      {"encoder_dim", value.encoder_dim},
+      {"workspace_dim", value.workspace_dim},
+      {"stm_slots", value.stm_slots},
+      {"stm_key_dim", value.stm_key_dim},
+      {"stm_value_dim", value.stm_value_dim},
+      {"ltm_slots", value.ltm_slots},
+      {"ltm_dim", value.ltm_dim},
+      {"controller_dim", value.controller_dim},
+      {"consolidation_stride", value.consolidation_stride},
+      {"retired_decay", value.retired_decay},
   };
 }
 
@@ -125,6 +135,16 @@ void from_json(const json& j, ModelConfig& value) {
   value.hidden_sizes = j.at("hidden_sizes").get<std::vector<int>>();
   value.action_dim = j.at("action_dim").get<int>();
   value.use_layer_norm = j.at("use_layer_norm").get<bool>();
+  value.encoder_dim = j.value("encoder_dim", 512);
+  value.workspace_dim = j.value("workspace_dim", 512);
+  value.stm_slots = j.value("stm_slots", 48);
+  value.stm_key_dim = j.value("stm_key_dim", 128);
+  value.stm_value_dim = j.value("stm_value_dim", 128);
+  value.ltm_slots = j.value("ltm_slots", 32);
+  value.ltm_dim = j.value("ltm_dim", 128);
+  value.controller_dim = j.value("controller_dim", 512);
+  value.consolidation_stride = j.value("consolidation_stride", 8);
+  value.retired_decay = j.value("retired_decay", 0.96F);
 }
 
 void to_json(json& j, const PPOConfig& value) {
@@ -145,6 +165,20 @@ void to_json(json& j, const PPOConfig& value) {
       {"target_kl", value.target_kl},
       {"device", value.device},
       {"checkpoint_interval", value.checkpoint_interval},
+      {"sequence_length", value.sequence_length},
+      {"burn_in", value.burn_in},
+      {"value_v_min", value.value_v_min},
+      {"value_v_max", value.value_v_max},
+      {"value_num_atoms", value.value_num_atoms},
+      {"use_adaptive_epsilon", value.use_adaptive_epsilon},
+      {"adaptive_epsilon_beta", value.adaptive_epsilon_beta},
+      {"epsilon_min", value.epsilon_min},
+      {"epsilon_max", value.epsilon_max},
+      {"use_confidence_weighting", value.use_confidence_weighting},
+      {"confidence_weight_type", value.confidence_weight_type},
+      {"confidence_weight_delta", value.confidence_weight_delta},
+      {"normalize_confidence_weights", value.normalize_confidence_weights},
+      {"advantage_calculation", value.advantage_calculation},
   };
 }
 
@@ -165,6 +199,20 @@ void from_json(const json& j, PPOConfig& value) {
   value.target_kl = j.at("target_kl").get<float>();
   value.device = j.at("device").get<std::string>();
   value.checkpoint_interval = j.at("checkpoint_interval").get<int>();
+  value.sequence_length = j.value("sequence_length", 16);
+  value.burn_in = j.value("burn_in", 4);
+  value.value_v_min = j.value("value_v_min", -10.0F);
+  value.value_v_max = j.value("value_v_max", 10.0F);
+  value.value_num_atoms = j.value("value_num_atoms", 51);
+  value.use_adaptive_epsilon = j.value("use_adaptive_epsilon", true);
+  value.adaptive_epsilon_beta = j.value("adaptive_epsilon_beta", 1.0F);
+  value.epsilon_min = j.value("epsilon_min", 0.05F);
+  value.epsilon_max = j.value("epsilon_max", 0.3F);
+  value.use_confidence_weighting = j.value("use_confidence_weighting", true);
+  value.confidence_weight_type = j.value("confidence_weight_type", std::string{"entropy"});
+  value.confidence_weight_delta = j.value("confidence_weight_delta", 1.0e-6F);
+  value.normalize_confidence_weights = j.value("normalize_confidence_weights", false);
+  value.advantage_calculation = j.value("advantage_calculation", std::string{"quantile_sampling"});
 }
 
 void to_json(json& j, const OfflineDatasetConfig& value) {
@@ -195,6 +243,8 @@ void to_json(json& j, const BehaviorCloningConfig& value) {
       {"weight_decay", value.weight_decay},
       {"label_smoothing", value.label_smoothing},
       {"max_grad_norm", value.max_grad_norm},
+      {"sequence_length", value.sequence_length},
+      {"sequences_per_batch", value.sequences_per_batch},
   };
 }
 
@@ -205,6 +255,8 @@ void from_json(const json& j, BehaviorCloningConfig& value) {
   value.weight_decay = j.value("weight_decay", 1.0e-6F);
   value.label_smoothing = j.value("label_smoothing", 0.0F);
   value.max_grad_norm = j.value("max_grad_norm", 1.0F);
+  value.sequence_length = j.value("sequence_length", 32);
+  value.sequences_per_batch = j.value("sequences_per_batch", 128);
 }
 
 void to_json(json& j, const NextGoalPredictorConfig& value) {
@@ -233,6 +285,36 @@ void from_json(const json& j, NextGoalPredictorConfig& value) {
   value.class_weights = j.value("class_weights", std::vector<float>{1.0F, 1.0F, 0.25F});
 }
 
+void to_json(json& j, const WandbConfig& value) {
+  j = json{
+      {"enabled", value.enabled},
+      {"project", value.project},
+      {"entity", value.entity},
+      {"run_name", value.run_name},
+      {"group", value.group},
+      {"job_type", value.job_type},
+      {"dir", value.dir},
+      {"mode", value.mode},
+      {"python_executable", value.python_executable},
+      {"script_path", value.script_path},
+      {"tags", value.tags},
+  };
+}
+
+void from_json(const json& j, WandbConfig& value) {
+  value.enabled = j.value("enabled", false);
+  value.project = j.value("project", std::string{"pulsar"});
+  value.entity = j.value("entity", std::string{});
+  value.run_name = j.value("run_name", std::string{});
+  value.group = j.value("group", std::string{});
+  value.job_type = j.value("job_type", std::string{});
+  value.dir = j.value("dir", std::string{});
+  value.mode = j.value("mode", std::string{"online"});
+  value.python_executable = j.value("python_executable", std::string{"python3"});
+  value.script_path = j.value("script_path", std::string{"scripts/wandb_stream.py"});
+  value.tags = j.value("tags", std::vector<std::string>{});
+}
+
 void to_json(json& j, const ExperimentConfig& value) {
   j = json{
       {"schema_version", value.schema_version},
@@ -245,6 +327,7 @@ void to_json(json& j, const ExperimentConfig& value) {
       {"offline_dataset", value.offline_dataset},
       {"behavior_cloning", value.behavior_cloning},
       {"next_goal_predictor", value.next_goal_predictor},
+      {"wandb", value.wandb},
   };
 }
 
@@ -264,6 +347,9 @@ void from_json(const json& j, ExperimentConfig& value) {
   }
   if (j.contains("next_goal_predictor")) {
     value.next_goal_predictor = j.at("next_goal_predictor").get<NextGoalPredictorConfig>();
+  }
+  if (j.contains("wandb")) {
+    value.wandb = j.at("wandb").get<WandbConfig>();
   }
 }
 

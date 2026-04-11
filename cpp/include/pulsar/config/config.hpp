@@ -44,6 +44,16 @@ struct ModelConfig {
   std::vector<int> hidden_sizes{1024, 1024, 512, 512};
   int action_dim = 90;
   bool use_layer_norm = true;
+  int encoder_dim = 512;
+  int workspace_dim = 512;
+  int stm_slots = 48;
+  int stm_key_dim = 128;
+  int stm_value_dim = 128;
+  int ltm_slots = 32;
+  int ltm_dim = 128;
+  int controller_dim = 512;
+  int consolidation_stride = 8;
+  float retired_decay = 0.96F;
 };
 
 struct PPOConfig {
@@ -63,6 +73,20 @@ struct PPOConfig {
   float target_kl = 0.03F;
   std::string device = "cpu";
   int checkpoint_interval = 10;
+  int sequence_length = 16;
+  int burn_in = 4;
+  float value_v_min = -10.0F;
+  float value_v_max = 10.0F;
+  int value_num_atoms = 51;
+  bool use_adaptive_epsilon = true;
+  float adaptive_epsilon_beta = 1.0F;
+  float epsilon_min = 0.05F;
+  float epsilon_max = 0.3F;
+  bool use_confidence_weighting = true;
+  std::string confidence_weight_type = "entropy";
+  float confidence_weight_delta = 1.0e-6F;
+  bool normalize_confidence_weights = false;
+  std::string advantage_calculation = "quantile_sampling";
 };
 
 struct OfflineDatasetConfig {
@@ -81,6 +105,8 @@ struct BehaviorCloningConfig {
   float weight_decay = 1.0e-6F;
   float label_smoothing = 0.0F;
   float max_grad_norm = 1.0F;
+  int sequence_length = 32;
+  int sequences_per_batch = 128;
 };
 
 struct NextGoalPredictorConfig {
@@ -95,6 +121,20 @@ struct NextGoalPredictorConfig {
   std::vector<float> class_weights{1.0F, 1.0F, 0.25F};
 };
 
+struct WandbConfig {
+  bool enabled = false;
+  std::string project = "pulsar";
+  std::string entity{};
+  std::string run_name{};
+  std::string group{};
+  std::string job_type{};
+  std::string dir{};
+  std::string mode = "online";
+  std::string python_executable = "python3";
+  std::string script_path = "scripts/wandb_stream.py";
+  std::vector<std::string> tags{};
+};
+
 struct ExperimentConfig {
   int schema_version = 1;
   int obs_schema_version = 1;
@@ -106,6 +146,7 @@ struct ExperimentConfig {
   OfflineDatasetConfig offline_dataset{};
   BehaviorCloningConfig behavior_cloning{};
   NextGoalPredictorConfig next_goal_predictor{};
+  WandbConfig wandb{};
 };
 
 struct CheckpointMetadata {
@@ -140,6 +181,8 @@ void to_json(nlohmann::json& j, const BehaviorCloningConfig& value);
 void from_json(const nlohmann::json& j, BehaviorCloningConfig& value);
 void to_json(nlohmann::json& j, const NextGoalPredictorConfig& value);
 void from_json(const nlohmann::json& j, NextGoalPredictorConfig& value);
+void to_json(nlohmann::json& j, const WandbConfig& value);
+void from_json(const nlohmann::json& j, WandbConfig& value);
 void to_json(nlohmann::json& j, const ExperimentConfig& value);
 void from_json(const nlohmann::json& j, ExperimentConfig& value);
 void to_json(nlohmann::json& j, const CheckpointMetadata& value);

@@ -326,7 +326,7 @@ def _find_replays(dataset_root: Path, split_subdir: str) -> list[Path]:
 
 def _write_manifest(path: Path, obs_dim: int, action_dim: int, shards: list[dict[str, Any]]) -> None:
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "observation_dim": obs_dim,
         "action_dim": action_dim,
         "next_goal_classes": 3,
@@ -369,15 +369,25 @@ def main() -> int:
     train_actions: list[int] = []
     train_next_goal: list[int] = []
     train_weights: list[float] = []
+    train_episode_starts: list[float] = []
     val_obs: list[np.ndarray] = []
     val_actions: list[int] = []
     val_next_goal: list[int] = []
     val_weights: list[float] = []
+    val_episode_starts: list[float] = []
     train_shards: list[dict[str, Any]] = []
     val_shards: list[dict[str, Any]] = []
     skipped = 0
 
-    def flush(split: str, shard_index: int, obs_rows: list[np.ndarray], actions: list[int], labels: list[int], weights: list[float]) -> None:
+    def flush(
+        split: str,
+        shard_index: int,
+        obs_rows: list[np.ndarray],
+        actions: list[int],
+        labels: list[int],
+        weights: list[float],
+        episode_starts: list[float],
+    ) -> None:
         if not obs_rows:
             return
         split_dir = args.output_dir / split
@@ -386,11 +396,13 @@ def main() -> int:
         actions_tensor = torch.tensor(actions, dtype=torch.long)
         labels_tensor = torch.tensor(labels, dtype=torch.long)
         weights_tensor = torch.tensor(weights, dtype=torch.float32)
+        episode_starts_tensor = torch.tensor(episode_starts, dtype=torch.float32)
         base = f"shard_{shard_index:05d}"
         torch.save(obs_tensor, split_dir / f"{base}_obs.pt")
         torch.save(actions_tensor, split_dir / f"{base}_actions.pt")
         torch.save(labels_tensor, split_dir / f"{base}_next_goal.pt")
         torch.save(weights_tensor, split_dir / f"{base}_weights.pt")
+        torch.save(episode_starts_tensor, split_dir / f"{base}_episode_starts.pt")
         target = train_shards if split == "train" else val_shards
         target.append(
             {
@@ -398,6 +410,7 @@ def main() -> int:
                 "actions_path": f"{split}/{base}_actions.pt",
                 "next_goal_path": f"{split}/{base}_next_goal.pt",
                 "weights_path": f"{split}/{base}_weights.pt",
+                "episode_starts_path": f"{split}/{base}_episode_starts.pt",
                 "samples": len(obs_rows),
             }
         )
@@ -405,6 +418,46 @@ def main() -> int:
         actions.clear()
         labels.clear()
         weights.clear()
+        episode_starts.clear()
+
+    def append_trajectory(
+        split: str,
+        trajectory_obs: list[np.ndarray],
+        trajectory_actions: list[int],
+        trajectory_labels: list[int],
+        trajectory_weights: list[float],
+    ) -> None:
+        nonlocal train_shard_index, val_shard_index
+        if not trajectory_obs:
+            return
+
+        if split == "train":
+            obs_rows = train_obs
+            actions = train_actions
+            labels = train_next_goal
+            weights = train_weights
+            episode_starts = train_episode_starts
+            shard_index = train_shard_index
+        else:
+            obs_rows = val_obs
+            actions = val_actions
+            labels = val_next_goal
+            weights = val_weights
+            episode_starts = val_episode_starts
+            shard_index = val_shard_index
+
+        if obs_rows and len(obs_rows) + len(trajectory_obs) > args.shard_size:
+            flush(split, shard_index, obs_rows, actions, labels, weights, episode_starts)
+            if split == "train":
+                train_shard_index += 1
+            else:
+                val_shard_index += 1
+
+        obs_rows.extend(trajectory_obs)
+        actions.extend(trajectory_actions)
+        labels.extend(trajectory_labels)
+        weights.extend(trajectory_weights)
+        episode_starts.extend([1.0] + [0.0] * (len(trajectory_obs) - 1))
 
     train_shard_index = 0
     val_shard_index = 0
@@ -428,11 +481,11 @@ def main() -> int:
                 skipped += 1
                 continue
 
-            is_train = rng.random() < args.train_fraction
-            obs_rows = train_obs if is_train else val_obs
-            actions = train_actions if is_train else val_actions
-            labels = train_next_goal if is_train else val_next_goal
-            weights = train_weights if is_train else val_weights
+            split = "train" if rng.random() < args.train_fraction else "val"
+            per_player_obs: list[list[np.ndarray]] = [[] for _ in range(len(players_meta))]
+            per_player_actions: list[list[int]] = [[] for _ in range(len(players_meta))]
+            per_player_labels: list[list[int]] = [[] for _ in range(len(players_meta))]
+            per_player_weights: list[list[float]] = [[] for _ in range(len(players_meta))]
 
             for frame_index in range(ndarray.shape[0] - 1):
                 ball, ball_vel, ball_ang, seconds_remaining, players = _frame_to_players(
@@ -448,24 +501,27 @@ def main() -> int:
                     player_headers,
                 )
                 for player_index, player in enumerate(players):
-                    obs_rows.append(_build_obs(players, ball, ball_vel, ball_ang, player_index))
-                    actions.append(_infer_action_index(player, next_players[player_index]))
-                    labels.append(_next_goal_label(seconds_remaining, player.team_is_zero, goal_events))
-                    weights.append(1.0)
+                    per_player_obs[player_index].append(_build_obs(players, ball, ball_vel, ball_ang, player_index))
+                    per_player_actions[player_index].append(_infer_action_index(player, next_players[player_index]))
+                    per_player_labels[player_index].append(
+                        _next_goal_label(seconds_remaining, player.team_is_zero, goal_events)
+                    )
+                    per_player_weights[player_index].append(1.0)
 
-                if len(obs_rows) >= args.shard_size:
-                    if is_train:
-                        flush("train", train_shard_index, train_obs, train_actions, train_next_goal, train_weights)
-                        train_shard_index += 1
-                    else:
-                        flush("val", val_shard_index, val_obs, val_actions, val_next_goal, val_weights)
-                        val_shard_index += 1
+            for player_index in range(len(players_meta)):
+                append_trajectory(
+                    split,
+                    per_player_obs[player_index],
+                    per_player_actions[player_index],
+                    per_player_labels[player_index],
+                    per_player_weights[player_index],
+                )
         except Exception:
             skipped += 1
             continue
 
-    flush("train", train_shard_index, train_obs, train_actions, train_next_goal, train_weights)
-    flush("val", val_shard_index, val_obs, val_actions, val_next_goal, val_weights)
+    flush("train", train_shard_index, train_obs, train_actions, train_next_goal, train_weights, train_episode_starts)
+    flush("val", val_shard_index, val_obs, val_actions, val_next_goal, val_weights, val_episode_starts)
 
     if not train_shards:
         raise SystemExit("No training shards were produced. Check the dataset path and parser assumptions.")

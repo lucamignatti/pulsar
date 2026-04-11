@@ -9,6 +9,7 @@ description = "Thin Python visualization and evaluation layer for Pulsar"
 requires-python = ">=3.10,<3.14"
 dependencies = [
   "numpy>=1.26",
+  "wandb>=0.17,<1",
 ]
 
 [project.optional-dependencies]
