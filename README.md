@@ -65,7 +65,7 @@ For the intended deployment target, see [docs/rocm_linux.md](/Users/lucamignatti
 - `pulsar_torch`: Shared actor-critic model, normalization, GPU rollout storage, and PPO trainer.
 - `pulsar_train`: Standalone trainer entry point.
 - `pulsar_native`: Python extension exposing the C++ model and checkpoint helpers.
-- `pulsar_bench`: Lightweight benchmark target for core runtime throughput.
+- `pulsar_bench`: Lightweight benchmark target for core runtime throughput. It reports both env-steps/sec and agent-steps/sec so comparisons against `RLGym`-style vectorized trainers stay apples-to-apples.
 
 ## Python Visualization
 
@@ -82,6 +82,13 @@ The visualization path is aligned with current `RLGym` defaults:
 - `DefaultObs(zero_padding=team_size)`
 - `RLViserRenderer(tick_rate=tick_rate / tick_skip)`
 
+## Throughput Notes
+
+- `ppo.collection_workers = 0` means auto-size the collection thread pool from hardware concurrency.
+- `collection_env_steps_per_second` counts one arena step as one step, regardless of team size.
+- `collection_agent_steps_per_second` multiplies by the number of controlled cars. This is the closest comparison to the thesis repo's aggregate "steps per second" metric, which is driven by batched active-agent observations across many environments.
+- `./build/<preset>/pulsar_bench <num_envs> [collection_workers]` lets you sweep arena count and collection parallelism independently.
+
 ## Current Status
 
 This repository now contains a working v1 with source-informed defaults:
@@ -92,6 +99,7 @@ This repository now contains a working v1 with source-informed defaults:
 - Terminal logic includes both goal termination and no-touch truncation.
 - The C++ runtime now uses real `RocketSim` arenas and downloaded soccar collision meshes.
 - The trainer batches policy inference across many independent arenas, writes checkpoints plus optimizer state, and logs per-update metrics to `metrics.jsonl`.
+- Rollout collection now parallelizes observation packing, action decode, stepping, reward computation, and reset checks across arenas while keeping rollout tensors device-resident after ingress.
 - The Python evaluator loads the same native C++ model module and refuses config/checkpoint mismatches.
 
 Verified locally in this workspace:

@@ -113,6 +113,17 @@ void RocketSimTransitionEngine::reset(std::uint64_t seed) {
 }
 
 StepResult RocketSimTransitionEngine::step(std::span<const ControllerState> actions) {
+  step_inplace(actions);
+
+  StepResult result;
+  result.state = state_;
+  result.rewards.assign(state_.cars.size(), 0.0F);
+  result.terminated.assign(state_.cars.size(), 0);
+  result.truncated.assign(state_.cars.size(), 0);
+  return result;
+}
+
+void RocketSimTransitionEngine::step_inplace(std::span<const ControllerState> actions) {
   if (actions.size() != state_.cars.size()) {
     throw std::invalid_argument("Action count must match the number of cars.");
   }
@@ -146,13 +157,6 @@ StepResult RocketSimTransitionEngine::step(std::span<const ControllerState> acti
   episode_ticks_ += config_.tick_skip;
   sync_batched_state();
 #endif
-
-  StepResult result;
-  result.state = state_;
-  result.rewards.assign(state_.cars.size(), 0.0F);
-  result.terminated.assign(state_.cars.size(), 0);
-  result.truncated.assign(state_.cars.size(), 0);
-  return result;
 }
 
 const EnvState& RocketSimTransitionEngine::state() const {

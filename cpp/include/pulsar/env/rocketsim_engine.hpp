@@ -32,6 +32,7 @@ class RocketSimTransitionEngine final : public TransitionEngine {
 
   void reset(std::uint64_t seed) override;
   StepResult step(std::span<const ControllerState> actions) override;
+  void step_inplace(std::span<const ControllerState> actions) override;
   const EnvState& state() const override;
   std::size_t num_agents() const override;
 

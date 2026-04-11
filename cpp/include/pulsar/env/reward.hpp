@@ -14,10 +14,15 @@ class CombinedRewardFunction final : public RewardFunction {
       const EnvState& current_state,
       std::span<const std::uint8_t> terminated,
       std::span<const std::uint8_t> truncated) const override;
+  void get_rewards_into(
+      const EnvState& previous_state,
+      const EnvState& current_state,
+      std::span<const std::uint8_t> terminated,
+      std::span<const std::uint8_t> truncated,
+      std::span<float> out) const override;
 
  private:
   RewardConfig config_{};
 };
 
 }  // namespace pulsar
-

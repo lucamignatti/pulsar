@@ -4,6 +4,7 @@
 #include <memory>
 
 #include "pulsar/config/config.hpp"
+#include "pulsar/core/parallel_executor.hpp"
 #include "pulsar/env/mutators.hpp"
 #include "pulsar/env/obs_builder.hpp"
 #include "pulsar/env/rocketsim_engine.hpp"
@@ -11,6 +12,8 @@
 int main(int argc, char** argv) {
   pulsar::ExperimentConfig config;
   const int num_envs = argc > 1 ? std::max(1, std::atoi(argv[1])) : 1;
+  const std::size_t collection_workers =
+      argc > 2 ? static_cast<std::size_t>(std::max(1, std::atoi(argv[2]))) : 0;
 
   auto reset_mutator = std::make_shared<pulsar::MutatorSequence>(
       std::vector<pulsar::StateMutatorPtr>{
@@ -29,6 +32,7 @@ int main(int argc, char** argv) {
   }
 
   pulsar::PulsarObsBuilder obs_builder(config.env);
+  pulsar::ParallelExecutor executor(collection_workers);
   std::vector<pulsar::ControllerState> actions(engines.front()->num_agents(), {.throttle = 1.0F, .boost = true});
   std::vector<float> obs_buffer(total_agents * obs_builder.obs_dim());
 
@@ -40,30 +44,38 @@ int main(int argc, char** argv) {
       engine->reset(config.env.seed);
     }
     for (int i = 0; i < warmup_steps; ++i) {
-      float* dst = obs_buffer.data();
-      for (auto& engine : engines) {
-        engine->step(actions);
-        if (include_obs) {
-          obs_builder.build_obs_batch(
-              engine->state(),
-              std::span<float>(dst, engine->num_agents() * obs_builder.obs_dim()));
-          dst += static_cast<std::ptrdiff_t>(engine->num_agents() * obs_builder.obs_dim());
+      executor.parallel_for(engines.size(), [&](std::size_t begin, std::size_t end) {
+        for (std::size_t engine_idx = begin; engine_idx < end; ++engine_idx) {
+          auto& engine = engines[engine_idx];
+          engine->step_inplace(actions);
+          if (include_obs) {
+            const std::size_t offset = engine_idx * static_cast<std::size_t>(engine->num_agents()) * obs_builder.obs_dim();
+            obs_builder.build_obs_batch(
+                engine->state(),
+                std::span<float>(
+                    obs_buffer.data() + static_cast<std::ptrdiff_t>(offset),
+                    engine->num_agents() * obs_builder.obs_dim()));
+          }
         }
-      }
+      });
     }
 
     const auto start = std::chrono::steady_clock::now();
     for (int i = 0; i < steps; ++i) {
-      float* dst = obs_buffer.data();
-      for (auto& engine : engines) {
-        engine->step(actions);
-        if (include_obs) {
-          obs_builder.build_obs_batch(
-              engine->state(),
-              std::span<float>(dst, engine->num_agents() * obs_builder.obs_dim()));
-          dst += static_cast<std::ptrdiff_t>(engine->num_agents() * obs_builder.obs_dim());
+      executor.parallel_for(engines.size(), [&](std::size_t begin, std::size_t end) {
+        for (std::size_t engine_idx = begin; engine_idx < end; ++engine_idx) {
+          auto& engine = engines[engine_idx];
+          engine->step_inplace(actions);
+          if (include_obs) {
+            const std::size_t offset = engine_idx * static_cast<std::size_t>(engine->num_agents()) * obs_builder.obs_dim();
+            obs_builder.build_obs_batch(
+                engine->state(),
+                std::span<float>(
+                    obs_buffer.data() + static_cast<std::ptrdiff_t>(offset),
+                    engine->num_agents() * obs_builder.obs_dim()));
+          }
         }
-      }
+      });
     }
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
   };
@@ -87,6 +99,7 @@ int main(int argc, char** argv) {
 #endif
             << '\n';
   std::cout << "num_envs=" << num_envs << '\n';
+  std::cout << "collection_workers=" << executor.worker_count() << '\n';
   std::cout << "step_only_env_steps_per_second=" << step_env_steps_per_second << '\n';
   std::cout << "collection_env_steps_per_second=" << collection_env_steps_per_second << '\n';
   std::cout << "collection_agent_steps_per_second=" << collection_agent_steps_per_second << '\n';

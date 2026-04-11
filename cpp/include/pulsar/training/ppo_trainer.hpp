@@ -8,6 +8,7 @@
 
 #include "pulsar/checkpoint/checkpoint.hpp"
 #include "pulsar/config/config.hpp"
+#include "pulsar/core/parallel_executor.hpp"
 #include "pulsar/model/actor_critic.hpp"
 #include "pulsar/model/normalizer.hpp"
 #include "pulsar/rl/action_table.hpp"
@@ -37,7 +38,8 @@ class PPOTrainer {
   void train(int updates, const std::string& checkpoint_dir);
 
  private:
-  torch::Tensor collect_observations() const;
+  torch::Tensor collect_observations();
+  void step_envs(std::span<const std::int64_t> action_indices, std::int64_t global_step);
   torch::Tensor sample_actions(const torch::Tensor& logits, torch::Tensor* log_probs) const;
   std::vector<std::int64_t> actions_to_indices(const torch::Tensor& actions) const;
   TrainerMetrics update_policy();
@@ -56,8 +58,12 @@ class PPOTrainer {
   torch::optim::Adam optimizer_;
   RolloutStorage rollout_;
   torch::Device device_{torch::kCPU};
+  ParallelExecutor collection_executor_;
   std::vector<std::size_t> agent_offsets_{};
   std::size_t total_agents_ = 0;
+  std::vector<ControllerState> host_actions_{};
+  std::vector<std::uint8_t> host_terminated_{};
+  std::vector<std::uint8_t> host_truncated_{};
   torch::Tensor host_obs_;
   torch::Tensor host_rewards_;
   torch::Tensor host_dones_;

@@ -19,6 +19,7 @@ class TransitionEngine {
 
   virtual void reset(std::uint64_t seed) = 0;
   virtual StepResult step(std::span<const ControllerState> actions) = 0;
+  virtual void step_inplace(std::span<const ControllerState> actions);
   virtual const EnvState& state() const = 0;
   virtual std::size_t num_agents() const = 0;
 };
@@ -41,6 +42,9 @@ class ActionParser {
  public:
   virtual ~ActionParser() = default;
   virtual std::vector<ControllerState> parse_actions(std::span<const std::int64_t> action_indices) const = 0;
+  virtual void parse_actions_into(
+      std::span<const std::int64_t> action_indices,
+      std::span<ControllerState> out) const;
 };
 
 class RewardFunction {
@@ -51,6 +55,12 @@ class RewardFunction {
       const EnvState& current_state,
       std::span<const std::uint8_t> terminated,
       std::span<const std::uint8_t> truncated) const = 0;
+  virtual void get_rewards_into(
+      const EnvState& previous_state,
+      const EnvState& current_state,
+      std::span<const std::uint8_t> terminated,
+      std::span<const std::uint8_t> truncated,
+      std::span<float> out) const;
 };
 
 class DoneCondition {
@@ -59,6 +69,11 @@ class DoneCondition {
   virtual std::pair<std::vector<std::uint8_t>, std::vector<std::uint8_t>> is_done(
       const EnvState& state,
       int episode_ticks) const = 0;
+  virtual void is_done_into(
+      const EnvState& state,
+      int episode_ticks,
+      std::span<std::uint8_t> terminated,
+      std::span<std::uint8_t> truncated) const;
 };
 
 using TransitionEnginePtr = std::shared_ptr<TransitionEngine>;

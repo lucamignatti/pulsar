@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace pulsar {
 namespace {
@@ -60,21 +61,49 @@ std::vector<float> apply_team_spirit_and_zero_sum(
   return adjusted;
 }
 
-}  // namespace
+void apply_team_spirit_and_zero_sum_inplace(
+    std::span<float> rewards,
+    const EnvState& state,
+    float team_spirit,
+    float opponent_scale) {
+  float blue_sum = 0.0F;
+  float orange_sum = 0.0F;
+  int blue_count = 0;
+  int orange_count = 0;
 
-CombinedRewardFunction::CombinedRewardFunction(RewardConfig config) : config_(std::move(config)) {}
+  for (std::size_t i = 0; i < state.cars.size(); ++i) {
+    if (state.cars[i].team == Team::Blue) {
+      blue_sum += rewards[i];
+      ++blue_count;
+    } else {
+      orange_sum += rewards[i];
+      ++orange_count;
+    }
+  }
 
-std::vector<float> CombinedRewardFunction::get_rewards(
+  const float blue_avg = blue_count > 0 ? blue_sum / static_cast<float>(blue_count) : 0.0F;
+  const float orange_avg = orange_count > 0 ? orange_sum / static_cast<float>(orange_count) : 0.0F;
+
+  for (std::size_t i = 0; i < state.cars.size(); ++i) {
+    const bool blue = state.cars[i].team == Team::Blue;
+    const float own_reward = rewards[i];
+    const float team_avg = blue ? blue_avg : orange_avg;
+    const float opp_avg = blue ? orange_avg : blue_avg;
+    rewards[i] = (own_reward * (1.0F - team_spirit)) + (team_avg * team_spirit) - (opp_avg * opponent_scale);
+  }
+}
+
+void compute_rewards_into(
+    const RewardConfig& config,
     const EnvState& previous_state,
     const EnvState& current_state,
-    std::span<const std::uint8_t>,
-    std::span<const std::uint8_t>) const {
-  std::vector<float> rewards(current_state.cars.size(), 0.0F);
+    std::span<float> rewards) {
+  std::fill(rewards.begin(), rewards.end(), 0.0F);
 
   const int blue_delta = current_state.blue_score - previous_state.blue_score;
   const int orange_delta = current_state.orange_score - previous_state.orange_score;
 
-  for (const auto& term : config_.terms) {
+  for (const auto& term : config.terms) {
     if (term.name == "goal") {
       for (std::size_t i = 0; i < current_state.cars.size(); ++i) {
         const bool blue = current_state.cars[i].team == Team::Blue;
@@ -85,7 +114,7 @@ std::vector<float> CombinedRewardFunction::get_rewards(
 
     if (term.name == "touch") {
       if (current_state.last_touch_agent >= 0 && current_state.last_touch_agent != previous_state.last_touch_agent) {
-        rewards.at(static_cast<std::size_t>(current_state.last_touch_agent)) += term.weight;
+        rewards[static_cast<std::size_t>(current_state.last_touch_agent)] += term.weight;
       }
       continue;
     }
@@ -125,7 +154,35 @@ std::vector<float> CombinedRewardFunction::get_rewards(
     }
   }
 
-  return apply_team_spirit_and_zero_sum(rewards, current_state, config_.team_spirit, config_.opponent_scale);
+  apply_team_spirit_and_zero_sum_inplace(rewards, current_state, config.team_spirit, config.opponent_scale);
+}
+
+}  // namespace
+
+CombinedRewardFunction::CombinedRewardFunction(RewardConfig config) : config_(std::move(config)) {}
+
+std::vector<float> CombinedRewardFunction::get_rewards(
+    const EnvState& previous_state,
+    const EnvState& current_state,
+    std::span<const std::uint8_t>,
+    std::span<const std::uint8_t>) const {
+  std::vector<float> rewards(current_state.cars.size(), 0.0F);
+  compute_rewards_into(config_, previous_state, current_state, rewards);
+  return rewards;
+}
+
+void CombinedRewardFunction::get_rewards_into(
+    const EnvState& previous_state,
+    const EnvState& current_state,
+    std::span<const std::uint8_t> terminated,
+    std::span<const std::uint8_t> truncated,
+    std::span<float> out) const {
+  if (out.size() != current_state.cars.size()) {
+    throw std::invalid_argument("CombinedRewardFunction::get_rewards_into output span has incorrect size.");
+  }
+  (void)terminated;
+  (void)truncated;
+  compute_rewards_into(config_, previous_state, current_state, out);
 }
 
 }  // namespace pulsar

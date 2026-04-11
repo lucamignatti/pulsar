@@ -120,6 +120,20 @@ std::vector<ControllerState> DiscreteActionParser::parse_actions(
   return actions;
 }
 
+void DiscreteActionParser::parse_actions_into(
+    std::span<const std::int64_t> action_indices,
+    std::span<ControllerState> out) const {
+  if (out.size() != action_indices.size()) {
+    throw std::invalid_argument("DiscreteActionParser::parse_actions_into output span has incorrect size.");
+  }
+
+  for (std::size_t i = 0; i < action_indices.size(); ++i) {
+    const std::size_t bounded_index = static_cast<std::size_t>(
+        std::clamp<std::int64_t>(action_indices[i], 0, static_cast<std::int64_t>(action_table_.size() - 1)));
+    out[i] = action_table_.at(bounded_index);
+  }
+}
+
 const ControllerActionTable& DiscreteActionParser::action_table() const {
   return action_table_;
 }

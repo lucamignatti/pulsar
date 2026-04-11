@@ -32,6 +32,9 @@ class DiscreteActionParser final : public ActionParser {
   explicit DiscreteActionParser(ControllerActionTable action_table);
 
   std::vector<ControllerState> parse_actions(std::span<const std::int64_t> action_indices) const override;
+  void parse_actions_into(
+      std::span<const std::int64_t> action_indices,
+      std::span<ControllerState> out) const override;
   [[nodiscard]] const ControllerActionTable& action_table() const;
 
  private:

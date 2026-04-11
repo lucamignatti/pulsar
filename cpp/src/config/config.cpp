@@ -130,6 +130,7 @@ void from_json(const json& j, ModelConfig& value) {
 void to_json(json& j, const PPOConfig& value) {
   j = json{
       {"num_envs", value.num_envs},
+      {"collection_workers", value.collection_workers},
       {"rollout_length", value.rollout_length},
       {"minibatch_size", value.minibatch_size},
       {"epochs", value.epochs},
@@ -149,6 +150,7 @@ void to_json(json& j, const PPOConfig& value) {
 
 void from_json(const json& j, PPOConfig& value) {
   value.num_envs = j.at("num_envs").get<int>();
+  value.collection_workers = j.value("collection_workers", 0);
   value.rollout_length = j.at("rollout_length").get<int>();
   value.minibatch_size = j.at("minibatch_size").get<int>();
   value.epochs = j.at("epochs").get<int>();

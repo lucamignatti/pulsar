@@ -80,6 +80,7 @@ PPOTrainer::PPOTrainer(
           config_.model.observation_dim,
           config_.model.action_dim,
           torch::Device(config_.ppo.device)),
+      collection_executor_(static_cast<std::size_t>(config_.ppo.collection_workers)),
       device_(config_.ppo.device) {
   if (engines_.empty()) {
     throw std::invalid_argument("PPOTrainer requires at least one transition engine.");
@@ -87,6 +88,9 @@ PPOTrainer::PPOTrainer(
 
   total_agents_ = total_agents_for(engines_);
   agent_offsets_ = offsets_for(engines_);
+  host_actions_.resize(total_agents_);
+  host_terminated_.resize(total_agents_, 0);
+  host_truncated_.resize(total_agents_, 0);
   use_pinned_host_buffers_ = device_.is_cuda();
   auto host_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
   if (use_pinned_host_buffers_) {
@@ -105,18 +109,73 @@ PPOTrainer::PPOTrainer(
   normalizer_.to(device_);
 }
 
-torch::Tensor PPOTrainer::collect_observations() const {
+torch::Tensor PPOTrainer::collect_observations() {
   float* dst = host_obs_.data_ptr<float>();
   const std::size_t stride = obs_builder_->obs_dim();
-
-  for (const auto& engine : engines_) {
-    const std::size_t count = engine->num_agents();
-    obs_builder_->build_obs_batch(
-        engine->state(),
-        std::span<float>(dst, count * stride));
-    dst += static_cast<std::ptrdiff_t>(count * stride);
-  }
+  collection_executor_.parallel_for(engines_.size(), [&](std::size_t begin, std::size_t end) {
+    for (std::size_t engine_idx = begin; engine_idx < end; ++engine_idx) {
+      const auto& engine = engines_[engine_idx];
+      const std::size_t agent_offset = agent_offsets_[engine_idx];
+      const std::size_t count = engine->num_agents();
+      obs_builder_->build_obs_batch(
+          engine->state(),
+          std::span<float>(
+              dst + static_cast<std::ptrdiff_t>(agent_offset * stride),
+              count * stride));
+    }
+  });
   return host_obs_.to(device_, use_pinned_host_buffers_);
+}
+
+void PPOTrainer::step_envs(std::span<const std::int64_t> action_indices, std::int64_t global_step) {
+  float* rewards_ptr = host_rewards_.data_ptr<float>();
+  float* dones_ptr = host_dones_.data_ptr<float>();
+
+  collection_executor_.parallel_for(engines_.size(), [&](std::size_t begin, std::size_t end) {
+    for (std::size_t engine_idx = begin; engine_idx < end; ++engine_idx) {
+      const std::size_t agent_begin = agent_offsets_[engine_idx];
+      const std::size_t agent_end = agent_offsets_[engine_idx + 1];
+      const std::size_t agent_count = agent_end - agent_begin;
+
+      const std::span<const std::int64_t> env_action_indices(
+          action_indices.data() + static_cast<std::ptrdiff_t>(agent_begin),
+          agent_count);
+      const std::span<ControllerState> env_actions(
+          host_actions_.data() + static_cast<std::ptrdiff_t>(agent_begin),
+          agent_count);
+      action_parser_->parse_actions_into(env_action_indices, env_actions);
+
+      const EnvState previous_state = engines_[engine_idx]->state();
+      engines_[engine_idx]->step_inplace(env_actions);
+      const EnvState& current_state = engines_[engine_idx]->state();
+
+      const std::span<std::uint8_t> terminated(
+          host_terminated_.data() + static_cast<std::ptrdiff_t>(agent_begin),
+          agent_count);
+      const std::span<std::uint8_t> truncated(
+          host_truncated_.data() + static_cast<std::ptrdiff_t>(agent_begin),
+          agent_count);
+      done_condition_->is_done_into(current_state, current_state.tick, terminated, truncated);
+      reward_fn_->get_rewards_into(
+          previous_state,
+          current_state,
+          terminated,
+          truncated,
+          std::span<float>(rewards_ptr + static_cast<std::ptrdiff_t>(agent_begin), agent_count));
+
+      bool reset_needed = false;
+      for (std::size_t i = 0; i < agent_count; ++i) {
+        const bool done = terminated[i] != 0 || truncated[i] != 0;
+        dones_ptr[agent_begin + i] = done ? 1.0F : 0.0F;
+        reset_needed = reset_needed || done;
+      }
+
+      if (reset_needed) {
+        engines_[engine_idx]->reset(
+            config_.env.seed + static_cast<std::uint64_t>(global_step) + static_cast<std::uint64_t>(engine_idx));
+      }
+    }
+  });
 }
 
 torch::Tensor PPOTrainer::sample_actions(const torch::Tensor& logits, torch::Tensor* log_probs) const {
@@ -239,12 +298,6 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir) {
     const auto collection_start = std::chrono::steady_clock::now();
 
     for (int step = 0; step < config_.ppo.rollout_length; ++step) {
-      std::vector<EnvState> previous_states;
-      previous_states.reserve(engines_.size());
-      for (const auto& engine : engines_) {
-        previous_states.push_back(engine->state());
-      }
-
       torch::Tensor obs = collect_observations();
       torch::Tensor actions;
       torch::Tensor log_probs;
@@ -259,35 +312,7 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir) {
         values = output.values;
       }
       const std::vector<std::int64_t> action_indices = actions_to_indices(actions);
-
-      float* rewards_ptr = host_rewards_.data_ptr<float>();
-      float* dones_ptr = host_dones_.data_ptr<float>();
-
-      for (std::size_t engine_idx = 0; engine_idx < engines_.size(); ++engine_idx) {
-        const std::size_t begin = agent_offsets_[engine_idx];
-        const std::size_t end = agent_offsets_[engine_idx + 1];
-        std::vector<std::int64_t> env_action_indices(
-            action_indices.begin() + static_cast<std::ptrdiff_t>(begin),
-            action_indices.begin() + static_cast<std::ptrdiff_t>(end));
-        const std::vector<ControllerState> parsed_actions = action_parser_->parse_actions(env_action_indices);
-        const StepResult transition = engines_[engine_idx]->step(parsed_actions);
-        const auto [terminated, truncated] = done_condition_->is_done(transition.state, transition.state.tick);
-        const std::vector<float> rewards =
-            reward_fn_->get_rewards(previous_states[engine_idx], transition.state, terminated, truncated);
-
-        for (std::size_t i = 0; i < rewards.size(); ++i) {
-          *rewards_ptr++ = rewards[i];
-          *dones_ptr++ = (terminated[i] != 0 || truncated[i] != 0) ? 1.0F : 0.0F;
-        }
-
-        const bool reset_needed =
-            std::any_of(terminated.begin(), terminated.end(), [](std::uint8_t value) { return value != 0; }) ||
-            std::any_of(truncated.begin(), truncated.end(), [](std::uint8_t value) { return value != 0; });
-        if (reset_needed) {
-          engines_[engine_idx]->reset(
-              config_.env.seed + static_cast<std::uint64_t>(global_step) + static_cast<std::uint64_t>(engine_idx));
-        }
-      }
+      step_envs(action_indices, global_step);
 
       rollout_.append(
           step,
