@@ -21,13 +21,13 @@ PyTorch ROCm builds still use the `cuda` device namespace in both Python and C++
 3. Download the soccar collision meshes with `python3 scripts/collision_mesh_downloader.py`.
 4. Install a ROCm-enabled PyTorch build in the virtualenv.
 5. Use `python -c 'import torch; print(torch.utils.cmake_prefix_path)'` as the Torch `CMAKE_PREFIX_PATH`.
-6. Create a Python virtualenv and install the visualization dependencies.
+6. Create a Python 3.12 or 3.13 virtualenv and install the visualization dependencies.
 7. Configure and build the project in `RelWithDebInfo`.
 
 Example:
 
 ```bash
-python3 -m venv .venv
+python3.12 -m venv .venv
 . .venv/bin/activate
 pip install torch pybind11
 pip install -e .[viz]

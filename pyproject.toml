@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "pulsar-viz"
 version = "0.1.0"
 description = "Thin Python visualization and evaluation layer for Pulsar"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"
 dependencies = [
   "numpy>=1.26",
 ]

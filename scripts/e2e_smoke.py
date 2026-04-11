@@ -11,6 +11,11 @@ from pathlib import Path
 def main() -> int:
     if len(sys.argv) != 4:
         raise SystemExit("usage: e2e_smoke.py <repo_root> <pulsar_train> <base_config>")
+    if sys.version_info >= (3, 14):
+        raise RuntimeError(
+            "rlgym is not currently compatible with Python 3.14 in this test path. "
+            "Recreate the virtualenv with Python 3.12 or 3.13."
+        )
 
     repo_root = Path(sys.argv[1]).resolve()
     train_binary = Path(sys.argv[2]).resolve()

@@ -34,7 +34,7 @@ python3 scripts/collision_mesh_downloader.py
 
 The project expects:
 
-- Python 3.10+
+- Python 3.10-3.13
 - `torch`
 - `pybind11`
 - `rlgym[rl-rlviser]`
