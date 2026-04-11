@@ -4,11 +4,11 @@
 
 ## Design Goals
 
-- Mirror the `RLGym` component model in C++ so environment logic stays composable.
-- Run the full `PPO` training loop in C++ with `libtorch`.
-- Use `RocketSim` as the high-throughput simulation backend.
-- Keep one model definition in C++ and expose that same implementation to Python.
-- Use Python only for checkpoint-driven evaluation and `RLViser` rendering.
+ - Fast vectorized C++ trainer
+ - Shared C++ backbone for model architecture
+ - No handmade reward function
+ - Good performance
+
 
 ## Repository Layout
 
@@ -39,6 +39,7 @@ The project expects:
 - `pybind11`
 - `rlgym[rl-rlviser]`
 - `rocketsim`
+- `wandb`
 - `subtr-actor-py` for replay preprocessing
 
 Configure with:
@@ -59,7 +60,7 @@ cmake --build build
 
 If `Torch` or Python binding dependencies are not available, CMake still builds the core environment/config targets and skips the trainer/bindings targets.
 
-For the intended deployment target, see [docs/rocm_linux.md](/Users/lucamignatti/Projects/pulsar/docs/rocm_linux.md). On ROCm machines, keep using the `cuda` device string in the config because PyTorch ROCm exposes the CUDA device namespace.
+For the intended deployment target, see [docs/rocm_linux.md](docs/rocm_linux.md). On ROCm machines, keep using the `cuda` device string in the config because PyTorch ROCm exposes the CUDA device namespace.
 
 ## Targets
 
@@ -147,9 +148,9 @@ This writes sequence-safe shards:
 - `val_manifest.json`
 - shard-local `obs.pt`, `actions.pt`, `next_goal.pt`, `weights.pt`, and `episode_starts.pt` tensor files
 
-The preprocessor uses `subtr_actor` for frame extraction, preserves per-player trajectories, writes explicit `episode_starts` markers, and keeps whole trajectories inside a shard so recurrent pretraining does not cross replay boundaries. It zero-fills unavailable boost-pad state and derives discrete action labels heuristically from short-horizon car kinematics plus jump state. The resulting labels are good enough for policy warm-starting, but they are not replay-perfect controller reconstruction.
+The preprocessor uses `subtr_actor` for frame extraction, preserves per-player trajectories, writes `episode_starts` markers, and keeps whole trajectories inside a shard so recurrent pretraining does not cross replay boundaries. It zero-fills unavailable boost-pad state and derives discrete action labels heuristically from short-horizon car kinematics plus jump state. The resulting labels are good enough for policy warm-starting, but they are not replay-perfect controller reconstruction.
 
-Then point [configs/2v2_offline.json](/Users/lucamignatti/Projects/pulsar/configs/2v2_offline.json) at those manifests and run:
+Then point [configs/2v2_offline.json](configs/2v2_offline.json) at those manifests and run:
 
 ```bash
 ./build/release/pulsar_offline_train configs/2v2_offline.json /path/to/offline_outputs
@@ -162,25 +163,3 @@ That produces:
 - `offline_metrics.jsonl`
 
 The offline trainer now runs truncated BPTT over real per-player trajectories. `behavior_cloning.sequence_length` controls the chunk length used for recurrent updates.
-
-## Current Status
-
-This repository now contains a working v1 with source-informed defaults:
-
-- The default action space is the 90-action `RLGym` lookup table.
-- The default observation shape is `132`, matching `DefaultObs(zero_padding=2)` for `2v2`.
-- Reward defaults follow the `RLGym` PPO guide direction more closely: goal event reward, touch reward, non-negative speed-to-ball reward, ball-to-goal shaping, and a small face-ball term.
-- Terminal logic includes both goal termination and no-touch truncation.
-- The C++ runtime now uses real `RocketSim` arenas and downloaded soccar collision meshes.
-- The trainer batches policy inference across many independent arenas, writes checkpoints plus optimizer state, and logs per-update metrics to `metrics.jsonl`.
-- Rollout collection now parallelizes observation packing, action decode, stepping, reward computation, and reset checks across arenas while keeping rollout tensors device-resident after ingress.
-- The offline stage now includes a tensor-shard dataset format, a C++ pretrainer for behavior cloning plus next-goal prediction, and a Kaggle `2v2` replay preprocessing script.
-- The Python evaluator loads the same native C++ model module and refuses config/checkpoint mismatches.
-
-Verified locally in this workspace:
-
-- Core and Torch CMake configure/build/tests pass.
-- Offline pretraining smoke tests pass and emit both policy and next-goal checkpoints.
-- `pulsar_bench` runs against real `RocketSim`.
-- `pulsar_train` can run a smoke PPO update and write a checkpoint.
-- Python can load that checkpoint through `pulsar_native`, construct the `RLGym` eval environment, and run a forward pass on live observations.
