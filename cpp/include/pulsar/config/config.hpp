@@ -65,6 +65,36 @@ struct PPOConfig {
   int checkpoint_interval = 10;
 };
 
+struct OfflineDatasetConfig {
+  std::string train_manifest = "";
+  std::string val_manifest = "";
+  int batch_size = 4096;
+  int val_batch_size = 8192;
+  bool shuffle = true;
+  std::uint64_t seed = 0;
+};
+
+struct BehaviorCloningConfig {
+  bool enabled = true;
+  int epochs = 10;
+  float learning_rate = 3.0e-4F;
+  float weight_decay = 1.0e-6F;
+  float label_smoothing = 0.0F;
+  float max_grad_norm = 1.0F;
+};
+
+struct NextGoalPredictorConfig {
+  bool enabled = true;
+  int epochs = 10;
+  int num_classes = 3;
+  std::vector<int> hidden_sizes{1024, 512};
+  float learning_rate = 3.0e-4F;
+  float weight_decay = 1.0e-6F;
+  float label_smoothing = 0.0F;
+  float max_grad_norm = 1.0F;
+  std::vector<float> class_weights{1.0F, 1.0F, 0.25F};
+};
+
 struct ExperimentConfig {
   int schema_version = 1;
   int obs_schema_version = 1;
@@ -73,6 +103,9 @@ struct ExperimentConfig {
   ActionTableConfig action_table{};
   ModelConfig model{};
   PPOConfig ppo{};
+  OfflineDatasetConfig offline_dataset{};
+  BehaviorCloningConfig behavior_cloning{};
+  NextGoalPredictorConfig next_goal_predictor{};
 };
 
 struct CheckpointMetadata {
@@ -101,6 +134,12 @@ void to_json(nlohmann::json& j, const ModelConfig& value);
 void from_json(const nlohmann::json& j, ModelConfig& value);
 void to_json(nlohmann::json& j, const PPOConfig& value);
 void from_json(const nlohmann::json& j, PPOConfig& value);
+void to_json(nlohmann::json& j, const OfflineDatasetConfig& value);
+void from_json(const nlohmann::json& j, OfflineDatasetConfig& value);
+void to_json(nlohmann::json& j, const BehaviorCloningConfig& value);
+void from_json(const nlohmann::json& j, BehaviorCloningConfig& value);
+void to_json(nlohmann::json& j, const NextGoalPredictorConfig& value);
+void from_json(const nlohmann::json& j, NextGoalPredictorConfig& value);
 void to_json(nlohmann::json& j, const ExperimentConfig& value);
 void from_json(const nlohmann::json& j, ExperimentConfig& value);
 void to_json(nlohmann::json& j, const CheckpointMetadata& value);

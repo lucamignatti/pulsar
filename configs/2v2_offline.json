@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "obs_schema_version": 1,
+  "env": {
+    "mode": "soccar",
+    "collision_meshes_path": "collision_meshes",
+    "team_size": 2,
+    "tick_skip": 8,
+    "tick_rate": 120,
+    "max_episode_ticks": 2250,
+    "no_touch_timeout_seconds": 10.0,
+    "spawn_opponents": true,
+    "randomize_kickoffs": true,
+    "seed": 0
+  },
+  "reward": {
+    "terms": [
+      {"name": "goal", "weight": 10.0},
+      {"name": "touch", "weight": 0.5},
+      {"name": "speed_to_ball", "weight": 0.05},
+      {"name": "ball_to_goal", "weight": 0.2},
+      {"name": "face_ball", "weight": 0.02}
+    ],
+    "team_spirit": 0.3,
+    "opponent_scale": 1.0
+  },
+  "action_table": {
+    "builtin": "rlgym_lookup_v1"
+  },
+  "model": {
+    "observation_dim": 132,
+    "hidden_sizes": [1024, 1024, 512, 512],
+    "action_dim": 90,
+    "use_layer_norm": true
+  },
+  "ppo": {
+    "num_envs": 128,
+    "collection_workers": 16,
+    "rollout_length": 256,
+    "minibatch_size": 32768,
+    "epochs": 3,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "value_clip_range": 0.2,
+    "entropy_coef": 0.01,
+    "value_coef": 1.0,
+    "learning_rate": 0.0002,
+    "max_grad_norm": 1.0,
+    "target_kl": 0.03,
+    "device": "cuda",
+    "checkpoint_interval": 10
+  },
+  "offline_dataset": {
+    "train_manifest": "data/offline/2v2/train_manifest.json",
+    "val_manifest": "data/offline/2v2/val_manifest.json",
+    "batch_size": 8192,
+    "val_batch_size": 16384,
+    "shuffle": true,
+    "seed": 7
+  },
+  "behavior_cloning": {
+    "enabled": true,
+    "epochs": 8,
+    "learning_rate": 0.0003,
+    "weight_decay": 1e-06,
+    "label_smoothing": 0.01,
+    "max_grad_norm": 1.0
+  },
+  "next_goal_predictor": {
+    "enabled": true,
+    "epochs": 8,
+    "num_classes": 3,
+    "hidden_sizes": [1024, 512],
+    "learning_rate": 0.0003,
+    "weight_decay": 1e-06,
+    "label_smoothing": 0.01,
+    "max_grad_norm": 1.0,
+    "class_weights": [1.0, 1.0, 0.25]
+  }
+}

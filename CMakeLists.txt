@@ -73,7 +73,10 @@ if(PULSAR_ENABLE_TORCH)
     add_library(
       pulsar_torch
       cpp/src/model/actor_critic.cpp
+      cpp/src/model/next_goal_predictor.cpp
       cpp/src/model/normalizer.cpp
+      cpp/src/training/offline_dataset.cpp
+      cpp/src/training/offline_pretrainer.cpp
       cpp/src/training/rollout_storage.cpp
       cpp/src/training/ppo_trainer.cpp
     )
@@ -84,6 +87,9 @@ if(PULSAR_ENABLE_TORCH)
 
     add_executable(pulsar_train cpp/src/apps/train_main.cpp)
     target_link_libraries(pulsar_train PRIVATE pulsar_torch)
+
+    add_executable(pulsar_offline_train cpp/src/apps/offline_train_main.cpp)
+    target_link_libraries(pulsar_offline_train PRIVATE pulsar_torch)
   else()
     message(WARNING "Torch not found; skipping pulsar_torch and pulsar_train targets.")
   endif()
@@ -124,6 +130,14 @@ if(PULSAR_ENABLE_TESTS)
     target_include_directories(pulsar_torch_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
     target_link_libraries(pulsar_torch_tests PRIVATE pulsar_torch)
     add_test(NAME pulsar_torch_tests COMMAND pulsar_torch_tests)
+
+    add_executable(
+      pulsar_offline_tests
+      cpp/tests/test_offline.cpp
+    )
+    target_include_directories(pulsar_offline_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
+    target_link_libraries(pulsar_offline_tests PRIVATE pulsar_torch)
+    add_test(NAME pulsar_offline_tests COMMAND pulsar_offline_tests)
 
     if(TARGET pulsar_train AND TARGET pulsar_native AND Python3_FOUND)
       add_test(

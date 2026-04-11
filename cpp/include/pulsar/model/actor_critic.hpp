@@ -48,4 +48,3 @@ class SharedActorCritic {
 #endif
 
 }  // namespace pulsar
-

@@ -167,6 +167,72 @@ void from_json(const json& j, PPOConfig& value) {
   value.checkpoint_interval = j.at("checkpoint_interval").get<int>();
 }
 
+void to_json(json& j, const OfflineDatasetConfig& value) {
+  j = json{
+      {"train_manifest", value.train_manifest},
+      {"val_manifest", value.val_manifest},
+      {"batch_size", value.batch_size},
+      {"val_batch_size", value.val_batch_size},
+      {"shuffle", value.shuffle},
+      {"seed", value.seed},
+  };
+}
+
+void from_json(const json& j, OfflineDatasetConfig& value) {
+  value.train_manifest = j.value("train_manifest", std::string{});
+  value.val_manifest = j.value("val_manifest", std::string{});
+  value.batch_size = j.value("batch_size", 4096);
+  value.val_batch_size = j.value("val_batch_size", 8192);
+  value.shuffle = j.value("shuffle", true);
+  value.seed = j.value("seed", static_cast<std::uint64_t>(0));
+}
+
+void to_json(json& j, const BehaviorCloningConfig& value) {
+  j = json{
+      {"enabled", value.enabled},
+      {"epochs", value.epochs},
+      {"learning_rate", value.learning_rate},
+      {"weight_decay", value.weight_decay},
+      {"label_smoothing", value.label_smoothing},
+      {"max_grad_norm", value.max_grad_norm},
+  };
+}
+
+void from_json(const json& j, BehaviorCloningConfig& value) {
+  value.enabled = j.value("enabled", true);
+  value.epochs = j.value("epochs", 10);
+  value.learning_rate = j.value("learning_rate", 3.0e-4F);
+  value.weight_decay = j.value("weight_decay", 1.0e-6F);
+  value.label_smoothing = j.value("label_smoothing", 0.0F);
+  value.max_grad_norm = j.value("max_grad_norm", 1.0F);
+}
+
+void to_json(json& j, const NextGoalPredictorConfig& value) {
+  j = json{
+      {"enabled", value.enabled},
+      {"epochs", value.epochs},
+      {"num_classes", value.num_classes},
+      {"hidden_sizes", value.hidden_sizes},
+      {"learning_rate", value.learning_rate},
+      {"weight_decay", value.weight_decay},
+      {"label_smoothing", value.label_smoothing},
+      {"max_grad_norm", value.max_grad_norm},
+      {"class_weights", value.class_weights},
+  };
+}
+
+void from_json(const json& j, NextGoalPredictorConfig& value) {
+  value.enabled = j.value("enabled", true);
+  value.epochs = j.value("epochs", 10);
+  value.num_classes = j.value("num_classes", 3);
+  value.hidden_sizes = j.value("hidden_sizes", std::vector<int>{1024, 512});
+  value.learning_rate = j.value("learning_rate", 3.0e-4F);
+  value.weight_decay = j.value("weight_decay", 1.0e-6F);
+  value.label_smoothing = j.value("label_smoothing", 0.0F);
+  value.max_grad_norm = j.value("max_grad_norm", 1.0F);
+  value.class_weights = j.value("class_weights", std::vector<float>{1.0F, 1.0F, 0.25F});
+}
+
 void to_json(json& j, const ExperimentConfig& value) {
   j = json{
       {"schema_version", value.schema_version},
@@ -176,6 +242,9 @@ void to_json(json& j, const ExperimentConfig& value) {
       {"action_table", value.action_table},
       {"model", value.model},
       {"ppo", value.ppo},
+      {"offline_dataset", value.offline_dataset},
+      {"behavior_cloning", value.behavior_cloning},
+      {"next_goal_predictor", value.next_goal_predictor},
   };
 }
 
@@ -187,6 +256,15 @@ void from_json(const json& j, ExperimentConfig& value) {
   value.action_table = j.at("action_table").get<ActionTableConfig>();
   value.model = j.at("model").get<ModelConfig>();
   value.ppo = j.at("ppo").get<PPOConfig>();
+  if (j.contains("offline_dataset")) {
+    value.offline_dataset = j.at("offline_dataset").get<OfflineDatasetConfig>();
+  }
+  if (j.contains("behavior_cloning")) {
+    value.behavior_cloning = j.at("behavior_cloning").get<BehaviorCloningConfig>();
+  }
+  if (j.contains("next_goal_predictor")) {
+    value.next_goal_predictor = j.at("next_goal_predictor").get<NextGoalPredictorConfig>();
+  }
 }
 
 void to_json(json& j, const CheckpointMetadata& value) {
