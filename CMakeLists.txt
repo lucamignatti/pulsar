@@ -36,6 +36,7 @@ endif()
 add_library(
   pulsar_core
   cpp/src/config/config.cpp
+  cpp/src/rl/interfaces.cpp
   cpp/src/rl/action_table.cpp
   cpp/src/env/mutators.cpp
   cpp/src/env/obs_builder.cpp

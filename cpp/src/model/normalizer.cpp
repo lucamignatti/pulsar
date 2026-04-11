@@ -10,10 +10,17 @@ ObservationNormalizer::ObservationNormalizer(int obs_dim) {
   count_ = torch::tensor(1.0F);
 }
 
+void ObservationNormalizer::to(const torch::Device& device) {
+  mean_ = mean_.to(device);
+  var_ = var_.to(device);
+  count_ = count_.to(device);
+}
+
 void ObservationNormalizer::update(const torch::Tensor& obs) {
   const torch::Tensor batch_mean = obs.mean(0);
   const torch::Tensor batch_var = obs.var(0, false);
-  const torch::Tensor batch_count = torch::tensor(static_cast<float>(obs.size(0)));
+  const torch::Tensor batch_count =
+      torch::tensor(static_cast<float>(obs.size(0)), torch::TensorOptions().device(obs.device()));
 
   const torch::Tensor delta = batch_mean - mean_;
   const torch::Tensor total_count = count_ + batch_count;
@@ -30,7 +37,7 @@ void ObservationNormalizer::update(const torch::Tensor& obs) {
 }
 
 torch::Tensor ObservationNormalizer::normalize(const torch::Tensor& obs) const {
-  return (obs - mean_.to(obs.device())) / torch::sqrt(var_.to(obs.device()) + 1.0e-6);
+  return (obs - mean_) / torch::sqrt(var_ + 1.0e-6);
 }
 
 void ObservationNormalizer::save(torch::serialize::OutputArchive& archive) const {
@@ -48,4 +55,3 @@ void ObservationNormalizer::load(torch::serialize::InputArchive& archive) {
 }  // namespace pulsar
 
 #endif
-

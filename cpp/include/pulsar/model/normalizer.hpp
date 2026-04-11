@@ -14,6 +14,7 @@ class ObservationNormalizer {
  public:
   explicit ObservationNormalizer(int obs_dim);
 
+  void to(const torch::Device& device);
   void update(const torch::Tensor& obs);
   torch::Tensor normalize(const torch::Tensor& obs) const;
   void save(torch::serialize::OutputArchive& archive) const;
@@ -35,4 +36,3 @@ class ObservationNormalizer {
 #endif
 
 }  // namespace pulsar
-

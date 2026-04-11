@@ -58,6 +58,10 @@ class PPOTrainer {
   torch::Device device_{torch::kCPU};
   std::vector<std::size_t> agent_offsets_{};
   std::size_t total_agents_ = 0;
+  torch::Tensor host_obs_;
+  torch::Tensor host_rewards_;
+  torch::Tensor host_dones_;
+  bool use_pinned_host_buffers_ = false;
 };
 
 }  // namespace pulsar

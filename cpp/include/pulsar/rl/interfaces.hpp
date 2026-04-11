@@ -33,6 +33,7 @@ class ObsBuilder {
  public:
   virtual ~ObsBuilder() = default;
   virtual std::vector<float> build_obs(const EnvState& state, AgentId agent_id) const = 0;
+  virtual void build_obs_batch(const EnvState& state, std::span<float> out) const;
   virtual std::size_t obs_dim() const = 0;
 };
 
@@ -68,4 +69,3 @@ using RewardFunctionPtr = std::shared_ptr<RewardFunction>;
 using DoneConditionPtr = std::shared_ptr<DoneCondition>;
 
 }  // namespace pulsar
-

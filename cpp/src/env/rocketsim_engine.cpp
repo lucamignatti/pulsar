@@ -78,7 +78,8 @@ void RocketSimTransitionEngine::reset(std::uint64_t seed) {
   }
 
   state_ = {};
-  state_.boost_pad_timers.assign(34, 0.0F);
+  state_.cars.resize(cars_.size());
+  state_.boost_pad_timers.resize(arena_->GetBoostPads().size(), 0.0F);
   state_.goal_scored = false;
   state_.last_touch_tick = 0;
   episode_ticks_ = 0;
@@ -174,15 +175,17 @@ void RocketSimTransitionEngine::sync_batched_state() {
     state_.ball.position = from_rs_vec(ball_state.pos);
     state_.ball.velocity = from_rs_vec(ball_state.vel);
     state_.ball.angular_velocity = from_rs_vec(ball_state.angVel);
-    state_.cars.clear();
-    state_.cars.reserve(cars_.size());
+    if (state_.cars.size() != cars_.size()) {
+      state_.cars.resize(cars_.size());
+    }
 
     int max_touch_tick = state_.last_touch_tick;
     int last_touch_agent = state_.last_touch_agent;
 
-    for (auto* car_ptr : cars_) {
+    for (std::size_t i = 0; i < cars_.size(); ++i) {
+      auto* car_ptr = cars_[i];
       const auto car_state = car_ptr->GetState();
-      CarState car;
+      CarState& car = state_.cars[i];
       car.id = static_cast<int>(car_ptr->id);
       car.team = car_ptr->team == RocketSim::Team::BLUE ? Team::Blue : Team::Orange;
       car.position = from_rs_vec(car_state.pos);
@@ -214,42 +217,51 @@ void RocketSimTransitionEngine::sync_batched_state() {
         }
         car.ball_touched =
             (static_cast<int>(arena_->tickCount) - touch_tick) <= config_.tick_skip;
+      } else {
+        car.ball_touched = false;
       }
-
-      state_.cars.push_back(car);
     }
 
     state_.last_touch_tick = max_touch_tick;
     state_.last_touch_agent = last_touch_agent;
     state_.kickoff_pause = false;
 
-    state_.boost_pad_timers.clear();
-    state_.boost_pad_timers.reserve(arena_->GetBoostPads().size());
-    for (const auto* pad : arena_->GetBoostPads()) {
+    if (state_.boost_pad_timers.size() != arena_->GetBoostPads().size()) {
+      state_.boost_pad_timers.resize(arena_->GetBoostPads().size());
+    }
+    for (std::size_t i = 0; i < arena_->GetBoostPads().size(); ++i) {
+      const auto* pad = arena_->GetBoostPads()[i];
       const auto pad_state = pad->GetState();
-      state_.boost_pad_timers.push_back(pad_state.isActive ? 0.0F : pad_state.cooldown);
+      state_.boost_pad_timers[i] = pad_state.isActive ? 0.0F : pad_state.cooldown;
     }
   }
 #endif
 
-  batched_state_.car_positions.clear();
-  batched_state_.car_velocities.clear();
-  batched_state_.car_boost.clear();
-  batched_state_.ball_positions = {state_.ball.position.x, state_.ball.position.y, state_.ball.position.z};
-  batched_state_.ball_velocities = {state_.ball.velocity.x, state_.ball.velocity.y, state_.ball.velocity.z};
+  batched_state_.ball_positions.resize(3);
+  batched_state_.ball_velocities.resize(3);
+  batched_state_.ball_positions[0] = state_.ball.position.x;
+  batched_state_.ball_positions[1] = state_.ball.position.y;
+  batched_state_.ball_positions[2] = state_.ball.position.z;
+  batched_state_.ball_velocities[0] = state_.ball.velocity.x;
+  batched_state_.ball_velocities[1] = state_.ball.velocity.y;
+  batched_state_.ball_velocities[2] = state_.ball.velocity.z;
 
-  batched_state_.car_positions.reserve(state_.cars.size() * 3);
-  batched_state_.car_velocities.reserve(state_.cars.size() * 3);
-  batched_state_.car_boost.reserve(state_.cars.size());
+  if (batched_state_.car_positions.size() != state_.cars.size() * 3) {
+    batched_state_.car_positions.resize(state_.cars.size() * 3);
+    batched_state_.car_velocities.resize(state_.cars.size() * 3);
+    batched_state_.car_boost.resize(state_.cars.size());
+  }
 
-  for (const auto& car : state_.cars) {
-    batched_state_.car_positions.insert(
-        batched_state_.car_positions.end(),
-        {car.position.x, car.position.y, car.position.z});
-    batched_state_.car_velocities.insert(
-        batched_state_.car_velocities.end(),
-        {car.velocity.x, car.velocity.y, car.velocity.z});
-    batched_state_.car_boost.push_back(car.boost);
+  for (std::size_t i = 0; i < state_.cars.size(); ++i) {
+    const auto& car = state_.cars[i];
+    const std::size_t base = i * 3;
+    batched_state_.car_positions[base] = car.position.x;
+    batched_state_.car_positions[base + 1] = car.position.y;
+    batched_state_.car_positions[base + 2] = car.position.z;
+    batched_state_.car_velocities[base] = car.velocity.x;
+    batched_state_.car_velocities[base + 1] = car.velocity.y;
+    batched_state_.car_velocities[base + 2] = car.velocity.z;
+    batched_state_.car_boost[i] = car.boost;
   }
 }
 

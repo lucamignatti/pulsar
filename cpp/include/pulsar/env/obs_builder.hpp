@@ -10,6 +10,7 @@ class PulsarObsBuilder final : public ObsBuilder {
   explicit PulsarObsBuilder(EnvConfig config);
 
   std::vector<float> build_obs(const EnvState& state, AgentId agent_id) const override;
+  void build_obs_batch(const EnvState& state, std::span<float> out) const override;
   std::size_t obs_dim() const override;
 
  private:
@@ -17,4 +18,3 @@ class PulsarObsBuilder final : public ObsBuilder {
 };
 
 }  // namespace pulsar
-

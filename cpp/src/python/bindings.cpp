@@ -35,6 +35,7 @@ class PySharedModel {
     torch::Tensor input = torch::tensor(obs, torch::TensorOptions().dtype(torch::kFloat32))
                               .reshape({1, config_.model.observation_dim})
                               .to(torch::Device(device_));
+    torch::NoGradGuard no_grad;
     const torch::Tensor normalized = normalizer_.normalize(input);
     const PolicyOutput output = model_->forward(normalized);
     const torch::Tensor logits = output.logits.squeeze(0).to(torch::kCPU);

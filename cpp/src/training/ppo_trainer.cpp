@@ -87,27 +87,36 @@ PPOTrainer::PPOTrainer(
 
   total_agents_ = total_agents_for(engines_);
   agent_offsets_ = offsets_for(engines_);
+  use_pinned_host_buffers_ = device_.is_cuda();
+  auto host_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+  if (use_pinned_host_buffers_) {
+    host_options = host_options.pinned_memory(true);
+  }
+  host_obs_ = torch::empty(
+      {static_cast<long>(total_agents_), static_cast<long>(config_.model.observation_dim)},
+      host_options);
+  host_rewards_ = torch::empty(
+      {static_cast<long>(total_agents_)},
+      host_options);
+  host_dones_ = torch::empty(
+      {static_cast<long>(total_agents_)},
+      host_options);
   model_->to(device_);
+  normalizer_.to(device_);
 }
 
 torch::Tensor PPOTrainer::collect_observations() const {
-  std::vector<float> flat;
-  flat.reserve(total_agents_ * obs_builder_->obs_dim());
+  float* dst = host_obs_.data_ptr<float>();
+  const std::size_t stride = obs_builder_->obs_dim();
 
   for (const auto& engine : engines_) {
-    for (std::size_t agent_id = 0; agent_id < engine->num_agents(); ++agent_id) {
-      const auto obs = obs_builder_->build_obs(engine->state(), agent_id);
-      flat.insert(flat.end(), obs.begin(), obs.end());
-    }
+    const std::size_t count = engine->num_agents();
+    obs_builder_->build_obs_batch(
+        engine->state(),
+        std::span<float>(dst, count * stride));
+    dst += static_cast<std::ptrdiff_t>(count * stride);
   }
-
-  auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(true);
-  torch::Tensor host = torch::from_blob(
-      flat.data(),
-      {static_cast<long>(total_agents_), static_cast<long>(obs_builder_->obs_dim())},
-      options)
-                           .clone();
-  return host.to(device_, true);
+  return host_obs_.to(device_, use_pinned_host_buffers_);
 }
 
 torch::Tensor PPOTrainer::sample_actions(const torch::Tensor& logits, torch::Tensor* log_probs) const {
@@ -237,18 +246,22 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir) {
       }
 
       torch::Tensor obs = collect_observations();
-      normalizer_.update(obs);
-      obs = normalizer_.normalize(obs);
-
-      const PolicyOutput output = model_->forward(obs);
+      torch::Tensor actions;
       torch::Tensor log_probs;
-      const torch::Tensor actions = sample_actions(output.logits, &log_probs);
+      torch::Tensor values;
+      {
+        torch::NoGradGuard no_grad;
+        normalizer_.update(obs);
+        obs = normalizer_.normalize(obs);
+
+        const PolicyOutput output = model_->forward(obs);
+        actions = sample_actions(output.logits, &log_probs);
+        values = output.values;
+      }
       const std::vector<std::int64_t> action_indices = actions_to_indices(actions);
 
-      std::vector<float> rewards_flat;
-      std::vector<float> dones_flat;
-      rewards_flat.reserve(total_agents_);
-      dones_flat.reserve(total_agents_);
+      float* rewards_ptr = host_rewards_.data_ptr<float>();
+      float* dones_ptr = host_dones_.data_ptr<float>();
 
       for (std::size_t engine_idx = 0; engine_idx < engines_.size(); ++engine_idx) {
         const std::size_t begin = agent_offsets_[engine_idx];
@@ -263,8 +276,8 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir) {
             reward_fn_->get_rewards(previous_states[engine_idx], transition.state, terminated, truncated);
 
         for (std::size_t i = 0; i < rewards.size(); ++i) {
-          rewards_flat.push_back(rewards[i]);
-          dones_flat.push_back((terminated[i] != 0 || truncated[i] != 0) ? 1.0F : 0.0F);
+          *rewards_ptr++ = rewards[i];
+          *dones_ptr++ = (terminated[i] != 0 || truncated[i] != 0) ? 1.0F : 0.0F;
         }
 
         const bool reset_needed =
@@ -281,15 +294,19 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir) {
           obs,
           actions,
           log_probs,
-          torch::tensor(rewards_flat, torch::TensorOptions().dtype(torch::kFloat32).device(device_)),
-          torch::tensor(dones_flat, torch::TensorOptions().dtype(torch::kFloat32).device(device_)),
-          output.values.detach());
+          host_rewards_.to(device_, use_pinned_host_buffers_),
+          host_dones_.to(device_, use_pinned_host_buffers_),
+          values);
 
       global_step += static_cast<std::int64_t>(total_agents_);
     }
 
-    torch::Tensor last_obs = normalizer_.normalize(collect_observations());
-    torch::Tensor last_value = model_->forward(last_obs).values.detach();
+    torch::Tensor last_value;
+    {
+      torch::NoGradGuard no_grad;
+      torch::Tensor last_obs = normalizer_.normalize(collect_observations());
+      last_value = model_->forward(last_obs).values;
+    }
     rollout_.compute_returns_and_advantages(last_value, config_.ppo.gamma, config_.ppo.gae_lambda);
 
     TrainerMetrics metrics = update_policy();
