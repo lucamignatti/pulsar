@@ -60,7 +60,7 @@ cmake --build build
 
 If `Torch` or Python binding dependencies are not available, CMake still builds the core environment/config targets and skips the trainer/bindings targets.
 
-For the intended deployment target, see [docs/rocm_linux.md](docs/rocm_linux.md). On ROCm machines, keep using the `cuda` device string in the config because PyTorch ROCm exposes the CUDA device namespace.
+For the intended deployment target, see [docs/rocm_linux.md](docs/rocm_linux.md).
 
 ## Targets
 
