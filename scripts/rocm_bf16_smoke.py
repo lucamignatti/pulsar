@@ -8,6 +8,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+import torch
+
+
+def skip(message: str) -> int:
+    print(f"SKIP: {message}")
+    return 77
+
 
 def main() -> int:
     if len(sys.argv) != 4:
@@ -16,6 +23,13 @@ def main() -> int:
     repo_root = Path(sys.argv[1]).resolve()
     train_binary = Path(sys.argv[2]).resolve()
     base_config_path = Path(sys.argv[3]).resolve()
+
+    if not torch.cuda.is_available():
+        return skip("ROCm smoke requires an available CUDA/ROCm device")
+    if not getattr(torch.version, "hip", None):
+        return skip("ROCm smoke requires a HIP-enabled PyTorch build")
+    if hasattr(torch.cuda, "is_bf16_supported") and not torch.cuda.is_bf16_supported():
+        return skip("current ROCm GPU does not report BF16 support")
 
     with tempfile.TemporaryDirectory(prefix="pulsar_rocm_smoke_") as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)

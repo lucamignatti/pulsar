@@ -2,48 +2,13 @@
 
 #ifdef PULSAR_HAS_TORCH
 
-#include <ATen/autocast_mode.h>
+#include <ATen/Context.h>
 
 #include <stdexcept>
 
+#include <torch/cuda.h>
+
 namespace pulsar {
-namespace {
-
-class ScopedAutocast {
- public:
-  ScopedAutocast(bool enabled, at::DeviceType device_type, at::ScalarType dtype)
-      : enabled_(enabled), device_type_(device_type) {
-    if (!enabled_) {
-      return;
-    }
-    previous_enabled_ = at::autocast::is_autocast_enabled(device_type_);
-    previous_dtype_ = at::autocast::get_autocast_dtype(device_type_);
-    previous_cache_enabled_ = at::autocast::is_autocast_cache_enabled();
-    at::autocast::set_autocast_enabled(device_type_, true);
-    at::autocast::set_autocast_dtype(device_type_, dtype);
-    at::autocast::set_autocast_cache_enabled(true);
-    at::autocast::increment_nesting();
-  }
-
-  ~ScopedAutocast() {
-    if (!enabled_) {
-      return;
-    }
-    at::autocast::decrement_nesting();
-    at::autocast::set_autocast_enabled(device_type_, previous_enabled_);
-    at::autocast::set_autocast_dtype(device_type_, previous_dtype_);
-    at::autocast::set_autocast_cache_enabled(previous_cache_enabled_);
-  }
-
- private:
-  bool enabled_ = false;
-  at::DeviceType device_type_ = at::kCPU;
-  bool previous_enabled_ = false;
-  bool previous_cache_enabled_ = false;
-  at::ScalarType previous_dtype_ = at::kFloat;
-};
-
-}  // namespace
 
 torch::Tensor apply_action_mask_to_logits(const torch::Tensor& logits, const torch::Tensor& action_masks) {
   return logits.masked_fill(action_masks.logical_not(), -1.0e9);
@@ -135,15 +100,24 @@ void validate_precision_mode_or_throw(const PPOConfig::PrecisionConfig& precisio
     throw std::runtime_error("ppo.precision.mode=amp_bf16 requires a CUDA/ROCm device.");
   }
 
-  try {
-    const auto options = torch::TensorOptions().dtype(torch::kFloat32).device(device);
-    torch::Tensor a = torch::randn({4, 4}, options);
-    torch::Tensor b = torch::randn({4, 4}, options);
-    ScopedAutocast autocast(true, device.type(), at::kBFloat16);
-    (void)torch::matmul(a, b);
-  } catch (const std::exception& exc) {
-    throw std::runtime_error(std::string("Failed to enable BF16 autocast on the selected device: ") + exc.what());
+  if (!torch::cuda::is_available()) {
+    throw std::runtime_error("ppo.precision.mode=amp_bf16 requested a CUDA/ROCm device, but no GPU was available.");
   }
+
+  const auto& hooks = at::detail::getCUDAHooks();
+#ifdef USE_ROCM
+  if (!hooks.hasROCM()) {
+    throw std::runtime_error("ppo.precision.mode=amp_bf16 currently only supports ROCm builds in Pulsar.");
+  }
+  if (!hooks.isGPUArch({"gfx90a", "gfx940", "gfx941", "gfx942", "gfx950"})) {
+    throw std::runtime_error(
+        "ppo.precision.mode=amp_bf16 requires a BF16-capable ROCm GPU. "
+        "Supported architectures are gfx90a, gfx940, gfx941, gfx942, and gfx950.");
+  }
+#else
+  (void)hooks;
+  throw std::runtime_error("ppo.precision.mode=amp_bf16 currently only supports ROCm builds in Pulsar.");
+#endif
 }
 
 }  // namespace pulsar

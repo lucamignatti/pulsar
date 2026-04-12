@@ -22,7 +22,7 @@ option(PULSAR_ENABLE_PYTHON "Enable Python bindings and visualization helpers" O
 option(PULSAR_ENABLE_TESTS "Build unit and smoke tests" ON)
 option(PULSAR_ENABLE_BENCHMARKS "Build benchmark targets" ON)
 option(PULSAR_ENABLE_ROCKETSIM "Enable RocketSim-backed simulation" ON)
-option(PULSAR_ENABLE_ROCM_SMOKES "Enable ROCm-only smoke tests." OFF)
+option(PULSAR_DISABLE_ROCM "Disable ROCm integration and ROCm-only tests even when ROCm is available." OFF)
 option(PULSAR_FETCH_JSON "Fetch nlohmann_json when not provided by the system" ON)
 option(PULSAR_FETCH_PYBIND11 "Fetch pybind11 when not provided by the system" OFF)
 
@@ -39,6 +39,13 @@ if(PULSAR_ENABLE_ROCKETSIM AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/Rock
   set(CMAKE_WARN_DEPRECATED FALSE)
   add_subdirectory(external/RocketSim EXCLUDE_FROM_ALL)
   set(CMAKE_WARN_DEPRECATED "${_PULSAR_SAVED_CMAKE_WARN_DEPRECATED}")
+  if(TARGET RocketSim)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+      target_compile_options(RocketSim PRIVATE -Wno-return-type)
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+      target_compile_options(RocketSim PRIVATE -Wno-return-type)
+    endif()
+  endif()
 endif()
 
 add_library(
@@ -263,7 +270,7 @@ if(PULSAR_ENABLE_TESTS AND Python3_EXECUTABLE)
   set_tests_properties(pulsar_preprocess_smoke PROPERTIES LABELS "smoke;dataset")
 endif()
 
-if(PULSAR_ENABLE_TESTS AND PULSAR_ENABLE_ROCM_SMOKES AND TARGET pulsar_train AND Python3_EXECUTABLE)
+if(PULSAR_ENABLE_TESTS AND PULSAR_ROCM_FOUND AND NOT PULSAR_DISABLE_ROCM AND TARGET pulsar_train AND Python3_EXECUTABLE)
   add_test(
     NAME pulsar_rocm_bf16_smoke
     COMMAND
@@ -273,5 +280,5 @@ if(PULSAR_ENABLE_TESTS AND PULSAR_ENABLE_ROCM_SMOKES AND TARGET pulsar_train AND
       $<TARGET_FILE:pulsar_train>
       ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_ppo.json
   )
-  set_tests_properties(pulsar_rocm_bf16_smoke PROPERTIES LABELS "rocm;smoke")
+  set_tests_properties(pulsar_rocm_bf16_smoke PROPERTIES LABELS "rocm;smoke" SKIP_RETURN_CODE 77)
 endif()
