@@ -195,7 +195,7 @@ void SelfPlayManager::infer_opponent_actions(
     }
   }
 
-  const bool use_amp = precision.mode == "amp_bf16" && device_.is_cuda();
+  const bool use_amp = precision.mode == "amp_fp16" && device_.is_cuda();
   const bool deterministic = config_.ppo.self_play.training_opponent_policy != "stochastic";
   for (std::size_t snapshot_index = 0; snapshot_index < grouped.size(); ++snapshot_index) {
     if (grouped[snapshot_index].empty()) {
@@ -210,7 +210,7 @@ void SelfPlayManager::infer_opponent_actions(
     const torch::Tensor starts = episode_starts.index_select(0, indices);
     const torch::Tensor normalized_obs = snapshot.normalizer.normalize(obs);
     ContinuumState state = gather_state(opponent_state, indices);
-    ScopedAutocast autocast(use_amp, device_.type(), at::kBFloat16);
+    ScopedAutocast autocast(use_amp, device_.type(), at::kHalf);
     const PolicyOutput output = snapshot.model->forward_step(normalized_obs, std::move(state), starts);
     const torch::Tensor sampled_actions =
         deterministic ? masked_argmax(output.policy_logits, masks) : masked_sample(output.policy_logits, masks);
@@ -364,7 +364,7 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
   const auto reset_mutator = make_eval_reset_mutator(config_.env);
   const std::string mode = mode_name();
   const auto* discrete = dynamic_cast<const DiscreteActionParser*>(action_parser_.get());
-  const bool use_amp = config_.ppo.precision.mode == "amp_bf16" && device_.is_cuda();
+  const bool use_amp = config_.ppo.precision.mode == "amp_fp16" && device_.is_cuda();
   const bool deterministic = config_.ppo.self_play.eval_policy == "deterministic";
   if (discrete == nullptr) {
     throw std::invalid_argument("SelfPlayManager evaluation requires DiscreteActionParser.");
@@ -415,7 +415,7 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
         obs.copy_(torch::from_blob(host_obs.data(), {static_cast<long>(total_agents), static_cast<long>(obs_builder_->obs_dim())}, torch::kFloat32).clone().to(device_));
         masks.copy_(torch::from_blob(host_masks.data(), {static_cast<long>(total_agents), static_cast<long>(discrete->action_table().size())}, torch::kUInt8).clone().to(device_));
 
-        ScopedAutocast autocast(use_amp, device_.type(), at::kBFloat16);
+        ScopedAutocast autocast(use_amp, device_.type(), at::kHalf);
         const PolicyOutput current_out =
             current_model->forward_step(current_normalizer.normalize(obs), std::move(current_state), episode_starts);
         const PolicyOutput snapshot_out =

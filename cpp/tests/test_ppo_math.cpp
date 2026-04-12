@@ -90,13 +90,13 @@ void test_confidence_weights_adaptive_epsilon_and_precision_validation() {
   }
   pulsar::test::require(invalid_precision_threw, "invalid precision mode should throw");
 
-  bool bf16_cpu_threw = false;
+  bool fp16_cpu_threw = false;
   try {
-    pulsar::validate_precision_mode_or_throw(pulsar::PPOConfig::PrecisionConfig{.mode = "amp_bf16"}, torch::kCPU);
+    pulsar::validate_precision_mode_or_throw(pulsar::PPOConfig::PrecisionConfig{.mode = "amp_fp16"}, torch::kCPU);
   } catch (const std::runtime_error&) {
-    bf16_cpu_threw = true;
+    fp16_cpu_threw = true;
   }
-  pulsar::test::require(bf16_cpu_threw, "amp_bf16 should reject CPU");
+  pulsar::test::require(fp16_cpu_threw, "amp_fp16 should reject CPU");
 }
 
 }  // namespace

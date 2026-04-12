@@ -110,7 +110,7 @@
       "elo_k": 32.0
     },
     "precision": {
-      "mode": "amp_bf16"
+      "mode": "amp_fp16"
     }
   },
   "wandb": {

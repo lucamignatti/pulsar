@@ -172,13 +172,13 @@ PPOTrainer::PPOTrainer(
   }
 
   total_agents_ = collector_->total_agents();
+  validate_precision_mode();
   collection_state_ = model_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
   opponent_collection_state_ = model_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
   host_actions_.resize(total_agents_);
   use_pinned_host_buffers_ = device_.is_cuda();
   model_->to(device_);
   normalizer_.to(device_);
-  validate_precision_mode();
   maybe_initialize_from_checkpoint();
   maybe_initialize_ngp_reward();
 
@@ -196,12 +196,12 @@ ContinuumState PPOTrainer::replay_state_until(std::int64_t start_step, const tor
     return state;
   }
 
-  const bool use_amp = config_.ppo.precision.mode == "amp_bf16" && device_.is_cuda();
+  const bool use_amp = config_.ppo.precision.mode == "amp_fp16" && device_.is_cuda();
   torch::NoGradGuard no_grad;
   for (std::int64_t step = 0; step < start_step; ++step) {
     const torch::Tensor obs = rollout_.obs[step].index_select(0, agent_indices);
     const torch::Tensor starts = rollout_.episode_starts[step].index_select(0, agent_indices);
-    ScopedAutocast autocast(use_amp, device_.type(), at::kBFloat16);
+    ScopedAutocast autocast(use_amp, device_.type(), at::kHalf);
     SequenceOutput out = model_->forward_sequence(obs.unsqueeze(0), std::move(state), starts.unsqueeze(0));
     state = std::move(out.final_state);
   }
@@ -302,7 +302,7 @@ torch::Tensor PPOTrainer::ngp_scalar(const torch::Tensor& logits) const {
 TrainerMetrics PPOTrainer::update_policy() {
   const auto update_start = std::chrono::steady_clock::now();
   TrainerMetrics metrics{};
-  const bool use_amp = config_.ppo.precision.mode == "amp_bf16" && device_.is_cuda();
+  const bool use_amp = config_.ppo.precision.mode == "amp_fp16" && device_.is_cuda();
   const int seq_len = std::max(1, config_.ppo.sequence_length);
   const int burn_in = std::max(0, config_.ppo.burn_in);
   const int agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
@@ -343,7 +343,7 @@ TrainerMetrics PPOTrainer::update_policy() {
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1.0e-6);
         SequenceOutput output;
         {
-          ScopedAutocast autocast(use_amp, device_.type(), at::kBFloat16);
+          ScopedAutocast autocast(use_amp, device_.type(), at::kHalf);
           output = model_->forward_sequence(obs, std::move(state), episode_starts);
         }
         torch::Tensor policy_logits = output.policy_logits.narrow(0, burn, effective_end - effective_start);
@@ -468,7 +468,7 @@ void PPOTrainer::save_checkpoint_to_directory(
 void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std::string& config_path) {
   std::int64_t global_step = 0;
   WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "ppo_train");
-  const bool use_amp = config_.ppo.precision.mode == "amp_bf16" && device_.is_cuda();
+  const bool use_amp = config_.ppo.precision.mode == "amp_fp16" && device_.is_cuda();
 
   for (int update_index = 0; update_index < updates; ++update_index) {
     const auto update_start = std::chrono::steady_clock::now();
@@ -498,7 +498,7 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
       const auto policy_start = std::chrono::steady_clock::now();
       {
         torch::NoGradGuard no_grad;
-        ScopedAutocast autocast(use_amp, device_.type(), at::kBFloat16);
+        ScopedAutocast autocast(use_amp, device_.type(), at::kHalf);
         if (use_ngp_reward_) {
           const torch::Tensor normalized_ngp_obs = ngp_normalizer_.normalize(raw_obs);
           PolicyOutput ngp_output =
@@ -548,7 +548,7 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
       if (use_ngp_reward_) {
         const auto ngp_start = std::chrono::steady_clock::now();
         torch::NoGradGuard no_grad;
-        ScopedAutocast autocast(use_amp, device_.type(), at::kBFloat16);
+        ScopedAutocast autocast(use_amp, device_.type(), at::kHalf);
         const torch::Tensor post_step_obs = collector_->host_post_step_obs().to(device_, use_pinned_host_buffers_);
         const torch::Tensor zero_starts = torch::zeros_like(dones);
         const torch::Tensor normalized_post_step_obs = ngp_normalizer_.normalize(post_step_obs);
@@ -588,7 +588,7 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
     const auto bootstrap_start = std::chrono::steady_clock::now();
     {
       torch::NoGradGuard no_grad;
-      ScopedAutocast autocast(use_amp, device_.type(), at::kBFloat16);
+      ScopedAutocast autocast(use_amp, device_.type(), at::kHalf);
       PolicyOutput output = model_->forward_step(last_obs, collection_state_, last_episode_starts);
       last_sampled_value = output.sampled_values;
     }

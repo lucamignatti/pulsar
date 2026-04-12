@@ -145,12 +145,12 @@ int main() {
 
     config.ppo.self_play.enabled = true;
     config.ppo.self_play.opponent_probability = 0.5F;
-    config.ppo.precision.mode = "amp_bf16";
+    config.ppo.precision.mode = "amp_fp16";
     const auto config_path = std::filesystem::temp_directory_path() / "pulsar_test_config.json";
     pulsar::save_experiment_config(config, config_path.string());
     const auto roundtripped = pulsar::load_experiment_config(config_path.string());
     require(roundtripped.ppo.self_play.enabled, "self-play config should round-trip");
-    require(roundtripped.ppo.precision.mode == "amp_bf16", "precision config should round-trip");
+    require(roundtripped.ppo.precision.mode == "amp_fp16", "precision config should round-trip");
     std::filesystem::remove(config_path);
 
     std::cout << "pulsar_core_tests passed\n";

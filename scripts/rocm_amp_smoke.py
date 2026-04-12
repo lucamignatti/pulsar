@@ -16,9 +16,22 @@ def skip(message: str) -> int:
     return 77
 
 
+def rocm_arch_name() -> str:
+    props = torch.cuda.get_device_properties(0)
+    for attr in ("gcnArchName", "gcn_arch_name"):
+        value = getattr(props, attr, "")
+        if value:
+            return str(value).split(":", 1)[0]
+    name = str(getattr(props, "name", ""))
+    if "gfx" in name:
+        suffix = name.split("gfx", 1)[1].split()[0].strip()
+        return f"gfx{suffix}"
+    return ""
+
+
 def main() -> int:
     if len(sys.argv) != 4:
-        raise SystemExit("usage: rocm_bf16_smoke.py <repo_root> <pulsar_train> <base_config>")
+        raise SystemExit("usage: rocm_amp_smoke.py <repo_root> <pulsar_train> <base_config>")
 
     repo_root = Path(sys.argv[1]).resolve()
     train_binary = Path(sys.argv[2]).resolve()
@@ -28,8 +41,9 @@ def main() -> int:
         return skip("ROCm smoke requires an available CUDA/ROCm device")
     if not getattr(torch.version, "hip", None):
         return skip("ROCm smoke requires a HIP-enabled PyTorch build")
-    if hasattr(torch.cuda, "is_bf16_supported") and not torch.cuda.is_bf16_supported():
-        return skip("current ROCm GPU does not report BF16 support")
+    arch = rocm_arch_name()
+    if not arch:
+        return skip("ROCm smoke could not determine the current GPU architecture")
 
     with tempfile.TemporaryDirectory(prefix="pulsar_rocm_smoke_") as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
@@ -56,7 +70,7 @@ def main() -> int:
         config["ppo"]["burn_in"] = 1
         config["ppo"]["collection_workers"] = 0
         config["ppo"]["device"] = "cuda"
-        config["ppo"]["precision"] = {"mode": "amp_bf16"}
+        config["ppo"]["precision"] = {"mode": "amp_fp16"}
         config["ppo"].setdefault("self_play", {})
         config["ppo"]["self_play"]["enabled"] = False
         config["reward"]["mode"] = "shaped"

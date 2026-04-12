@@ -93,30 +93,25 @@ void validate_precision_mode_or_throw(const PPOConfig::PrecisionConfig& precisio
   if (precision.mode == "fp32") {
     return;
   }
-  if (precision.mode != "amp_bf16") {
+  if (precision.mode != "amp_fp16") {
     throw std::runtime_error("Unsupported ppo.precision.mode: " + precision.mode);
   }
   if (!device.is_cuda()) {
-    throw std::runtime_error("ppo.precision.mode=amp_bf16 requires a CUDA/ROCm device.");
+    throw std::runtime_error("ppo.precision.mode=amp_fp16 requires a CUDA/ROCm device.");
   }
 
   if (!torch::cuda::is_available()) {
-    throw std::runtime_error("ppo.precision.mode=amp_bf16 requested a CUDA/ROCm device, but no GPU was available.");
+    throw std::runtime_error("ppo.precision.mode=amp_fp16 requested a CUDA/ROCm device, but no GPU was available.");
   }
 
   const auto& hooks = at::detail::getCUDAHooks();
 #ifdef USE_ROCM
   if (!hooks.hasROCM()) {
-    throw std::runtime_error("ppo.precision.mode=amp_bf16 currently only supports ROCm builds in Pulsar.");
-  }
-  if (!hooks.isGPUArch({"gfx90a", "gfx940", "gfx941", "gfx942", "gfx950"})) {
-    throw std::runtime_error(
-        "ppo.precision.mode=amp_bf16 requires a BF16-capable ROCm GPU. "
-        "Supported architectures are gfx90a, gfx940, gfx941, gfx942, and gfx950.");
+    throw std::runtime_error("ppo.precision.mode=amp_fp16 currently only supports ROCm builds in Pulsar.");
   }
 #else
   (void)hooks;
-  throw std::runtime_error("ppo.precision.mode=amp_bf16 currently only supports ROCm builds in Pulsar.");
+  throw std::runtime_error("ppo.precision.mode=amp_fp16 currently only supports ROCm builds in Pulsar.");
 #endif
 }
 
