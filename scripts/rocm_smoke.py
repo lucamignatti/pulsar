@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -45,8 +46,9 @@ def main() -> int:
     if not arch:
         return skip("ROCm smoke could not determine the current GPU architecture")
 
-    with tempfile.TemporaryDirectory(prefix="pulsar_rocm_smoke_") as tmp_dir_str:
-        tmp_dir = Path(tmp_dir_str)
+    tmp_dir = Path(tempfile.mkdtemp(prefix="pulsar_rocm_smoke_"))
+    keep_tmp_dir = True
+    try:
         checkpoint_dir = tmp_dir / "checkpoints"
         config_path = tmp_dir / "config.json"
 
@@ -79,11 +81,18 @@ def main() -> int:
         config["wandb"]["enabled"] = False
         config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
-        subprocess.run(
-            [str(train_binary), str(config_path), str(checkpoint_dir), "1"],
-            check=True,
-            cwd=repo_root,
-        )
+        command = [str(train_binary), str(config_path), str(checkpoint_dir), "1"]
+        print(f"ROCm smoke temp dir: {tmp_dir}")
+        print("ROCm smoke command:", " ".join(command))
+        try:
+            subprocess.run(
+                command,
+                check=True,
+                cwd=repo_root,
+            )
+        except subprocess.CalledProcessError:
+            print(f"ROCm smoke failed; preserving temp dir: {tmp_dir}", file=sys.stderr)
+            raise
 
         metrics_lines = [
             json.loads(line)
@@ -98,6 +107,12 @@ def main() -> int:
                 raise RuntimeError(f"non-finite metric in ROCm smoke: {field}={value}")
         if not (checkpoint_dir / "final" / "model.pt").exists():
             raise RuntimeError("ROCm smoke did not write final checkpoint")
+        keep_tmp_dir = False
+    finally:
+        if keep_tmp_dir:
+            print(f"ROCm smoke preserved temp dir: {tmp_dir}")
+        else:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     return 0
 
