@@ -14,6 +14,22 @@
 
 namespace {
 
+std::filesystem::path find_repo_collision_meshes() {
+  namespace fs = std::filesystem;
+  fs::path current = fs::current_path();
+  for (int depth = 0; depth < 6; ++depth) {
+    const fs::path candidate = current / "collision_meshes";
+    if (fs::exists(candidate)) {
+      return fs::canonical(candidate);
+    }
+    if (!current.has_parent_path()) {
+      break;
+    }
+    current = current.parent_path();
+  }
+  throw std::runtime_error("failed to locate collision_meshes from test working directory");
+}
+
 class FakeTransitionEngine final : public pulsar::TransitionEngine {
  public:
   explicit FakeTransitionEngine(pulsar::EnvConfig config) : config_(std::move(config)) {
@@ -177,7 +193,7 @@ int main() {
     config.ppo.sequence_length = 2;
     config.ppo.burn_in = 1;
     config.env.seed = 5;
-    config.env.collision_meshes_path = (fs::current_path().parent_path() / "collision_meshes").string();
+    config.env.collision_meshes_path = find_repo_collision_meshes().string();
 
     auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
     auto action_parser =
