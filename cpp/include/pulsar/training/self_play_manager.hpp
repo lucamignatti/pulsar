@@ -17,6 +17,8 @@
 
 namespace pulsar {
 
+void update_elo_ratings(double& winner, double& loser, double k_factor);
+
 struct SelfPlayMetrics {
   double eval_seconds = 0.0;
   std::map<std::string, double> ratings{};

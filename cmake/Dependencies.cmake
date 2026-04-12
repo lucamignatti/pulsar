@@ -221,23 +221,37 @@ function(pulsar_find_python_bindings)
   find_package(Python3 COMPONENTS Interpreter Development.Module QUIET)
 
   if(Python3_FOUND)
-    _pulsar_suppress_external_warnings_begin()
-    find_package(pybind11 QUIET)
-    _pulsar_suppress_external_warnings_end()
+    if((NOT DEFINED pybind11_DIR OR NOT EXISTS "${pybind11_DIR}") AND Python3_EXECUTABLE)
+      execute_process(
+        COMMAND
+          "${Python3_EXECUTABLE}"
+          -c
+          "import pybind11; print(pybind11.get_cmake_dir())"
+        OUTPUT_VARIABLE _pulsar_pybind11_dir
+        ERROR_QUIET
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _pulsar_pybind11_result
+      )
+      if(_pulsar_pybind11_result EQUAL 0 AND EXISTS "${_pulsar_pybind11_dir}")
+        set(pybind11_DIR "${_pulsar_pybind11_dir}" CACHE PATH "pybind11 CMake package directory." FORCE)
+      endif()
+    endif()
+
+    if(DEFINED pybind11_DIR AND EXISTS "${pybind11_DIR}")
+      _pulsar_suppress_external_warnings_begin()
+      find_package(pybind11 QUIET CONFIG PATHS "${pybind11_DIR}" NO_DEFAULT_PATH)
+      _pulsar_suppress_external_warnings_end()
+    else()
+      message(STATUS "pybind11 was not available from the selected Python interpreter; skipping pybind11 discovery.")
+      set(pybind11_FOUND FALSE)
+    endif()
   else()
     message(STATUS "Python3 Development.Module not found; skipping pybind11 discovery.")
     set(pybind11_FOUND FALSE)
   endif()
 
   if(NOT pybind11_FOUND AND PULSAR_FETCH_PYBIND11)
-    FetchContent_Declare(
-      pybind11
-      GIT_REPOSITORY https://github.com/pybind/pybind11.git
-      GIT_TAG v2.13.6
-    )
-    if(Python3_FOUND)
-      FetchContent_MakeAvailable(pybind11)
-    endif()
+    message(STATUS "PULSAR_FETCH_PYBIND11 is enabled, but automatic pybind11 fetching is disabled. Install pybind11 in the selected Python environment or set pybind11_DIR explicitly.")
   endif()
 
   set(Python3_FOUND ${Python3_FOUND} PARENT_SCOPE)

@@ -57,10 +57,6 @@ torch::Tensor gather_state_tensor(const torch::Tensor& tensor, const torch::Tens
   return tensor.index_select(0, agent_indices);
 }
 
-torch::Tensor masked_logits(const torch::Tensor& logits, const torch::Tensor& action_masks) {
-  return logits.masked_fill(action_masks.logical_not(), -1.0e9);
-}
-
 std::string stable_model_signature(const ExperimentConfig& config) {
   nlohmann::json j = {
       {"model", config.model},
@@ -217,16 +213,7 @@ torch::Tensor PPOTrainer::sample_actions(
     const torch::Tensor& action_masks,
     bool deterministic,
     torch::Tensor* log_probs) const {
-  const torch::Tensor masked = masked_logits(logits, action_masks);
-  const torch::Tensor probs = torch::softmax(masked, -1);
-  const torch::Tensor actions =
-      deterministic ? probs.argmax(-1) : probs.multinomial(1).squeeze(-1);
-  const torch::Tensor chosen_log_probs =
-      torch::log_softmax(masked, -1).gather(-1, actions.unsqueeze(-1)).squeeze(-1);
-  if (log_probs != nullptr) {
-    *log_probs = chosen_log_probs;
-  }
-  return actions;
+  return sample_masked_actions(logits, action_masks, deterministic, log_probs);
 }
 
 std::vector<std::int64_t> PPOTrainer::actions_to_indices(const torch::Tensor& actions) const {
@@ -237,71 +224,23 @@ std::vector<std::int64_t> PPOTrainer::actions_to_indices(const torch::Tensor& ac
 }
 
 torch::Tensor PPOTrainer::categorical_projection(const torch::Tensor& returns) const {
-  const float v_min = config_.ppo.value_v_min;
-  const float v_max = config_.ppo.value_v_max;
-  const float delta_z = (v_max - v_min) / static_cast<float>(config_.ppo.value_num_atoms - 1);
-  const torch::Tensor clamped = returns.clamp(v_min, v_max);
-  const torch::Tensor b = (clamped - v_min) / delta_z;
-  const torch::Tensor lower = b.floor().to(torch::kLong).clamp(0, config_.ppo.value_num_atoms - 1);
-  const torch::Tensor upper = b.ceil().to(torch::kLong).clamp(0, config_.ppo.value_num_atoms - 1);
-  const torch::Tensor upper_prob = b - lower.to(torch::kFloat32);
-  const torch::Tensor lower_prob = 1.0 - upper_prob;
-  torch::Tensor target = torch::zeros(
-      {returns.size(0), config_.ppo.value_num_atoms},
-      torch::TensorOptions().dtype(torch::kFloat32).device(returns.device()));
-  target.scatter_add_(1, lower.unsqueeze(-1), lower_prob.unsqueeze(-1));
-  target.scatter_add_(1, upper.unsqueeze(-1), upper_prob.unsqueeze(-1));
-  return target;
+  return categorical_value_projection(
+      returns,
+      config_.ppo.value_v_min,
+      config_.ppo.value_v_max,
+      config_.ppo.value_num_atoms);
 }
 
 torch::Tensor PPOTrainer::confidence_weights(const torch::Tensor& value_logits) const {
-  if (!config_.ppo.use_confidence_weighting) {
-    return torch::ones({value_logits.size(0)}, torch::TensorOptions().dtype(torch::kFloat32).device(value_logits.device()));
-  }
-  torch::Tensor weights;
-  if (config_.ppo.confidence_weight_type == "variance") {
-    weights = 1.0 / (model_->value_variance(value_logits) + config_.ppo.confidence_weight_delta);
-  } else {
-    weights = 1.0 / (model_->value_entropy(value_logits) + config_.ppo.confidence_weight_delta);
-  }
-  if (config_.ppo.normalize_confidence_weights) {
-    weights = weights / weights.mean().clamp_min(1.0e-6);
-  }
-  return weights.detach();
+  return compute_confidence_weights(model_, config_.ppo, value_logits);
 }
 
 torch::Tensor PPOTrainer::adaptive_epsilon(const torch::Tensor& value_logits) const {
-  if (!config_.ppo.use_adaptive_epsilon) {
-    return torch::full(
-        {value_logits.size(0)},
-        config_.ppo.clip_range,
-        torch::TensorOptions().dtype(torch::kFloat32).device(value_logits.device()));
-  }
-  torch::Tensor epsilon = config_.ppo.clip_range /
-      (1.0 + config_.ppo.adaptive_epsilon_beta * model_->value_variance(value_logits));
-  return torch::clamp(epsilon, config_.ppo.epsilon_min, config_.ppo.epsilon_max).detach();
+  return compute_adaptive_epsilon(model_, config_.ppo, value_logits);
 }
 
 void PPOTrainer::validate_precision_mode() const {
-  if (config_.ppo.precision.mode == "fp32") {
-    return;
-  }
-  if (config_.ppo.precision.mode != "amp_bf16") {
-    throw std::runtime_error("Unsupported ppo.precision.mode: " + config_.ppo.precision.mode);
-  }
-  if (!device_.is_cuda()) {
-    throw std::runtime_error("ppo.precision.mode=amp_bf16 requires a CUDA/ROCm device.");
-  }
-
-  try {
-    const auto options = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
-    torch::Tensor a = torch::randn({4, 4}, options);
-    torch::Tensor b = torch::randn({4, 4}, options);
-    ScopedAutocast autocast(true, device_.type(), at::kBFloat16);
-    (void)torch::matmul(a, b);
-  } catch (const std::exception& exc) {
-    throw std::runtime_error(std::string("Failed to enable BF16 autocast on the selected device: ") + exc.what());
-  }
+  validate_precision_mode_or_throw(config_.ppo.precision, device_);
 }
 
 void PPOTrainer::maybe_initialize_from_checkpoint() {
@@ -431,7 +370,7 @@ TrainerMetrics PPOTrainer::update_policy() {
         const torch::Tensor active_advantages = flat_advantages.index({flat_active});
         const torch::Tensor active_returns = flat_returns.index({flat_active});
 
-        const torch::Tensor active_masked_logits = masked_logits(active_policy_logits, active_action_masks);
+        const torch::Tensor active_masked_logits = apply_action_mask_to_logits(active_policy_logits, active_action_masks);
         const torch::Tensor current_log_probs =
             torch::log_softmax(active_masked_logits, -1).gather(-1, active_actions.unsqueeze(-1)).squeeze(-1);
         const torch::Tensor ratio = torch::exp(current_log_probs - active_old_log_probs);
@@ -442,11 +381,7 @@ TrainerMetrics PPOTrainer::update_policy() {
         const torch::Tensor clipped = clipped_ratio * active_advantages;
         const torch::Tensor policy_loss = -(torch::min(unclipped, clipped) * weights).mean();
 
-        const torch::Tensor probs = torch::softmax(active_masked_logits, -1);
-        const torch::Tensor valid_counts =
-            active_action_masks.to(torch::kFloat32).sum(-1).clamp_min(1.0F);
-        const torch::Tensor action_entropy =
-            (-(probs * torch::log(probs + 1.0e-8)).sum(-1) / valid_counts.log().clamp_min(1.0e-6)).mean();
+        const torch::Tensor action_entropy = masked_action_entropy(active_policy_logits, active_action_masks).mean();
         const torch::Tensor target_dist = categorical_projection(active_returns);
         const torch::Tensor critic_loss =
             -(target_dist * torch::log_softmax(active_value_logits, -1)).sum(-1).mean();

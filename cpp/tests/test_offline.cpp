@@ -225,6 +225,51 @@ int main() {
       throw std::runtime_error("ppo final checkpoint missing");
     }
 
+    auto make_trainer = [&](const pulsar::ExperimentConfig& trainer_config) {
+      auto local_obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(trainer_config.env);
+      auto local_action_parser =
+          std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(trainer_config.action_table));
+      auto local_reward_fn = std::make_shared<pulsar::CombinedRewardFunction>(trainer_config.reward);
+      auto local_done_condition = std::make_shared<pulsar::SimpleDoneCondition>(trainer_config.env);
+      auto local_collector = std::make_unique<pulsar::BatchedRocketSimCollector>(
+          trainer_config,
+          local_obs_builder,
+          local_action_parser,
+          local_reward_fn,
+          local_done_condition,
+          false);
+      return std::make_unique<pulsar::PPOTrainer>(
+          trainer_config,
+          std::move(local_collector),
+          local_action_parser,
+          nullptr);
+    };
+
+    pulsar::ExperimentConfig bad_init_config = config;
+    bad_init_config.model.hidden_sizes = {64, 32};
+    bool init_mismatch_threw = false;
+    try {
+      (void)make_trainer(bad_init_config);
+    } catch (const std::runtime_error& exc) {
+      init_mismatch_threw = std::string(exc.what()).find("Init checkpoint") != std::string::npos;
+    }
+    if (!init_mismatch_threw) {
+      throw std::runtime_error("init checkpoint compatibility mismatch should throw clearly");
+    }
+
+    pulsar::ExperimentConfig bad_ngp_config = config;
+    bad_ngp_config.model.controller_dim = 48;
+    bad_ngp_config.ppo.init_checkpoint.clear();
+    bool ngp_mismatch_threw = false;
+    try {
+      (void)make_trainer(bad_ngp_config);
+    } catch (const std::runtime_error& exc) {
+      ngp_mismatch_threw = std::string(exc.what()).find("NGP checkpoint") != std::string::npos;
+    }
+    if (!ngp_mismatch_threw) {
+      throw std::runtime_error("NGP checkpoint compatibility mismatch should throw clearly");
+    }
+
     fs::remove_all(root);
     std::cout << "pulsar_offline_tests passed\n";
     return EXIT_SUCCESS;

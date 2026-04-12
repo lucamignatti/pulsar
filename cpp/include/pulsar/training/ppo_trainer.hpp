@@ -17,6 +17,7 @@
 #include "pulsar/rl/action_table.hpp"
 #include "pulsar/rl/interfaces.hpp"
 #include "pulsar/training/batched_rocketsim_collector.hpp"
+#include "pulsar/training/ppo_math.hpp"
 #include "pulsar/training/rollout_storage.hpp"
 #include "pulsar/training/self_play_manager.hpp"
 

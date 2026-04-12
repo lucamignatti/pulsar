@@ -100,7 +100,7 @@ class ScopedAutocast {
   at::ScalarType previous_dtype_ = at::kFloat;
 };
 
-void update_elo(double& winner, double& loser, double k_factor) {
+void update_elo_impl(double& winner, double& loser, double k_factor) {
   const double expected = 1.0 / (1.0 + std::pow(10.0, (loser - winner) / 400.0));
   winner += k_factor * (1.0 - expected);
   loser += k_factor * (expected - 1.0);
@@ -115,6 +115,10 @@ std::shared_ptr<MutatorSequence> make_eval_reset_mutator(const EnvConfig& config
 }
 
 }  // namespace
+
+void update_elo_ratings(double& winner, double& loser, double k_factor) {
+  update_elo_impl(winner, loser, k_factor);
+}
 
 SelfPlayManager::SelfPlayManager(
     ExperimentConfig config,
@@ -462,9 +466,9 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
               snapshot_rating = config_.ppo.self_play.elo_initial;
             }
             if (current_won) {
-              update_elo(current_rating, snapshot_rating, config_.ppo.self_play.elo_k);
+              update_elo_ratings(current_rating, snapshot_rating, config_.ppo.self_play.elo_k);
             } else {
-              update_elo(snapshot_rating, current_rating, config_.ppo.self_play.elo_k);
+              update_elo_ratings(snapshot_rating, current_rating, config_.ppo.self_play.elo_k);
             }
             winner_recorded = true;
           }

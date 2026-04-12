@@ -22,12 +22,17 @@ option(PULSAR_ENABLE_PYTHON "Enable Python bindings and visualization helpers" O
 option(PULSAR_ENABLE_TESTS "Build unit and smoke tests" ON)
 option(PULSAR_ENABLE_BENCHMARKS "Build benchmark targets" ON)
 option(PULSAR_ENABLE_ROCKETSIM "Enable RocketSim-backed simulation" ON)
+option(PULSAR_ENABLE_ROCM_SMOKES "Enable ROCm-only smoke tests." OFF)
 option(PULSAR_FETCH_JSON "Fetch nlohmann_json when not provided by the system" ON)
-option(PULSAR_FETCH_PYBIND11 "Fetch pybind11 when not provided by the system" ON)
+option(PULSAR_FETCH_PYBIND11 "Fetch pybind11 when not provided by the system" OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CTest)
 include(cmake/Dependencies.cmake)
+
+if(NOT Python3_EXECUTABLE)
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+endif()
 
 if(PULSAR_ENABLE_ROCKETSIM AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/RocketSim/CMakeLists.txt")
   set(_PULSAR_SAVED_CMAKE_WARN_DEPRECATED "${CMAKE_WARN_DEPRECATED}")
@@ -83,6 +88,7 @@ if(PULSAR_ENABLE_TORCH)
       cpp/src/training/offline_pretrainer.cpp
       cpp/src/training/rollout_storage.cpp
       cpp/src/training/batched_rocketsim_collector.cpp
+      cpp/src/training/ppo_math.cpp
       cpp/src/training/ppo_trainer.cpp
       cpp/src/training/self_play_manager.cpp
     )
@@ -128,6 +134,14 @@ if(PULSAR_ENABLE_TESTS)
   target_link_libraries(pulsar_core_tests PRIVATE pulsar_core)
   add_test(NAME pulsar_core_tests COMMAND pulsar_core_tests)
 
+  add_executable(
+    pulsar_env_tests
+    cpp/tests/test_env.cpp
+  )
+  target_include_directories(pulsar_env_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
+  target_link_libraries(pulsar_env_tests PRIVATE pulsar_core)
+  add_test(NAME pulsar_env_tests COMMAND pulsar_env_tests)
+
   if(TARGET pulsar_torch)
     add_executable(
       pulsar_torch_tests
@@ -145,7 +159,41 @@ if(PULSAR_ENABLE_TESTS)
     target_link_libraries(pulsar_offline_tests PRIVATE pulsar_torch)
     add_test(NAME pulsar_offline_tests COMMAND pulsar_offline_tests)
 
-    if(TARGET pulsar_train AND TARGET pulsar_native AND Python3_FOUND)
+    add_executable(
+      pulsar_dataset_tests
+      cpp/tests/test_dataset.cpp
+    )
+    target_include_directories(pulsar_dataset_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
+    target_link_libraries(pulsar_dataset_tests PRIVATE pulsar_torch)
+    add_test(NAME pulsar_dataset_tests COMMAND pulsar_dataset_tests)
+
+    add_executable(
+      pulsar_ppo_math_tests
+      cpp/tests/test_ppo_math.cpp
+    )
+    target_include_directories(pulsar_ppo_math_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
+    target_link_libraries(pulsar_ppo_math_tests PRIVATE pulsar_torch)
+    add_test(NAME pulsar_ppo_math_tests COMMAND pulsar_ppo_math_tests)
+    set_tests_properties(pulsar_ppo_math_tests PROPERTIES LABELS "reference")
+
+    add_executable(
+      pulsar_collector_tests
+      cpp/tests/test_collector.cpp
+    )
+    target_include_directories(pulsar_collector_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
+    target_link_libraries(pulsar_collector_tests PRIVATE pulsar_torch)
+    add_test(NAME pulsar_collector_tests COMMAND pulsar_collector_tests)
+    set_tests_properties(pulsar_collector_tests PROPERTIES LABELS "reference")
+
+    add_executable(
+      pulsar_self_play_tests
+      cpp/tests/test_self_play.cpp
+    )
+    target_include_directories(pulsar_self_play_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
+    target_link_libraries(pulsar_self_play_tests PRIVATE pulsar_torch)
+    add_test(NAME pulsar_self_play_tests COMMAND pulsar_self_play_tests)
+
+    if(TARGET pulsar_train AND TARGET pulsar_native AND Python3_EXECUTABLE)
       add_test(
         NAME pulsar_e2e_smoke
         COMMAND
@@ -155,6 +203,31 @@ if(PULSAR_ENABLE_TESTS)
           $<TARGET_FILE:pulsar_train>
           ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_ppo.json
       )
+    endif()
+
+    if(TARGET pulsar_train AND Python3_EXECUTABLE)
+      add_test(
+        NAME pulsar_train_binary_smoke
+        COMMAND
+          ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/scripts/train_binary_smoke.py
+          ${CMAKE_CURRENT_SOURCE_DIR}
+          $<TARGET_FILE:pulsar_train>
+          ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_ppo.json
+      )
+      set_tests_properties(pulsar_train_binary_smoke PROPERTIES LABELS "smoke")
+    endif()
+
+    if(TARGET pulsar_offline_train AND Python3_EXECUTABLE)
+      add_test(
+        NAME pulsar_offline_binary_smoke
+        COMMAND
+          ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/scripts/offline_binary_smoke.py
+          ${CMAKE_CURRENT_SOURCE_DIR}
+          $<TARGET_FILE:pulsar_offline_train>
+      )
+      set_tests_properties(pulsar_offline_binary_smoke PROPERTIES LABELS "smoke")
     endif()
   endif()
 endif()
@@ -166,4 +239,39 @@ if(PULSAR_ENABLE_BENCHMARKS AND TARGET pulsar_torch)
   )
   target_include_directories(pulsar_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
   target_link_libraries(pulsar_bench PRIVATE pulsar_torch)
+
+  if(PULSAR_ENABLE_TESTS AND Python3_EXECUTABLE)
+    add_test(
+      NAME pulsar_bench_smoke
+      COMMAND
+        ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/bench_smoke.py
+        $<TARGET_FILE:pulsar_bench>
+    )
+    set_tests_properties(pulsar_bench_smoke PROPERTIES LABELS "benchmark")
+  endif()
+endif()
+
+if(PULSAR_ENABLE_TESTS AND Python3_EXECUTABLE)
+  add_test(
+    NAME pulsar_preprocess_smoke
+    COMMAND
+      ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/preprocess_smoke.py
+      ${CMAKE_CURRENT_SOURCE_DIR}
+  )
+  set_tests_properties(pulsar_preprocess_smoke PROPERTIES LABELS "smoke;dataset")
+endif()
+
+if(PULSAR_ENABLE_TESTS AND PULSAR_ENABLE_ROCM_SMOKES AND TARGET pulsar_train AND Python3_EXECUTABLE)
+  add_test(
+    NAME pulsar_rocm_bf16_smoke
+    COMMAND
+      ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/rocm_bf16_smoke.py
+      ${CMAKE_CURRENT_SOURCE_DIR}
+      $<TARGET_FILE:pulsar_train>
+      ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_ppo.json
+  )
+  set_tests_properties(pulsar_rocm_bf16_smoke PROPERTIES LABELS "rocm;smoke")
 endif()

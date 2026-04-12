@@ -13,6 +13,32 @@
 namespace pulsar {
 namespace {
 
+std::filesystem::path resolve_collision_meshes_path(const std::string& configured_path) {
+  namespace fs = std::filesystem;
+  fs::path path(configured_path);
+  if (path.is_absolute() && fs::exists(path)) {
+    return path;
+  }
+
+  if (fs::exists(path)) {
+    return fs::absolute(path);
+  }
+
+  fs::path current = fs::current_path();
+  for (int depth = 0; depth < 8; ++depth) {
+    const fs::path candidate = current / path;
+    if (fs::exists(candidate)) {
+      return fs::absolute(candidate);
+    }
+    if (!current.has_parent_path()) {
+      break;
+    }
+    current = current.parent_path();
+  }
+
+  return path;
+}
+
 float team_sign(Team team) {
   return team == Team::Blue ? 1.0F : -1.0F;
 }
@@ -59,7 +85,7 @@ void RocketSimTransitionEngine::reset(std::uint64_t seed) {
 #ifdef PULSAR_HAS_ROCKETSIM
   static std::once_flag rocketsim_init_once;
   std::call_once(rocketsim_init_once, [this]() {
-    RocketSim::Init(std::filesystem::path(config_.collision_meshes_path), true);
+    RocketSim::Init(resolve_collision_meshes_path(config_.collision_meshes_path), true);
   });
 
   delete arena_;

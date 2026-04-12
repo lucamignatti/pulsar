@@ -45,6 +45,14 @@ class BatchedRocketSimCollector {
       RewardFunctionPtr reward_fn,
       DoneConditionPtr done_condition,
       bool pin_host_memory);
+  BatchedRocketSimCollector(
+      ExperimentConfig config,
+      std::vector<TransitionEnginePtr> engines,
+      ObsBuilderPtr obs_builder,
+      ActionParserPtr action_parser,
+      RewardFunctionPtr reward_fn,
+      DoneConditionPtr done_condition,
+      bool pin_host_memory);
 
   void set_self_play_assignment_fn(AssignmentFn assignment_fn);
 
@@ -67,7 +75,7 @@ class BatchedRocketSimCollector {
 
  private:
   struct EnvRuntime {
-    std::shared_ptr<RocketSimTransitionEngine> engine;
+    TransitionEnginePtr engine;
     SelfPlayAssignment assignment;
     std::uint64_t reset_seed = 0;
   };

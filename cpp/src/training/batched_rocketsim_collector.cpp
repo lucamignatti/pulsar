@@ -18,10 +18,39 @@ std::shared_ptr<MutatorSequence> make_default_reset_mutator(const EnvConfig& con
       });
 }
 
+std::vector<TransitionEnginePtr> make_default_engines(const ExperimentConfig& config) {
+  std::vector<TransitionEnginePtr> engines;
+  const auto reset_mutator = make_default_reset_mutator(config.env);
+  engines.reserve(static_cast<std::size_t>(config.ppo.num_envs));
+  for (int env_idx = 0; env_idx < config.ppo.num_envs; ++env_idx) {
+    EnvConfig env_config = config.env;
+    env_config.seed += static_cast<std::uint64_t>(env_idx);
+    engines.push_back(std::make_shared<RocketSimTransitionEngine>(env_config, reset_mutator));
+  }
+  return engines;
+}
+
 }  // namespace
 
 BatchedRocketSimCollector::BatchedRocketSimCollector(
     ExperimentConfig config,
+    ObsBuilderPtr obs_builder,
+    ActionParserPtr action_parser,
+    RewardFunctionPtr reward_fn,
+    DoneConditionPtr done_condition,
+    bool pin_host_memory)
+    : BatchedRocketSimCollector(
+          config,
+          make_default_engines(config),
+          std::move(obs_builder),
+          std::move(action_parser),
+          std::move(reward_fn),
+          std::move(done_condition),
+          pin_host_memory) {}
+
+BatchedRocketSimCollector::BatchedRocketSimCollector(
+    ExperimentConfig config,
+    std::vector<TransitionEnginePtr> engines,
     ObsBuilderPtr obs_builder,
     ActionParserPtr action_parser,
     RewardFunctionPtr reward_fn,
@@ -37,16 +66,19 @@ BatchedRocketSimCollector::BatchedRocketSimCollector(
     throw std::invalid_argument("BatchedRocketSimCollector requires non-null components.");
   }
 
-  const auto reset_mutator = make_default_reset_mutator(config_.env);
-  envs_.reserve(static_cast<std::size_t>(config_.ppo.num_envs));
-  for (int env_idx = 0; env_idx < config_.ppo.num_envs; ++env_idx) {
-    EnvConfig env_config = config_.env;
-    env_config.seed += static_cast<std::uint64_t>(env_idx);
-    auto engine = std::make_shared<RocketSimTransitionEngine>(env_config, reset_mutator);
+  if (engines.empty()) {
+    throw std::invalid_argument("BatchedRocketSimCollector requires at least one engine.");
+  }
+
+  envs_.reserve(engines.size());
+  for (std::size_t env_idx = 0; env_idx < engines.size(); ++env_idx) {
+    if (!engines[env_idx]) {
+      throw std::invalid_argument("BatchedRocketSimCollector requires non-null engines.");
+    }
     envs_.push_back(EnvRuntime{
-        .engine = std::move(engine),
+        .engine = std::move(engines[env_idx]),
         .assignment = {},
-        .reset_seed = env_config.seed,
+        .reset_seed = config_.env.seed + static_cast<std::uint64_t>(env_idx),
     });
   }
 

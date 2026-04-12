@@ -9,6 +9,7 @@
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
+#include <torch/serialize.h>
 
 namespace pulsar {
 namespace {
@@ -16,12 +17,28 @@ namespace {
 using nlohmann::json;
 
 torch::Tensor load_tensor_checked(const std::string& path) {
-  torch::Tensor tensor;
-  torch::load(tensor, path);
-  if (!tensor.defined()) {
-    throw std::runtime_error("Failed to load tensor: " + path);
+  try {
+    torch::Tensor tensor;
+    torch::load(tensor, path);
+    if (!tensor.defined()) {
+      throw std::runtime_error("Loaded undefined tensor.");
+    }
+    return tensor.contiguous();
+  } catch (const c10::Error&) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+      throw std::runtime_error("Failed to open tensor file: " + path);
+    }
+    std::vector<char> bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    if (bytes.empty()) {
+      throw std::runtime_error("Tensor file was empty: " + path);
+    }
+    const torch::IValue value = torch::pickle_load(bytes);
+    if (!value.isTensor()) {
+      throw std::runtime_error("Tensor file did not contain a tensor: " + path);
+    }
+    return value.toTensor().contiguous();
   }
-  return tensor.contiguous();
 }
 
 }  // namespace
