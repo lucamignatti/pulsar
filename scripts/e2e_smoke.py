@@ -39,7 +39,6 @@ def main() -> int:
         config["ppo"]["epochs"] = 1
         config["ppo"]["checkpoint_interval"] = 1
         config["ppo"]["device"] = "cpu"
-        config["ppo"]["precision"] = {"mode": "fp32"}
         config["reward"]["mode"] = "shaped"
         config["reward"]["ngp_checkpoint"] = ""
         config["reward"]["shaped_scale"] = 1.0

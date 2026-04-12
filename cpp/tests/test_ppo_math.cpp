@@ -70,7 +70,7 @@ void test_entropy_projection_and_rollout_storage() {
   pulsar::test::require(storage.returns[0][0].item<float>() > 0.0F, "returns should be computed");
 }
 
-void test_confidence_weights_adaptive_epsilon_and_precision_validation() {
+void test_confidence_weights_and_adaptive_epsilon() {
   pulsar::ModelConfig model_config;
   pulsar::PPOConfig ppo_config;
   ppo_config.value_num_atoms = 11;
@@ -82,21 +82,6 @@ void test_confidence_weights_adaptive_epsilon_and_precision_validation() {
   const torch::Tensor eps = pulsar::compute_adaptive_epsilon(model, ppo_config, value_logits);
   pulsar::test::require(eps.sizes() == torch::IntArrayRef({4}), "adaptive epsilon shape mismatch");
 
-  bool invalid_precision_threw = false;
-  try {
-    pulsar::validate_precision_mode_or_throw(pulsar::PPOConfig::PrecisionConfig{.mode = "bogus"}, torch::kCPU);
-  } catch (const std::runtime_error&) {
-    invalid_precision_threw = true;
-  }
-  pulsar::test::require(invalid_precision_threw, "invalid precision mode should throw");
-
-  bool fp16_cpu_threw = false;
-  try {
-    pulsar::validate_precision_mode_or_throw(pulsar::PPOConfig::PrecisionConfig{.mode = "amp_fp16"}, torch::kCPU);
-  } catch (const std::runtime_error&) {
-    fp16_cpu_threw = true;
-  }
-  pulsar::test::require(fp16_cpu_threw, "amp_fp16 should reject CPU");
 }
 
 }  // namespace
@@ -105,7 +90,7 @@ int main() {
   try {
     test_masked_sampling_and_log_probs();
     test_entropy_projection_and_rollout_storage();
-    test_confidence_weights_adaptive_epsilon_and_precision_validation();
+    test_confidence_weights_and_adaptive_epsilon();
     std::cout << "pulsar_ppo_math_tests passed\n";
     return EXIT_SUCCESS;
   } catch (const std::exception& exc) {

@@ -83,7 +83,6 @@ void test_opponent_inference_and_elo_math() {
   double inference_seconds = 0.0;
   manager.infer_opponent_actions(
       model,
-      config.ppo.precision,
       raw_obs,
       action_masks,
       episode_starts,

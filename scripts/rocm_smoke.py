@@ -31,7 +31,7 @@ def rocm_arch_name() -> str:
 
 def main() -> int:
     if len(sys.argv) != 4:
-        raise SystemExit("usage: rocm_amp_smoke.py <repo_root> <pulsar_train> <base_config>")
+        raise SystemExit("usage: rocm_smoke.py <repo_root> <pulsar_train> <base_config>")
 
     repo_root = Path(sys.argv[1]).resolve()
     train_binary = Path(sys.argv[2]).resolve()
@@ -70,7 +70,6 @@ def main() -> int:
         config["ppo"]["burn_in"] = 1
         config["ppo"]["collection_workers"] = 0
         config["ppo"]["device"] = "cuda"
-        config["ppo"]["precision"] = {"mode": "amp_fp16"}
         config["ppo"].setdefault("self_play", {})
         config["ppo"]["self_play"]["enabled"] = False
         config["reward"]["mode"] = "shaped"

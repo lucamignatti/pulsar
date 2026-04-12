@@ -40,7 +40,6 @@ class SelfPlayManager {
 
   void infer_opponent_actions(
       SharedActorCritic& current_model,
-      const PPOConfig::PrecisionConfig& precision,
       const torch::Tensor& raw_obs,
       const torch::Tensor& action_masks,
       const torch::Tensor& episode_starts,

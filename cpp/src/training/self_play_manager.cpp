@@ -2,8 +2,6 @@
 
 #ifdef PULSAR_HAS_TORCH
 
-#include <ATen/autocast_mode.h>
-
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -65,40 +63,6 @@ void scatter_state(ContinuumState& dst, const torch::Tensor& indices, const Cont
   scatter_state_tensor(dst.ltm_coeffs, indices, src.ltm_coeffs);
   scatter_state_tensor(dst.timestep, indices, src.timestep);
 }
-
-class ScopedAutocast {
- public:
-  ScopedAutocast(bool enabled, at::DeviceType device_type, at::ScalarType dtype)
-      : enabled_(enabled), device_type_(device_type) {
-    if (!enabled_) {
-      return;
-    }
-    previous_enabled_ = at::autocast::is_autocast_enabled(device_type_);
-    previous_dtype_ = at::autocast::get_autocast_dtype(device_type_);
-    previous_cache_enabled_ = at::autocast::is_autocast_cache_enabled();
-    at::autocast::set_autocast_enabled(device_type_, true);
-    at::autocast::set_autocast_dtype(device_type_, dtype);
-    at::autocast::set_autocast_cache_enabled(true);
-    at::autocast::increment_nesting();
-  }
-
-  ~ScopedAutocast() {
-    if (!enabled_) {
-      return;
-    }
-    at::autocast::decrement_nesting();
-    at::autocast::set_autocast_enabled(device_type_, previous_enabled_);
-    at::autocast::set_autocast_dtype(device_type_, previous_dtype_);
-    at::autocast::set_autocast_cache_enabled(previous_cache_enabled_);
-  }
-
- private:
-  bool enabled_ = false;
-  at::DeviceType device_type_ = at::kCPU;
-  bool previous_enabled_ = false;
-  bool previous_cache_enabled_ = false;
-  at::ScalarType previous_dtype_ = at::kFloat;
-};
 
 void update_elo_impl(double& winner, double& loser, double k_factor) {
   const double expected = 1.0 / (1.0 + std::pow(10.0, (loser - winner) / 400.0));
@@ -168,7 +132,6 @@ bool SelfPlayManager::has_snapshots() const {
 
 void SelfPlayManager::infer_opponent_actions(
     SharedActorCritic&,
-    const PPOConfig::PrecisionConfig& precision,
     const torch::Tensor& raw_obs,
     const torch::Tensor& action_masks,
     const torch::Tensor& episode_starts,
@@ -195,7 +158,6 @@ void SelfPlayManager::infer_opponent_actions(
     }
   }
 
-  const bool use_amp = precision.mode == "amp_fp16" && device_.is_cuda();
   const bool deterministic = config_.ppo.self_play.training_opponent_policy != "stochastic";
   for (std::size_t snapshot_index = 0; snapshot_index < grouped.size(); ++snapshot_index) {
     if (grouped[snapshot_index].empty()) {
@@ -210,7 +172,6 @@ void SelfPlayManager::infer_opponent_actions(
     const torch::Tensor starts = episode_starts.index_select(0, indices);
     const torch::Tensor normalized_obs = snapshot.normalizer.normalize(obs);
     ContinuumState state = gather_state(opponent_state, indices);
-    ScopedAutocast autocast(use_amp, device_.type(), at::kHalf);
     const PolicyOutput output = snapshot.model->forward_step(normalized_obs, std::move(state), starts);
     const torch::Tensor sampled_actions =
         deterministic ? masked_argmax(output.policy_logits, masks) : masked_sample(output.policy_logits, masks);
@@ -364,7 +325,6 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
   const auto reset_mutator = make_eval_reset_mutator(config_.env);
   const std::string mode = mode_name();
   const auto* discrete = dynamic_cast<const DiscreteActionParser*>(action_parser_.get());
-  const bool use_amp = config_.ppo.precision.mode == "amp_fp16" && device_.is_cuda();
   const bool deterministic = config_.ppo.self_play.eval_policy == "deterministic";
   if (discrete == nullptr) {
     throw std::invalid_argument("SelfPlayManager evaluation requires DiscreteActionParser.");
@@ -415,7 +375,6 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
         obs.copy_(torch::from_blob(host_obs.data(), {static_cast<long>(total_agents), static_cast<long>(obs_builder_->obs_dim())}, torch::kFloat32).clone().to(device_));
         masks.copy_(torch::from_blob(host_masks.data(), {static_cast<long>(total_agents), static_cast<long>(discrete->action_table().size())}, torch::kUInt8).clone().to(device_));
 
-        ScopedAutocast autocast(use_amp, device_.type(), at::kHalf);
         const PolicyOutput current_out =
             current_model->forward_step(current_normalizer.normalize(obs), std::move(current_state), episode_starts);
         const PolicyOutput snapshot_out =

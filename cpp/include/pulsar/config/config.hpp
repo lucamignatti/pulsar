@@ -76,10 +76,6 @@ struct PPOConfig {
     float elo_k = 32.0F;
   };
 
-  struct PrecisionConfig {
-    std::string mode = "fp32";
-  };
-
   int num_envs = 64;
   int collection_workers = 0;
   std::string init_checkpoint{};
@@ -112,7 +108,6 @@ struct PPOConfig {
   bool normalize_confidence_weights = false;
   std::string advantage_calculation = "quantile_sampling";
   SelfPlayConfig self_play{};
-  PrecisionConfig precision{};
 };
 
 struct OfflineDatasetConfig {
@@ -201,8 +196,6 @@ void to_json(nlohmann::json& j, const ModelConfig& value);
 void from_json(const nlohmann::json& j, ModelConfig& value);
 void to_json(nlohmann::json& j, const PPOConfig::SelfPlayConfig& value);
 void from_json(const nlohmann::json& j, PPOConfig::SelfPlayConfig& value);
-void to_json(nlohmann::json& j, const PPOConfig::PrecisionConfig& value);
-void from_json(const nlohmann::json& j, PPOConfig::PrecisionConfig& value);
 void to_json(nlohmann::json& j, const PPOConfig& value);
 void from_json(const nlohmann::json& j, PPOConfig& value);
 void to_json(nlohmann::json& j, const OfflineDatasetConfig& value);

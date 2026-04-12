@@ -70,7 +70,6 @@ class PPOTrainer {
   torch::Tensor categorical_projection(const torch::Tensor& returns) const;
   torch::Tensor confidence_weights(const torch::Tensor& value_logits) const;
   torch::Tensor adaptive_epsilon(const torch::Tensor& value_logits) const;
-  void validate_precision_mode() const;
   void maybe_initialize_from_checkpoint();
   void maybe_initialize_ngp_reward();
   torch::Tensor ngp_scalar(const torch::Tensor& logits) const;

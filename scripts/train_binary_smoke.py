@@ -41,7 +41,6 @@ def main() -> int:
         config["ppo"]["burn_in"] = 1
         config["ppo"]["collection_workers"] = 0
         config["ppo"]["device"] = "cpu"
-        config["ppo"]["precision"] = {"mode": "fp32"}
         config["ppo"].setdefault("self_play", {})
         config["ppo"]["self_play"]["enabled"] = False
         config["reward"]["mode"] = "shaped"

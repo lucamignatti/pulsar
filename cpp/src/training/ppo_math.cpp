@@ -2,12 +2,6 @@
 
 #ifdef PULSAR_HAS_TORCH
 
-#include <ATen/Context.h>
-
-#include <stdexcept>
-
-#include <torch/cuda.h>
-
 namespace pulsar {
 
 torch::Tensor apply_action_mask_to_logits(const torch::Tensor& logits, const torch::Tensor& action_masks) {
@@ -87,32 +81,6 @@ torch::Tensor compute_adaptive_epsilon(
   const torch::Tensor epsilon =
       config.clip_range / (1.0 + config.adaptive_epsilon_beta * model->value_variance(value_logits));
   return torch::clamp(epsilon, config.epsilon_min, config.epsilon_max).detach();
-}
-
-void validate_precision_mode_or_throw(const PPOConfig::PrecisionConfig& precision, const torch::Device& device) {
-  if (precision.mode == "fp32") {
-    return;
-  }
-  if (precision.mode != "amp_fp16") {
-    throw std::runtime_error("Unsupported ppo.precision.mode: " + precision.mode);
-  }
-  if (!device.is_cuda()) {
-    throw std::runtime_error("ppo.precision.mode=amp_fp16 requires a CUDA/ROCm device.");
-  }
-
-  if (!torch::cuda::is_available()) {
-    throw std::runtime_error("ppo.precision.mode=amp_fp16 requested a CUDA/ROCm device, but no GPU was available.");
-  }
-
-  const auto& hooks = at::detail::getCUDAHooks();
-#ifdef USE_ROCM
-  if (!hooks.hasROCM()) {
-    throw std::runtime_error("ppo.precision.mode=amp_fp16 currently only supports ROCm builds in Pulsar.");
-  }
-#else
-  (void)hooks;
-  throw std::runtime_error("ppo.precision.mode=amp_fp16 currently only supports ROCm builds in Pulsar.");
-#endif
 }
 
 }  // namespace pulsar

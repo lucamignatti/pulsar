@@ -25,7 +25,6 @@ torch::Tensor compute_adaptive_epsilon(
     const SharedActorCritic& model,
     const PPOConfig& config,
     const torch::Tensor& value_logits);
-void validate_precision_mode_or_throw(const PPOConfig::PrecisionConfig& precision, const torch::Device& device);
 
 }  // namespace pulsar
 

@@ -187,14 +187,6 @@ void from_json(const json& j, PPOConfig::SelfPlayConfig& value) {
   value.elo_k = j.value("elo_k", 32.0F);
 }
 
-void to_json(json& j, const PPOConfig::PrecisionConfig& value) {
-  j = json{{"mode", value.mode}};
-}
-
-void from_json(const json& j, PPOConfig::PrecisionConfig& value) {
-  value.mode = j.value("mode", std::string{"fp32"});
-}
-
 void to_json(json& j, const PPOConfig& value) {
   j = json{
       {"num_envs", value.num_envs},
@@ -229,7 +221,6 @@ void to_json(json& j, const PPOConfig& value) {
       {"normalize_confidence_weights", value.normalize_confidence_weights},
       {"advantage_calculation", value.advantage_calculation},
       {"self_play", value.self_play},
-      {"precision", value.precision},
   };
 }
 
@@ -266,7 +257,6 @@ void from_json(const json& j, PPOConfig& value) {
   value.normalize_confidence_weights = j.value("normalize_confidence_weights", false);
   value.advantage_calculation = j.value("advantage_calculation", std::string{"quantile_sampling"});
   value.self_play = j.value("self_play", PPOConfig::SelfPlayConfig{});
-  value.precision = j.value("precision", PPOConfig::PrecisionConfig{});
 }
 
 void to_json(json& j, const OfflineDatasetConfig& value) {

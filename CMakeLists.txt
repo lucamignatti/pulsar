@@ -272,13 +272,13 @@ endif()
 
 if(PULSAR_ENABLE_TESTS AND PULSAR_ROCM_FOUND AND NOT PULSAR_DISABLE_ROCM AND TARGET pulsar_train AND Python3_EXECUTABLE)
   add_test(
-    NAME pulsar_rocm_amp_smoke
+    NAME pulsar_rocm_smoke
     COMMAND
       ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/rocm_amp_smoke.py
+      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/rocm_smoke.py
       ${CMAKE_CURRENT_SOURCE_DIR}
       $<TARGET_FILE:pulsar_train>
       ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_ppo.json
   )
-  set_tests_properties(pulsar_rocm_amp_smoke PROPERTIES LABELS "rocm;smoke" SKIP_RETURN_CODE 77)
+  set_tests_properties(pulsar_rocm_smoke PROPERTIES LABELS "rocm;smoke" SKIP_RETURN_CODE 77)
 endif()
