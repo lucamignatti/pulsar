@@ -2,6 +2,8 @@
 
 #ifdef PULSAR_HAS_TORCH
 
+#include <c10/core/DeviceGuard.h>
+
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -19,6 +21,36 @@ torch::Tensor gather_state_tensor(const torch::Tensor& tensor, const torch::Tens
     return tensor;
   }
   return tensor.index_select(0, agent_indices);
+}
+
+torch::Device resolve_runtime_device(const std::string& device_name) {
+  torch::Device device(device_name);
+  if (device.is_cuda() && !device.has_index()) {
+    return torch::Device(torch::kCUDA, 0);
+  }
+  return device;
+}
+
+RolloutStorage make_rollout_storage(
+    const ExperimentConfig& config,
+    int num_agents,
+    int action_dim) {
+  const torch::Device device = resolve_runtime_device(config.ppo.device);
+  if (device.is_cuda()) {
+    c10::DeviceGuard device_guard(device);
+    return RolloutStorage(
+        config.ppo.rollout_length,
+        num_agents,
+        config.model.observation_dim,
+        action_dim,
+        device);
+  }
+  return RolloutStorage(
+      config.ppo.rollout_length,
+      num_agents,
+      config.model.observation_dim,
+      action_dim,
+      device);
 }
 
 std::string stable_model_signature(const ExperimentConfig& config) {
@@ -123,13 +155,11 @@ PPOTrainer::PPOTrainer(
       model_(SharedActorCritic(config_.model, config_.ppo)),
       normalizer_(config_.model.observation_dim),
       optimizer_(model_->parameters(), torch::optim::AdamOptions(config_.ppo.learning_rate)),
-      rollout_(
-          config_.ppo.rollout_length,
+      rollout_(make_rollout_storage(
+          config_,
           static_cast<int>(collector_->total_agents()),
-          config_.model.observation_dim,
-          collector_->action_dim(),
-          torch::Device(config_.ppo.device)),
-      device_(config_.ppo.device),
+          collector_->action_dim())),
+      device_(resolve_runtime_device(config_.ppo.device)),
       ngp_normalizer_(config_.model.observation_dim) {
   if (!collector_ || !action_parser_) {
     throw std::invalid_argument("PPOTrainer requires a collector and action parser.");
