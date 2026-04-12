@@ -62,6 +62,10 @@ void to_json(json& j, const RewardConfig& value) {
       {"terms", value.terms},
       {"team_spirit", value.team_spirit},
       {"opponent_scale", value.opponent_scale},
+      {"mode", value.mode},
+      {"ngp_checkpoint", value.ngp_checkpoint},
+      {"shaped_scale", value.shaped_scale},
+      {"ngp_scale", value.ngp_scale},
   };
 }
 
@@ -69,6 +73,10 @@ void from_json(const json& j, RewardConfig& value) {
   value.terms = j.at("terms").get<std::vector<RewardTermConfig>>();
   value.team_spirit = j.value("team_spirit", 0.0F);
   value.opponent_scale = j.value("opponent_scale", 0.0F);
+  value.mode = j.value("mode", std::string{"shaped"});
+  value.ngp_checkpoint = j.value("ngp_checkpoint", std::string{});
+  value.shaped_scale = j.value("shaped_scale", 1.0F);
+  value.ngp_scale = j.value("ngp_scale", 1.0F);
 }
 
 void to_json(json& j, const ActionTableConfig& value) {

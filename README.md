@@ -183,3 +183,16 @@ That produces:
 The offline trainer now runs truncated BPTT over real per-player trajectories. `behavior_cloning.sequence_length` controls the chunk length used for recurrent updates.
 
 To start PPO from the offline-pretrained policy instead of random initialization, set `ppo.init_checkpoint` in your PPO config to the offline policy checkpoint directory, for example `/path/to/offline_outputs/policy`.
+
+To use the trained next-goal predictor as the online reward, set:
+
+- `reward.mode = "ngp"`
+- `reward.ngp_checkpoint = /path/to/offline_outputs/next_goal`
+- `reward.shaped_scale = 0.0`
+- `reward.ngp_scale = 1.0`
+
+PPO training now writes:
+
+- periodic `update_N/` checkpoints
+- `best/` for the highest rollout reward seen so far
+- `final/` for the final checkpoint at the end of training

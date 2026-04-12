@@ -45,6 +45,7 @@ void append_metrics_line(
       {"global_step", global_step},
       {"collection_fps", metrics.collection_fps},
       {"update_seconds", metrics.update_seconds},
+      {"reward_mean", metrics.reward_mean},
       {"policy_loss", metrics.policy_loss},
       {"value_loss", metrics.value_loss},
       {"entropy", metrics.entropy},
@@ -92,6 +93,25 @@ void validate_init_checkpoint_compatibility(
   }
 }
 
+void validate_aux_checkpoint_compatibility(
+    const CheckpointMetadata& metadata,
+    const ExperimentConfig& checkpoint_config,
+    const ExperimentConfig& active_config,
+    const char* checkpoint_name) {
+  if (metadata.schema_version != active_config.schema_version) {
+    throw std::runtime_error(std::string(checkpoint_name) + " schema_version does not match the active config.");
+  }
+  if (metadata.obs_schema_version != active_config.obs_schema_version) {
+    throw std::runtime_error(std::string(checkpoint_name) + " obs_schema_version does not match the active config.");
+  }
+  if (metadata.action_table_hash != action_table_hash(active_config.action_table)) {
+    throw std::runtime_error(std::string(checkpoint_name) + " action table hash does not match the active config.");
+  }
+  if (stable_model_signature(checkpoint_config) != stable_model_signature(active_config)) {
+    throw std::runtime_error(std::string(checkpoint_name) + " model/value signature does not match the active config.");
+  }
+}
+
 }  // namespace
 
 PPOTrainer::PPOTrainer(
@@ -110,6 +130,7 @@ PPOTrainer::PPOTrainer(
       action_table_(config_.action_table),
       model_(SharedActorCritic(config_.model, config_.ppo)),
       normalizer_(config_.model.observation_dim),
+      ngp_normalizer_(config_.model.observation_dim),
       optimizer_(model_->parameters(), torch::optim::AdamOptions(config_.ppo.learning_rate)),
       rollout_(
           config_.ppo.rollout_length,
@@ -136,12 +157,16 @@ PPOTrainer::PPOTrainer(
   host_obs_ = torch::empty(
       {static_cast<long>(total_agents_), static_cast<long>(config_.model.observation_dim)},
       host_options);
+  host_post_step_obs_ = torch::empty(
+      {static_cast<long>(total_agents_), static_cast<long>(config_.model.observation_dim)},
+      host_options);
   host_episode_starts_ = torch::ones({static_cast<long>(total_agents_)}, host_options);
   host_rewards_ = torch::empty({static_cast<long>(total_agents_)}, host_options);
   host_dones_ = torch::empty({static_cast<long>(total_agents_)}, host_options);
   model_->to(device_);
   normalizer_.to(device_);
   maybe_initialize_from_checkpoint();
+  maybe_initialize_ngp_reward();
 }
 
 torch::Tensor PPOTrainer::collect_observations() {
@@ -165,6 +190,8 @@ torch::Tensor PPOTrainer::collect_observations() {
 void PPOTrainer::step_envs(std::span<const std::int64_t> action_indices, std::int64_t global_step) {
   float* rewards_ptr = host_rewards_.data_ptr<float>();
   float* dones_ptr = host_dones_.data_ptr<float>();
+  float* post_step_obs_ptr = host_post_step_obs_.data_ptr<float>();
+  const std::size_t obs_stride = obs_builder_->obs_dim();
 
   collection_executor_.parallel_for(engines_.size(), [&](std::size_t begin, std::size_t end) {
     for (std::size_t engine_idx = begin; engine_idx < end; ++engine_idx) {
@@ -191,12 +218,29 @@ void PPOTrainer::step_envs(std::span<const std::int64_t> action_indices, std::in
           host_truncated_.data() + static_cast<std::ptrdiff_t>(agent_begin),
           agent_count);
       done_condition_->is_done_into(current_state, current_state.tick, terminated, truncated);
-      reward_fn_->get_rewards_into(
-          previous_state,
-          current_state,
-          terminated,
-          truncated,
-          std::span<float>(rewards_ptr + static_cast<std::ptrdiff_t>(agent_begin), agent_count));
+      if (use_shaped_reward_) {
+        reward_fn_->get_rewards_into(
+            previous_state,
+            current_state,
+            terminated,
+            truncated,
+            std::span<float>(rewards_ptr + static_cast<std::ptrdiff_t>(agent_begin), agent_count));
+        if (config_.reward.shaped_scale != 1.0F) {
+          for (std::size_t i = 0; i < agent_count; ++i) {
+            rewards_ptr[agent_begin + i] *= config_.reward.shaped_scale;
+          }
+        }
+      } else {
+        std::fill_n(rewards_ptr + static_cast<std::ptrdiff_t>(agent_begin), agent_count, 0.0F);
+      }
+
+      if (use_ngp_reward_) {
+        obs_builder_->build_obs_batch(
+            current_state,
+            std::span<float>(
+                post_step_obs_ptr + static_cast<std::ptrdiff_t>(agent_begin * obs_stride),
+                agent_count * obs_stride));
+      }
 
       bool reset_needed = false;
       for (std::size_t i = 0; i < agent_count; ++i) {
@@ -316,6 +360,41 @@ void PPOTrainer::maybe_initialize_from_checkpoint() {
   std::cout << "initialized_from_checkpoint=" << base.string() << '\n';
 }
 
+void PPOTrainer::maybe_initialize_ngp_reward() {
+  use_shaped_reward_ = config_.reward.mode != "ngp" && config_.reward.shaped_scale != 0.0F;
+  use_ngp_reward_ = (config_.reward.mode == "ngp" || config_.reward.mode == "hybrid") &&
+                    !config_.reward.ngp_checkpoint.empty();
+  if (!use_ngp_reward_) {
+    if (config_.reward.mode == "ngp" || config_.reward.mode == "hybrid") {
+      throw std::runtime_error("reward.ngp_checkpoint must be set when reward.mode is ngp or hybrid.");
+    }
+    return;
+  }
+
+  namespace fs = std::filesystem;
+  const fs::path base(config_.reward.ngp_checkpoint);
+  const ExperimentConfig checkpoint_config = load_experiment_config((base / "config.json").string());
+  const CheckpointMetadata metadata = load_checkpoint_metadata((base / "metadata.json").string());
+  validate_aux_checkpoint_compatibility(metadata, checkpoint_config, config_, "NGP checkpoint");
+
+  ngp_model_ = SharedActorCritic(config_.model, config_.ppo);
+  torch::serialize::InputArchive archive;
+  archive.load_from((base / "model.pt").string());
+  ngp_model_->load(archive);
+  ngp_normalizer_.load(archive);
+  ngp_model_->to(device_);
+  ngp_normalizer_.to(device_);
+  ngp_model_->eval();
+  ngp_collection_state_ = ngp_model_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
+
+  std::cout << "initialized_ngp_reward_from_checkpoint=" << base.string() << '\n';
+}
+
+torch::Tensor PPOTrainer::ngp_scalar(const torch::Tensor& logits) const {
+  const torch::Tensor probs = torch::softmax(logits, -1);
+  return probs.select(-1, 0) - probs.select(-1, 1);
+}
+
 TrainerMetrics PPOTrainer::update_policy() {
   const auto update_start = std::chrono::steady_clock::now();
   TrainerMetrics metrics{};
@@ -429,6 +508,15 @@ void PPOTrainer::save_checkpoint(
     std::int64_t update_index) {
   namespace fs = std::filesystem;
   const fs::path directory = fs::path(checkpoint_dir) / ("update_" + std::to_string(update_index));
+  save_checkpoint_to_directory(directory, global_step, update_index);
+}
+
+void PPOTrainer::save_checkpoint_to_directory(
+    const std::filesystem::path& directory,
+    std::int64_t global_step,
+    std::int64_t update_index) {
+  namespace fs = std::filesystem;
+  fs::remove_all(directory);
   fs::create_directories(directory);
 
   save_experiment_config(config_, (directory / "config.json").string());
@@ -452,13 +540,23 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
     const auto collection_start = std::chrono::steady_clock::now();
 
     for (int step = 0; step < config_.ppo.rollout_length; ++step) {
-      torch::Tensor obs = collect_observations();
+      torch::Tensor raw_obs = collect_observations();
+      torch::Tensor obs = raw_obs;
       torch::Tensor actions;
       torch::Tensor log_probs;
       torch::Tensor sampled_values;
       torch::Tensor episode_starts = host_episode_starts_.to(device_, use_pinned_host_buffers_);
+      torch::Tensor ngp_prev_scalar;
+      ContinuumState next_ngp_state;
       {
         torch::NoGradGuard no_grad;
+        if (use_ngp_reward_) {
+          torch::Tensor normalized_ngp_obs = ngp_normalizer_.normalize(raw_obs);
+          PolicyOutput ngp_output =
+              ngp_model_->forward_step(normalized_ngp_obs, std::move(ngp_collection_state_), episode_starts);
+          ngp_prev_scalar = ngp_scalar(ngp_output.next_goal_logits);
+          next_ngp_state = std::move(ngp_output.state);
+        }
         normalizer_.update(obs);
         obs = normalizer_.normalize(obs);
 
@@ -470,8 +568,19 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
 
       const std::vector<std::int64_t> action_indices = actions_to_indices(actions);
       step_envs(action_indices, global_step);
-      const torch::Tensor rewards = host_rewards_.to(device_, use_pinned_host_buffers_);
+      torch::Tensor rewards = host_rewards_.to(device_, use_pinned_host_buffers_);
       const torch::Tensor dones = host_dones_.to(device_, use_pinned_host_buffers_);
+      if (use_ngp_reward_) {
+        torch::NoGradGuard no_grad;
+        torch::Tensor post_step_obs = host_post_step_obs_.to(device_, use_pinned_host_buffers_);
+        torch::Tensor zero_starts = torch::zeros_like(dones);
+        torch::Tensor normalized_post_step_obs = ngp_normalizer_.normalize(post_step_obs);
+        PolicyOutput ngp_output =
+            ngp_model_->forward_step(normalized_post_step_obs, std::move(next_ngp_state), zero_starts);
+        const torch::Tensor ngp_current_scalar = ngp_scalar(ngp_output.next_goal_logits);
+        rewards = rewards + config_.reward.ngp_scale * (ngp_current_scalar - ngp_prev_scalar);
+        ngp_collection_state_ = std::move(ngp_output.state);
+      }
 
       rollout_.append(step, obs, episode_starts, actions, log_probs, rewards, dones, sampled_values);
       host_episode_starts_.copy_(host_dones_);
@@ -492,9 +601,11 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
     metrics.collection_fps =
         static_cast<double>(config_.ppo.rollout_length * total_agents_) /
         std::chrono::duration<double>(std::chrono::steady_clock::now() - collection_start).count();
+    metrics.reward_mean = rollout_.rewards.mean().item<double>();
 
     std::cout << "update=" << update_index
               << " fps=" << metrics.collection_fps
+              << " reward_mean=" << metrics.reward_mean
               << " policy_loss=" << metrics.policy_loss
               << " value_loss=" << metrics.value_loss
               << " entropy=" << metrics.entropy
@@ -508,6 +619,7 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
           {"global_step", global_step},
           {"collection_fps", metrics.collection_fps},
           {"update_seconds", metrics.update_seconds},
+          {"reward_mean", metrics.reward_mean},
           {"policy_loss", metrics.policy_loss},
           {"value_loss", metrics.value_loss},
           {"entropy", metrics.entropy},
@@ -519,7 +631,12 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
     if ((update_index + 1) % config_.ppo.checkpoint_interval == 0) {
       save_checkpoint(checkpoint_dir, global_step, update_index + 1);
     }
+    if (metrics.reward_mean > best_reward_mean_) {
+      best_reward_mean_ = metrics.reward_mean;
+      save_checkpoint_to_directory(std::filesystem::path(checkpoint_dir) / "best", global_step, update_index + 1);
+    }
   }
+  save_checkpoint_to_directory(std::filesystem::path(checkpoint_dir) / "final", global_step, updates);
   wandb.finish();
 }
 

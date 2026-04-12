@@ -14,6 +14,10 @@
     "seed": 7
   },
   "reward": {
+    "mode": "ngp",
+    "ngp_checkpoint": "",
+    "shaped_scale": 0.0,
+    "ngp_scale": 1.0,
     "team_spirit": 0.2,
     "opponent_scale": 1.0,
     "terms": [

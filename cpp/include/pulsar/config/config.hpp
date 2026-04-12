@@ -19,6 +19,10 @@ struct RewardConfig {
   std::vector<RewardTermConfig> terms{};
   float team_spirit = 0.0F;
   float opponent_scale = 0.0F;
+  std::string mode = "shaped";
+  std::string ngp_checkpoint{};
+  float shaped_scale = 1.0F;
+  float ngp_scale = 1.0F;
 };
 
 struct ActionTableConfig {

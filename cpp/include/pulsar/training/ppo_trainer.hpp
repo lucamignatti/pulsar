@@ -2,6 +2,7 @@
 
 #ifdef PULSAR_HAS_TORCH
 
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -21,6 +22,7 @@ namespace pulsar {
 struct TrainerMetrics {
   double collection_fps = 0.0;
   double update_seconds = 0.0;
+  double reward_mean = 0.0;
   double policy_loss = 0.0;
   double value_loss = 0.0;
   double entropy = 0.0;
@@ -50,6 +52,12 @@ class PPOTrainer {
   torch::Tensor confidence_weights(const torch::Tensor& value_logits) const;
   torch::Tensor adaptive_epsilon(const torch::Tensor& value_logits) const;
   void maybe_initialize_from_checkpoint();
+  void maybe_initialize_ngp_reward();
+  torch::Tensor ngp_scalar(const torch::Tensor& logits) const;
+  void save_checkpoint_to_directory(
+      const std::filesystem::path& directory,
+      std::int64_t global_step,
+      std::int64_t update_index);
   TrainerMetrics update_policy();
   CheckpointMetadata make_checkpoint_metadata(std::int64_t global_step, std::int64_t update_index) const;
   void save_checkpoint(const std::string& checkpoint_dir, std::int64_t global_step, std::int64_t update_index);
@@ -67,17 +75,24 @@ class PPOTrainer {
   RolloutStorage rollout_;
   torch::Device device_{torch::kCPU};
   ParallelExecutor collection_executor_;
+  SharedActorCritic ngp_model_{nullptr};
+  ObservationNormalizer ngp_normalizer_{1};
   std::vector<std::size_t> agent_offsets_{};
   std::size_t total_agents_ = 0;
   ContinuumState collection_state_{};
+  ContinuumState ngp_collection_state_{};
   std::vector<ControllerState> host_actions_{};
   std::vector<std::uint8_t> host_terminated_{};
   std::vector<std::uint8_t> host_truncated_{};
   torch::Tensor host_obs_;
+  torch::Tensor host_post_step_obs_;
   torch::Tensor host_episode_starts_;
   torch::Tensor host_rewards_;
   torch::Tensor host_dones_;
   bool use_pinned_host_buffers_ = false;
+  bool use_ngp_reward_ = false;
+  bool use_shaped_reward_ = true;
+  double best_reward_mean_ = -1.0e30;
 };
 
 }  // namespace pulsar

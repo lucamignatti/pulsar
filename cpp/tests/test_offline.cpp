@@ -4,7 +4,87 @@
 #include <iostream>
 #include <stdexcept>
 
+#include "pulsar/env/done.hpp"
+#include "pulsar/env/mutators.hpp"
+#include "pulsar/env/obs_builder.hpp"
+#include "pulsar/env/reward.hpp"
+#include "pulsar/rl/action_table.hpp"
+#include "pulsar/training/ppo_trainer.hpp"
 #include "pulsar/training/offline_pretrainer.hpp"
+
+namespace {
+
+class FakeTransitionEngine final : public pulsar::TransitionEngine {
+ public:
+  explicit FakeTransitionEngine(pulsar::EnvConfig config) : config_(std::move(config)) {
+    reset(config_.seed);
+  }
+
+  void reset(std::uint64_t seed) override {
+    state_ = {};
+    ticks_ = 0;
+    pulse_ = static_cast<int>(seed % 9);
+    pulsar::FixedTeamSizeMutator fixed(config_);
+    pulsar::KickoffMutator kickoff(config_);
+    fixed.apply(state_, seed);
+    kickoff.apply(state_, seed);
+    state_.last_touch_tick = 0;
+    state_.goal_scored = false;
+  }
+
+  pulsar::StepResult step(std::span<const pulsar::ControllerState> actions) override {
+    step_inplace(actions);
+    return {.state = state_};
+  }
+
+  void step_inplace(std::span<const pulsar::ControllerState> actions) override {
+    state_.goal_scored = false;
+    state_.tick += config_.tick_skip;
+    ticks_ += config_.tick_skip;
+    pulse_ += 1;
+
+    state_.ball.position.y += 110.0F;
+    state_.ball.velocity = {0.0F, 110.0F, 0.0F};
+
+    for (std::size_t i = 0; i < state_.cars.size(); ++i) {
+      auto& car = state_.cars[i];
+      const auto& action = actions[i];
+      car.velocity = {action.steer * 150.0F, action.throttle * 300.0F, 0.0F};
+      car.position = car.position + car.velocity * 0.016F;
+      car.forward = {1.0F, 0.0F, 0.0F};
+      car.up = {0.0F, 0.0F, 1.0F};
+      car.is_boosting = action.boost;
+      car.handbrake = action.handbrake ? 1.0F : 0.0F;
+      car.ball_touched = false;
+    }
+
+    state_.last_touch_agent = pulse_ % static_cast<int>(state_.cars.size());
+    state_.cars[static_cast<std::size_t>(state_.last_touch_agent)].ball_touched = true;
+    state_.last_touch_tick = state_.tick;
+
+    if (ticks_ >= config_.tick_skip * 3) {
+      state_.blue_score += 1;
+      state_.goal_scored = true;
+      ticks_ = 0;
+    }
+  }
+
+  const pulsar::EnvState& state() const override {
+    return state_;
+  }
+
+  std::size_t num_agents() const override {
+    return state_.cars.size();
+  }
+
+ private:
+  pulsar::EnvConfig config_{};
+  pulsar::EnvState state_{};
+  int ticks_ = 0;
+  int pulse_ = 0;
+};
+
+}  // namespace
 
 int main() {
   try {
@@ -14,8 +94,8 @@ int main() {
     fs::create_directories(root / "data");
 
     const int64_t rows = 64;
-    const int64_t obs_dim = 8;
-    const int64_t action_dim = 4;
+    const int64_t obs_dim = 132;
+    const int64_t action_dim = 90;
     torch::Tensor obs = torch::randn({rows, obs_dim});
     torch::Tensor actions = torch::randint(action_dim, {rows}, torch::TensorOptions().dtype(torch::kLong));
     torch::Tensor action_probs = torch::one_hot(actions, action_dim).to(torch::kFloat32);
@@ -34,9 +114,9 @@ int main() {
 
     std::ofstream manifest(root / "data" / "manifest.json");
     manifest << R"({
-  "schema_version": 1,
-  "observation_dim": 8,
-  "action_dim": 4,
+  "schema_version": 3,
+  "observation_dim": 132,
+  "action_dim": 90,
   "next_goal_classes": 3,
   "shards": [
     {
@@ -55,8 +135,17 @@ int main() {
     pulsar::ExperimentConfig config;
     config.model.observation_dim = static_cast<int>(obs_dim);
     config.model.hidden_sizes = {32, 32};
+    config.model.encoder_dim = 32;
+    config.model.workspace_dim = 32;
+    config.model.stm_slots = 8;
+    config.model.stm_key_dim = 16;
+    config.model.stm_value_dim = 16;
+    config.model.ltm_slots = 8;
+    config.model.ltm_dim = 16;
+    config.model.controller_dim = 32;
     config.model.action_dim = static_cast<int>(action_dim);
     config.ppo.device = "cpu";
+    config.ppo.value_num_atoms = 11;
     config.offline_dataset.train_manifest = (root / "data" / "manifest.json").string();
     config.offline_dataset.val_manifest = (root / "data" / "manifest.json").string();
     config.offline_dataset.batch_size = 16;
@@ -73,6 +162,48 @@ int main() {
     }
     if (!fs::exists(root / "output" / "next_goal" / "model.pt")) {
       throw std::runtime_error("next goal checkpoint missing");
+    }
+
+    config.reward.mode = "ngp";
+    config.reward.ngp_checkpoint = (root / "output" / "next_goal").string();
+    config.reward.shaped_scale = 0.0F;
+    config.reward.ngp_scale = 1.0F;
+    config.ppo.init_checkpoint = (root / "output" / "policy").string();
+    config.ppo.num_envs = 2;
+    config.ppo.rollout_length = 4;
+    config.ppo.minibatch_size = 8;
+    config.ppo.epochs = 1;
+    config.ppo.checkpoint_interval = 1;
+    config.ppo.sequence_length = 2;
+    config.ppo.burn_in = 1;
+    config.env.seed = 5;
+
+    std::vector<pulsar::TransitionEnginePtr> engines;
+    engines.push_back(std::make_shared<FakeTransitionEngine>(config.env));
+    engines.push_back(std::make_shared<FakeTransitionEngine>(config.env));
+    auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
+    auto action_parser =
+        std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
+    auto reward_fn = std::make_shared<pulsar::CombinedRewardFunction>(config.reward);
+    auto done_condition = std::make_shared<pulsar::SimpleDoneCondition>(config.env);
+
+    pulsar::PPOTrainer trainer(
+        config,
+        std::move(engines),
+        obs_builder,
+        action_parser,
+        reward_fn,
+        done_condition);
+    trainer.train(1, (root / "ppo").string());
+
+    if (!fs::exists(root / "ppo" / "update_1" / "model.pt")) {
+      throw std::runtime_error("ppo update checkpoint missing");
+    }
+    if (!fs::exists(root / "ppo" / "best" / "model.pt")) {
+      throw std::runtime_error("ppo best checkpoint missing");
+    }
+    if (!fs::exists(root / "ppo" / "final" / "model.pt")) {
+      throw std::runtime_error("ppo final checkpoint missing");
     }
 
     fs::remove_all(root);
