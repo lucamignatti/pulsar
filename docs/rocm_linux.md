@@ -7,13 +7,6 @@
 - `RocketSim` available to the C++ build
 - Python package extras for `rlgym`, `rocketsim`, and `rlviser-py`
 
-## Important Device Note
-
-PyTorch ROCm builds still use the `cuda` device namespace in both Python and C++ APIs.
-
-- Use `"device": "cuda"` in experiment configs even on AMD/ROCm machines.
-- In C++, `torch::Device("cuda")` is still the correct device selector for ROCm-enabled builds.
-
 ## Suggested Build Flow
 
 1. Install ROCm on the Linux host and verify it with the ROCm tooling.
