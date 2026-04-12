@@ -2,6 +2,8 @@
 
 `Pulsar` is a modular Rocket League bot platform built around a high-throughput C++ training runtime and a thin Python evaluation/visualization layer.
 
+The current online training path is a single-process, synchronous PPO loop backed by a batched `RocketSim` collector. It includes hard-legality action masking, frozen-policy self-play with Elo evaluation, expanded per-update timing metrics, and GPU execution.
+
 ## Design Goals
 
  - Fast vectorized C++ trainer
@@ -51,16 +53,41 @@ pip install torch pybind11
 pip install -e .[viz]
 pip install -e .[offline]
 
-cmake -S . -B build \
+cmake -S . -B build/release \
   -DCMAKE_PREFIX_PATH="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')" \
   -Dpybind11_DIR="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')" \
   -DPython3_EXECUTABLE="$(which python)"
-cmake --build build
+cmake --build build/release
 ```
 
-If `Torch` or Python binding dependencies are not available, CMake still builds the core environment/config targets and skips the trainer/bindings targets.
+If `Torch` or Python binding dependencies are not available, CMake still builds the core environment/config targets and skips the trainer/bindings targets. If ROCm is installed and discoverable, the ROCm libraries and ROCm-only tests are enabled automatically. Pass `-DPULSAR_DISABLE_ROCM=ON` to force a CPU-only build on a ROCm host.
 
 For the intended deployment target, see [docs/rocm_linux.md](docs/rocm_linux.md).
+
+## Validation
+
+Use this as the normal post-build validation path:
+
+```bash
+ctest --test-dir build/release --output-on-failure
+```
+
+That default suite covers:
+
+- core config, environment, reward, done, and action-mask tests
+- offline dataset and offline-pretrain smoke coverage
+- PPO math, batched collector, and self-play coverage
+- train/offline/benchmark/preprocess binary smokes
+- ROCm smoke automatically on ROCm builds
+
+Useful focused invocations:
+
+```bash
+ctest --test-dir build/release -L reference --output-on-failure
+ctest --test-dir build/release -L smoke --output-on-failure
+ctest --test-dir build/release -L rocm --output-on-failure
+./build/release/pulsar_bench
+```
 
 ## Targets
 
@@ -120,7 +147,15 @@ The visualization path is aligned with current `RLGym` defaults:
 - `ppo.collection_workers = 0` means auto-size the collection thread pool from hardware concurrency.
 - `collection_env_steps_per_second` counts one arena step as one step, regardless of team size.
 - `collection_agent_steps_per_second` multiplies by the number of controlled cars. This is the closest comparison to the thesis repo's aggregate "steps per second" metric, which is driven by batched active-agent observations across many environments.
+- per-update metrics also include stage timings such as `obs_build_seconds`, `mask_build_seconds`, `policy_forward_seconds`, `env_step_seconds`, `gae_seconds`, and `ppo_forward_backward_seconds`
 - `./build/<preset>/pulsar_bench <num_envs> [collection_workers]` lets you sweep arena count and collection parallelism independently.
+
+## Online PPO Notes
+
+- Hard-legality action masking is always enabled in the online trainer.
+- Self-play snapshots are stored under `policy_versions/` in the run directory when `ppo.self_play.enabled` is true.
+- Only learner-controlled agents contribute rollout entries and `global_step` during self-play episodes.
+- Mixed precision is not part of the current runtime. The trainer runs in FP32 on both CPU and ROCm.
 
 ## Offline Pretraining
 
