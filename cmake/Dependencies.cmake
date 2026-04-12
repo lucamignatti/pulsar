@@ -121,7 +121,16 @@ function(_pulsar_sanitize_torch_language_standard)
     set(TORCH_CXX_FLAGS "${_torch_cxx_flags_joined}" PARENT_SCOPE)
   endif()
 
-  foreach(_torch_target IN ITEMS torch torch_cpu c10 c10_cuda torch_hip_library)
+  foreach(_torch_target IN ITEMS
+    headeronly
+    c10
+    c10_cuda
+    torch
+    torch_cpu
+    torch_cpu_library
+    torch_library
+    torch_hip_library
+  )
     if(TARGET "${_torch_target}")
       get_target_property(_torch_compile_options "${_torch_target}" INTERFACE_COMPILE_OPTIONS)
       if(_torch_compile_options)
@@ -129,6 +138,24 @@ function(_pulsar_sanitize_torch_language_standard)
         set_target_properties(
           "${_torch_target}"
           PROPERTIES INTERFACE_COMPILE_OPTIONS "${_torch_compile_options_clean}"
+        )
+      endif()
+
+      get_target_property(_torch_compile_features "${_torch_target}" INTERFACE_COMPILE_FEATURES)
+      if(_torch_compile_features)
+        set_target_properties(
+          "${_torch_target}"
+          PROPERTIES INTERFACE_COMPILE_FEATURES ""
+        )
+      endif()
+
+      get_target_property(_torch_cxx_standard "${_torch_target}" CXX_STANDARD)
+      if(_torch_cxx_standard)
+        set_target_properties(
+          "${_torch_target}"
+          PROPERTIES
+            CXX_STANDARD 20
+            CXX_STANDARD_REQUIRED ON
         )
       endif()
     endif()
