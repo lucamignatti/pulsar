@@ -3,6 +3,15 @@
 #ifdef PULSAR_HAS_TORCH
 
 namespace pulsar {
+namespace {
+
+torch::Tensor sample_categorical_from_logits(const torch::Tensor& logits) {
+  const torch::Tensor uniform = torch::rand_like(logits).clamp_(1.0e-6, 1.0 - 1.0e-6);
+  const torch::Tensor gumbel = -torch::log(-torch::log(uniform));
+  return (logits + gumbel).argmax(-1);
+}
+
+}  // namespace
 
 torch::Tensor apply_action_mask_to_logits(const torch::Tensor& logits, const torch::Tensor& action_masks) {
   return logits.masked_fill(action_masks.logical_not(), -1.0e9);
@@ -14,9 +23,7 @@ torch::Tensor sample_masked_actions(
     bool deterministic,
     torch::Tensor* log_probs) {
   const torch::Tensor masked = apply_action_mask_to_logits(logits, action_masks);
-  const torch::Tensor probs = torch::softmax(masked, -1);
-  const torch::Tensor actions =
-      deterministic ? probs.argmax(-1) : probs.multinomial(1).squeeze(-1);
+  const torch::Tensor actions = deterministic ? masked.argmax(-1) : sample_categorical_from_logits(masked);
   if (log_probs != nullptr) {
     *log_probs = torch::log_softmax(masked, -1).gather(-1, actions.unsqueeze(-1)).squeeze(-1);
   }

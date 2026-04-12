@@ -12,6 +12,21 @@
 #include "pulsar/training/ppo_trainer.hpp"
 #include "pulsar/training/self_play_manager.hpp"
 
+namespace {
+
+bool should_pin_host_memory(const std::string& device) {
+  if (device == "cpu") {
+    return false;
+  }
+#ifdef USE_ROCM
+  return false;
+#else
+  return true;
+#endif
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
   if (argc < 3) {
     std::cerr << "usage: pulsar_train <config.json> <checkpoint_dir> [updates]\n";
@@ -29,7 +44,7 @@ int main(int argc, char** argv) {
       action_parser,
       reward_fn,
       done_condition,
-      config.ppo.device != "cpu");
+      should_pin_host_memory(config.ppo.device));
 
   std::unique_ptr<pulsar::SelfPlayManager> self_play_manager;
   if (config.ppo.self_play.enabled) {

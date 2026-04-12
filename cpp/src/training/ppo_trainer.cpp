@@ -139,7 +139,11 @@ PPOTrainer::PPOTrainer(
   collection_state_ = model_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
   opponent_collection_state_ = model_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
   host_actions_.resize(total_agents_);
+#ifdef USE_ROCM
+  use_pinned_host_buffers_ = false;
+#else
   use_pinned_host_buffers_ = device_.is_cuda();
+#endif
   model_->to(device_);
   normalizer_.to(device_);
   maybe_initialize_from_checkpoint();

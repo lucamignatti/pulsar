@@ -11,6 +11,12 @@
 namespace pulsar {
 namespace {
 
+torch::Tensor sample_categorical_from_logits(const torch::Tensor& logits) {
+  const torch::Tensor uniform = torch::rand_like(logits).clamp_(1.0e-6, 1.0 - 1.0e-6);
+  const torch::Tensor gumbel = -torch::log(-torch::log(uniform));
+  return (logits + gumbel).argmax(-1);
+}
+
 torch::Tensor maybe_zero_mask(torch::Tensor tensor, const torch::Tensor& mask) {
   if (!mask.defined()) {
     return tensor;
@@ -238,8 +244,7 @@ torch::Tensor SharedActorCriticImpl::expected_value(torch::Tensor value_logits) 
 }
 
 torch::Tensor SharedActorCriticImpl::sample_value(torch::Tensor value_logits) const {
-  const torch::Tensor probs = torch::softmax(value_logits, -1);
-  const torch::Tensor indices = probs.multinomial(1).squeeze(-1);
+  const torch::Tensor indices = sample_categorical_from_logits(value_logits);
   return support_.to(value_logits.device()).index_select(0, indices);
 }
 

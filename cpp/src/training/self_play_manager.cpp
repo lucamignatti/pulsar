@@ -14,6 +14,7 @@
 #include "pulsar/env/mutators.hpp"
 #include "pulsar/env/rocketsim_engine.hpp"
 #include "pulsar/rl/action_table.hpp"
+#include "pulsar/training/ppo_math.hpp"
 
 namespace pulsar {
 namespace {
@@ -24,9 +25,7 @@ torch::Tensor masked_argmax(const torch::Tensor& logits, const torch::Tensor& ac
 }
 
 torch::Tensor masked_sample(const torch::Tensor& logits, const torch::Tensor& action_masks) {
-  const torch::Tensor masked_logits = logits.masked_fill(action_masks.logical_not(), -1.0e9);
-  const torch::Tensor probs = torch::softmax(masked_logits, -1);
-  return probs.multinomial(1).squeeze(-1);
+  return sample_masked_actions(logits, action_masks, false, nullptr);
 }
 
 torch::Tensor gather_state_tensor(const torch::Tensor& tensor, const torch::Tensor& indices) {
