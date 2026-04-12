@@ -64,6 +64,34 @@ torch::Tensor gather_state_tensor(const torch::Tensor& tensor, const torch::Tens
   return tensor.index_select(0, agent_indices);
 }
 
+std::string stable_model_signature(const ExperimentConfig& config) {
+  nlohmann::json j = {
+      {"model", config.model},
+      {"value_num_atoms", config.ppo.value_num_atoms},
+      {"value_v_min", config.ppo.value_v_min},
+      {"value_v_max", config.ppo.value_v_max},
+  };
+  return j.dump(-1, ' ', false, nlohmann::json::error_handler_t::strict);
+}
+
+void validate_init_checkpoint_compatibility(
+    const CheckpointMetadata& metadata,
+    const ExperimentConfig& checkpoint_config,
+    const ExperimentConfig& active_config) {
+  if (metadata.schema_version != active_config.schema_version) {
+    throw std::runtime_error("Init checkpoint schema_version does not match the active config.");
+  }
+  if (metadata.obs_schema_version != active_config.obs_schema_version) {
+    throw std::runtime_error("Init checkpoint obs_schema_version does not match the active config.");
+  }
+  if (metadata.action_table_hash != action_table_hash(active_config.action_table)) {
+    throw std::runtime_error("Init checkpoint action table hash does not match the active config.");
+  }
+  if (stable_model_signature(checkpoint_config) != stable_model_signature(active_config)) {
+    throw std::runtime_error("Init checkpoint model/value signature does not match the active config.");
+  }
+}
+
 }  // namespace
 
 PPOTrainer::PPOTrainer(
@@ -113,6 +141,7 @@ PPOTrainer::PPOTrainer(
   host_dones_ = torch::empty({static_cast<long>(total_agents_)}, host_options);
   model_->to(device_);
   normalizer_.to(device_);
+  maybe_initialize_from_checkpoint();
 }
 
 torch::Tensor PPOTrainer::collect_observations() {
@@ -264,6 +293,27 @@ torch::Tensor PPOTrainer::adaptive_epsilon(const torch::Tensor& value_logits) co
   torch::Tensor epsilon = config_.ppo.clip_range /
       (1.0 + config_.ppo.adaptive_epsilon_beta * model_->value_variance(value_logits));
   return torch::clamp(epsilon, config_.ppo.epsilon_min, config_.ppo.epsilon_max).detach();
+}
+
+void PPOTrainer::maybe_initialize_from_checkpoint() {
+  if (config_.ppo.init_checkpoint.empty()) {
+    return;
+  }
+
+  namespace fs = std::filesystem;
+  const fs::path base(config_.ppo.init_checkpoint);
+  const ExperimentConfig checkpoint_config = load_experiment_config((base / "config.json").string());
+  const CheckpointMetadata metadata = load_checkpoint_metadata((base / "metadata.json").string());
+  validate_init_checkpoint_compatibility(metadata, checkpoint_config, config_);
+
+  torch::serialize::InputArchive archive;
+  archive.load_from((base / "model.pt").string());
+  model_->load(archive);
+  normalizer_.load(archive);
+  model_->to(device_);
+  normalizer_.to(device_);
+
+  std::cout << "initialized_from_checkpoint=" << base.string() << '\n';
 }
 
 TrainerMetrics PPOTrainer::update_policy() {

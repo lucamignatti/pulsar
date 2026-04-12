@@ -18,6 +18,7 @@ int main() {
     const int64_t action_dim = 4;
     torch::Tensor obs = torch::randn({rows, obs_dim});
     torch::Tensor actions = torch::randint(action_dim, {rows}, torch::TensorOptions().dtype(torch::kLong));
+    torch::Tensor action_probs = torch::one_hot(actions, action_dim).to(torch::kFloat32);
     torch::Tensor next_goal = torch::randint(3, {rows}, torch::TensorOptions().dtype(torch::kLong));
     torch::Tensor weights = torch::ones({rows});
     torch::Tensor episode_starts = torch::zeros({rows});
@@ -26,6 +27,7 @@ int main() {
 
     torch::save(obs, (root / "data" / "obs.pt").string());
     torch::save(actions, (root / "data" / "actions.pt").string());
+    torch::save(action_probs, (root / "data" / "action_probs.pt").string());
     torch::save(next_goal, (root / "data" / "next_goal.pt").string());
     torch::save(weights, (root / "data" / "weights.pt").string());
     torch::save(episode_starts, (root / "data" / "episode_starts.pt").string());
@@ -40,6 +42,7 @@ int main() {
     {
       "obs_path": "obs.pt",
       "actions_path": "actions.pt",
+      "action_probs_path": "action_probs.pt",
       "next_goal_path": "next_goal.pt",
       "weights_path": "weights.pt",
       "episode_starts_path": "episode_starts.pt",

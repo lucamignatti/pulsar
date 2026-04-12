@@ -18,6 +18,7 @@ namespace pulsar {
 struct OfflineTensorBatch {
   torch::Tensor obs{};
   torch::Tensor actions{};
+  torch::Tensor action_probs{};
   torch::Tensor next_goal{};
   torch::Tensor weights{};
   torch::Tensor episode_starts{};
@@ -26,6 +27,7 @@ struct OfflineTensorBatch {
 struct OfflineTensorShardEntry {
   std::string obs_path{};
   std::string actions_path{};
+  std::string action_probs_path{};
   std::string next_goal_path{};
   std::string weights_path{};
   std::string episode_starts_path{};

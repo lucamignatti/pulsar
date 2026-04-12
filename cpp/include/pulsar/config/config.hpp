@@ -59,6 +59,7 @@ struct ModelConfig {
 struct PPOConfig {
   int num_envs = 64;
   int collection_workers = 0;
+  std::string init_checkpoint{};
   int rollout_length = 256;
   int minibatch_size = 2048;
   int epochs = 4;

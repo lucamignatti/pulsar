@@ -49,6 +49,7 @@ class PPOTrainer {
   torch::Tensor categorical_projection(const torch::Tensor& returns) const;
   torch::Tensor confidence_weights(const torch::Tensor& value_logits) const;
   torch::Tensor adaptive_epsilon(const torch::Tensor& value_logits) const;
+  void maybe_initialize_from_checkpoint();
   TrainerMetrics update_policy();
   CheckpointMetadata make_checkpoint_metadata(std::int64_t global_step, std::int64_t update_index) const;
   void save_checkpoint(const std::string& checkpoint_dir, std::int64_t global_step, std::int64_t update_index);

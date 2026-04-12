@@ -44,6 +44,7 @@ OfflineTensorManifest load_offline_tensor_manifest(const std::string& path) {
     OfflineTensorShardEntry shard;
     shard.obs_path = shard_json.at("obs_path").get<std::string>();
     shard.actions_path = shard_json.value("actions_path", std::string{});
+    shard.action_probs_path = shard_json.value("action_probs_path", std::string{});
     shard.next_goal_path = shard_json.value("next_goal_path", std::string{});
     shard.weights_path = shard_json.value("weights_path", std::string{});
     shard.episode_starts_path = shard_json.value("episode_starts_path", std::string{});
@@ -115,6 +116,12 @@ void OfflineTensorDataset::for_each_batch(
       actions = load_tensor_checked((manifest_dir / shard.actions_path).string()).to(torch::kLong).view({-1});
     }
 
+    torch::Tensor action_probs;
+    if (!shard.action_probs_path.empty()) {
+      action_probs =
+          load_tensor_checked((manifest_dir / shard.action_probs_path).string()).to(torch::kFloat32).contiguous();
+    }
+
     torch::Tensor next_goal;
     if (!shard.next_goal_path.empty()) {
       next_goal = load_tensor_checked((manifest_dir / shard.next_goal_path).string()).to(torch::kLong).view({-1});
@@ -140,6 +147,7 @@ void OfflineTensorDataset::for_each_batch(
 
     if (obs.size(0) != weights.size(0) ||
         (actions.defined() && obs.size(0) != actions.size(0)) ||
+        (action_probs.defined() && (action_probs.dim() != 2 || obs.size(0) != action_probs.size(0))) ||
         (next_goal.defined() && obs.size(0) != next_goal.size(0)) ||
         obs.size(0) != episode_starts.size(0)) {
       throw std::runtime_error("Offline shard tensors have mismatched leading dimensions.");
@@ -158,6 +166,9 @@ void OfflineTensorDataset::for_each_batch(
       batch.obs = obs.index_select(0, batch_indices);
       if (actions.defined()) {
         batch.actions = actions.index_select(0, batch_indices);
+      }
+      if (action_probs.defined()) {
+        batch.action_probs = action_probs.index_select(0, batch_indices);
       }
       if (next_goal.defined()) {
         batch.next_goal = next_goal.index_select(0, batch_indices);
@@ -187,6 +198,12 @@ void OfflineTensorDataset::for_each_trajectory(
       actions = load_tensor_checked((manifest_dir / shard.actions_path).string()).to(torch::kLong).view({-1});
     }
 
+    torch::Tensor action_probs;
+    if (!shard.action_probs_path.empty()) {
+      action_probs =
+          load_tensor_checked((manifest_dir / shard.action_probs_path).string()).to(torch::kFloat32).contiguous();
+    }
+
     torch::Tensor next_goal;
     if (!shard.next_goal_path.empty()) {
       next_goal = load_tensor_checked((manifest_dir / shard.next_goal_path).string()).to(torch::kLong).view({-1});
@@ -212,6 +229,7 @@ void OfflineTensorDataset::for_each_trajectory(
 
     if (obs.size(0) != weights.size(0) ||
         (actions.defined() && obs.size(0) != actions.size(0)) ||
+        (action_probs.defined() && (action_probs.dim() != 2 || obs.size(0) != action_probs.size(0))) ||
         (next_goal.defined() && obs.size(0) != next_goal.size(0)) ||
         obs.size(0) != episode_starts.size(0)) {
       throw std::runtime_error("Offline shard tensors have mismatched leading dimensions.");
@@ -254,6 +272,9 @@ void OfflineTensorDataset::for_each_trajectory(
       batch.obs = obs.narrow(0, start, length);
       if (actions.defined()) {
         batch.actions = actions.narrow(0, start, length);
+      }
+      if (action_probs.defined()) {
+        batch.action_probs = action_probs.narrow(0, start, length);
       }
       if (next_goal.defined()) {
         batch.next_goal = next_goal.narrow(0, start, length);

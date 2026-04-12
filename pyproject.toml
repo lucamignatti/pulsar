@@ -19,7 +19,11 @@ viz = [
 ]
 offline = [
   "kagglehub>=0.3.10",
-  "subtr-actor-py>=0.3.1",
+  "rlgym-tools>=2.6.4",
+  "pandas>=2.2,<4",
+  "pyarrow>=16,<30",
+  "scipy>=1.13,<2",
+  "numba>=0.60,<1",
 ]
 
 [project.scripts]

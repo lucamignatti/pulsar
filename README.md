@@ -40,7 +40,7 @@ The project expects:
 - `rlgym[rl-rlviser]`
 - `rocketsim`
 - `wandb`
-- `subtr-actor-py` for replay preprocessing
+- `rlgym-tools`, `pandas`, and `pyarrow` for replay preprocessing
 
 Configure with:
 
@@ -146,9 +146,27 @@ This writes sequence-safe shards:
 
 - `train_manifest.json`
 - `val_manifest.json`
-- shard-local `obs.pt`, `actions.pt`, `next_goal.pt`, `weights.pt`, and `episode_starts.pt` tensor files
+- shard-local `obs.pt`, `actions.pt`, `action_probs.pt`, `next_goal.pt`, `weights.pt`, and `episode_starts.pt` tensor files
 
-The preprocessor uses `subtr_actor` for frame extraction, preserves per-player trajectories, writes `episode_starts` markers, and keeps whole trajectories inside a shard so recurrent pretraining does not cross replay boundaries. It zero-fills unavailable boost-pad state and derives discrete action labels heuristically from short-horizon car kinematics plus jump state. The resulting labels are good enough for policy warm-starting, but they are not replay-perfect controller reconstruction.
+The preprocessor now uses `rlgym-tools` replay parsing and `replay_to_rlgym`, so the offline dataset is built from native `ReplayFrame` objects rather than hand-decoded replay tensors. That gives it:
+
+- exact `DefaultObs(zero_padding=2)` observations aligned with the online schema
+- direct `next_scoring_team` next-goal labels
+- replay-native continuous controls mapped onto the 90-action lookup table with `pick_action`
+- soft discrete policy targets in `action_probs.pt`
+
+For accuracy, it filters out interpolated car updates by default with `--max-update-age 0.0` and splits trajectories whenever an agent becomes stale or a kickoff/game boundary is reached.
+
+Recommended invocation:
+
+```bash
+.venv/bin/python scripts/preprocess_kaggle_2v2.py \
+  /path/to/high-level-rocket-league-replay-dataset \
+  /path/to/pulsar_offline_2v2 \
+  --interpolation rocketsim \
+  --action-target-mode weighted \
+  --max-update-age 0.0
+```
 
 Then point [configs/2v2_offline.json](configs/2v2_offline.json) at those manifests and run:
 
@@ -163,3 +181,5 @@ That produces:
 - `offline_metrics.jsonl`
 
 The offline trainer now runs truncated BPTT over real per-player trajectories. `behavior_cloning.sequence_length` controls the chunk length used for recurrent updates.
+
+To start PPO from the offline-pretrained policy instead of random initialization, set `ppo.init_checkpoint` in your PPO config to the offline policy checkpoint directory, for example `/path/to/offline_outputs/policy`.

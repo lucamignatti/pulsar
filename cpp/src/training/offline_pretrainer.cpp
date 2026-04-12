@@ -34,6 +34,15 @@ torch::Tensor weighted_cross_entropy(
   return (per_sample * normalized_weights).mean();
 }
 
+torch::Tensor weighted_soft_cross_entropy(
+    const torch::Tensor& logits,
+    const torch::Tensor& target_probs,
+    const torch::Tensor& weights) {
+  const torch::Tensor per_sample = -(target_probs * torch::log_softmax(logits, -1)).sum(-1);
+  const torch::Tensor normalized_weights = weights / weights.mean().clamp_min(1.0e-6);
+  return (per_sample * normalized_weights).mean();
+}
+
 double weighted_accuracy(
     const torch::Tensor& logits,
     const torch::Tensor& labels,
@@ -41,6 +50,14 @@ double weighted_accuracy(
   const torch::Tensor predictions = logits.argmax(-1);
   const torch::Tensor correct = predictions.eq(labels).to(torch::kFloat32);
   return ((correct * weights).sum() / weights.sum().clamp_min(1.0e-6)).item<double>();
+}
+
+double weighted_accuracy_from_probs(
+    const torch::Tensor& logits,
+    const torch::Tensor& target_probs,
+    const torch::Tensor& weights) {
+  const torch::Tensor labels = target_probs.argmax(-1);
+  return weighted_accuracy(logits, labels, weights);
 }
 
 ContinuumState detach_state(ContinuumState state) {
@@ -187,17 +204,25 @@ OfflineEpochMetrics OfflinePretrainer::run_epoch(
           torch::Tensor total_loss = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
           const torch::Tensor chunk_weights = weights.narrow(0, offset, chunk_length);
 
-          if (config_.behavior_cloning.enabled && actions.defined()) {
-            const torch::Tensor chunk_actions = actions.narrow(0, offset, chunk_length);
+          if (config_.behavior_cloning.enabled && (actions.defined() || batch.action_probs.defined())) {
             const torch::Tensor logits = output.policy_logits.squeeze(1);
-            const torch::Tensor loss = weighted_cross_entropy(
-                logits,
-                chunk_actions,
-                chunk_weights,
-                config_.behavior_cloning.label_smoothing);
+            torch::Tensor loss;
+            if (batch.action_probs.defined()) {
+              const torch::Tensor chunk_action_probs = batch.action_probs.to(device_).narrow(0, offset, chunk_length);
+              loss = weighted_soft_cross_entropy(logits, chunk_action_probs, chunk_weights);
+              metrics.policy_accuracy +=
+                  weighted_accuracy_from_probs(logits, chunk_action_probs, chunk_weights) * static_cast<double>(chunk_length);
+            } else {
+              const torch::Tensor chunk_actions = actions.narrow(0, offset, chunk_length);
+              loss = weighted_cross_entropy(
+                  logits,
+                  chunk_actions,
+                  chunk_weights,
+                  config_.behavior_cloning.label_smoothing);
+              metrics.policy_accuracy +=
+                  weighted_accuracy(logits, chunk_actions, chunk_weights) * static_cast<double>(chunk_length);
+            }
             metrics.policy_loss += loss.item<double>() * static_cast<double>(chunk_length);
-            metrics.policy_accuracy +=
-                weighted_accuracy(logits, chunk_actions, chunk_weights) * static_cast<double>(chunk_length);
             total_loss = total_loss + loss;
           }
 
