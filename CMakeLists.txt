@@ -30,7 +30,10 @@ include(CTest)
 include(cmake/Dependencies.cmake)
 
 if(PULSAR_ENABLE_ROCKETSIM AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/RocketSim/CMakeLists.txt")
+  set(_PULSAR_SAVED_CMAKE_WARN_DEPRECATED "${CMAKE_WARN_DEPRECATED}")
+  set(CMAKE_WARN_DEPRECATED FALSE)
   add_subdirectory(external/RocketSim EXCLUDE_FROM_ALL)
+  set(CMAKE_WARN_DEPRECATED "${_PULSAR_SAVED_CMAKE_WARN_DEPRECATED}")
 endif()
 
 add_library(
@@ -112,7 +115,7 @@ if(PULSAR_ENABLE_PYTHON)
         LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/python
     )
   else()
-    message(WARNING "Python bindings requested but Torch, pybind11, or Python3 were unavailable.")
+    message(STATUS "Python bindings disabled: Torch, pybind11, or Python3 Development.Module was unavailable.")
   endif()
 endif()
 
