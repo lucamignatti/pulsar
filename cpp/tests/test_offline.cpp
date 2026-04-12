@@ -177,23 +177,26 @@ int main() {
     config.ppo.sequence_length = 2;
     config.ppo.burn_in = 1;
     config.env.seed = 5;
+    config.env.collision_meshes_path = (fs::current_path().parent_path() / "collision_meshes").string();
 
-    std::vector<pulsar::TransitionEnginePtr> engines;
-    engines.push_back(std::make_shared<FakeTransitionEngine>(config.env));
-    engines.push_back(std::make_shared<FakeTransitionEngine>(config.env));
     auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
     auto action_parser =
         std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
     auto reward_fn = std::make_shared<pulsar::CombinedRewardFunction>(config.reward);
     auto done_condition = std::make_shared<pulsar::SimpleDoneCondition>(config.env);
-
-    pulsar::PPOTrainer trainer(
+    auto collector = std::make_unique<pulsar::BatchedRocketSimCollector>(
         config,
-        std::move(engines),
         obs_builder,
         action_parser,
         reward_fn,
-        done_condition);
+        done_condition,
+        false);
+
+    pulsar::PPOTrainer trainer(
+        config,
+        std::move(collector),
+        action_parser,
+        nullptr);
     trainer.train(1, (root / "ppo").string());
 
     if (!fs::exists(root / "ppo" / "update_1" / "model.pt")) {

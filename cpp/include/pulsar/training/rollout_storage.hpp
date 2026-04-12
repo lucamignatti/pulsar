@@ -12,12 +12,15 @@ class RolloutStorage {
       int rollout_length,
       int num_agents,
       int obs_dim,
+      int action_dim,
       torch::Device device);
 
   void append(
       int step,
       const torch::Tensor& obs,
       const torch::Tensor& episode_starts,
+      const torch::Tensor& action_masks,
+      const torch::Tensor& learner_active,
       const torch::Tensor& actions,
       const torch::Tensor& log_probs,
       const torch::Tensor& rewards,
@@ -34,6 +37,8 @@ class RolloutStorage {
 
   torch::Tensor obs;
   torch::Tensor episode_starts;
+  torch::Tensor action_masks;
+  torch::Tensor learner_active;
   torch::Tensor actions;
   torch::Tensor log_probs;
   torch::Tensor rewards;

@@ -155,6 +155,46 @@ void from_json(const json& j, ModelConfig& value) {
   value.retired_decay = j.value("retired_decay", 0.96F);
 }
 
+void to_json(json& j, const PPOConfig::SelfPlayConfig& value) {
+  j = json{
+      {"enabled", value.enabled},
+      {"opponent_probability", value.opponent_probability},
+      {"snapshot_interval_updates", value.snapshot_interval_updates},
+      {"max_snapshots", value.max_snapshots},
+      {"opponent_sampling", value.opponent_sampling},
+      {"training_opponent_policy", value.training_opponent_policy},
+      {"eval_interval_updates", value.eval_interval_updates},
+      {"eval_num_envs", value.eval_num_envs},
+      {"eval_matches_per_snapshot", value.eval_matches_per_snapshot},
+      {"eval_policy", value.eval_policy},
+      {"elo_initial", value.elo_initial},
+      {"elo_k", value.elo_k},
+  };
+}
+
+void from_json(const json& j, PPOConfig::SelfPlayConfig& value) {
+  value.enabled = j.value("enabled", false);
+  value.opponent_probability = j.value("opponent_probability", 0.0F);
+  value.snapshot_interval_updates = j.value("snapshot_interval_updates", 10);
+  value.max_snapshots = j.value("max_snapshots", 8);
+  value.opponent_sampling = j.value("opponent_sampling", std::string{"uniform"});
+  value.training_opponent_policy = j.value("training_opponent_policy", std::string{"stochastic"});
+  value.eval_interval_updates = j.value("eval_interval_updates", 10);
+  value.eval_num_envs = j.value("eval_num_envs", 8);
+  value.eval_matches_per_snapshot = j.value("eval_matches_per_snapshot", 4);
+  value.eval_policy = j.value("eval_policy", std::string{"deterministic"});
+  value.elo_initial = j.value("elo_initial", 1000.0F);
+  value.elo_k = j.value("elo_k", 32.0F);
+}
+
+void to_json(json& j, const PPOConfig::PrecisionConfig& value) {
+  j = json{{"mode", value.mode}};
+}
+
+void from_json(const json& j, PPOConfig::PrecisionConfig& value) {
+  value.mode = j.value("mode", std::string{"fp32"});
+}
+
 void to_json(json& j, const PPOConfig& value) {
   j = json{
       {"num_envs", value.num_envs},
@@ -188,6 +228,8 @@ void to_json(json& j, const PPOConfig& value) {
       {"confidence_weight_delta", value.confidence_weight_delta},
       {"normalize_confidence_weights", value.normalize_confidence_weights},
       {"advantage_calculation", value.advantage_calculation},
+      {"self_play", value.self_play},
+      {"precision", value.precision},
   };
 }
 
@@ -223,6 +265,8 @@ void from_json(const json& j, PPOConfig& value) {
   value.confidence_weight_delta = j.value("confidence_weight_delta", 1.0e-6F);
   value.normalize_confidence_weights = j.value("normalize_confidence_weights", false);
   value.advantage_calculation = j.value("advantage_calculation", std::string{"quantile_sampling"});
+  value.self_play = j.value("self_play", PPOConfig::SelfPlayConfig{});
+  value.precision = j.value("precision", PPOConfig::PrecisionConfig{});
 }
 
 void to_json(json& j, const OfflineDatasetConfig& value) {

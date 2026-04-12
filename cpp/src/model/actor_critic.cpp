@@ -285,6 +285,30 @@ SharedActorCritic load_shared_model(const std::string& checkpoint_path, const st
   return model;
 }
 
+SharedActorCritic clone_shared_model(const SharedActorCritic& source, const torch::Device& device) {
+  torch::NoGradGuard no_grad;
+  SharedActorCritic clone(source->config(), source->ppo_config());
+  clone->to(device);
+  auto dst_params = clone->named_parameters(true);
+  for (const auto& item : source->named_parameters(true)) {
+    dst_params[item.key()].copy_(item.value().to(device));
+  }
+
+  auto dst_buffers = clone->named_buffers(true);
+  for (const auto& item : source->named_buffers(true)) {
+    if (dst_buffers.find(item.key()) != nullptr) {
+      dst_buffers[item.key()].copy_(item.value().to(device));
+    }
+  }
+
+  if (source->is_training()) {
+    clone->train();
+  } else {
+    clone->eval();
+  }
+  return clone;
+}
+
 }  // namespace pulsar
 
 #endif

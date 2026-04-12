@@ -8,10 +8,15 @@ RolloutStorage::RolloutStorage(
     int rollout_length,
     int num_agents,
     int obs_dim,
+    int action_dim,
     torch::Device device)
     : rollout_length_(rollout_length), num_agents_(num_agents) {
   obs = torch::zeros({rollout_length, num_agents, obs_dim}, device);
   episode_starts = torch::zeros({rollout_length, num_agents}, device);
+  action_masks = torch::zeros(
+      {rollout_length, num_agents, action_dim},
+      torch::TensorOptions().dtype(torch::kUInt8).device(device));
+  learner_active = torch::zeros({rollout_length, num_agents}, device);
   actions = torch::zeros({rollout_length, num_agents}, torch::TensorOptions().dtype(torch::kLong).device(device));
   log_probs = torch::zeros({rollout_length, num_agents}, device);
   rewards = torch::zeros({rollout_length, num_agents}, device);
@@ -25,6 +30,8 @@ void RolloutStorage::append(
     int step,
     const torch::Tensor& obs_in,
     const torch::Tensor& episode_starts_in,
+    const torch::Tensor& action_masks_in,
+    const torch::Tensor& learner_active_in,
     const torch::Tensor& actions_in,
     const torch::Tensor& log_probs_in,
     const torch::Tensor& rewards_in,
@@ -32,6 +39,8 @@ void RolloutStorage::append(
     const torch::Tensor& sampled_values_in) {
   obs[step].copy_(obs_in.detach());
   episode_starts[step].copy_(episode_starts_in.detach());
+  action_masks[step].copy_(action_masks_in.detach());
+  learner_active[step].copy_(learner_active_in.detach());
   actions[step].copy_(actions_in.detach());
   log_probs[step].copy_(log_probs_in.detach());
   rewards[step].copy_(rewards_in.detach());

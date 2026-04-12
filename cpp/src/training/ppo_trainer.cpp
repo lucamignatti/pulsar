@@ -2,7 +2,8 @@
 
 #ifdef PULSAR_HAS_TORCH
 
-#include <algorithm>
+#include <ATen/autocast_mode.h>
+
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -15,54 +16,49 @@
 namespace pulsar {
 namespace {
 
-std::size_t total_agents_for(const std::vector<TransitionEnginePtr>& engines) {
-  std::size_t total = 0;
-  for (const auto& engine : engines) {
-    total += engine->num_agents();
+class ScopedAutocast {
+ public:
+  ScopedAutocast(bool enabled, at::DeviceType device_type, at::ScalarType dtype)
+      : enabled_(enabled), device_type_(device_type) {
+    if (!enabled_) {
+      return;
+    }
+    previous_enabled_ = at::autocast::is_autocast_enabled(device_type_);
+    previous_dtype_ = at::autocast::get_autocast_dtype(device_type_);
+    previous_cache_enabled_ = at::autocast::is_autocast_cache_enabled();
+    at::autocast::set_autocast_enabled(device_type_, true);
+    at::autocast::set_autocast_dtype(device_type_, dtype);
+    at::autocast::set_autocast_cache_enabled(true);
+    at::autocast::increment_nesting();
   }
-  return total;
-}
 
-std::vector<std::size_t> offsets_for(const std::vector<TransitionEnginePtr>& engines) {
-  std::vector<std::size_t> offsets;
-  offsets.reserve(engines.size() + 1);
-  offsets.push_back(0);
-  std::size_t total = 0;
-  for (const auto& engine : engines) {
-    total += engine->num_agents();
-    offsets.push_back(total);
+  ~ScopedAutocast() {
+    if (!enabled_) {
+      return;
+    }
+    at::autocast::decrement_nesting();
+    at::autocast::set_autocast_enabled(device_type_, previous_enabled_);
+    at::autocast::set_autocast_dtype(device_type_, previous_dtype_);
+    at::autocast::set_autocast_cache_enabled(previous_cache_enabled_);
   }
-  return offsets;
-}
 
-void append_metrics_line(
-    const std::filesystem::path& checkpoint_dir,
-    int update_index,
-    std::int64_t global_step,
-    const TrainerMetrics& metrics) {
-  nlohmann::json line = {
-      {"update", update_index},
-      {"global_step", global_step},
-      {"collection_fps", metrics.collection_fps},
-      {"update_seconds", metrics.update_seconds},
-      {"reward_mean", metrics.reward_mean},
-      {"policy_loss", metrics.policy_loss},
-      {"value_loss", metrics.value_loss},
-      {"entropy", metrics.entropy},
-      {"value_entropy", metrics.value_entropy},
-      {"value_variance", metrics.value_variance},
-  };
-
-  std::filesystem::create_directories(checkpoint_dir);
-  std::ofstream output(checkpoint_dir / "metrics.jsonl", std::ios::app);
-  output << line.dump() << '\n';
-}
+ private:
+  bool enabled_ = false;
+  at::DeviceType device_type_ = at::kCPU;
+  bool previous_enabled_ = false;
+  bool previous_cache_enabled_ = false;
+  at::ScalarType previous_dtype_ = at::kFloat;
+};
 
 torch::Tensor gather_state_tensor(const torch::Tensor& tensor, const torch::Tensor& agent_indices) {
   if (!tensor.defined()) {
     return tensor;
   }
   return tensor.index_select(0, agent_indices);
+}
+
+torch::Tensor masked_logits(const torch::Tensor& logits, const torch::Tensor& action_masks) {
+  return logits.masked_fill(action_masks.logical_not(), -1.0e9);
 }
 
 std::string stable_model_signature(const ExperimentConfig& config) {
@@ -112,149 +108,90 @@ void validate_aux_checkpoint_compatibility(
   }
 }
 
+void append_metrics_line(
+    const std::filesystem::path& checkpoint_dir,
+    int update_index,
+    std::int64_t global_step,
+    const TrainerMetrics& metrics) {
+  nlohmann::json line = {
+      {"update", update_index},
+      {"global_step", global_step},
+      {"collection_agent_steps_per_second", metrics.collection_agent_steps_per_second},
+      {"update_agent_steps_per_second", metrics.update_agent_steps_per_second},
+      {"overall_agent_steps_per_second", metrics.overall_agent_steps_per_second},
+      {"update_seconds", metrics.update_seconds},
+      {"reward_mean", metrics.reward_mean},
+      {"policy_loss", metrics.policy_loss},
+      {"value_loss", metrics.value_loss},
+      {"entropy", metrics.entropy},
+      {"value_entropy", metrics.value_entropy},
+      {"value_variance", metrics.value_variance},
+      {"obs_build_seconds", metrics.obs_build_seconds},
+      {"mask_build_seconds", metrics.mask_build_seconds},
+      {"policy_forward_seconds", metrics.policy_forward_seconds},
+      {"action_decode_seconds", metrics.action_decode_seconds},
+      {"env_step_seconds", metrics.env_step_seconds},
+      {"reward_done_seconds", metrics.reward_done_seconds},
+      {"ngp_reward_seconds", metrics.ngp_reward_seconds},
+      {"rollout_append_seconds", metrics.rollout_append_seconds},
+      {"gae_seconds", metrics.gae_seconds},
+      {"ppo_forward_backward_seconds", metrics.ppo_forward_backward_seconds},
+      {"optimizer_step_seconds", metrics.optimizer_step_seconds},
+      {"self_play_eval_seconds", metrics.self_play_eval_seconds},
+  };
+  for (const auto& [mode, rating] : metrics.elo_ratings) {
+    line["elo_" + mode] = rating;
+  }
+
+  std::filesystem::create_directories(checkpoint_dir);
+  std::ofstream output(checkpoint_dir / "metrics.jsonl", std::ios::app);
+  output << line.dump() << '\n';
+}
+
 }  // namespace
 
 PPOTrainer::PPOTrainer(
     ExperimentConfig config,
-    std::vector<TransitionEnginePtr> engines,
-    ObsBuilderPtr obs_builder,
+    std::unique_ptr<BatchedRocketSimCollector> collector,
     ActionParserPtr action_parser,
-    RewardFunctionPtr reward_fn,
-    DoneConditionPtr done_condition)
+    std::unique_ptr<SelfPlayManager> self_play_manager)
     : config_(std::move(config)),
-      engines_(std::move(engines)),
-      obs_builder_(std::move(obs_builder)),
+      collector_(std::move(collector)),
       action_parser_(std::move(action_parser)),
-      reward_fn_(std::move(reward_fn)),
-      done_condition_(std::move(done_condition)),
+      self_play_manager_(std::move(self_play_manager)),
       action_table_(config_.action_table),
       model_(SharedActorCritic(config_.model, config_.ppo)),
       normalizer_(config_.model.observation_dim),
-      ngp_normalizer_(config_.model.observation_dim),
       optimizer_(model_->parameters(), torch::optim::AdamOptions(config_.ppo.learning_rate)),
       rollout_(
           config_.ppo.rollout_length,
-          static_cast<int>(total_agents_for(engines_)),
+          static_cast<int>(collector_->total_agents()),
           config_.model.observation_dim,
+          collector_->action_dim(),
           torch::Device(config_.ppo.device)),
       device_(config_.ppo.device),
-      collection_executor_(static_cast<std::size_t>(config_.ppo.collection_workers)) {
-  if (engines_.empty()) {
-    throw std::invalid_argument("PPOTrainer requires at least one transition engine.");
+      ngp_normalizer_(config_.model.observation_dim) {
+  if (!collector_ || !action_parser_) {
+    throw std::invalid_argument("PPOTrainer requires a collector and action parser.");
   }
 
-  total_agents_ = total_agents_for(engines_);
-  agent_offsets_ = offsets_for(engines_);
+  total_agents_ = collector_->total_agents();
   collection_state_ = model_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
+  opponent_collection_state_ = model_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
   host_actions_.resize(total_agents_);
-  host_terminated_.resize(total_agents_, 0);
-  host_truncated_.resize(total_agents_, 0);
   use_pinned_host_buffers_ = device_.is_cuda();
-  auto host_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-  if (use_pinned_host_buffers_) {
-    host_options = host_options.pinned_memory(true);
-  }
-  host_obs_ = torch::empty(
-      {static_cast<long>(total_agents_), static_cast<long>(config_.model.observation_dim)},
-      host_options);
-  host_post_step_obs_ = torch::empty(
-      {static_cast<long>(total_agents_), static_cast<long>(config_.model.observation_dim)},
-      host_options);
-  host_episode_starts_ = torch::ones({static_cast<long>(total_agents_)}, host_options);
-  host_rewards_ = torch::empty({static_cast<long>(total_agents_)}, host_options);
-  host_dones_ = torch::empty({static_cast<long>(total_agents_)}, host_options);
   model_->to(device_);
   normalizer_.to(device_);
+  validate_precision_mode();
   maybe_initialize_from_checkpoint();
   maybe_initialize_ngp_reward();
-}
 
-torch::Tensor PPOTrainer::collect_observations() {
-  float* dst = host_obs_.data_ptr<float>();
-  const std::size_t stride = obs_builder_->obs_dim();
-  collection_executor_.parallel_for(engines_.size(), [&](std::size_t begin, std::size_t end) {
-    for (std::size_t engine_idx = begin; engine_idx < end; ++engine_idx) {
-      const auto& engine = engines_[engine_idx];
-      const std::size_t agent_offset = agent_offsets_[engine_idx];
-      const std::size_t count = engine->num_agents();
-      obs_builder_->build_obs_batch(
-          engine->state(),
-          std::span<float>(
-              dst + static_cast<std::ptrdiff_t>(agent_offset * stride),
-              count * stride));
-    }
-  });
-  return host_obs_.to(device_, use_pinned_host_buffers_);
-}
-
-void PPOTrainer::step_envs(std::span<const std::int64_t> action_indices, std::int64_t global_step) {
-  float* rewards_ptr = host_rewards_.data_ptr<float>();
-  float* dones_ptr = host_dones_.data_ptr<float>();
-  float* post_step_obs_ptr = host_post_step_obs_.data_ptr<float>();
-  const std::size_t obs_stride = obs_builder_->obs_dim();
-
-  collection_executor_.parallel_for(engines_.size(), [&](std::size_t begin, std::size_t end) {
-    for (std::size_t engine_idx = begin; engine_idx < end; ++engine_idx) {
-      const std::size_t agent_begin = agent_offsets_[engine_idx];
-      const std::size_t agent_end = agent_offsets_[engine_idx + 1];
-      const std::size_t agent_count = agent_end - agent_begin;
-
-      const std::span<const std::int64_t> env_action_indices(
-          action_indices.data() + static_cast<std::ptrdiff_t>(agent_begin),
-          agent_count);
-      const std::span<ControllerState> env_actions(
-          host_actions_.data() + static_cast<std::ptrdiff_t>(agent_begin),
-          agent_count);
-      action_parser_->parse_actions_into(env_action_indices, env_actions);
-
-      const EnvState previous_state = engines_[engine_idx]->state();
-      engines_[engine_idx]->step_inplace(env_actions);
-      const EnvState& current_state = engines_[engine_idx]->state();
-
-      const std::span<std::uint8_t> terminated(
-          host_terminated_.data() + static_cast<std::ptrdiff_t>(agent_begin),
-          agent_count);
-      const std::span<std::uint8_t> truncated(
-          host_truncated_.data() + static_cast<std::ptrdiff_t>(agent_begin),
-          agent_count);
-      done_condition_->is_done_into(current_state, current_state.tick, terminated, truncated);
-      if (use_shaped_reward_) {
-        reward_fn_->get_rewards_into(
-            previous_state,
-            current_state,
-            terminated,
-            truncated,
-            std::span<float>(rewards_ptr + static_cast<std::ptrdiff_t>(agent_begin), agent_count));
-        if (config_.reward.shaped_scale != 1.0F) {
-          for (std::size_t i = 0; i < agent_count; ++i) {
-            rewards_ptr[agent_begin + i] *= config_.reward.shaped_scale;
-          }
-        }
-      } else {
-        std::fill_n(rewards_ptr + static_cast<std::ptrdiff_t>(agent_begin), agent_count, 0.0F);
-      }
-
-      if (use_ngp_reward_) {
-        obs_builder_->build_obs_batch(
-            current_state,
-            std::span<float>(
-                post_step_obs_ptr + static_cast<std::ptrdiff_t>(agent_begin * obs_stride),
-                agent_count * obs_stride));
-      }
-
-      bool reset_needed = false;
-      for (std::size_t i = 0; i < agent_count; ++i) {
-        const bool done = terminated[i] != 0 || truncated[i] != 0;
-        dones_ptr[agent_begin + i] = done ? 1.0F : 0.0F;
-        reset_needed = reset_needed || done;
-      }
-
-      if (reset_needed) {
-        engines_[engine_idx]->reset(
-            config_.env.seed + static_cast<std::uint64_t>(global_step) + static_cast<std::uint64_t>(engine_idx));
-      }
-    }
-  });
+  if (self_play_manager_ && self_play_manager_->enabled()) {
+    collector_->set_self_play_assignment_fn(
+        [this](std::size_t env_idx, std::uint64_t seed) {
+          return self_play_manager_->sample_assignment(env_idx, seed);
+        });
+  }
 }
 
 ContinuumState PPOTrainer::replay_state_until(std::int64_t start_step, const torch::Tensor& agent_indices) {
@@ -263,21 +200,29 @@ ContinuumState PPOTrainer::replay_state_until(std::int64_t start_step, const tor
     return state;
   }
 
+  const bool use_amp = config_.ppo.precision.mode == "amp_bf16" && device_.is_cuda();
   torch::NoGradGuard no_grad;
   for (std::int64_t step = 0; step < start_step; ++step) {
     const torch::Tensor obs = rollout_.obs[step].index_select(0, agent_indices);
     const torch::Tensor starts = rollout_.episode_starts[step].index_select(0, agent_indices);
+    ScopedAutocast autocast(use_amp, device_.type(), at::kBFloat16);
     SequenceOutput out = model_->forward_sequence(obs.unsqueeze(0), std::move(state), starts.unsqueeze(0));
     state = std::move(out.final_state);
   }
   return state;
 }
 
-torch::Tensor PPOTrainer::sample_actions(const torch::Tensor& logits, torch::Tensor* log_probs) const {
-  const torch::Tensor probs = torch::softmax(logits, -1);
-  const torch::Tensor actions = probs.multinomial(1).squeeze(-1);
+torch::Tensor PPOTrainer::sample_actions(
+    const torch::Tensor& logits,
+    const torch::Tensor& action_masks,
+    bool deterministic,
+    torch::Tensor* log_probs) const {
+  const torch::Tensor masked = masked_logits(logits, action_masks);
+  const torch::Tensor probs = torch::softmax(masked, -1);
+  const torch::Tensor actions =
+      deterministic ? probs.argmax(-1) : probs.multinomial(1).squeeze(-1);
   const torch::Tensor chosen_log_probs =
-      torch::log_softmax(logits, -1).gather(-1, actions.unsqueeze(-1)).squeeze(-1);
+      torch::log_softmax(masked, -1).gather(-1, actions.unsqueeze(-1)).squeeze(-1);
   if (log_probs != nullptr) {
     *log_probs = chosen_log_probs;
   }
@@ -292,7 +237,6 @@ std::vector<std::int64_t> PPOTrainer::actions_to_indices(const torch::Tensor& ac
 }
 
 torch::Tensor PPOTrainer::categorical_projection(const torch::Tensor& returns) const {
-  const torch::Tensor support = model_->support().to(returns.device());
   const float v_min = config_.ppo.value_v_min;
   const float v_max = config_.ppo.value_v_max;
   const float delta_z = (v_max - v_min) / static_cast<float>(config_.ppo.value_num_atoms - 1);
@@ -307,7 +251,6 @@ torch::Tensor PPOTrainer::categorical_projection(const torch::Tensor& returns) c
       torch::TensorOptions().dtype(torch::kFloat32).device(returns.device()));
   target.scatter_add_(1, lower.unsqueeze(-1), lower_prob.unsqueeze(-1));
   target.scatter_add_(1, upper.unsqueeze(-1), upper_prob.unsqueeze(-1));
-  (void)support;
   return target;
 }
 
@@ -337,6 +280,28 @@ torch::Tensor PPOTrainer::adaptive_epsilon(const torch::Tensor& value_logits) co
   torch::Tensor epsilon = config_.ppo.clip_range /
       (1.0 + config_.ppo.adaptive_epsilon_beta * model_->value_variance(value_logits));
   return torch::clamp(epsilon, config_.ppo.epsilon_min, config_.ppo.epsilon_max).detach();
+}
+
+void PPOTrainer::validate_precision_mode() const {
+  if (config_.ppo.precision.mode == "fp32") {
+    return;
+  }
+  if (config_.ppo.precision.mode != "amp_bf16") {
+    throw std::runtime_error("Unsupported ppo.precision.mode: " + config_.ppo.precision.mode);
+  }
+  if (!device_.is_cuda()) {
+    throw std::runtime_error("ppo.precision.mode=amp_bf16 requires a CUDA/ROCm device.");
+  }
+
+  try {
+    const auto options = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
+    torch::Tensor a = torch::randn({4, 4}, options);
+    torch::Tensor b = torch::randn({4, 4}, options);
+    ScopedAutocast autocast(true, device_.type(), at::kBFloat16);
+    (void)torch::matmul(a, b);
+  } catch (const std::exception& exc) {
+    throw std::runtime_error(std::string("Failed to enable BF16 autocast on the selected device: ") + exc.what());
+  }
 }
 
 void PPOTrainer::maybe_initialize_from_checkpoint() {
@@ -398,6 +363,7 @@ torch::Tensor PPOTrainer::ngp_scalar(const torch::Tensor& logits) const {
 TrainerMetrics PPOTrainer::update_policy() {
   const auto update_start = std::chrono::steady_clock::now();
   TrainerMetrics metrics{};
+  const bool use_amp = config_.ppo.precision.mode == "amp_bf16" && device_.is_cuda();
   const int seq_len = std::max(1, config_.ppo.sequence_length);
   const int burn_in = std::max(0, config_.ppo.burn_in);
   const int agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
@@ -421,6 +387,10 @@ TrainerMetrics PPOTrainer::update_policy() {
         const torch::Tensor obs = rollout_.obs.narrow(0, context_start, total_steps).index_select(1, agent_indices);
         const torch::Tensor episode_starts =
             rollout_.episode_starts.narrow(0, context_start, total_steps).index_select(1, agent_indices);
+        const torch::Tensor action_masks =
+            rollout_.action_masks.narrow(0, effective_start, effective_end - effective_start).index_select(1, agent_indices).to(torch::kBool);
+        const torch::Tensor learner_active =
+            rollout_.learner_active.narrow(0, effective_start, effective_end - effective_start).index_select(1, agent_indices);
         const torch::Tensor actions =
             rollout_.actions.narrow(0, effective_start, effective_end - effective_start).index_select(1, agent_indices);
         const torch::Tensor old_log_probs =
@@ -430,47 +400,75 @@ TrainerMetrics PPOTrainer::update_policy() {
         torch::Tensor advantages =
             rollout_.advantages.narrow(0, effective_start, effective_end - effective_start).index_select(1, agent_indices);
 
+        const auto ppo_start = std::chrono::steady_clock::now();
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1.0e-6);
-        const SequenceOutput output = model_->forward_sequence(obs, std::move(state), episode_starts);
+        SequenceOutput output;
+        {
+          ScopedAutocast autocast(use_amp, device_.type(), at::kBFloat16);
+          output = model_->forward_sequence(obs, std::move(state), episode_starts);
+        }
         torch::Tensor policy_logits = output.policy_logits.narrow(0, burn, effective_end - effective_start);
         torch::Tensor value_logits = output.value_logits.narrow(0, burn, effective_end - effective_start);
 
         const torch::Tensor flat_policy_logits = policy_logits.reshape({-1, config_.model.action_dim});
+        const torch::Tensor flat_action_masks = action_masks.reshape({-1, config_.model.action_dim});
         const torch::Tensor flat_value_logits = value_logits.reshape({-1, config_.ppo.value_num_atoms});
         const torch::Tensor flat_actions = actions.reshape({-1});
         const torch::Tensor flat_old_log_probs = old_log_probs.reshape({-1});
         const torch::Tensor flat_advantages = advantages.reshape({-1});
         const torch::Tensor flat_returns = returns.reshape({-1});
+        const torch::Tensor flat_active = learner_active.reshape({-1}) > 0.5;
 
+        if (flat_active.sum().item<std::int64_t>() == 0) {
+          continue;
+        }
+
+        const torch::Tensor active_policy_logits = flat_policy_logits.index({flat_active});
+        const torch::Tensor active_action_masks = flat_action_masks.index({flat_active});
+        const torch::Tensor active_value_logits = flat_value_logits.index({flat_active});
+        const torch::Tensor active_actions = flat_actions.index({flat_active});
+        const torch::Tensor active_old_log_probs = flat_old_log_probs.index({flat_active});
+        const torch::Tensor active_advantages = flat_advantages.index({flat_active});
+        const torch::Tensor active_returns = flat_returns.index({flat_active});
+
+        const torch::Tensor active_masked_logits = masked_logits(active_policy_logits, active_action_masks);
         const torch::Tensor current_log_probs =
-            torch::log_softmax(flat_policy_logits, -1).gather(-1, flat_actions.unsqueeze(-1)).squeeze(-1);
-        const torch::Tensor ratio = torch::exp(current_log_probs - flat_old_log_probs);
-        const torch::Tensor epsilon = adaptive_epsilon(flat_value_logits);
+            torch::log_softmax(active_masked_logits, -1).gather(-1, active_actions.unsqueeze(-1)).squeeze(-1);
+        const torch::Tensor ratio = torch::exp(current_log_probs - active_old_log_probs);
+        const torch::Tensor epsilon = adaptive_epsilon(active_value_logits);
         const torch::Tensor clipped_ratio = torch::clamp(ratio, 1.0 - epsilon, 1.0 + epsilon);
-        const torch::Tensor weights = confidence_weights(flat_value_logits);
-        const torch::Tensor unclipped = ratio * flat_advantages;
-        const torch::Tensor clipped = clipped_ratio * flat_advantages;
+        const torch::Tensor weights = confidence_weights(active_value_logits);
+        const torch::Tensor unclipped = ratio * active_advantages;
+        const torch::Tensor clipped = clipped_ratio * active_advantages;
         const torch::Tensor policy_loss = -(torch::min(unclipped, clipped) * weights).mean();
 
+        const torch::Tensor probs = torch::softmax(active_masked_logits, -1);
+        const torch::Tensor valid_counts =
+            active_action_masks.to(torch::kFloat32).sum(-1).clamp_min(1.0F);
         const torch::Tensor action_entropy =
-            -(torch::softmax(flat_policy_logits, -1) * torch::log_softmax(flat_policy_logits, -1)).sum(-1).mean();
-        const torch::Tensor target_dist = categorical_projection(flat_returns);
+            (-(probs * torch::log(probs + 1.0e-8)).sum(-1) / valid_counts.log().clamp_min(1.0e-6)).mean();
+        const torch::Tensor target_dist = categorical_projection(active_returns);
         const torch::Tensor critic_loss =
-            -(target_dist * torch::log_softmax(flat_value_logits, -1)).sum(-1).mean();
+            -(target_dist * torch::log_softmax(active_value_logits, -1)).sum(-1).mean();
         const torch::Tensor loss =
             policy_loss + config_.ppo.value_coef * critic_loss - config_.ppo.entropy_coef * action_entropy;
+        metrics.ppo_forward_backward_seconds +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - ppo_start).count();
 
+        const auto optim_start = std::chrono::steady_clock::now();
         optimizer_.zero_grad();
         loss.backward();
         torch::nn::utils::clip_grad_norm_(model_->parameters(), config_.ppo.max_grad_norm);
         optimizer_.step();
+        metrics.optimizer_step_seconds +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - optim_start).count();
 
-        metrics.policy_loss += policy_loss.item<double>() * flat_actions.size(0);
-        metrics.value_loss += critic_loss.item<double>() * flat_actions.size(0);
-        metrics.entropy += action_entropy.item<double>() * flat_actions.size(0);
-        metrics.value_entropy += model_->value_entropy(flat_value_logits).mean().item<double>() * flat_actions.size(0);
-        metrics.value_variance += model_->value_variance(flat_value_logits).mean().item<double>() * flat_actions.size(0);
-        metric_steps += flat_actions.size(0);
+        metrics.policy_loss += policy_loss.item<double>() * active_actions.size(0);
+        metrics.value_loss += critic_loss.item<double>() * active_actions.size(0);
+        metrics.entropy += action_entropy.item<double>() * active_actions.size(0);
+        metrics.value_entropy += model_->value_entropy(active_value_logits).mean().item<double>() * active_actions.size(0);
+        metrics.value_variance += model_->value_variance(active_value_logits).mean().item<double>() * active_actions.size(0);
+        metric_steps += active_actions.size(0);
       }
     }
   }
@@ -535,89 +533,190 @@ void PPOTrainer::save_checkpoint_to_directory(
 void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std::string& config_path) {
   std::int64_t global_step = 0;
   WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "ppo_train");
+  const bool use_amp = config_.ppo.precision.mode == "amp_bf16" && device_.is_cuda();
 
   for (int update_index = 0; update_index < updates; ++update_index) {
-    const auto collection_start = std::chrono::steady_clock::now();
+    const auto update_start = std::chrono::steady_clock::now();
+    TrainerMetrics metrics{};
+    CollectorTimings collector_timings{};
+    std::int64_t collected_agent_steps = 0;
 
+    const auto collection_start = std::chrono::steady_clock::now();
     for (int step = 0; step < config_.ppo.rollout_length; ++step) {
-      torch::Tensor raw_obs = collect_observations();
+      torch::Tensor raw_obs_host = collector_->collect_observations(&collector_timings);
+      collector_->collect_action_masks(&collector_timings);
+
+      const torch::Tensor raw_obs = raw_obs_host.to(device_, use_pinned_host_buffers_);
+      const torch::Tensor episode_starts = collector_->host_episode_starts().to(device_, use_pinned_host_buffers_);
+      const torch::Tensor action_masks = collector_->host_action_masks().to(device_, use_pinned_host_buffers_).to(torch::kBool);
+      const torch::Tensor learner_active = collector_->host_learner_active().to(device_, use_pinned_host_buffers_);
+      const torch::Tensor snapshot_ids = collector_->host_snapshot_ids().to(device_, use_pinned_host_buffers_);
+
       torch::Tensor obs = raw_obs;
       torch::Tensor actions;
+      torch::Tensor current_actions;
       torch::Tensor log_probs;
       torch::Tensor sampled_values;
-      torch::Tensor episode_starts = host_episode_starts_.to(device_, use_pinned_host_buffers_);
       torch::Tensor ngp_prev_scalar;
       ContinuumState next_ngp_state;
+
+      const auto policy_start = std::chrono::steady_clock::now();
       {
         torch::NoGradGuard no_grad;
+        ScopedAutocast autocast(use_amp, device_.type(), at::kBFloat16);
         if (use_ngp_reward_) {
-          torch::Tensor normalized_ngp_obs = ngp_normalizer_.normalize(raw_obs);
+          const torch::Tensor normalized_ngp_obs = ngp_normalizer_.normalize(raw_obs);
           PolicyOutput ngp_output =
               ngp_model_->forward_step(normalized_ngp_obs, std::move(ngp_collection_state_), episode_starts);
           ngp_prev_scalar = ngp_scalar(ngp_output.next_goal_logits);
           next_ngp_state = std::move(ngp_output.state);
         }
+
         normalizer_.update(obs);
         obs = normalizer_.normalize(obs);
-
         PolicyOutput output = model_->forward_step(obs, std::move(collection_state_), episode_starts);
         collection_state_ = std::move(output.state);
-        actions = sample_actions(output.policy_logits, &log_probs);
+        current_actions = sample_actions(output.policy_logits, action_masks, false, &log_probs);
         sampled_values = output.sampled_values;
       }
+      actions = current_actions;
+      metrics.policy_forward_seconds +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - policy_start).count();
 
+      if (self_play_manager_ && self_play_manager_->has_snapshots()) {
+        torch::Tensor opponent_actions;
+        self_play_manager_->infer_opponent_actions(
+            model_,
+            config_.ppo.precision,
+            raw_obs,
+            action_masks,
+            episode_starts,
+            snapshot_ids,
+            opponent_collection_state_,
+            &opponent_actions,
+            &metrics.policy_forward_seconds);
+        actions = torch::where(snapshot_ids >= 0, opponent_actions, current_actions);
+      }
+
+      const auto decode_start = std::chrono::steady_clock::now();
       const std::vector<std::int64_t> action_indices = actions_to_indices(actions);
-      step_envs(action_indices, global_step);
-      torch::Tensor rewards = host_rewards_.to(device_, use_pinned_host_buffers_);
-      const torch::Tensor dones = host_dones_.to(device_, use_pinned_host_buffers_);
+      action_parser_->parse_actions_into(action_indices, host_actions_);
+      metrics.action_decode_seconds +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
+
+      collector_->step(host_actions_, use_ngp_reward_, &collector_timings);
+      torch::Tensor rewards = collector_->host_rewards().to(device_, use_pinned_host_buffers_);
+      const torch::Tensor dones = collector_->host_dones().to(device_, use_pinned_host_buffers_);
+      if (!use_shaped_reward_) {
+        rewards.zero_();
+      }
       if (use_ngp_reward_) {
+        const auto ngp_start = std::chrono::steady_clock::now();
         torch::NoGradGuard no_grad;
-        torch::Tensor post_step_obs = host_post_step_obs_.to(device_, use_pinned_host_buffers_);
-        torch::Tensor zero_starts = torch::zeros_like(dones);
-        torch::Tensor normalized_post_step_obs = ngp_normalizer_.normalize(post_step_obs);
+        ScopedAutocast autocast(use_amp, device_.type(), at::kBFloat16);
+        const torch::Tensor post_step_obs = collector_->host_post_step_obs().to(device_, use_pinned_host_buffers_);
+        const torch::Tensor zero_starts = torch::zeros_like(dones);
+        const torch::Tensor normalized_post_step_obs = ngp_normalizer_.normalize(post_step_obs);
         PolicyOutput ngp_output =
             ngp_model_->forward_step(normalized_post_step_obs, std::move(next_ngp_state), zero_starts);
         const torch::Tensor ngp_current_scalar = ngp_scalar(ngp_output.next_goal_logits);
         rewards = rewards + config_.reward.ngp_scale * (ngp_current_scalar - ngp_prev_scalar);
         ngp_collection_state_ = std::move(ngp_output.state);
+        metrics.ngp_reward_seconds +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - ngp_start).count();
       }
 
-      rollout_.append(step, obs, episode_starts, actions, log_probs, rewards, dones, sampled_values);
-      host_episode_starts_.copy_(host_dones_);
-      global_step += static_cast<std::int64_t>(total_agents_);
+      const auto append_start = std::chrono::steady_clock::now();
+      rollout_.append(
+          step,
+          obs,
+          episode_starts,
+          action_masks.to(torch::kUInt8),
+          learner_active,
+          actions,
+          log_probs,
+          rewards,
+          dones,
+          sampled_values);
+      metrics.rollout_append_seconds +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - append_start).count();
+      collected_agent_steps += learner_active.sum().item<std::int64_t>();
     }
+    const double collection_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - collection_start).count();
 
+    const auto gae_start = std::chrono::steady_clock::now();
+    const torch::Tensor last_obs_host = collector_->collect_observations(&collector_timings);
+    const torch::Tensor last_obs = normalizer_.normalize(last_obs_host.to(device_, use_pinned_host_buffers_));
+    const torch::Tensor last_episode_starts = collector_->host_episode_starts().to(device_, use_pinned_host_buffers_);
     torch::Tensor last_sampled_value;
+    const auto bootstrap_start = std::chrono::steady_clock::now();
     {
       torch::NoGradGuard no_grad;
-      torch::Tensor last_obs = normalizer_.normalize(collect_observations());
-      torch::Tensor episode_starts = host_episode_starts_.to(device_, use_pinned_host_buffers_);
-      PolicyOutput output = model_->forward_step(last_obs, collection_state_, episode_starts);
+      ScopedAutocast autocast(use_amp, device_.type(), at::kBFloat16);
+      PolicyOutput output = model_->forward_step(last_obs, collection_state_, last_episode_starts);
       last_sampled_value = output.sampled_values;
     }
+    metrics.policy_forward_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - bootstrap_start).count();
     rollout_.compute_returns_and_advantages(last_sampled_value, config_.ppo.gamma, config_.ppo.gae_lambda);
+    metrics.gae_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - gae_start).count();
 
-    TrainerMetrics metrics = update_policy();
-    metrics.collection_fps =
-        static_cast<double>(config_.ppo.rollout_length * total_agents_) /
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - collection_start).count();
-    metrics.reward_mean = rollout_.rewards.mean().item<double>();
+    TrainerMetrics update_metrics = update_policy();
+    metrics.policy_loss = update_metrics.policy_loss;
+    metrics.value_loss = update_metrics.value_loss;
+    metrics.entropy = update_metrics.entropy;
+    metrics.value_entropy = update_metrics.value_entropy;
+    metrics.value_variance = update_metrics.value_variance;
+    metrics.update_seconds = update_metrics.update_seconds;
+    metrics.ppo_forward_backward_seconds = update_metrics.ppo_forward_backward_seconds;
+    metrics.optimizer_step_seconds = update_metrics.optimizer_step_seconds;
+    metrics.obs_build_seconds = collector_timings.obs_build_seconds;
+    metrics.mask_build_seconds = collector_timings.mask_build_seconds;
+    metrics.env_step_seconds = collector_timings.env_step_seconds;
+    metrics.reward_done_seconds = collector_timings.reward_done_seconds;
+
+    metrics.collection_agent_steps_per_second =
+        collected_agent_steps > 0 ? static_cast<double>(collected_agent_steps) / collection_seconds : 0.0;
+    metrics.update_agent_steps_per_second =
+        collected_agent_steps > 0 ? static_cast<double>(collected_agent_steps) / std::max(metrics.update_seconds, 1.0e-9) : 0.0;
+
+    global_step += collected_agent_steps;
+
+    if (self_play_manager_) {
+      SelfPlayMetrics self_play_metrics =
+          self_play_manager_->on_update(model_, normalizer_, global_step, update_index + 1);
+      metrics.self_play_eval_seconds = self_play_metrics.eval_seconds;
+      metrics.elo_ratings = std::move(self_play_metrics.ratings);
+    }
+
+    metrics.overall_agent_steps_per_second =
+        collected_agent_steps > 0
+            ? static_cast<double>(collected_agent_steps) /
+                  std::max(std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count(), 1.0e-9)
+            : 0.0;
+    const torch::Tensor active_rewards = rollout_.rewards * rollout_.learner_active;
+    const double active_count = rollout_.learner_active.sum().item<double>();
+    metrics.reward_mean = active_count > 0.0 ? active_rewards.sum().item<double>() / active_count : 0.0;
 
     std::cout << "update=" << update_index
-              << " fps=" << metrics.collection_fps
+              << " collection_sps=" << metrics.collection_agent_steps_per_second
+              << " update_sps=" << metrics.update_agent_steps_per_second
+              << " overall_sps=" << metrics.overall_agent_steps_per_second
               << " reward_mean=" << metrics.reward_mean
               << " policy_loss=" << metrics.policy_loss
               << " value_loss=" << metrics.value_loss
               << " entropy=" << metrics.entropy
-              << " value_entropy=" << metrics.value_entropy
-              << " value_variance=" << metrics.value_variance
+              << " self_play_eval_s=" << metrics.self_play_eval_seconds
               << '\n';
     append_metrics_line(checkpoint_dir, update_index, global_step, metrics);
     if (wandb.enabled()) {
-      wandb.log(nlohmann::json{
+      nlohmann::json wandb_metrics = {
           {"update", update_index},
           {"global_step", global_step},
-          {"collection_fps", metrics.collection_fps},
+          {"collection_agent_steps_per_second", metrics.collection_agent_steps_per_second},
+          {"update_agent_steps_per_second", metrics.update_agent_steps_per_second},
+          {"overall_agent_steps_per_second", metrics.overall_agent_steps_per_second},
           {"update_seconds", metrics.update_seconds},
           {"reward_mean", metrics.reward_mean},
           {"policy_loss", metrics.policy_loss},
@@ -625,7 +724,23 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
           {"entropy", metrics.entropy},
           {"value_entropy", metrics.value_entropy},
           {"value_variance", metrics.value_variance},
-      });
+          {"obs_build_seconds", metrics.obs_build_seconds},
+          {"mask_build_seconds", metrics.mask_build_seconds},
+          {"policy_forward_seconds", metrics.policy_forward_seconds},
+          {"action_decode_seconds", metrics.action_decode_seconds},
+          {"env_step_seconds", metrics.env_step_seconds},
+          {"reward_done_seconds", metrics.reward_done_seconds},
+          {"ngp_reward_seconds", metrics.ngp_reward_seconds},
+          {"rollout_append_seconds", metrics.rollout_append_seconds},
+          {"gae_seconds", metrics.gae_seconds},
+          {"ppo_forward_backward_seconds", metrics.ppo_forward_backward_seconds},
+          {"optimizer_step_seconds", metrics.optimizer_step_seconds},
+          {"self_play_eval_seconds", metrics.self_play_eval_seconds},
+      };
+      for (const auto& [mode, rating] : metrics.elo_ratings) {
+        wandb_metrics["elo/" + mode] = rating;
+      }
+      wandb.log(std::move(wandb_metrics));
     }
 
     if ((update_index + 1) % config_.ppo.checkpoint_interval == 0) {

@@ -4,88 +4,75 @@
 #include <memory>
 
 #include "pulsar/config/config.hpp"
-#include "pulsar/core/parallel_executor.hpp"
-#include "pulsar/env/mutators.hpp"
+#include "pulsar/env/done.hpp"
 #include "pulsar/env/obs_builder.hpp"
-#include "pulsar/env/rocketsim_engine.hpp"
+#include "pulsar/env/reward.hpp"
+#include "pulsar/rl/action_table.hpp"
+#include "pulsar/training/batched_rocketsim_collector.hpp"
 
 int main(int argc, char** argv) {
   pulsar::ExperimentConfig config;
   const int num_envs = argc > 1 ? std::max(1, std::atoi(argv[1])) : 1;
   const std::size_t collection_workers =
       argc > 2 ? static_cast<std::size_t>(std::max(1, std::atoi(argv[2]))) : 0;
+  const bool pin_host_memory = argc > 3 ? std::atoi(argv[3]) != 0 : false;
+  config.ppo.num_envs = num_envs;
+  config.ppo.collection_workers = static_cast<int>(collection_workers);
 
-  auto reset_mutator = std::make_shared<pulsar::MutatorSequence>(
-      std::vector<pulsar::StateMutatorPtr>{
-          std::make_shared<pulsar::FixedTeamSizeMutator>(config.env),
-          std::make_shared<pulsar::KickoffMutator>(config.env),
-      });
-
-  std::vector<std::unique_ptr<pulsar::RocketSimTransitionEngine>> engines;
-  engines.reserve(static_cast<std::size_t>(num_envs));
-  std::size_t total_agents = 0;
-  for (int env_idx = 0; env_idx < num_envs; ++env_idx) {
-    pulsar::EnvConfig env_config = config.env;
-    env_config.seed += static_cast<std::uint64_t>(env_idx);
-    engines.push_back(std::make_unique<pulsar::RocketSimTransitionEngine>(env_config, reset_mutator));
-    total_agents += engines.back()->num_agents();
-  }
-
-  pulsar::PulsarObsBuilder obs_builder(config.env);
-  pulsar::ParallelExecutor executor(collection_workers);
-  std::vector<pulsar::ControllerState> actions(engines.front()->num_agents(), {.throttle = 1.0F, .boost = true});
-  std::vector<float> obs_buffer(total_agents * obs_builder.obs_dim());
+  auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
+  auto action_parser =
+      std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
+  auto reward_fn = std::make_shared<pulsar::CombinedRewardFunction>(config.reward);
+  auto done_condition = std::make_shared<pulsar::SimpleDoneCondition>(config.env);
+  pulsar::BatchedRocketSimCollector collector(
+      config,
+      obs_builder,
+      action_parser,
+      reward_fn,
+      done_condition,
+      pin_host_memory);
+  std::vector<pulsar::ControllerState> actions(
+      collector.total_agents(),
+      pulsar::ControllerState{.throttle = 1.0F, .boost = true});
 
   const int warmup_steps = 256;
   const int steps = 10000;
 
-  auto run = [&](bool include_obs) {
-    for (auto& engine : engines) {
-      engine->reset(config.env.seed);
-    }
+  auto run = [&](bool include_obs, bool include_masks) {
+    pulsar::CollectorTimings timings{};
     for (int i = 0; i < warmup_steps; ++i) {
-      executor.parallel_for(engines.size(), [&](std::size_t begin, std::size_t end) {
-        for (std::size_t engine_idx = begin; engine_idx < end; ++engine_idx) {
-          auto& engine = engines[engine_idx];
-          engine->step_inplace(actions);
-          if (include_obs) {
-            const std::size_t offset = engine_idx * static_cast<std::size_t>(engine->num_agents()) * obs_builder.obs_dim();
-            obs_builder.build_obs_batch(
-                engine->state(),
-                std::span<float>(
-                    obs_buffer.data() + static_cast<std::ptrdiff_t>(offset),
-                    engine->num_agents() * obs_builder.obs_dim()));
-          }
-        }
-      });
+      if (include_obs) {
+        collector.collect_observations(&timings);
+      }
+      if (include_masks) {
+        collector.collect_action_masks(&timings);
+      }
+      collector.step(actions, false, &timings);
     }
 
     const auto start = std::chrono::steady_clock::now();
+    timings = {};
     for (int i = 0; i < steps; ++i) {
-      executor.parallel_for(engines.size(), [&](std::size_t begin, std::size_t end) {
-        for (std::size_t engine_idx = begin; engine_idx < end; ++engine_idx) {
-          auto& engine = engines[engine_idx];
-          engine->step_inplace(actions);
-          if (include_obs) {
-            const std::size_t offset = engine_idx * static_cast<std::size_t>(engine->num_agents()) * obs_builder.obs_dim();
-            obs_builder.build_obs_batch(
-                engine->state(),
-                std::span<float>(
-                    obs_buffer.data() + static_cast<std::ptrdiff_t>(offset),
-                    engine->num_agents() * obs_builder.obs_dim()));
-          }
-        }
-      });
+      if (include_obs) {
+        collector.collect_observations(&timings);
+      }
+      if (include_masks) {
+        collector.collect_action_masks(&timings);
+      }
+      collector.step(actions, false, &timings);
     }
-    return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    return std::pair{
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
+        timings,
+    };
   };
 
-  const double step_seconds = run(false);
-  const double collection_seconds = run(true);
+  const auto [step_seconds, step_timings] = run(false, false);
+  const auto [collection_seconds, collection_timings] = run(true, true);
   const double step_env_steps_per_second = static_cast<double>(steps * num_envs) / step_seconds;
   const double collection_env_steps_per_second = static_cast<double>(steps * num_envs) / collection_seconds;
   const double collection_agent_steps_per_second =
-      collection_env_steps_per_second * static_cast<double>(engines.front()->num_agents());
+      collection_env_steps_per_second * static_cast<double>(collector.total_agents()) / static_cast<double>(num_envs);
   const double collection_sim_ticks_per_second =
       collection_env_steps_per_second * static_cast<double>(config.env.tick_skip);
   const double collection_agent_ticks_per_second =
@@ -99,14 +86,19 @@ int main(int argc, char** argv) {
 #endif
             << '\n';
   std::cout << "num_envs=" << num_envs << '\n';
-  std::cout << "collection_workers=" << executor.worker_count() << '\n';
+  std::cout << "collection_workers=" << collection_workers << '\n';
   std::cout << "step_only_env_steps_per_second=" << step_env_steps_per_second << '\n';
   std::cout << "collection_env_steps_per_second=" << collection_env_steps_per_second << '\n';
   std::cout << "collection_agent_steps_per_second=" << collection_agent_steps_per_second << '\n';
   std::cout << "collection_sim_ticks_per_second=" << collection_sim_ticks_per_second << '\n';
   std::cout << "collection_agent_ticks_per_second=" << collection_agent_ticks_per_second << '\n';
-  std::cout << "agents=" << engines.front()->num_agents() << '\n';
+  std::cout << "agents=" << collector.total_agents() / static_cast<std::size_t>(num_envs) << '\n';
   std::cout << "tick_skip=" << config.env.tick_skip << '\n';
-  std::cout << "obs_dim=" << obs_builder.obs_dim() << '\n';
+  std::cout << "obs_dim=" << obs_builder->obs_dim() << '\n';
+  std::cout << "obs_build_seconds=" << collection_timings.obs_build_seconds << '\n';
+  std::cout << "mask_build_seconds=" << collection_timings.mask_build_seconds << '\n';
+  std::cout << "env_step_seconds=" << collection_timings.env_step_seconds << '\n';
+  std::cout << "reward_done_seconds=" << collection_timings.reward_done_seconds << '\n';
+  std::cout << "step_only_env_step_seconds=" << step_timings.env_step_seconds << '\n';
   return 0;
 }

@@ -38,11 +38,12 @@ pulsar::ExperimentConfig make_config() {
 
 int main() {
   try {
-    const pulsar::ExperimentConfig config = make_config();
+    pulsar::ExperimentConfig config = make_config();
 
     const pulsar::ControllerActionTable action_table(config.action_table);
     require(action_table.size() == 90, "lookup action table size mismatch");
     require(!action_table.hash().empty(), "action table hash should not be empty");
+    const pulsar::DiscreteActionParser parser(action_table);
 
     pulsar::EnvState state;
     pulsar::FixedTeamSizeMutator fixed(config.env);
@@ -73,6 +74,59 @@ int main() {
     require(terminated[0] == 1, "goal should terminate the episode");
     require(truncated[0] == 1, "max episode ticks should truncate the episode");
 
+    state.cars.resize(1);
+    state.cars[0].id = 0;
+    state.cars[0].boost = 0.0F;
+    state.cars[0].on_ground = true;
+    state.cars[0].has_flip = true;
+    std::vector<std::uint8_t> no_boost_mask(action_table.size(), 0);
+    parser.build_action_mask_batch(state, no_boost_mask);
+    bool saw_masked_boost = false;
+    for (std::size_t i = 0; i < action_table.size(); ++i) {
+      if (action_table.at(i).boost) {
+        saw_masked_boost = saw_masked_boost || (no_boost_mask[i] == 0);
+      }
+    }
+    require(saw_masked_boost, "boost actions should be masked when boost is unavailable");
+
+    state.cars[0].boost = 33.0F;
+    state.cars[0].on_ground = true;
+    state.cars[0].has_flip = true;
+    std::vector<std::uint8_t> grounded_mask(action_table.size(), 0);
+    parser.build_action_mask_batch(state, grounded_mask);
+    bool saw_ground_jump = false;
+    for (std::size_t i = 0; i < action_table.size(); ++i) {
+      if (action_table.at(i).jump && grounded_mask[i] != 0) {
+        saw_ground_jump = true;
+        break;
+      }
+    }
+    require(saw_ground_jump, "jump actions should remain valid on the ground");
+
+    state.cars[0].on_ground = false;
+    state.cars[0].has_flip = true;
+    std::vector<std::uint8_t> flip_mask(action_table.size(), 0);
+    parser.build_action_mask_batch(state, flip_mask);
+    bool saw_air_jump = false;
+    for (std::size_t i = 0; i < action_table.size(); ++i) {
+      if (action_table.at(i).jump && flip_mask[i] != 0) {
+        saw_air_jump = true;
+        break;
+      }
+    }
+    require(saw_air_jump, "jump actions should remain valid while a flip is available");
+
+    state.cars[0].has_flip = false;
+    std::vector<std::uint8_t> no_flip_mask(action_table.size(), 0);
+    parser.build_action_mask_batch(state, no_flip_mask);
+    bool saw_masked_jump = false;
+    for (std::size_t i = 0; i < action_table.size(); ++i) {
+      if (action_table.at(i).jump) {
+        saw_masked_jump = saw_masked_jump || (no_flip_mask[i] == 0);
+      }
+    }
+    require(saw_masked_jump, "jump actions should be masked when airborne without a flip");
+
     const auto tmp_dir = std::filesystem::temp_directory_path() / "pulsar_test_metadata.json";
     const pulsar::CheckpointMetadata metadata{
         .schema_version = config.schema_version,
@@ -88,6 +142,16 @@ int main() {
     const auto loaded = pulsar::load_checkpoint_metadata(tmp_dir.string());
     pulsar::validate_checkpoint_metadata(loaded, config);
     std::filesystem::remove(tmp_dir);
+
+    config.ppo.self_play.enabled = true;
+    config.ppo.self_play.opponent_probability = 0.5F;
+    config.ppo.precision.mode = "amp_bf16";
+    const auto config_path = std::filesystem::temp_directory_path() / "pulsar_test_config.json";
+    pulsar::save_experiment_config(config, config_path.string());
+    const auto roundtripped = pulsar::load_experiment_config(config_path.string());
+    require(roundtripped.ppo.self_play.enabled, "self-play config should round-trip");
+    require(roundtripped.ppo.precision.mode == "amp_bf16", "precision config should round-trip");
+    std::filesystem::remove(config_path);
 
     std::cout << "pulsar_core_tests passed\n";
     return EXIT_SUCCESS;

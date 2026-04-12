@@ -134,6 +134,29 @@ void DiscreteActionParser::parse_actions_into(
   }
 }
 
+std::vector<std::uint8_t> DiscreteActionParser::build_action_mask(const EnvState& state, AgentId agent_id) const {
+  if (agent_id >= state.cars.size()) {
+    throw std::out_of_range("Action mask agent index out of range.");
+  }
+
+  const CarState& car = state.cars[agent_id];
+  std::vector<std::uint8_t> mask(action_table_.size(), static_cast<std::uint8_t>(1));
+  for (std::size_t index = 0; index < action_table_.size(); ++index) {
+    const ControllerState& action = action_table_.at(index);
+    bool valid = true;
+
+    if (action.boost && car.boost <= 0.5F) {
+      valid = false;
+    }
+    if (action.jump && !(car.on_ground || car.has_flip)) {
+      valid = false;
+    }
+
+    mask[index] = static_cast<std::uint8_t>(valid ? 1 : 0);
+  }
+  return mask;
+}
+
 const ControllerActionTable& DiscreteActionParser::action_table() const {
   return action_table_;
 }

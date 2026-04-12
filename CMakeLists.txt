@@ -79,7 +79,9 @@ if(PULSAR_ENABLE_TORCH)
       cpp/src/training/offline_dataset.cpp
       cpp/src/training/offline_pretrainer.cpp
       cpp/src/training/rollout_storage.cpp
+      cpp/src/training/batched_rocketsim_collector.cpp
       cpp/src/training/ppo_trainer.cpp
+      cpp/src/training/self_play_manager.cpp
     )
 
     target_include_directories(pulsar_torch PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
@@ -154,11 +156,11 @@ if(PULSAR_ENABLE_TESTS)
   endif()
 endif()
 
-if(PULSAR_ENABLE_BENCHMARKS)
+if(PULSAR_ENABLE_BENCHMARKS AND TARGET pulsar_torch)
   add_executable(
     pulsar_bench
     cpp/benchmarks/benchmark_main.cpp
   )
   target_include_directories(pulsar_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
-  target_link_libraries(pulsar_bench PRIVATE pulsar_core)
+  target_link_libraries(pulsar_bench PRIVATE pulsar_torch)
 endif()

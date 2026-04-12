@@ -17,6 +17,7 @@ class ObservationNormalizer {
   void to(const torch::Device& device);
   void update(const torch::Tensor& obs);
   torch::Tensor normalize(const torch::Tensor& obs) const;
+  [[nodiscard]] ObservationNormalizer clone() const;
   void save(torch::serialize::OutputArchive& archive) const;
   void load(torch::serialize::InputArchive& archive);
 

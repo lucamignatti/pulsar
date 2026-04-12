@@ -94,7 +94,24 @@
     "confidence_weight_type": "entropy",
     "confidence_weight_delta": 1e-06,
     "normalize_confidence_weights": false,
-    "advantage_calculation": "quantile_sampling"
+    "advantage_calculation": "quantile_sampling",
+    "self_play": {
+      "enabled": true,
+      "opponent_probability": 0.5,
+      "snapshot_interval_updates": 10,
+      "max_snapshots": 8,
+      "opponent_sampling": "uniform",
+      "training_opponent_policy": "stochastic",
+      "eval_interval_updates": 10,
+      "eval_num_envs": 8,
+      "eval_matches_per_snapshot": 4,
+      "eval_policy": "deterministic",
+      "elo_initial": 1000.0,
+      "elo_k": 32.0
+    },
+    "precision": {
+      "mode": "amp_bf16"
+    }
   },
   "wandb": {
     "enabled": false,

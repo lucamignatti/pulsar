@@ -61,6 +61,25 @@ struct ModelConfig {
 };
 
 struct PPOConfig {
+  struct SelfPlayConfig {
+    bool enabled = false;
+    float opponent_probability = 0.0F;
+    int snapshot_interval_updates = 10;
+    int max_snapshots = 8;
+    std::string opponent_sampling = "uniform";
+    std::string training_opponent_policy = "stochastic";
+    int eval_interval_updates = 10;
+    int eval_num_envs = 8;
+    int eval_matches_per_snapshot = 4;
+    std::string eval_policy = "deterministic";
+    float elo_initial = 1000.0F;
+    float elo_k = 32.0F;
+  };
+
+  struct PrecisionConfig {
+    std::string mode = "fp32";
+  };
+
   int num_envs = 64;
   int collection_workers = 0;
   std::string init_checkpoint{};
@@ -92,6 +111,8 @@ struct PPOConfig {
   float confidence_weight_delta = 1.0e-6F;
   bool normalize_confidence_weights = false;
   std::string advantage_calculation = "quantile_sampling";
+  SelfPlayConfig self_play{};
+  PrecisionConfig precision{};
 };
 
 struct OfflineDatasetConfig {
@@ -178,6 +199,10 @@ void to_json(nlohmann::json& j, const EnvConfig& value);
 void from_json(const nlohmann::json& j, EnvConfig& value);
 void to_json(nlohmann::json& j, const ModelConfig& value);
 void from_json(const nlohmann::json& j, ModelConfig& value);
+void to_json(nlohmann::json& j, const PPOConfig::SelfPlayConfig& value);
+void from_json(const nlohmann::json& j, PPOConfig::SelfPlayConfig& value);
+void to_json(nlohmann::json& j, const PPOConfig::PrecisionConfig& value);
+void from_json(const nlohmann::json& j, PPOConfig::PrecisionConfig& value);
 void to_json(nlohmann::json& j, const PPOConfig& value);
 void from_json(const nlohmann::json& j, PPOConfig& value);
 void to_json(nlohmann::json& j, const OfflineDatasetConfig& value);

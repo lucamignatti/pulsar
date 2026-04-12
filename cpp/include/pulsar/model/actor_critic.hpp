@@ -95,6 +95,7 @@ class SharedActorCriticImpl : public torch::nn::Module {
 TORCH_MODULE(SharedActorCritic);
 
 SharedActorCritic load_shared_model(const std::string& checkpoint_path, const std::string& device);
+SharedActorCritic clone_shared_model(const SharedActorCritic& source, const torch::Device& device);
 
 #else
 

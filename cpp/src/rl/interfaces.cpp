@@ -32,6 +32,34 @@ void ActionParser::parse_actions_into(
   std::copy(actions.begin(), actions.end(), out.begin());
 }
 
+void ActionParser::build_action_mask_batch(const EnvState& state, std::span<std::uint8_t> out) const {
+  if (state.cars.empty()) {
+    if (!out.empty()) {
+      throw std::invalid_argument("ActionParser::build_action_mask_batch expected an empty output span.");
+    }
+    return;
+  }
+
+  const std::vector<std::uint8_t> first = build_action_mask(state, 0);
+  const std::size_t stride = first.size();
+  const std::size_t expected = state.cars.size() * stride;
+  if (out.size() != expected) {
+    throw std::invalid_argument("ActionParser::build_action_mask_batch received an output span with the wrong size.");
+  }
+
+  std::copy(first.begin(), first.end(), out.begin());
+  for (std::size_t agent_id = 1; agent_id < state.cars.size(); ++agent_id) {
+    const std::vector<std::uint8_t> mask = build_action_mask(state, agent_id);
+    if (mask.size() != stride) {
+      throw std::invalid_argument("ActionParser::build_action_mask returned inconsistent sizes across agents.");
+    }
+    std::copy(
+        mask.begin(),
+        mask.end(),
+        out.begin() + static_cast<std::ptrdiff_t>(agent_id * stride));
+  }
+}
+
 void RewardFunction::get_rewards_into(
     const EnvState& previous_state,
     const EnvState& current_state,

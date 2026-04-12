@@ -40,6 +40,14 @@ torch::Tensor ObservationNormalizer::normalize(const torch::Tensor& obs) const {
   return (obs - mean_) / torch::sqrt(var_ + 1.0e-6);
 }
 
+ObservationNormalizer ObservationNormalizer::clone() const {
+  ObservationNormalizer copy(0);
+  copy.mean_ = mean_.clone();
+  copy.var_ = var_.clone();
+  copy.count_ = count_.clone();
+  return copy;
+}
+
 void ObservationNormalizer::save(torch::serialize::OutputArchive& archive) const {
   archive.write("norm_mean", mean_);
   archive.write("norm_var", var_);

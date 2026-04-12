@@ -1,8 +1,10 @@
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 
 #include "pulsar/model/actor_critic.hpp"
+#include "pulsar/model/normalizer.hpp"
 
 int main() {
   try {
@@ -24,6 +26,23 @@ int main() {
     }
     if (output.expected_values.sizes() != torch::IntArrayRef({4})) {
       throw std::runtime_error("expected value shape mismatch");
+    }
+
+    const auto clone = pulsar::clone_shared_model(model, torch::kCPU);
+    const auto source_params = model->named_parameters(true);
+    const auto clone_params = clone->named_parameters(true);
+    for (const auto& item : source_params) {
+      if (!torch::allclose(item.value(), clone_params[item.key()])) {
+        throw std::runtime_error("cloned model parameters diverged");
+      }
+    }
+
+    pulsar::ObservationNormalizer normalizer(config.observation_dim);
+    normalizer.update(torch::randn({8, config.observation_dim}));
+    const auto normalizer_clone = normalizer.clone();
+    const torch::Tensor sample = torch::randn({2, config.observation_dim});
+    if (!torch::allclose(normalizer.normalize(sample), normalizer_clone.normalize(sample))) {
+      throw std::runtime_error("normalizer clone mismatch");
     }
 
     std::cout << "pulsar_torch_tests passed\n";

@@ -39,10 +39,12 @@ def main() -> int:
         config["ppo"]["epochs"] = 1
         config["ppo"]["checkpoint_interval"] = 1
         config["ppo"]["device"] = "cpu"
+        config["ppo"]["precision"] = {"mode": "fp32"}
         config["reward"]["mode"] = "shaped"
         config["reward"]["ngp_checkpoint"] = ""
         config["reward"]["shaped_scale"] = 1.0
         config["reward"]["ngp_scale"] = 0.0
+        config["env"]["collision_meshes_path"] = str(repo_root / "collision_meshes")
         config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
         subprocess.run(
