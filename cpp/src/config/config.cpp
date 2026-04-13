@@ -103,7 +103,6 @@ void from_json(const json& j, EnvConfig& value) {
 void to_json(json& j, const ModelConfig& value) {
   j = json{
       {"observation_dim", value.observation_dim},
-      {"hidden_sizes", value.hidden_sizes},
       {"action_dim", value.action_dim},
       {"use_layer_norm", value.use_layer_norm},
       {"encoder_dim", value.encoder_dim},
@@ -121,7 +120,6 @@ void to_json(json& j, const ModelConfig& value) {
 
 void from_json(const json& j, ModelConfig& value) {
   value.observation_dim = j.at("observation_dim").get<int>();
-  value.hidden_sizes = j.at("hidden_sizes").get<std::vector<int>>();
   value.action_dim = j.at("action_dim").get<int>();
   value.use_layer_norm = j.at("use_layer_norm").get<bool>();
   value.encoder_dim = j.value("encoder_dim", 512);

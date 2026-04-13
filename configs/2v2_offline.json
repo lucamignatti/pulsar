@@ -18,7 +18,6 @@
   },
   "model": {
     "observation_dim": 132,
-    "hidden_sizes": [1024, 1024, 512, 512],
     "action_dim": 90,
     "use_layer_norm": true,
     "encoder_dim": 512,

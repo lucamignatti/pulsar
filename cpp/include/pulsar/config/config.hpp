@@ -35,7 +35,6 @@ struct EnvConfig {
 
 struct ModelConfig {
   int observation_dim = 132;
-  std::vector<int> hidden_sizes{1024, 1024, 512, 512};
   int action_dim = 90;
   bool use_layer_norm = true;
   int encoder_dim = 512;

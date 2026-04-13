@@ -9,6 +9,8 @@
 int main() {
   try {
     pulsar::ModelConfig config;
+    config.encoder_dim = 16;
+    config.use_layer_norm = false;
     pulsar::PPOConfig ppo;
     ppo.value_num_atoms = 31;
     pulsar::SharedActorCritic model(config, ppo);
@@ -26,6 +28,15 @@ int main() {
     }
     if (output.expected_values.sizes() != torch::IntArrayRef({4})) {
       throw std::runtime_error("expected value shape mismatch");
+    }
+
+    const auto named_parameters = model->named_parameters(true);
+    const auto* first_encoder = named_parameters.find("encoder.0.weight");
+    if (first_encoder == nullptr) {
+      throw std::runtime_error("encoder projection parameter missing");
+    }
+    if (first_encoder->sizes() != torch::IntArrayRef({config.encoder_dim, config.observation_dim})) {
+      throw std::runtime_error("encoder projection shape mismatch");
     }
 
     const auto clone = pulsar::clone_shared_model(model, torch::kCPU);

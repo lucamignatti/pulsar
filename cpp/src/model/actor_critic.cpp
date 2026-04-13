@@ -33,15 +33,44 @@ torch::Tensor masked_softmax(torch::Tensor logits, const torch::Tensor& strength
   return torch::softmax(masked_logits, -1);
 }
 
+void append_encoder_block(
+    torch::nn::Sequential& encoder,
+    int in_dim,
+    int out_dim,
+    bool use_layer_norm) {
+  encoder->push_back(torch::nn::Linear(in_dim, out_dim));
+  if (use_layer_norm) {
+    encoder->push_back(torch::nn::LayerNorm(torch::nn::LayerNormOptions({out_dim})));
+  }
+  encoder->push_back(torch::nn::Functional(torch::relu));
+}
+
+void validate_model_config(const ModelConfig& config) {
+  auto require_positive = [](int value, const char* field) {
+    if (value <= 0) {
+      throw std::invalid_argument(std::string("ModelConfig.") + field + " must be positive.");
+    }
+  };
+
+  require_positive(config.observation_dim, "observation_dim");
+  require_positive(config.action_dim, "action_dim");
+  require_positive(config.encoder_dim, "encoder_dim");
+  require_positive(config.workspace_dim, "workspace_dim");
+  require_positive(config.stm_slots, "stm_slots");
+  require_positive(config.stm_key_dim, "stm_key_dim");
+  require_positive(config.stm_value_dim, "stm_value_dim");
+  require_positive(config.ltm_slots, "ltm_slots");
+  require_positive(config.ltm_dim, "ltm_dim");
+  require_positive(config.controller_dim, "controller_dim");
+  require_positive(config.consolidation_stride, "consolidation_stride");
+}
+
 }  // namespace
 
 SharedActorCriticImpl::SharedActorCriticImpl(ModelConfig config, PPOConfig ppo_config)
     : config_(std::move(config)), ppo_config_(std::move(ppo_config)) {
-  encoder_->push_back(torch::nn::Linear(config_.observation_dim, config_.encoder_dim));
-  if (config_.use_layer_norm) {
-    encoder_->push_back(torch::nn::LayerNorm(torch::nn::LayerNormOptions({config_.encoder_dim})));
-  }
-  encoder_->push_back(torch::nn::Functional(torch::relu));
+  validate_model_config(config_);
+  append_encoder_block(encoder_, config_.observation_dim, config_.encoder_dim, config_.use_layer_norm);
   register_module("encoder", encoder_);
 
   const int fused_in = config_.encoder_dim + config_.workspace_dim;

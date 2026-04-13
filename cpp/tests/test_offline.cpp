@@ -149,7 +149,6 @@ int main() {
 
     pulsar::ExperimentConfig config;
     config.model.observation_dim = static_cast<int>(obs_dim);
-    config.model.hidden_sizes = {32, 32};
     config.model.encoder_dim = 32;
     config.model.workspace_dim = 32;
     config.model.stm_slots = 8;
@@ -237,7 +236,7 @@ int main() {
     };
 
     pulsar::ExperimentConfig bad_init_config = config;
-    bad_init_config.model.hidden_sizes = {64, 32};
+    bad_init_config.model.encoder_dim = 64;
     bool init_mismatch_threw = false;
     try {
       (void)make_trainer(bad_init_config);
