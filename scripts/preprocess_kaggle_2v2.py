@@ -4,13 +4,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
+from tqdm.auto import tqdm
 
 
 def _require_replay_stack() -> dict[str, Any]:
@@ -466,6 +467,14 @@ def _process_replay_subset_job(job: tuple[list[str], dict[str, Any], str]) -> Wo
     return _process_replay_subset(replay_paths, worker_config, shard_prefix)
 
 
+def _chunk_replay_paths(replay_paths: list[str], worker_count: int) -> list[list[str]]:
+    if not replay_paths:
+        return []
+    target_jobs = max(worker_count * 8, worker_count)
+    chunk_size = max(1, (len(replay_paths) + target_jobs - 1) // target_jobs)
+    return [replay_paths[index:index + chunk_size] for index in range(0, len(replay_paths), chunk_size)]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Convert the Kaggle high-level Rocket League 2v2 replay split into Pulsar offline trajectory shards."
@@ -498,22 +507,36 @@ def main() -> int:
     replay_path_strs = [path.as_posix() for path in replay_paths]
     worker_count = min(args.workers, len(replay_path_strs))
     worker_config = _build_worker_config(args)
+    replay_chunks = _chunk_replay_paths(replay_path_strs, worker_count)
+    chunk_width = max(2, len(str(max(len(replay_chunks) - 1, 0))))
+    jobs = [
+        (
+            replay_chunk,
+            worker_config,
+            f"c{chunk_index:0{chunk_width}d}_",
+        )
+        for chunk_index, replay_chunk in enumerate(replay_chunks)
+    ]
 
-    if worker_count == 1:
-        results = [_process_replay_subset(replay_path_strs, worker_config, "")]
-    else:
-        worker_width = max(2, len(str(worker_count - 1)))
-        jobs = [
-            (
-                replay_path_strs[worker_index::worker_count],
-                worker_config,
-                f"w{worker_index:0{worker_width}d}_",
-            )
-            for worker_index in range(worker_count)
-            if replay_path_strs[worker_index::worker_count]
-        ]
-        with ProcessPoolExecutor(max_workers=worker_count) as executor:
-            results = list(executor.map(_process_replay_subset_job, jobs))
+    progress = tqdm(total=len(replay_path_strs), desc="Preprocess", unit="replay")
+
+    results: list[WorkerResult] = []
+    try:
+        if worker_count == 1:
+            for replay_chunk, worker_config_chunk, shard_prefix in jobs:
+                results.append(_process_replay_subset(replay_chunk, worker_config_chunk, shard_prefix))
+                progress.update(len(replay_chunk))
+        else:
+            with ProcessPoolExecutor(max_workers=worker_count) as executor:
+                future_to_chunk_size = {
+                    executor.submit(_process_replay_subset_job, job): len(job[0])
+                    for job in jobs
+                }
+                for future in as_completed(future_to_chunk_size):
+                    results.append(future.result())
+                    progress.update(future_to_chunk_size[future])
+    finally:
+        progress.close()
 
     obs_dims = sorted({result.obs_dim for result in results if result.obs_dim is not None})
     if not obs_dims:

@@ -24,6 +24,7 @@ offline = [
   "pyarrow>=16,<30",
   "scipy>=1.13,<2",
   "numba>=0.60,<1",
+  "tqdm>=4.66,<5",
 ]
 
 [project.scripts]
