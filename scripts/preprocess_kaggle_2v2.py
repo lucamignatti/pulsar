@@ -467,14 +467,6 @@ def _process_replay_subset_job(job: tuple[list[str], dict[str, Any], str]) -> Wo
     return _process_replay_subset(replay_paths, worker_config, shard_prefix)
 
 
-def _chunk_replay_paths(replay_paths: list[str], worker_count: int) -> list[list[str]]:
-    if not replay_paths:
-        return []
-    target_jobs = max(worker_count * 8, worker_count)
-    chunk_size = max(1, (len(replay_paths) + target_jobs - 1) // target_jobs)
-    return [replay_paths[index:index + chunk_size] for index in range(0, len(replay_paths), chunk_size)]
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Convert the Kaggle high-level Rocket League 2v2 replay split into Pulsar offline trajectory shards."
@@ -507,15 +499,14 @@ def main() -> int:
     replay_path_strs = [path.as_posix() for path in replay_paths]
     worker_count = min(args.workers, len(replay_path_strs))
     worker_config = _build_worker_config(args)
-    replay_chunks = _chunk_replay_paths(replay_path_strs, worker_count)
-    chunk_width = max(2, len(str(max(len(replay_chunks) - 1, 0))))
+    job_width = max(2, len(str(max(len(replay_path_strs) - 1, 0))))
     jobs = [
         (
-            replay_chunk,
+            [replay_path],
             worker_config,
-            f"c{chunk_index:0{chunk_width}d}_",
+            f"r{job_index:0{job_width}d}_",
         )
-        for chunk_index, replay_chunk in enumerate(replay_chunks)
+        for job_index, replay_path in enumerate(replay_path_strs)
     ]
 
     progress = tqdm(total=len(replay_path_strs), desc="Preprocess", unit="replay")
@@ -523,9 +514,9 @@ def main() -> int:
     results: list[WorkerResult] = []
     try:
         if worker_count == 1:
-            for replay_chunk, worker_config_chunk, shard_prefix in jobs:
-                results.append(_process_replay_subset(replay_chunk, worker_config_chunk, shard_prefix))
-                progress.update(len(replay_chunk))
+            for replay_job, worker_config_chunk, shard_prefix in jobs:
+                results.append(_process_replay_subset(replay_job, worker_config_chunk, shard_prefix))
+                progress.update(1)
         else:
             with ProcessPoolExecutor(max_workers=worker_count) as executor:
                 future_to_chunk_size = {
@@ -534,7 +525,7 @@ def main() -> int:
                 }
                 for future in as_completed(future_to_chunk_size):
                     results.append(future.result())
-                    progress.update(future_to_chunk_size[future])
+                    progress.update(1)
     finally:
         progress.close()
 
