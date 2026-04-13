@@ -435,7 +435,8 @@ def _process_replay_subset(
 
             for trajectory in trajectories.values():
                 append_trajectory(split, trajectory)
-        except Exception:
+        except Exception as exc:
+            print(f"error while processing replay: {replay_path} ({exc!r})", flush=True)
             result.skipped_replays += 1
             continue
 
@@ -510,46 +511,56 @@ def main() -> int:
     ]
 
     progress = tqdm(total=len(replay_path_strs), desc="Preprocess", unit="replay")
-
-    results: list[WorkerResult] = []
-    try:
-        if worker_count == 1:
-            for replay_job, worker_config_chunk, shard_prefix in jobs:
-                results.append(_process_replay_subset(replay_job, worker_config_chunk, shard_prefix))
-                progress.update(1)
-        else:
-            with ProcessPoolExecutor(max_workers=worker_count) as executor:
-                future_to_chunk_size = {
-                    executor.submit(_process_replay_subset_job, job): len(job[0])
-                    for job in jobs
-                }
-                for future in as_completed(future_to_chunk_size):
-                    results.append(future.result())
-                    progress.update(1)
-    finally:
-        progress.close()
-
-    obs_dims = sorted({result.obs_dim for result in results if result.obs_dim is not None})
-    if not obs_dims:
-        raise SystemExit("No valid observations were produced. Check replay interpolation and parser output.")
-    if len(obs_dims) != 1:
-        raise SystemExit(f"Inconsistent observation widths across workers: {obs_dims}")
-    obs_dim = obs_dims[0]
-
+    obs_dim: int | None = None
     train_shards: list[dict[str, Any]] = []
     val_shards: list[dict[str, Any]] = []
     exact_samples = 0
     skipped_replays = 0
     skipped_unbalanced_frames = 0
     skipped_bad_obs_frames = 0
+    try:
+        if worker_count == 1:
+            for replay_job, worker_config_chunk, shard_prefix in jobs:
+                result = _process_replay_subset(replay_job, worker_config_chunk, shard_prefix)
+                if result.obs_dim is not None:
+                    if obs_dim is None:
+                        obs_dim = result.obs_dim
+                    elif obs_dim != result.obs_dim:
+                        raise SystemExit(f"Inconsistent observation widths across workers: {[obs_dim, result.obs_dim]}")
+                train_shards.extend(result.train_shards)
+                val_shards.extend(result.val_shards)
+                exact_samples += result.exact_samples
+                skipped_replays += result.skipped_replays
+                skipped_unbalanced_frames += result.skipped_unbalanced_frames
+                skipped_bad_obs_frames += result.skipped_bad_obs_frames
+                progress.update(1)
+        else:
+            with ProcessPoolExecutor(max_workers=worker_count, max_tasks_per_child=1) as executor:
+                future_to_chunk_size = {
+                    executor.submit(_process_replay_subset_job, job): len(job[0])
+                    for job in jobs
+                }
+                for future in as_completed(future_to_chunk_size):
+                    result = future.result()
+                    if result.obs_dim is not None:
+                        if obs_dim is None:
+                            obs_dim = result.obs_dim
+                        elif obs_dim != result.obs_dim:
+                            raise SystemExit(
+                                f"Inconsistent observation widths across workers: {[obs_dim, result.obs_dim]}"
+                            )
+                    train_shards.extend(result.train_shards)
+                    val_shards.extend(result.val_shards)
+                    exact_samples += result.exact_samples
+                    skipped_replays += result.skipped_replays
+                    skipped_unbalanced_frames += result.skipped_unbalanced_frames
+                    skipped_bad_obs_frames += result.skipped_bad_obs_frames
+                    progress.update(1)
+    finally:
+        progress.close()
 
-    for result in results:
-        train_shards.extend(result.train_shards)
-        val_shards.extend(result.val_shards)
-        exact_samples += result.exact_samples
-        skipped_replays += result.skipped_replays
-        skipped_unbalanced_frames += result.skipped_unbalanced_frames
-        skipped_bad_obs_frames += result.skipped_bad_obs_frames
+    if obs_dim is None:
+        raise SystemExit("No valid observations were produced. Check replay interpolation and parser output.")
 
     train_shards.sort(key=lambda shard: shard["obs_path"])
     val_shards.sort(key=lambda shard: shard["obs_path"])
