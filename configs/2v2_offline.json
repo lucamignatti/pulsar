@@ -13,17 +13,6 @@
     "randomize_kickoffs": true,
     "seed": 0
   },
-  "reward": {
-    "terms": [
-      {"name": "goal", "weight": 10.0},
-      {"name": "touch", "weight": 0.5},
-      {"name": "speed_to_ball", "weight": 0.05},
-      {"name": "ball_to_goal", "weight": 0.2},
-      {"name": "face_ball", "weight": 0.02}
-    ],
-    "team_spirit": 0.3,
-    "opponent_scale": 1.0
-  },
   "action_table": {
     "builtin": "rlgym_lookup_v1"
   },
@@ -53,12 +42,10 @@
     "gamma": 0.99,
     "gae_lambda": 0.95,
     "clip_range": 0.2,
-    "value_clip_range": 0.2,
     "entropy_coef": 0.01,
     "value_coef": 1.0,
     "learning_rate": 0.0002,
     "max_grad_norm": 1.0,
-    "target_kl": 0.03,
     "device": "cuda",
     "checkpoint_interval": 10,
     "sequence_length": 16,
@@ -73,14 +60,12 @@
     "use_confidence_weighting": true,
     "confidence_weight_type": "entropy",
     "confidence_weight_delta": 1e-06,
-    "normalize_confidence_weights": false,
-    "advantage_calculation": "quantile_sampling"
+    "normalize_confidence_weights": false
   },
   "offline_dataset": {
     "train_manifest": "data/offline/2v2/train_manifest.json",
     "val_manifest": "data/offline/2v2/val_manifest.json",
     "batch_size": 8192,
-    "val_batch_size": 16384,
     "shuffle": true,
     "seed": 7
   },
@@ -91,14 +76,11 @@
     "weight_decay": 1e-06,
     "label_smoothing": 0.01,
     "max_grad_norm": 1.0,
-    "sequence_length": 32,
-    "sequences_per_batch": 128
+    "sequence_length": 32
   },
   "next_goal_predictor": {
     "enabled": true,
     "epochs": 8,
-    "num_classes": 3,
-    "hidden_sizes": [1024, 512],
     "learning_rate": 0.0003,
     "weight_decay": 1e-06,
     "label_smoothing": 0.01,

@@ -6,7 +6,6 @@
 #include "pulsar/config/config.hpp"
 #include "pulsar/env/done.hpp"
 #include "pulsar/env/obs_builder.hpp"
-#include "pulsar/env/reward.hpp"
 #include "pulsar/rl/action_table.hpp"
 #include "pulsar/training/batched_rocketsim_collector.hpp"
 
@@ -22,13 +21,11 @@ int main(int argc, char** argv) {
   auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
-  auto reward_fn = std::make_shared<pulsar::CombinedRewardFunction>(config.reward);
   auto done_condition = std::make_shared<pulsar::SimpleDoneCondition>(config.env);
   pulsar::BatchedRocketSimCollector collector(
       config,
       obs_builder,
       action_parser,
-      reward_fn,
       done_condition,
       pin_host_memory);
   std::vector<pulsar::ControllerState> actions(
@@ -98,7 +95,7 @@ int main(int argc, char** argv) {
   std::cout << "obs_build_seconds=" << collection_timings.obs_build_seconds << '\n';
   std::cout << "mask_build_seconds=" << collection_timings.mask_build_seconds << '\n';
   std::cout << "env_step_seconds=" << collection_timings.env_step_seconds << '\n';
-  std::cout << "reward_done_seconds=" << collection_timings.reward_done_seconds << '\n';
+  std::cout << "done_reset_seconds=" << collection_timings.done_reset_seconds << '\n';
   std::cout << "step_only_env_step_seconds=" << step_timings.env_step_seconds << '\n';
   return 0;
 }

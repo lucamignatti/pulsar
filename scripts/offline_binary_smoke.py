@@ -69,7 +69,6 @@ def main() -> int:
         config["offline_dataset"]["train_manifest"] = str((data_dir / "manifest.json").resolve())
         config["offline_dataset"]["val_manifest"] = str((data_dir / "manifest.json").resolve())
         config["offline_dataset"]["batch_size"] = 8
-        config["offline_dataset"]["val_batch_size"] = 8
         config["behavior_cloning"]["epochs"] = 1
         config["next_goal_predictor"]["epochs"] = 1
         config["ppo"]["device"] = "cpu"

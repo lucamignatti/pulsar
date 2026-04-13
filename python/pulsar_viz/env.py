@@ -13,7 +13,6 @@ def _require_rlgym() -> Any:
         from rlgym.rocket_league.action_parsers import LookupTableAction, RepeatAction
         from rlgym.rocket_league.done_conditions import GoalCondition, NoTouchTimeoutCondition, TimeoutCondition
         from rlgym.rocket_league.obs_builders import DefaultObs
-        from rlgym.rocket_league.reward_functions import CombinedReward, GoalReward, TouchReward
         from rlgym.rocket_league.rlviser import RLViserRenderer
         from rlgym.rocket_league.sim.rocketsim_engine import RocketSimEngine
         from rlgym.rocket_league.state_mutators import FixedTeamSizeMutator, KickoffMutator, MutatorSequence
@@ -31,15 +30,20 @@ def _require_rlgym() -> Any:
         "NoTouchTimeoutCondition": NoTouchTimeoutCondition,
         "TimeoutCondition": TimeoutCondition,
         "DefaultObs": DefaultObs,
-        "CombinedReward": CombinedReward,
-        "GoalReward": GoalReward,
-        "TouchReward": TouchReward,
         "RLViserRenderer": RLViserRenderer,
         "RocketSimEngine": RocketSimEngine,
         "FixedTeamSizeMutator": FixedTeamSizeMutator,
         "KickoffMutator": KickoffMutator,
         "MutatorSequence": MutatorSequence,
     }
+
+
+class ZeroReward:
+    def reset(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def get_rewards(self, agents: list[Any], *args: Any, **kwargs: Any) -> dict[Any, float]:
+        return {agent: 0.0 for agent in agents}
 
 
 @dataclass(slots=True)
@@ -59,16 +63,11 @@ def make_eval_env(config: dict[str, Any]) -> EvalBundle:
         mods["KickoffMutator"](),
     )
 
-    reward = mods["CombinedReward"](
-        (mods["GoalReward"](), 1.0),
-        (mods["TouchReward"](), 0.1),
-    )
-
     env = mods["RLGym"](
         state_mutator=state_mutator,
         obs_builder=mods["DefaultObs"](zero_padding=env_cfg["team_size"]),
         action_parser=mods["RepeatAction"](mods["LookupTableAction"](), repeats=env_cfg["tick_skip"]),
-        reward_fn=reward,
+        reward_fn=ZeroReward(),
         transition_engine=mods["RocketSimEngine"](),
         termination_cond=mods["GoalCondition"](),
         truncation_cond=mods["NoTouchTimeoutCondition"](env_cfg["no_touch_timeout_seconds"]),

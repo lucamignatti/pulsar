@@ -21,11 +21,11 @@ torch::Tensor maybe_zero_mask(torch::Tensor tensor, const torch::Tensor& mask) {
   if (!mask.defined()) {
     return tensor;
   }
-  torch::Tensor shaped = mask;
-  while (shaped.dim() < tensor.dim()) {
-    shaped = shaped.unsqueeze(-1);
+  torch::Tensor expanded_mask = mask;
+  while (expanded_mask.dim() < tensor.dim()) {
+    expanded_mask = expanded_mask.unsqueeze(-1);
   }
-  return tensor * (1.0 - shaped);
+  return tensor * (1.0 - expanded_mask);
 }
 
 torch::Tensor masked_softmax(torch::Tensor logits, const torch::Tensor& strengths) {

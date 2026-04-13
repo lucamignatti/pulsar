@@ -15,16 +15,6 @@ class Car;
 
 namespace pulsar {
 
-struct BatchedArenaState {
-  std::size_t num_envs = 1;
-  std::size_t agents_per_env = 4;
-  std::vector<float> car_positions{};
-  std::vector<float> car_velocities{};
-  std::vector<float> car_boost{};
-  std::vector<float> ball_positions{};
-  std::vector<float> ball_velocities{};
-};
-
 class RocketSimTransitionEngine final : public TransitionEngine {
  public:
   RocketSimTransitionEngine(EnvConfig config, StateMutatorPtr reset_mutator);
@@ -36,16 +26,15 @@ class RocketSimTransitionEngine final : public TransitionEngine {
   const EnvState& state() const override;
   std::size_t num_agents() const override;
 
-  [[nodiscard]] const BatchedArenaState& batched_state() const;
-
  private:
-  void sync_batched_state();
   void apply_placeholder_dynamics(std::span<const ControllerState> actions);
+#ifdef PULSAR_HAS_ROCKETSIM
+  void sync_state_from_arena();
+#endif
 
   EnvConfig config_{};
   StateMutatorPtr reset_mutator_{};
   EnvState state_{};
-  BatchedArenaState batched_state_{};
   int episode_ticks_ = 0;
 
 #ifdef PULSAR_HAS_ROCKETSIM

@@ -7,7 +7,6 @@
 #include "pulsar/env/done.hpp"
 #include "pulsar/env/mutators.hpp"
 #include "pulsar/env/obs_builder.hpp"
-#include "pulsar/env/reward.hpp"
 #include "pulsar/env/rocketsim_engine.hpp"
 #include "test_utils.hpp"
 
@@ -75,7 +74,7 @@ void test_obs_content_and_done() {
   pulsar::test::require(tick_truncated[0] == 1, "max tick timeout should truncate");
 }
 
-void test_mutators_and_reward_composition() {
+void test_mutators() {
   pulsar::ExperimentConfig config = pulsar::test::make_test_config();
   pulsar::EnvState state;
   pulsar::FixedTeamSizeMutator fixed(config.env);
@@ -88,22 +87,6 @@ void test_mutators_and_reward_composition() {
   pulsar::test::require(state.cars[2].team == pulsar::Team::Orange, "third car should be orange");
   pulsar::test::require(std::fabs(state.ball.position.x) < 1.0e-5F, "kickoff ball x should be centered");
   pulsar::test::require(std::fabs(state.ball.position.y) < 1.0e-5F, "kickoff ball y should be centered");
-
-  pulsar::EnvState next = state;
-  next.goal_scored = true;
-  next.blue_score = 1;
-  next.last_touch_agent = 0;
-  next.ball.velocity = {0.0F, 600.0F, 0.0F};
-  next.cars[0].position = {0.0F, -1000.0F, 17.0F};
-  next.cars[0].velocity = {0.0F, 1200.0F, 0.0F};
-  next.cars[0].forward = {0.0F, 1.0F, 0.0F};
-
-  pulsar::CombinedRewardFunction reward(config.reward);
-  const auto rewards = reward.get_rewards(state, next, {}, {});
-  pulsar::test::require(rewards.size() == 4, "reward vector size mismatch");
-  pulsar::test::require(rewards[0] > rewards[1], "touching scorer should beat blue teammate");
-  pulsar::test::require(rewards[0] > rewards[2], "scoring team should beat opponents");
-  pulsar::test::require(rewards[2] < 0.0F, "opponents should be penalized on concession");
 }
 
 void test_rocketsim_reproducibility() {
@@ -146,7 +129,7 @@ void test_rocketsim_reproducibility() {
 int main() {
   try {
     test_obs_content_and_done();
-    test_mutators_and_reward_composition();
+    test_mutators();
     test_rocketsim_reproducibility();
     std::cout << "pulsar_env_tests passed\n";
     return EXIT_SUCCESS;

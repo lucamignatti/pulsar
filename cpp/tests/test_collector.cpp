@@ -7,7 +7,6 @@
 #include "pulsar/env/done.hpp"
 #include "pulsar/env/mutators.hpp"
 #include "pulsar/env/obs_builder.hpp"
-#include "pulsar/env/reward.hpp"
 #include "pulsar/env/rocketsim_engine.hpp"
 #include "pulsar/rl/action_table.hpp"
 #include "pulsar/training/batched_rocketsim_collector.hpp"
@@ -84,14 +83,12 @@ void test_collector_shapes_self_play_and_reset() {
   auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
-  auto reward_fn = std::make_shared<pulsar::CombinedRewardFunction>(config.reward);
   auto done_condition = std::make_shared<pulsar::SimpleDoneCondition>(config.env);
   pulsar::BatchedRocketSimCollector collector(
       config,
       std::move(engines),
       obs_builder,
       action_parser,
-      reward_fn,
       done_condition,
       false);
 
@@ -155,14 +152,12 @@ void test_collector_parity_with_legacy_engine() {
   auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
-  auto reward_fn = std::make_shared<pulsar::CombinedRewardFunction>(config.reward);
   auto done_condition = std::make_shared<pulsar::SimpleDoneCondition>(config.env);
   pulsar::BatchedRocketSimCollector collector(
       config,
       std::vector<pulsar::TransitionEnginePtr>{collector_engine},
       obs_builder,
       action_parser,
-      reward_fn,
       done_condition,
       false);
 
@@ -180,26 +175,7 @@ void test_collector_parity_with_legacy_engine() {
       "collector obs parity mismatch");
 
   std::vector<pulsar::ControllerState> actions(collector_engine->num_agents(), {.throttle = 1.0F, .steer = 0.25F});
-  const pulsar::EnvState previous = collector_engine->state();
   collector.step(actions, false);
-  std::vector<std::uint8_t> terminated(collector_engine->num_agents(), 0);
-  std::vector<std::uint8_t> truncated(collector_engine->num_agents(), 0);
-  done_condition->is_done_into(
-      collector_engine->state(),
-      collector_engine->state().tick,
-      terminated,
-      truncated);
-  std::vector<float> oracle_rewards(collector_engine->num_agents(), 0.0F);
-  reward_fn->get_rewards_into(previous, collector_engine->state(), terminated, truncated, oracle_rewards);
-  const torch::Tensor oracle_rewards_tensor =
-      torch::from_blob(
-          oracle_rewards.data(),
-          {static_cast<long>(collector_engine->num_agents())},
-          torch::kFloat32)
-          .clone();
-  pulsar::test::require(
-      torch::allclose(collector.host_rewards(), oracle_rewards_tensor, 1.0e-5, 1.0e-5),
-      "collector reward parity mismatch");
   pulsar::test::require(collector.host_dones().sum().item<float>() == 0.0F, "one-step parity run should not reset");
 }
 

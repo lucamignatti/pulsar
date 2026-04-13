@@ -36,7 +36,6 @@ BatchedRocketSimCollector::BatchedRocketSimCollector(
     ExperimentConfig config,
     ObsBuilderPtr obs_builder,
     ActionParserPtr action_parser,
-    RewardFunctionPtr reward_fn,
     DoneConditionPtr done_condition,
     bool pin_host_memory)
     : BatchedRocketSimCollector(
@@ -44,7 +43,6 @@ BatchedRocketSimCollector::BatchedRocketSimCollector(
           make_default_engines(config),
           std::move(obs_builder),
           std::move(action_parser),
-          std::move(reward_fn),
           std::move(done_condition),
           pin_host_memory) {}
 
@@ -53,16 +51,14 @@ BatchedRocketSimCollector::BatchedRocketSimCollector(
     std::vector<TransitionEnginePtr> engines,
     ObsBuilderPtr obs_builder,
     ActionParserPtr action_parser,
-    RewardFunctionPtr reward_fn,
     DoneConditionPtr done_condition,
     bool pin_host_memory)
     : config_(std::move(config)),
       obs_builder_(std::move(obs_builder)),
       action_parser_(std::move(action_parser)),
-      reward_fn_(std::move(reward_fn)),
       done_condition_(std::move(done_condition)),
       executor_(static_cast<std::size_t>(config_.ppo.collection_workers)) {
-  if (!obs_builder_ || !action_parser_ || !reward_fn_ || !done_condition_) {
+  if (!obs_builder_ || !action_parser_ || !done_condition_) {
     throw std::invalid_argument("BatchedRocketSimCollector requires non-null components.");
   }
 
@@ -88,7 +84,6 @@ BatchedRocketSimCollector::BatchedRocketSimCollector(
     agent_offsets_.push_back(agent_offsets_.back() + env.engine->num_agents());
   }
   total_agents_ = agent_offsets_.back();
-  previous_states_.resize(envs_.size());
   obs_dim_ = static_cast<int>(obs_builder_->obs_dim());
 
   auto* discrete = dynamic_cast<const DiscreteActionParser*>(action_parser_.get());
@@ -111,7 +106,6 @@ BatchedRocketSimCollector::BatchedRocketSimCollector(
   host_learner_active_ = torch::ones({static_cast<long>(total_agents_)}, f32);
   host_snapshot_ids_ = torch::full({static_cast<long>(total_agents_)}, -1, i64);
   host_episode_starts_ = torch::ones({static_cast<long>(total_agents_)}, f32);
-  host_rewards_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   host_dones_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   host_post_step_obs_ = torch::empty({static_cast<long>(total_agents_), obs_dim_}, f32);
 
@@ -213,7 +207,6 @@ void BatchedRocketSimCollector::step(
     for (std::size_t env_idx = begin; env_idx < end; ++env_idx) {
       const std::size_t agent_begin = agent_offsets_[env_idx];
       const std::size_t agent_end = agent_offsets_[env_idx + 1];
-      previous_states_[env_idx] = envs_[env_idx].engine->state();
       envs_[env_idx].engine->step_inplace(
           std::span<const ControllerState>(
               actions.data() + static_cast<std::ptrdiff_t>(agent_begin),
@@ -225,8 +218,7 @@ void BatchedRocketSimCollector::step(
         std::chrono::duration<double>(std::chrono::steady_clock::now() - env_step_start).count();
   }
 
-  const auto reward_start = std::chrono::steady_clock::now();
-  float* rewards_ptr = host_rewards_.data_ptr<float>();
+  const auto done_reset_start = std::chrono::steady_clock::now();
   float* dones_ptr = host_dones_.data_ptr<float>();
   float* post_step_obs_ptr = host_post_step_obs_.data_ptr<float>();
   host_dones_.zero_();
@@ -241,20 +233,6 @@ void BatchedRocketSimCollector::step(
       std::vector<std::uint8_t> terminated(count, 0);
       std::vector<std::uint8_t> truncated(count, 0);
       done_condition_->is_done_into(current_state, current_state.tick, terminated, truncated);
-      reward_fn_->get_rewards_into(
-          previous_states_[env_idx],
-          current_state,
-          terminated,
-          truncated,
-          std::span<float>(
-              rewards_ptr + static_cast<std::ptrdiff_t>(agent_begin),
-              count));
-
-      if (config_.reward.shaped_scale != 1.0F) {
-        for (std::size_t idx = 0; idx < count; ++idx) {
-          rewards_ptr[agent_begin + idx] *= config_.reward.shaped_scale;
-        }
-      }
 
       if (collect_post_step_obs) {
         obs_builder_->build_obs_batch(
@@ -281,8 +259,8 @@ void BatchedRocketSimCollector::step(
 
   host_episode_starts_.copy_(host_dones_);
   if (timings != nullptr) {
-    timings->reward_done_seconds +=
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - reward_start).count();
+    timings->done_reset_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - done_reset_start).count();
   }
 }
 
@@ -300,10 +278,6 @@ const torch::Tensor& BatchedRocketSimCollector::host_snapshot_ids() const {
 
 const torch::Tensor& BatchedRocketSimCollector::host_episode_starts() const {
   return host_episode_starts_;
-}
-
-const torch::Tensor& BatchedRocketSimCollector::host_rewards() const {
-  return host_rewards_;
 }
 
 const torch::Tensor& BatchedRocketSimCollector::host_dones() const {

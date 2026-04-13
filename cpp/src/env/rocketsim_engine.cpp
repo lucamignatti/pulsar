@@ -69,8 +69,6 @@ Vec3 from_rs_vec(const RocketSim::Vec& value) {
 
 RocketSimTransitionEngine::RocketSimTransitionEngine(EnvConfig config, StateMutatorPtr reset_mutator)
     : config_(std::move(config)), reset_mutator_(std::move(reset_mutator)) {
-  batched_state_.num_envs = 1;
-  batched_state_.agents_per_env = static_cast<std::size_t>(config_.team_size * 2);
   reset(config_.seed);
 }
 
@@ -125,7 +123,7 @@ void RocketSimTransitionEngine::reset(std::uint64_t seed) {
 
   const int kickoff_seed = config_.randomize_kickoffs ? static_cast<int>(seed) : 0;
   arena_->ResetToRandomKickoff(kickoff_seed);
-  sync_batched_state();
+  sync_state_from_arena();
 #else
   state_ = {};
   episode_ticks_ = 0;
@@ -133,8 +131,6 @@ void RocketSimTransitionEngine::reset(std::uint64_t seed) {
   if (reset_mutator_) {
     reset_mutator_->apply(state_, seed);
   }
-
-  sync_batched_state();
 #endif
 }
 
@@ -143,7 +139,6 @@ StepResult RocketSimTransitionEngine::step(std::span<const ControllerState> acti
 
   StepResult result;
   result.state = state_;
-  result.rewards.assign(state_.cars.size(), 0.0F);
   result.terminated.assign(state_.cars.size(), 0);
   result.truncated.assign(state_.cars.size(), 0);
   return result;
@@ -176,12 +171,11 @@ void RocketSimTransitionEngine::step_inplace(std::span<const ControllerState> ac
 
   arena_->Step(config_.tick_skip);
   episode_ticks_ += config_.tick_skip;
-  sync_batched_state();
+  sync_state_from_arena();
 #else
   apply_placeholder_dynamics(actions);
   state_.tick += config_.tick_skip;
   episode_ticks_ += config_.tick_skip;
-  sync_batched_state();
 #endif
 }
 
@@ -193,12 +187,8 @@ std::size_t RocketSimTransitionEngine::num_agents() const {
   return state_.cars.size();
 }
 
-const BatchedArenaState& RocketSimTransitionEngine::batched_state() const {
-  return batched_state_;
-}
-
-void RocketSimTransitionEngine::sync_batched_state() {
 #ifdef PULSAR_HAS_ROCKETSIM
+void RocketSimTransitionEngine::sync_state_from_arena() {
   if (arena_ != nullptr) {
     const auto ball_state = arena_->ball->GetState();
     state_.tick = static_cast<int>(arena_->tickCount);
@@ -265,35 +255,8 @@ void RocketSimTransitionEngine::sync_batched_state() {
       state_.boost_pad_timers[i] = pad_state.isActive ? 0.0F : pad_state.cooldown;
     }
   }
-#endif
-
-  batched_state_.ball_positions.resize(3);
-  batched_state_.ball_velocities.resize(3);
-  batched_state_.ball_positions[0] = state_.ball.position.x;
-  batched_state_.ball_positions[1] = state_.ball.position.y;
-  batched_state_.ball_positions[2] = state_.ball.position.z;
-  batched_state_.ball_velocities[0] = state_.ball.velocity.x;
-  batched_state_.ball_velocities[1] = state_.ball.velocity.y;
-  batched_state_.ball_velocities[2] = state_.ball.velocity.z;
-
-  if (batched_state_.car_positions.size() != state_.cars.size() * 3) {
-    batched_state_.car_positions.resize(state_.cars.size() * 3);
-    batched_state_.car_velocities.resize(state_.cars.size() * 3);
-    batched_state_.car_boost.resize(state_.cars.size());
-  }
-
-  for (std::size_t i = 0; i < state_.cars.size(); ++i) {
-    const auto& car = state_.cars[i];
-    const std::size_t base = i * 3;
-    batched_state_.car_positions[base] = car.position.x;
-    batched_state_.car_positions[base + 1] = car.position.y;
-    batched_state_.car_positions[base + 2] = car.position.z;
-    batched_state_.car_velocities[base] = car.velocity.x;
-    batched_state_.car_velocities[base + 1] = car.velocity.y;
-    batched_state_.car_velocities[base + 2] = car.velocity.z;
-    batched_state_.car_boost[i] = car.boost;
-  }
 }
+#endif
 
 void RocketSimTransitionEngine::apply_placeholder_dynamics(std::span<const ControllerState> actions) {
   static constexpr float kDt = 8.0F / 120.0F;

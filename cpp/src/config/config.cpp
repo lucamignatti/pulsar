@@ -48,34 +48,15 @@ void from_json(const json& j, ControllerState& value) {
   value.handbrake = j.at("handbrake").get<bool>();
 }
 
-void to_json(json& j, const RewardTermConfig& value) {
-  j = json{{"name", value.name}, {"weight", value.weight}};
-}
-
-void from_json(const json& j, RewardTermConfig& value) {
-  value.name = j.at("name").get<std::string>();
-  value.weight = j.at("weight").get<float>();
-}
-
 void to_json(json& j, const RewardConfig& value) {
   j = json{
-      {"terms", value.terms},
-      {"team_spirit", value.team_spirit},
-      {"opponent_scale", value.opponent_scale},
-      {"mode", value.mode},
       {"ngp_checkpoint", value.ngp_checkpoint},
-      {"shaped_scale", value.shaped_scale},
       {"ngp_scale", value.ngp_scale},
   };
 }
 
 void from_json(const json& j, RewardConfig& value) {
-  value.terms = j.at("terms").get<std::vector<RewardTermConfig>>();
-  value.team_spirit = j.value("team_spirit", 0.0F);
-  value.opponent_scale = j.value("opponent_scale", 0.0F);
-  value.mode = j.value("mode", std::string{"shaped"});
   value.ngp_checkpoint = j.value("ngp_checkpoint", std::string{});
-  value.shaped_scale = j.value("shaped_scale", 1.0F);
   value.ngp_scale = j.value("ngp_scale", 1.0F);
 }
 
@@ -161,7 +142,6 @@ void to_json(json& j, const PPOConfig::SelfPlayConfig& value) {
       {"opponent_probability", value.opponent_probability},
       {"snapshot_interval_updates", value.snapshot_interval_updates},
       {"max_snapshots", value.max_snapshots},
-      {"opponent_sampling", value.opponent_sampling},
       {"training_opponent_policy", value.training_opponent_policy},
       {"eval_interval_updates", value.eval_interval_updates},
       {"eval_num_envs", value.eval_num_envs},
@@ -177,7 +157,6 @@ void from_json(const json& j, PPOConfig::SelfPlayConfig& value) {
   value.opponent_probability = j.value("opponent_probability", 0.0F);
   value.snapshot_interval_updates = j.value("snapshot_interval_updates", 10);
   value.max_snapshots = j.value("max_snapshots", 8);
-  value.opponent_sampling = j.value("opponent_sampling", std::string{"uniform"});
   value.training_opponent_policy = j.value("training_opponent_policy", std::string{"stochastic"});
   value.eval_interval_updates = j.value("eval_interval_updates", 10);
   value.eval_num_envs = j.value("eval_num_envs", 8);
@@ -198,12 +177,10 @@ void to_json(json& j, const PPOConfig& value) {
       {"gamma", value.gamma},
       {"gae_lambda", value.gae_lambda},
       {"clip_range", value.clip_range},
-      {"value_clip_range", value.value_clip_range},
       {"entropy_coef", value.entropy_coef},
       {"value_coef", value.value_coef},
       {"learning_rate", value.learning_rate},
       {"max_grad_norm", value.max_grad_norm},
-      {"target_kl", value.target_kl},
       {"device", value.device},
       {"checkpoint_interval", value.checkpoint_interval},
       {"sequence_length", value.sequence_length},
@@ -219,7 +196,6 @@ void to_json(json& j, const PPOConfig& value) {
       {"confidence_weight_type", value.confidence_weight_type},
       {"confidence_weight_delta", value.confidence_weight_delta},
       {"normalize_confidence_weights", value.normalize_confidence_weights},
-      {"advantage_calculation", value.advantage_calculation},
       {"self_play", value.self_play},
   };
 }
@@ -234,12 +210,10 @@ void from_json(const json& j, PPOConfig& value) {
   value.gamma = j.at("gamma").get<float>();
   value.gae_lambda = j.at("gae_lambda").get<float>();
   value.clip_range = j.at("clip_range").get<float>();
-  value.value_clip_range = j.at("value_clip_range").get<float>();
   value.entropy_coef = j.at("entropy_coef").get<float>();
   value.value_coef = j.at("value_coef").get<float>();
   value.learning_rate = j.at("learning_rate").get<float>();
   value.max_grad_norm = j.at("max_grad_norm").get<float>();
-  value.target_kl = j.at("target_kl").get<float>();
   value.device = j.at("device").get<std::string>();
   value.checkpoint_interval = j.at("checkpoint_interval").get<int>();
   value.sequence_length = j.value("sequence_length", 16);
@@ -255,7 +229,6 @@ void from_json(const json& j, PPOConfig& value) {
   value.confidence_weight_type = j.value("confidence_weight_type", std::string{"entropy"});
   value.confidence_weight_delta = j.value("confidence_weight_delta", 1.0e-6F);
   value.normalize_confidence_weights = j.value("normalize_confidence_weights", false);
-  value.advantage_calculation = j.value("advantage_calculation", std::string{"quantile_sampling"});
   value.self_play = j.value("self_play", PPOConfig::SelfPlayConfig{});
 }
 
@@ -264,7 +237,6 @@ void to_json(json& j, const OfflineDatasetConfig& value) {
       {"train_manifest", value.train_manifest},
       {"val_manifest", value.val_manifest},
       {"batch_size", value.batch_size},
-      {"val_batch_size", value.val_batch_size},
       {"shuffle", value.shuffle},
       {"seed", value.seed},
   };
@@ -274,7 +246,6 @@ void from_json(const json& j, OfflineDatasetConfig& value) {
   value.train_manifest = j.value("train_manifest", std::string{});
   value.val_manifest = j.value("val_manifest", std::string{});
   value.batch_size = j.value("batch_size", 4096);
-  value.val_batch_size = j.value("val_batch_size", 8192);
   value.shuffle = j.value("shuffle", true);
   value.seed = j.value("seed", static_cast<std::uint64_t>(0));
 }
@@ -288,7 +259,6 @@ void to_json(json& j, const BehaviorCloningConfig& value) {
       {"label_smoothing", value.label_smoothing},
       {"max_grad_norm", value.max_grad_norm},
       {"sequence_length", value.sequence_length},
-      {"sequences_per_batch", value.sequences_per_batch},
   };
 }
 
@@ -300,15 +270,12 @@ void from_json(const json& j, BehaviorCloningConfig& value) {
   value.label_smoothing = j.value("label_smoothing", 0.0F);
   value.max_grad_norm = j.value("max_grad_norm", 1.0F);
   value.sequence_length = j.value("sequence_length", 32);
-  value.sequences_per_batch = j.value("sequences_per_batch", 128);
 }
 
 void to_json(json& j, const NextGoalPredictorConfig& value) {
   j = json{
       {"enabled", value.enabled},
       {"epochs", value.epochs},
-      {"num_classes", value.num_classes},
-      {"hidden_sizes", value.hidden_sizes},
       {"learning_rate", value.learning_rate},
       {"weight_decay", value.weight_decay},
       {"label_smoothing", value.label_smoothing},
@@ -320,8 +287,6 @@ void to_json(json& j, const NextGoalPredictorConfig& value) {
 void from_json(const json& j, NextGoalPredictorConfig& value) {
   value.enabled = j.value("enabled", true);
   value.epochs = j.value("epochs", 10);
-  value.num_classes = j.value("num_classes", 3);
-  value.hidden_sizes = j.value("hidden_sizes", std::vector<int>{1024, 512});
   value.learning_rate = j.value("learning_rate", 3.0e-4F);
   value.weight_decay = j.value("weight_decay", 1.0e-6F);
   value.label_smoothing = j.value("label_smoothing", 0.0F);
@@ -379,7 +344,9 @@ void from_json(const json& j, ExperimentConfig& value) {
   value.schema_version = j.at("schema_version").get<int>();
   value.obs_schema_version = j.at("obs_schema_version").get<int>();
   value.env = j.at("env").get<EnvConfig>();
-  value.reward = j.at("reward").get<RewardConfig>();
+  if (j.contains("reward")) {
+    value.reward = j.at("reward").get<RewardConfig>();
+  }
   value.action_table = j.at("action_table").get<ActionTableConfig>();
   value.model = j.at("model").get<ModelConfig>();
   value.ppo = j.at("ppo").get<PPOConfig>();

@@ -2,7 +2,7 @@
 
 `Pulsar` is a modular Rocket League bot platform built around a high-throughput C++ training runtime and a thin Python evaluation/visualization layer.
 
-The current online training path is a single-process, synchronous PPO loop backed by a batched `RocketSim` collector. It includes hard-legality action masking, frozen-policy self-play with Elo evaluation, expanded per-update timing metrics, and GPU execution.
+The current training path is a two-stage pipeline: offline pretrain a shared policy plus next-goal head on tensorized replay data, then run synchronous PPO self-play online using the pretrained next-goal checkpoint as the only reward signal. The runtime keeps hard-legality action masking, frozen-policy self-play with Elo evaluation, expanded per-update timing metrics, and GPU execution.
 
 ## Design Goals
 
@@ -74,9 +74,9 @@ ctest --test-dir build/release --output-on-failure
 
 That default suite covers:
 
-- core config, environment, reward, done, and action-mask tests
+- core config, environment, done, and action-mask tests
 - offline dataset and offline-pretrain smoke coverage
-- PPO math, batched collector, and self-play coverage
+- PPO math, batched collector, next-goal reward, and self-play coverage
 - train/offline/benchmark/preprocess binary smokes
 - ROCm smoke automatically on ROCm builds
 
@@ -91,7 +91,7 @@ ctest --test-dir build/release -L rocm --output-on-failure
 
 ## Targets
 
-- `pulsar_core`: Config, action tables, rewards, done conditions, mutators, and environment scaffolding.
+- `pulsar_core`: Config, action tables, done conditions, mutators, and environment scaffolding.
 - `pulsar_torch`: Shared actor-critic model, normalization, GPU rollout storage, and PPO trainer.
 - `pulsar_train`: Standalone trainer entry point.
 - `pulsar_offline_train`: Standalone offline pretrainer for behavior cloning and next-goal prediction.
@@ -147,12 +147,14 @@ The visualization path is aligned with current `RLGym` defaults:
 - `ppo.collection_workers = 0` means auto-size the collection thread pool from hardware concurrency.
 - `collection_env_steps_per_second` counts one arena step as one step, regardless of team size.
 - `collection_agent_steps_per_second` multiplies by the number of controlled cars. This is the closest comparison to the thesis repo's aggregate "steps per second" metric, which is driven by batched active-agent observations across many environments.
-- per-update metrics also include stage timings such as `obs_build_seconds`, `mask_build_seconds`, `policy_forward_seconds`, `env_step_seconds`, `gae_seconds`, and `ppo_forward_backward_seconds`
+- per-update metrics also include stage timings such as `obs_build_seconds`, `mask_build_seconds`, `policy_forward_seconds`, `env_step_seconds`, `done_reset_seconds`, `reward_model_seconds`, `gae_seconds`, and `ppo_forward_backward_seconds`
 - `./build/<preset>/pulsar_bench <num_envs> [collection_workers]` lets you sweep arena count and collection parallelism independently.
 
 ## Online PPO Notes
 
 - Hard-legality action masking is always enabled in the online trainer.
+- `reward.ngp_checkpoint` is required. `pulsar_train` fails fast if it is empty.
+- Online reward is always `reward.ngp_scale * (ngp_t - ngp_{t-1})` from the pretrained next-goal head.
 - Self-play snapshots are stored under `policy_versions/` in the run directory when `ppo.self_play.enabled` is true.
 - Only learner-controlled agents contribute rollout entries and `global_step` during self-play episodes.
 - Mixed precision is not part of the current runtime. The trainer runs in FP32 on both CPU and ROCm.
@@ -219,11 +221,9 @@ The offline trainer now runs truncated BPTT over real per-player trajectories. `
 
 To start PPO from the offline-pretrained policy instead of random initialization, set `ppo.init_checkpoint` in your PPO config to the offline policy checkpoint directory, for example `/path/to/offline_outputs/policy`.
 
-To use the trained next-goal predictor as the online reward, set:
+To use the trained next-goal predictor online, set:
 
-- `reward.mode = "ngp"`
 - `reward.ngp_checkpoint = /path/to/offline_outputs/next_goal`
-- `reward.shaped_scale = 0.0`
 - `reward.ngp_scale = 1.0`
 
 PPO training now writes:

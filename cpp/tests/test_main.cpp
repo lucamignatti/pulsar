@@ -8,7 +8,6 @@
 #include "pulsar/env/done.hpp"
 #include "pulsar/env/mutators.hpp"
 #include "pulsar/env/obs_builder.hpp"
-#include "pulsar/env/reward.hpp"
 #include "pulsar/rl/action_table.hpp"
 
 namespace {
@@ -21,15 +20,6 @@ void require(bool condition, const char* message) {
 
 pulsar::ExperimentConfig make_config() {
   pulsar::ExperimentConfig config;
-  config.reward.terms = {
-      {"goal", 10.0F},
-      {"touch", 0.25F},
-      {"speed_to_ball", 0.01F},
-      {"ball_to_goal", 0.1F},
-      {"face_ball", 0.005F},
-  };
-  config.reward.team_spirit = 0.2F;
-  config.reward.opponent_scale = 1.0F;
   config.action_table.builtin = "rlgym_lookup_v1";
   return config;
 }
@@ -57,19 +47,10 @@ int main() {
     require(obs_builder.obs_dim() == 132, "default obs dimension mismatch");
     require(obs.size() == obs_builder.obs_dim(), "observation dimension mismatch");
 
+    pulsar::SimpleDoneCondition done(config.env);
     pulsar::EnvState next_state = state;
     next_state.blue_score = 1;
     next_state.goal_scored = true;
-    next_state.last_touch_agent = 0;
-    next_state.cars[0].velocity = {1000.0F, 0.0F, 0.0F};
-    next_state.cars[0].forward = {1.0F, 0.0F, 0.0F};
-    pulsar::CombinedRewardFunction reward_fn(config.reward);
-    const auto rewards = reward_fn.get_rewards(state, next_state, {}, {});
-    require(rewards.size() == 4, "reward vector size mismatch");
-    require(rewards[0] > 0.0F, "scoring agent should receive positive reward");
-    require(rewards[2] < rewards[0], "opponents should receive less reward under zero-sum shaping");
-
-    pulsar::SimpleDoneCondition done(config.env);
     const auto [terminated, truncated] = done.is_done(next_state, config.env.max_episode_ticks);
     require(terminated[0] == 1, "goal should terminate the episode");
     require(truncated[0] == 1, "max episode ticks should truncate the episode");

@@ -29,7 +29,7 @@ def main() -> int:
         "obs_build_seconds",
         "mask_build_seconds",
         "env_step_seconds",
-        "reward_done_seconds",
+        "done_reset_seconds",
     }
     missing = sorted(required - metrics.keys())
     if missing:

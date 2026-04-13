@@ -7,10 +7,15 @@ import sys
 import tempfile
 from pathlib import Path
 
+from two_stage_smoke_common import run_offline_pretrain
+
 
 def main() -> int:
-    if len(sys.argv) != 4:
-        raise SystemExit("usage: e2e_smoke.py <repo_root> <pulsar_train> <base_config>")
+    if len(sys.argv) != 6:
+        raise SystemExit(
+            "usage: e2e_smoke.py <repo_root> <pulsar_train> <pulsar_offline_train> "
+            "<ppo_base_config> <offline_base_config>"
+        )
     if sys.version_info >= (3, 14):
         raise RuntimeError(
             "rlgym is not currently compatible with Python 3.14 in this test path. "
@@ -19,7 +24,9 @@ def main() -> int:
 
     repo_root = Path(sys.argv[1]).resolve()
     train_binary = Path(sys.argv[2]).resolve()
-    base_config_path = Path(sys.argv[3]).resolve()
+    offline_binary = Path(sys.argv[3]).resolve()
+    ppo_base_config_path = Path(sys.argv[4]).resolve()
+    offline_base_config_path = Path(sys.argv[5]).resolve()
 
     sys.path.insert(0, str(repo_root / "python"))
 
@@ -27,22 +34,32 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="pulsar_e2e_") as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
+        model_overrides = {
+            "hidden_sizes": [64, 64],
+            "use_layer_norm": False,
+        }
+        offline_output_dir = run_offline_pretrain(
+            repo_root=repo_root,
+            offline_binary=offline_binary,
+            offline_base_config_path=offline_base_config_path,
+            work_dir=tmp_dir,
+            device="cpu",
+            model_overrides=model_overrides,
+        )
         checkpoint_dir = tmp_dir / "checkpoints"
         config_path = tmp_dir / "config.json"
 
-        config = json.loads(base_config_path.read_text(encoding="utf-8"))
-        config["model"]["hidden_sizes"] = [64, 64]
-        config["model"]["use_layer_norm"] = False
+        config = json.loads(ppo_base_config_path.read_text(encoding="utf-8"))
+        config["model"].update(model_overrides)
         config["ppo"]["num_envs"] = 2
         config["ppo"]["rollout_length"] = 4
         config["ppo"]["minibatch_size"] = 8
         config["ppo"]["epochs"] = 1
         config["ppo"]["checkpoint_interval"] = 1
         config["ppo"]["device"] = "cpu"
-        config["reward"]["mode"] = "shaped"
-        config["reward"]["ngp_checkpoint"] = ""
-        config["reward"]["shaped_scale"] = 1.0
-        config["reward"]["ngp_scale"] = 0.0
+        config["ppo"]["init_checkpoint"] = str((offline_output_dir / "policy").resolve())
+        config["reward"]["ngp_checkpoint"] = str((offline_output_dir / "next_goal").resolve())
+        config["reward"]["ngp_scale"] = 1.0
         config["env"]["collision_meshes_path"] = str(repo_root / "collision_meshes")
         config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 

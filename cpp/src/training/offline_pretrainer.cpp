@@ -134,9 +134,8 @@ void OfflinePretrainer::validate_config() const {
         "Offline pretrainer requires trajectory-safe manifests with episode_starts_path entries. "
         "Re-run scripts/preprocess_kaggle_2v2.py with the current repo version.");
   }
-  if (config_.next_goal_predictor.enabled &&
-      train_dataset_.next_goal_classes() != config_.next_goal_predictor.num_classes) {
-    throw std::runtime_error("Offline manifest next_goal_classes does not match next_goal_predictor.num_classes.");
+  if (config_.next_goal_predictor.enabled && train_dataset_.next_goal_classes() != 3) {
+    throw std::runtime_error("Offline manifest next_goal_classes must be 3 for the shared next-goal head.");
   }
 }
 

@@ -36,15 +36,6 @@ inline std::filesystem::path find_repo_collision_meshes() {
 
 inline ExperimentConfig make_test_config() {
   ExperimentConfig config;
-  config.reward.terms = {
-      {"goal", 10.0F},
-      {"touch", 0.25F},
-      {"speed_to_ball", 0.01F},
-      {"ball_to_goal", 0.1F},
-      {"face_ball", 0.005F},
-  };
-  config.reward.team_spirit = 0.2F;
-  config.reward.opponent_scale = 1.0F;
   config.action_table.builtin = "rlgym_lookup_v1";
   return config;
 }

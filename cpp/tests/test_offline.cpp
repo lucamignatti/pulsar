@@ -7,7 +7,6 @@
 #include "pulsar/env/done.hpp"
 #include "pulsar/env/mutators.hpp"
 #include "pulsar/env/obs_builder.hpp"
-#include "pulsar/env/reward.hpp"
 #include "pulsar/rl/action_table.hpp"
 #include "pulsar/training/ppo_trainer.hpp"
 #include "pulsar/training/offline_pretrainer.hpp"
@@ -165,10 +164,8 @@ int main() {
     config.offline_dataset.train_manifest = (root / "data" / "manifest.json").string();
     config.offline_dataset.val_manifest = (root / "data" / "manifest.json").string();
     config.offline_dataset.batch_size = 16;
-    config.offline_dataset.val_batch_size = 32;
     config.behavior_cloning.epochs = 1;
     config.next_goal_predictor.epochs = 1;
-    config.next_goal_predictor.hidden_sizes = {16};
 
     pulsar::OfflinePretrainer pretrainer(config);
     pretrainer.train((root / "output").string());
@@ -180,9 +177,7 @@ int main() {
       throw std::runtime_error("next goal checkpoint missing");
     }
 
-    config.reward.mode = "ngp";
     config.reward.ngp_checkpoint = (root / "output" / "next_goal").string();
-    config.reward.shaped_scale = 0.0F;
     config.reward.ngp_scale = 1.0F;
     config.ppo.init_checkpoint = (root / "output" / "policy").string();
     config.ppo.num_envs = 2;
@@ -198,13 +193,11 @@ int main() {
     auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
     auto action_parser =
         std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
-    auto reward_fn = std::make_shared<pulsar::CombinedRewardFunction>(config.reward);
     auto done_condition = std::make_shared<pulsar::SimpleDoneCondition>(config.env);
     auto collector = std::make_unique<pulsar::BatchedRocketSimCollector>(
         config,
         obs_builder,
         action_parser,
-        reward_fn,
         done_condition,
         false);
 
@@ -229,13 +222,11 @@ int main() {
       auto local_obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(trainer_config.env);
       auto local_action_parser =
           std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(trainer_config.action_table));
-      auto local_reward_fn = std::make_shared<pulsar::CombinedRewardFunction>(trainer_config.reward);
       auto local_done_condition = std::make_shared<pulsar::SimpleDoneCondition>(trainer_config.env);
       auto local_collector = std::make_unique<pulsar::BatchedRocketSimCollector>(
           trainer_config,
           local_obs_builder,
           local_action_parser,
-          local_reward_fn,
           local_done_condition,
           false);
       return std::make_unique<pulsar::PPOTrainer>(

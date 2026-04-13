@@ -15,7 +15,6 @@
 #include "pulsar/env/done.hpp"
 #include "pulsar/env/mutators.hpp"
 #include "pulsar/env/obs_builder.hpp"
-#include "pulsar/env/reward.hpp"
 #include "pulsar/env/rocketsim_engine.hpp"
 #include "pulsar/rl/interfaces.hpp"
 
@@ -25,7 +24,7 @@ struct CollectorTimings {
   double obs_build_seconds = 0.0;
   double mask_build_seconds = 0.0;
   double env_step_seconds = 0.0;
-  double reward_done_seconds = 0.0;
+  double done_reset_seconds = 0.0;
 };
 
 struct SelfPlayAssignment {
@@ -42,7 +41,6 @@ class BatchedRocketSimCollector {
       ExperimentConfig config,
       ObsBuilderPtr obs_builder,
       ActionParserPtr action_parser,
-      RewardFunctionPtr reward_fn,
       DoneConditionPtr done_condition,
       bool pin_host_memory);
   BatchedRocketSimCollector(
@@ -50,7 +48,6 @@ class BatchedRocketSimCollector {
       std::vector<TransitionEnginePtr> engines,
       ObsBuilderPtr obs_builder,
       ActionParserPtr action_parser,
-      RewardFunctionPtr reward_fn,
       DoneConditionPtr done_condition,
       bool pin_host_memory);
 
@@ -69,7 +66,6 @@ class BatchedRocketSimCollector {
   [[nodiscard]] const torch::Tensor& host_learner_active() const;
   [[nodiscard]] const torch::Tensor& host_snapshot_ids() const;
   [[nodiscard]] const torch::Tensor& host_episode_starts() const;
-  [[nodiscard]] const torch::Tensor& host_rewards() const;
   [[nodiscard]] const torch::Tensor& host_dones() const;
   [[nodiscard]] const torch::Tensor& host_post_step_obs() const;
 
@@ -85,19 +81,16 @@ class BatchedRocketSimCollector {
   ExperimentConfig config_{};
   ObsBuilderPtr obs_builder_{};
   ActionParserPtr action_parser_{};
-  RewardFunctionPtr reward_fn_{};
   DoneConditionPtr done_condition_{};
   ParallelExecutor executor_;
   std::vector<EnvRuntime> envs_{};
   std::vector<std::size_t> agent_offsets_{};
-  std::vector<EnvState> previous_states_{};
   AssignmentFn assignment_fn_{};
   torch::Tensor host_obs_;
   torch::Tensor host_action_masks_;
   torch::Tensor host_learner_active_;
   torch::Tensor host_snapshot_ids_;
   torch::Tensor host_episode_starts_;
-  torch::Tensor host_rewards_;
   torch::Tensor host_dones_;
   torch::Tensor host_post_step_obs_;
   std::size_t total_agents_ = 0;

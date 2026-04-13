@@ -39,8 +39,8 @@ struct TrainerMetrics {
   double policy_forward_seconds = 0.0;
   double action_decode_seconds = 0.0;
   double env_step_seconds = 0.0;
-  double reward_done_seconds = 0.0;
-  double ngp_reward_seconds = 0.0;
+  double done_reset_seconds = 0.0;
+  double reward_model_seconds = 0.0;
   double rollout_append_seconds = 0.0;
   double gae_seconds = 0.0;
   double ppo_forward_backward_seconds = 0.0;
@@ -99,8 +99,6 @@ class PPOTrainer {
   ContinuumState ngp_collection_state_{};
   std::vector<ControllerState> host_actions_{};
   bool use_pinned_host_buffers_ = false;
-  bool use_ngp_reward_ = false;
-  bool use_shaped_reward_ = true;
   double best_reward_mean_ = -1.0e30;
 };
 

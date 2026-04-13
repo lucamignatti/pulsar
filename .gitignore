@@ -10,6 +10,7 @@ __pycache__/
 *.pth
 *.ckpt
 *.log
+*.egg-info/
 .venv/
 .idea/
 .vscode/

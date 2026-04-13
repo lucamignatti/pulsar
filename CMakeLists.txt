@@ -80,7 +80,6 @@ add_library(
   cpp/src/rl/action_table.cpp
   cpp/src/env/mutators.cpp
   cpp/src/env/obs_builder.cpp
-  cpp/src/env/reward.cpp
   cpp/src/env/done.cpp
   cpp/src/env/rocketsim_engine.cpp
   cpp/src/checkpoint/checkpoint.cpp
@@ -114,7 +113,6 @@ if(PULSAR_ENABLE_TORCH)
     add_library(
       pulsar_torch
       cpp/src/model/actor_critic.cpp
-      cpp/src/model/next_goal_predictor.cpp
       cpp/src/model/normalizer.cpp
       cpp/src/training/offline_dataset.cpp
       cpp/src/training/offline_pretrainer.cpp
@@ -235,7 +233,7 @@ if(PULSAR_ENABLE_TESTS)
     pulsar_force_target_cxx20(pulsar_self_play_tests)
     add_test(NAME pulsar_self_play_tests COMMAND pulsar_self_play_tests)
 
-    if(TARGET pulsar_train AND TARGET pulsar_native AND Python3_EXECUTABLE)
+    if(TARGET pulsar_train AND TARGET pulsar_offline_train AND TARGET pulsar_native AND Python3_EXECUTABLE)
       add_test(
         NAME pulsar_e2e_smoke
         COMMAND
@@ -243,11 +241,13 @@ if(PULSAR_ENABLE_TESTS)
           ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_smoke.py
           ${CMAKE_CURRENT_SOURCE_DIR}
           $<TARGET_FILE:pulsar_train>
+          $<TARGET_FILE:pulsar_offline_train>
           ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_ppo.json
+          ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_offline.json
       )
     endif()
 
-    if(TARGET pulsar_train AND Python3_EXECUTABLE)
+    if(TARGET pulsar_train AND TARGET pulsar_offline_train AND Python3_EXECUTABLE)
       add_test(
         NAME pulsar_train_binary_smoke
         COMMAND
@@ -255,7 +255,9 @@ if(PULSAR_ENABLE_TESTS)
           ${CMAKE_CURRENT_SOURCE_DIR}/scripts/train_binary_smoke.py
           ${CMAKE_CURRENT_SOURCE_DIR}
           $<TARGET_FILE:pulsar_train>
+          $<TARGET_FILE:pulsar_offline_train>
           ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_ppo.json
+          ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_offline.json
       )
       set_tests_properties(pulsar_train_binary_smoke PROPERTIES LABELS "smoke")
     endif()
@@ -306,7 +308,7 @@ if(PULSAR_ENABLE_TESTS AND Python3_EXECUTABLE)
   set_tests_properties(pulsar_preprocess_smoke PROPERTIES LABELS "smoke;dataset")
 endif()
 
-if(PULSAR_ENABLE_TESTS AND PULSAR_ROCM_FOUND AND NOT PULSAR_DISABLE_ROCM AND TARGET pulsar_train AND Python3_EXECUTABLE)
+if(PULSAR_ENABLE_TESTS AND PULSAR_ROCM_FOUND AND NOT PULSAR_DISABLE_ROCM AND TARGET pulsar_train AND TARGET pulsar_offline_train AND Python3_EXECUTABLE)
   add_test(
     NAME pulsar_rocm_smoke
     COMMAND
@@ -314,7 +316,9 @@ if(PULSAR_ENABLE_TESTS AND PULSAR_ROCM_FOUND AND NOT PULSAR_DISABLE_ROCM AND TAR
       ${CMAKE_CURRENT_SOURCE_DIR}/scripts/rocm_smoke.py
       ${CMAKE_CURRENT_SOURCE_DIR}
       $<TARGET_FILE:pulsar_train>
+      $<TARGET_FILE:pulsar_offline_train>
       ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_ppo.json
+      ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_offline.json
   )
   set_tests_properties(pulsar_rocm_smoke PROPERTIES LABELS "rocm;smoke" SKIP_RETURN_CODE 77)
 endif()

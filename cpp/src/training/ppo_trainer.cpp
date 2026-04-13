@@ -123,8 +123,8 @@ void append_metrics_line(
       {"policy_forward_seconds", metrics.policy_forward_seconds},
       {"action_decode_seconds", metrics.action_decode_seconds},
       {"env_step_seconds", metrics.env_step_seconds},
-      {"reward_done_seconds", metrics.reward_done_seconds},
-      {"ngp_reward_seconds", metrics.ngp_reward_seconds},
+      {"done_reset_seconds", metrics.done_reset_seconds},
+      {"reward_model_seconds", metrics.reward_model_seconds},
       {"rollout_append_seconds", metrics.rollout_append_seconds},
       {"gae_seconds", metrics.gae_seconds},
       {"ppo_forward_backward_seconds", metrics.ppo_forward_backward_seconds},
@@ -256,14 +256,8 @@ void PPOTrainer::maybe_initialize_from_checkpoint() {
 }
 
 void PPOTrainer::maybe_initialize_ngp_reward() {
-  use_shaped_reward_ = config_.reward.mode != "ngp" && config_.reward.shaped_scale != 0.0F;
-  use_ngp_reward_ = (config_.reward.mode == "ngp" || config_.reward.mode == "hybrid") &&
-                    !config_.reward.ngp_checkpoint.empty();
-  if (!use_ngp_reward_) {
-    if (config_.reward.mode == "ngp" || config_.reward.mode == "hybrid") {
-      throw std::runtime_error("reward.ngp_checkpoint must be set when reward.mode is ngp or hybrid.");
-    }
-    return;
+  if (config_.reward.ngp_checkpoint.empty()) {
+    throw std::runtime_error("reward.ngp_checkpoint must be set for PPO training.");
   }
 
   namespace fs = std::filesystem;
@@ -484,13 +478,11 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
       const auto policy_start = std::chrono::steady_clock::now();
       {
         torch::NoGradGuard no_grad;
-        if (use_ngp_reward_) {
-          const torch::Tensor normalized_ngp_obs = ngp_normalizer_.normalize(raw_obs);
-          PolicyOutput ngp_output =
-              ngp_model_->forward_step(normalized_ngp_obs, std::move(ngp_collection_state_), episode_starts);
-          ngp_prev_scalar = ngp_scalar(ngp_output.next_goal_logits);
-          next_ngp_state = std::move(ngp_output.state);
-        }
+        const torch::Tensor normalized_ngp_obs = ngp_normalizer_.normalize(raw_obs);
+        PolicyOutput ngp_output =
+            ngp_model_->forward_step(normalized_ngp_obs, std::move(ngp_collection_state_), episode_starts);
+        ngp_prev_scalar = ngp_scalar(ngp_output.next_goal_logits);
+        next_ngp_state = std::move(ngp_output.state);
 
         normalizer_.update(obs);
         obs = normalizer_.normalize(obs);
@@ -523,14 +515,11 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
       metrics.action_decode_seconds +=
           std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
 
-      collector_->step(host_actions_, use_ngp_reward_, &collector_timings);
-      torch::Tensor rewards = collector_->host_rewards().to(device_, use_pinned_host_buffers_);
+      collector_->step(host_actions_, true, &collector_timings);
       const torch::Tensor dones = collector_->host_dones().to(device_, use_pinned_host_buffers_);
-      if (!use_shaped_reward_) {
-        rewards.zero_();
-      }
-      if (use_ngp_reward_) {
-        const auto ngp_start = std::chrono::steady_clock::now();
+      const auto ngp_start = std::chrono::steady_clock::now();
+      torch::Tensor rewards;
+      {
         torch::NoGradGuard no_grad;
         const torch::Tensor post_step_obs = collector_->host_post_step_obs().to(device_, use_pinned_host_buffers_);
         const torch::Tensor zero_starts = torch::zeros_like(dones);
@@ -538,11 +527,11 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
         PolicyOutput ngp_output =
             ngp_model_->forward_step(normalized_post_step_obs, std::move(next_ngp_state), zero_starts);
         const torch::Tensor ngp_current_scalar = ngp_scalar(ngp_output.next_goal_logits);
-        rewards = rewards + config_.reward.ngp_scale * (ngp_current_scalar - ngp_prev_scalar);
+        rewards = config_.reward.ngp_scale * (ngp_current_scalar - ngp_prev_scalar);
         ngp_collection_state_ = std::move(ngp_output.state);
-        metrics.ngp_reward_seconds +=
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - ngp_start).count();
       }
+      metrics.reward_model_seconds +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - ngp_start).count();
 
       const auto append_start = std::chrono::steady_clock::now();
       rollout_.append(
@@ -591,7 +580,7 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
     metrics.obs_build_seconds = collector_timings.obs_build_seconds;
     metrics.mask_build_seconds = collector_timings.mask_build_seconds;
     metrics.env_step_seconds = collector_timings.env_step_seconds;
-    metrics.reward_done_seconds = collector_timings.reward_done_seconds;
+    metrics.done_reset_seconds = collector_timings.done_reset_seconds;
 
     metrics.collection_agent_steps_per_second =
         collected_agent_steps > 0 ? static_cast<double>(collected_agent_steps) / collection_seconds : 0.0;
@@ -646,8 +635,8 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
           {"policy_forward_seconds", metrics.policy_forward_seconds},
           {"action_decode_seconds", metrics.action_decode_seconds},
           {"env_step_seconds", metrics.env_step_seconds},
-          {"reward_done_seconds", metrics.reward_done_seconds},
-          {"ngp_reward_seconds", metrics.ngp_reward_seconds},
+          {"done_reset_seconds", metrics.done_reset_seconds},
+          {"reward_model_seconds", metrics.reward_model_seconds},
           {"rollout_append_seconds", metrics.rollout_append_seconds},
           {"gae_seconds", metrics.gae_seconds},
           {"ppo_forward_backward_seconds", metrics.ppo_forward_backward_seconds},

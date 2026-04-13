@@ -1,2 +1,0 @@
-[console_scripts]
-pulsar-viz = pulsar_viz.cli:main

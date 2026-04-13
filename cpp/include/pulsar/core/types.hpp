@@ -90,7 +90,6 @@ struct EnvState {
 
 struct StepResult {
   EnvState state{};
-  std::vector<float> rewards{};
   std::vector<std::uint8_t> terminated{};
   std::vector<std::uint8_t> truncated{};
 };

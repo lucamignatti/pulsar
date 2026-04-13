@@ -10,18 +10,8 @@
 
 namespace pulsar {
 
-struct RewardTermConfig {
-  std::string name{};
-  float weight = 0.0F;
-};
-
 struct RewardConfig {
-  std::vector<RewardTermConfig> terms{};
-  float team_spirit = 0.0F;
-  float opponent_scale = 0.0F;
-  std::string mode = "shaped";
   std::string ngp_checkpoint{};
-  float shaped_scale = 1.0F;
   float ngp_scale = 1.0F;
 };
 
@@ -66,7 +56,6 @@ struct PPOConfig {
     float opponent_probability = 0.0F;
     int snapshot_interval_updates = 10;
     int max_snapshots = 8;
-    std::string opponent_sampling = "uniform";
     std::string training_opponent_policy = "stochastic";
     int eval_interval_updates = 10;
     int eval_num_envs = 8;
@@ -85,12 +74,10 @@ struct PPOConfig {
   float gamma = 0.99F;
   float gae_lambda = 0.95F;
   float clip_range = 0.2F;
-  float value_clip_range = 0.2F;
   float entropy_coef = 0.01F;
   float value_coef = 1.0F;
   float learning_rate = 3.0e-4F;
   float max_grad_norm = 1.0F;
-  float target_kl = 0.03F;
   std::string device = "cpu";
   int checkpoint_interval = 10;
   int sequence_length = 16;
@@ -106,7 +93,6 @@ struct PPOConfig {
   std::string confidence_weight_type = "entropy";
   float confidence_weight_delta = 1.0e-6F;
   bool normalize_confidence_weights = false;
-  std::string advantage_calculation = "quantile_sampling";
   SelfPlayConfig self_play{};
 };
 
@@ -114,7 +100,6 @@ struct OfflineDatasetConfig {
   std::string train_manifest = "";
   std::string val_manifest = "";
   int batch_size = 4096;
-  int val_batch_size = 8192;
   bool shuffle = true;
   std::uint64_t seed = 0;
 };
@@ -127,14 +112,11 @@ struct BehaviorCloningConfig {
   float label_smoothing = 0.0F;
   float max_grad_norm = 1.0F;
   int sequence_length = 32;
-  int sequences_per_batch = 128;
 };
 
 struct NextGoalPredictorConfig {
   bool enabled = true;
   int epochs = 10;
-  int num_classes = 3;
-  std::vector<int> hidden_sizes{1024, 512};
   float learning_rate = 3.0e-4F;
   float weight_decay = 1.0e-6F;
   float label_smoothing = 0.0F;
@@ -184,8 +166,6 @@ struct CheckpointMetadata {
 void to_json(nlohmann::json& j, const ControllerState& value);
 void from_json(const nlohmann::json& j, ControllerState& value);
 
-void to_json(nlohmann::json& j, const RewardTermConfig& value);
-void from_json(const nlohmann::json& j, RewardTermConfig& value);
 void to_json(nlohmann::json& j, const RewardConfig& value);
 void from_json(const nlohmann::json& j, RewardConfig& value);
 void to_json(nlohmann::json& j, const ActionTableConfig& value);

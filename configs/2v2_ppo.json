@@ -14,34 +14,8 @@
     "seed": 7
   },
   "reward": {
-    "mode": "ngp",
     "ngp_checkpoint": "",
-    "shaped_scale": 0.0,
-    "ngp_scale": 1.0,
-    "team_spirit": 0.2,
-    "opponent_scale": 1.0,
-    "terms": [
-      {
-        "name": "goal",
-        "weight": 10.0
-      },
-      {
-        "name": "touch",
-        "weight": 0.1
-      },
-      {
-        "name": "speed_to_ball",
-        "weight": 0.01
-      },
-      {
-        "name": "ball_to_goal",
-        "weight": 0.1
-      },
-      {
-        "name": "face_ball",
-        "weight": 0.002
-      }
-    ]
+    "ngp_scale": 1.0
   },
   "action_table": {
     "builtin": "rlgym_lookup_v1",
@@ -73,12 +47,10 @@
     "gamma": 0.99,
     "gae_lambda": 0.95,
     "clip_range": 0.2,
-    "value_clip_range": 0.2,
     "entropy_coef": 0.01,
     "value_coef": 1.0,
     "learning_rate": 0.0002,
     "max_grad_norm": 1.0,
-    "target_kl": 0.03,
     "device": "cuda",
     "checkpoint_interval": 10,
     "sequence_length": 16,
@@ -94,13 +66,11 @@
     "confidence_weight_type": "entropy",
     "confidence_weight_delta": 1e-06,
     "normalize_confidence_weights": false,
-    "advantage_calculation": "quantile_sampling",
     "self_play": {
       "enabled": true,
       "opponent_probability": 0.5,
       "snapshot_interval_updates": 10,
       "max_snapshots": 8,
-      "opponent_sampling": "uniform",
       "training_opponent_policy": "stochastic",
       "eval_interval_updates": 10,
       "eval_num_envs": 8,

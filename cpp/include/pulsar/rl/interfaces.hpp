@@ -49,22 +49,6 @@ class ActionParser {
   virtual void build_action_mask_batch(const EnvState& state, std::span<std::uint8_t> out) const;
 };
 
-class RewardFunction {
- public:
-  virtual ~RewardFunction() = default;
-  virtual std::vector<float> get_rewards(
-      const EnvState& previous_state,
-      const EnvState& current_state,
-      std::span<const std::uint8_t> terminated,
-      std::span<const std::uint8_t> truncated) const = 0;
-  virtual void get_rewards_into(
-      const EnvState& previous_state,
-      const EnvState& current_state,
-      std::span<const std::uint8_t> terminated,
-      std::span<const std::uint8_t> truncated,
-      std::span<float> out) const;
-};
-
 class DoneCondition {
  public:
   virtual ~DoneCondition() = default;
@@ -82,7 +66,6 @@ using TransitionEnginePtr = std::shared_ptr<TransitionEngine>;
 using StateMutatorPtr = std::shared_ptr<StateMutator>;
 using ObsBuilderPtr = std::shared_ptr<ObsBuilder>;
 using ActionParserPtr = std::shared_ptr<ActionParser>;
-using RewardFunctionPtr = std::shared_ptr<RewardFunction>;
 using DoneConditionPtr = std::shared_ptr<DoneCondition>;
 
 }  // namespace pulsar

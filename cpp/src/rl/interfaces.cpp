@@ -60,20 +60,6 @@ void ActionParser::build_action_mask_batch(const EnvState& state, std::span<std:
   }
 }
 
-void RewardFunction::get_rewards_into(
-    const EnvState& previous_state,
-    const EnvState& current_state,
-    std::span<const std::uint8_t> terminated,
-    std::span<const std::uint8_t> truncated,
-    std::span<float> out) const {
-  if (out.size() != current_state.cars.size()) {
-    throw std::invalid_argument("RewardFunction::get_rewards_into output span has incorrect size.");
-  }
-
-  const std::vector<float> rewards = get_rewards(previous_state, current_state, terminated, truncated);
-  std::copy(rewards.begin(), rewards.end(), out.begin());
-}
-
 void DoneCondition::is_done_into(
     const EnvState& state,
     int episode_ticks,
