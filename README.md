@@ -200,10 +200,13 @@ Recommended invocation:
 .venv/bin/python scripts/preprocess_kaggle_2v2.py \
   /path/to/high-level-rocket-league-replay-dataset \
   /path/to/pulsar_offline_2v2 \
+  --workers 8 \
   --interpolation rocketsim \
   --action-target-mode weighted \
   --max-update-age 0.0
 ```
+
+For throughput, `--workers` lets the preprocessor fan out across multiple CPU processes. `--interpolation rocketsim` gives the highest-fidelity reconstruction but is the slowest mode; `linear` and then `none` are progressively faster if you can tolerate lower replay reconstruction fidelity. `--action-target-mode best` is also cheaper than `weighted`.
 
 Then point [configs/2v2_offline.json](configs/2v2_offline.json) at those manifests and run:
 

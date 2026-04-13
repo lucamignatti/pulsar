@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
-import random
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -112,6 +113,17 @@ class TrajectoryBuffer:
         return bool(self.obs)
 
 
+@dataclass(slots=True)
+class WorkerResult:
+    train_shards: list[dict[str, Any]] = field(default_factory=list)
+    val_shards: list[dict[str, Any]] = field(default_factory=list)
+    obs_dim: int | None = None
+    exact_samples: int = 0
+    skipped_replays: int = 0
+    skipped_unbalanced_frames: int = 0
+    skipped_bad_obs_frames: int = 0
+
+
 def _find_replays(dataset_root: Path, split_subdir: str) -> list[Path]:
     roots = list(dataset_root.glob(f"**/{split_subdir}"))
     replay_paths: list[Path] = []
@@ -148,38 +160,73 @@ def _is_fresh_update(update_age: float, max_update_age: float) -> bool:
     return float(update_age) <= max_update_age + 1.0e-9
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Convert the Kaggle high-level Rocket League 2v2 replay split into Pulsar offline trajectory shards."
-    )
-    parser.add_argument("dataset_root", type=Path)
-    parser.add_argument("output_dir", type=Path)
-    parser.add_argument("--split-subdir", default="2v2")
-    parser.add_argument("--train-fraction", type=float, default=0.95)
-    parser.add_argument("--max-replays", type=int, default=0)
-    parser.add_argument("--shard-size", type=int, default=50000)
-    parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--interpolation", choices=("none", "linear", "rocketsim"), default="rocketsim")
-    parser.add_argument("--no-predict-pyr", action="store_true")
-    parser.add_argument("--max-update-age", type=float, default=0.0)
-    parser.add_argument("--action-target-mode", choices=("weighted", "best"), default="weighted")
-    parser.add_argument("--dodge-deadzone", type=float, default=0.5)
-    args = parser.parse_args()
+def _has_two_cars_per_team(cars: dict[int, Any], blue_team: int, orange_team: int) -> bool:
+    blue_count = 0
+    orange_count = 0
+    for car in cars.values():
+        if car.team_num == blue_team:
+            blue_count += 1
+        elif car.team_num == orange_team:
+            orange_count += 1
+        else:
+            return False
+    return blue_count == 2 and orange_count == 2
 
+
+def _stack_rows(rows: list[np.ndarray], label: str, split: str, shard_name: str) -> np.ndarray:
+    shapes = sorted({tuple(np.asarray(row).shape) for row in rows})
+    if len(shapes) != 1:
+        raise RuntimeError(f"Inconsistent {label} shapes in {split} shard {shard_name}: {shapes}")
+    return np.stack(rows).astype(np.float32)
+
+
+def _assign_split(replay_path: str, seed: int, train_fraction: float) -> str:
+    digest = hashlib.blake2b(f"{seed}:{replay_path}".encode("utf-8"), digest_size=8).digest()
+    draw = int.from_bytes(digest, "big") / float(1 << 64)
+    return "train" if draw < train_fraction else "val"
+
+
+def _make_shard_name(prefix: str, shard_index: int) -> str:
+    return f"{prefix}shard_{shard_index:05d}"
+
+
+def _build_worker_config(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "output_dir": str(args.output_dir),
+        "shard_size": int(args.shard_size),
+        "seed": int(args.seed),
+        "interpolation": str(args.interpolation),
+        "no_predict_pyr": bool(args.no_predict_pyr),
+        "max_update_age": float(args.max_update_age),
+        "action_target_mode": str(args.action_target_mode),
+        "dodge_deadzone": float(args.dodge_deadzone),
+        "train_fraction": float(args.train_fraction),
+    }
+
+
+def _process_replay_subset(
+    replay_paths: list[str],
+    worker_config: dict[str, Any],
+    shard_prefix: str,
+) -> WorkerResult:
     mods = _require_replay_stack()
-    ParsedReplay = mods["ParsedReplay"]
+    blue_team = mods["BLUE_TEAM"]
+    orange_team = mods["ORANGE_TEAM"]
+    parsed_replay_cls = mods["ParsedReplay"]
     replay_to_rlgym = mods["replay_to_rlgym"]
-    DefaultObs = mods["DefaultObs"]
+    default_obs_cls = mods["DefaultObs"]
     get_best_action_options = mods["get_best_action_options"]
     get_weighted_action_options = mods["get_weighted_action_options"]
 
-    rng = random.Random(args.seed)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    replay_paths = _find_replays(args.dataset_root, args.split_subdir)
-    if args.max_replays > 0:
-      replay_paths = replay_paths[: args.max_replays]
-    if not replay_paths:
-        raise SystemExit("No replay files found for the requested split.")
+    output_dir = Path(worker_config["output_dir"])
+    shard_size = int(worker_config["shard_size"])
+    seed = int(worker_config["seed"])
+    interpolation = str(worker_config["interpolation"])
+    no_predict_pyr = bool(worker_config["no_predict_pyr"])
+    max_update_age = float(worker_config["max_update_age"])
+    action_target_mode = str(worker_config["action_target_mode"])
+    dodge_deadzone = float(worker_config["dodge_deadzone"])
+    train_fraction = float(worker_config["train_fraction"])
 
     train_obs: list[np.ndarray] = []
     train_actions: list[int] = []
@@ -193,10 +240,10 @@ def main() -> int:
     val_next_goal: list[int] = []
     val_weights: list[float] = []
     val_episode_starts: list[float] = []
-    train_shards: list[dict[str, Any]] = []
-    val_shards: list[dict[str, Any]] = []
-    skipped = 0
-    exact_samples = 0
+    result = WorkerResult()
+
+    train_shard_index = 0
+    val_shard_index = 0
 
     def flush(
         split: str,
@@ -210,30 +257,35 @@ def main() -> int:
     ) -> None:
         if not obs_rows:
             return
-        split_dir = args.output_dir / split
+
+        split_dir = output_dir / split
         split_dir.mkdir(parents=True, exist_ok=True)
-        obs_tensor = torch.from_numpy(np.stack(obs_rows).astype(np.float32))
+        shard_name = _make_shard_name(shard_prefix, shard_index)
+        obs_tensor = torch.from_numpy(_stack_rows(obs_rows, "observation", split, shard_name))
         actions_tensor = torch.tensor(actions, dtype=torch.long)
-        action_probs_tensor = torch.from_numpy(np.stack(action_probs).astype(np.float32))
+        action_probs_tensor = torch.from_numpy(
+            _stack_rows(action_probs, "action probability", split, shard_name)
+        )
         labels_tensor = torch.tensor(labels, dtype=torch.long)
         weights_tensor = torch.tensor(weights, dtype=torch.float32)
         episode_starts_tensor = torch.tensor(episode_starts, dtype=torch.float32)
-        base = f"shard_{shard_index:05d}"
-        torch.save(obs_tensor, split_dir / f"{base}_obs.pt")
-        torch.save(actions_tensor, split_dir / f"{base}_actions.pt")
-        torch.save(action_probs_tensor, split_dir / f"{base}_action_probs.pt")
-        torch.save(labels_tensor, split_dir / f"{base}_next_goal.pt")
-        torch.save(weights_tensor, split_dir / f"{base}_weights.pt")
-        torch.save(episode_starts_tensor, split_dir / f"{base}_episode_starts.pt")
-        target = train_shards if split == "train" else val_shards
+
+        torch.save(obs_tensor, split_dir / f"{shard_name}_obs.pt")
+        torch.save(actions_tensor, split_dir / f"{shard_name}_actions.pt")
+        torch.save(action_probs_tensor, split_dir / f"{shard_name}_action_probs.pt")
+        torch.save(labels_tensor, split_dir / f"{shard_name}_next_goal.pt")
+        torch.save(weights_tensor, split_dir / f"{shard_name}_weights.pt")
+        torch.save(episode_starts_tensor, split_dir / f"{shard_name}_episode_starts.pt")
+
+        target = result.train_shards if split == "train" else result.val_shards
         target.append(
             {
-                "obs_path": f"{split}/{base}_obs.pt",
-                "actions_path": f"{split}/{base}_actions.pt",
-                "action_probs_path": f"{split}/{base}_action_probs.pt",
-                "next_goal_path": f"{split}/{base}_next_goal.pt",
-                "weights_path": f"{split}/{base}_weights.pt",
-                "episode_starts_path": f"{split}/{base}_episode_starts.pt",
+                "obs_path": f"{split}/{shard_name}_obs.pt",
+                "actions_path": f"{split}/{shard_name}_actions.pt",
+                "action_probs_path": f"{split}/{shard_name}_action_probs.pt",
+                "next_goal_path": f"{split}/{shard_name}_next_goal.pt",
+                "weights_path": f"{split}/{shard_name}_weights.pt",
+                "episode_starts_path": f"{split}/{shard_name}_episode_starts.pt",
                 "samples": len(obs_rows),
             }
         )
@@ -243,9 +295,6 @@ def main() -> int:
         labels.clear()
         weights.clear()
         episode_starts.clear()
-
-    train_shard_index = 0
-    val_shard_index = 0
 
     def append_trajectory(split: str, trajectory: TrajectoryBuffer) -> None:
         nonlocal train_shard_index, val_shard_index
@@ -269,7 +318,7 @@ def main() -> int:
             episode_starts = val_episode_starts
             shard_index = val_shard_index
 
-        if obs_rows and len(obs_rows) + len(trajectory.obs) > args.shard_size:
+        if obs_rows and len(obs_rows) + len(trajectory.obs) > shard_size:
             flush(split, shard_index, obs_rows, actions, action_probs, labels, weights, episode_starts)
             if split == "train":
                 train_shard_index += 1
@@ -284,21 +333,28 @@ def main() -> int:
         episode_starts.extend([1.0] + [0.0] * (len(trajectory.obs) - 1))
         trajectory.clear()
 
-    for replay_path in replay_paths:
+    for replay_path_str in replay_paths:
+        replay_path = Path(replay_path_str)
         try:
-            replay = ParsedReplay.load(replay_path)
-            obs_builder = DefaultObs(zero_padding=2)
+            replay = parsed_replay_cls.load(replay_path)
+            obs_builder = default_obs_cls(zero_padding=2)
             trajectories: dict[int, TrajectoryBuffer] = {}
-            split = "train" if rng.random() < args.train_fraction else "val"
+            split = _assign_split(replay_path.as_posix(), seed, train_fraction)
             first_frame = True
             agent_order: list[int] = []
 
             for frame in replay_to_rlgym(
                 replay,
-                interpolation=args.interpolation,
-                predict_pyr=not args.no_predict_pyr,
+                interpolation=interpolation,
+                predict_pyr=not no_predict_pyr,
             ):
                 if len(frame.state.cars) != 4:
+                    continue
+                if not _has_two_cars_per_team(frame.state.cars, blue_team, orange_team):
+                    if not first_frame:
+                        for agent_id in agent_order:
+                            append_trajectory(split, trajectories[agent_id])
+                    result.skipped_unbalanced_frames += 1
                     continue
                 if first_frame:
                     agent_order = sorted(frame.state.cars.keys())
@@ -307,6 +363,26 @@ def main() -> int:
                     first_frame = False
 
                 obs_map = obs_builder.build_obs(agent_order, frame.state, {})
+                obs_rows_by_agent: dict[int, np.ndarray] = {}
+                bad_obs_frame = False
+
+                for agent_id in agent_order:
+                    obs_row = np.asarray(obs_map[agent_id], dtype=np.float32).reshape(-1)
+                    if not np.all(np.isfinite(obs_row)):
+                        bad_obs_frame = True
+                        break
+                    if result.obs_dim is None:
+                        result.obs_dim = int(obs_row.shape[0])
+                    if obs_row.shape != (result.obs_dim,):
+                        bad_obs_frame = True
+                        break
+                    obs_rows_by_agent[agent_id] = obs_row
+
+                if bad_obs_frame:
+                    for agent_id in agent_order:
+                        append_trajectory(split, trajectories[agent_id])
+                    result.skipped_bad_obs_frames += 1
+                    continue
 
                 for agent_id in agent_order:
                     car = frame.state.cars[agent_id]
@@ -318,24 +394,24 @@ def main() -> int:
                         car.is_demoed
                         or not np.all(np.isfinite(replay_action))
                         or replay_action.shape != (8,)
-                        or not _is_fresh_update(update_age, args.max_update_age)
+                        or not _is_fresh_update(update_age, max_update_age)
                     ):
                         append_trajectory(split, trajectory)
                         continue
 
-                    if args.action_target_mode == "weighted":
+                    if action_target_mode == "weighted":
                         action_probs = get_weighted_action_options(
                             car,
                             replay_action,
                             ACTION_OPTIONS,
-                            dodge_deadzone=args.dodge_deadzone,
+                            dodge_deadzone=dodge_deadzone,
                         )
                     else:
                         action_probs = get_best_action_options(
                             car,
                             replay_action,
                             ACTION_OPTIONS,
-                            dodge_deadzone=args.dodge_deadzone,
+                            dodge_deadzone=dodge_deadzone,
                             greedy=True,
                         )
                     action_probs = np.asarray(action_probs, dtype=np.float32)
@@ -345,12 +421,12 @@ def main() -> int:
                         continue
                     action_probs = action_probs / total_prob
 
-                    trajectory.obs.append(np.asarray(obs_map[agent_id], dtype=np.float32))
+                    trajectory.obs.append(obs_rows_by_agent[agent_id])
                     trajectory.action_probs.append(action_probs)
                     trajectory.actions.append(int(np.argmax(action_probs)))
                     trajectory.next_goal.append(_next_goal_label(car.team_num, frame.next_scoring_team))
                     trajectory.weights.append(_sample_weight(action_probs))
-                    exact_samples += 1
+                    result.exact_samples += 1
 
                 if frame.scoreboard.go_to_kickoff or frame.scoreboard.is_over:
                     for agent_id in agent_order:
@@ -359,7 +435,7 @@ def main() -> int:
             for trajectory in trajectories.values():
                 append_trajectory(split, trajectory)
         except Exception:
-            skipped += 1
+            result.skipped_replays += 1
             continue
 
     flush(
@@ -382,16 +458,99 @@ def main() -> int:
         val_weights,
         val_episode_starts,
     )
+    return result
+
+
+def _process_replay_subset_job(job: tuple[list[str], dict[str, Any], str]) -> WorkerResult:
+    replay_paths, worker_config, shard_prefix = job
+    return _process_replay_subset(replay_paths, worker_config, shard_prefix)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Convert the Kaggle high-level Rocket League 2v2 replay split into Pulsar offline trajectory shards."
+    )
+    parser.add_argument("dataset_root", type=Path)
+    parser.add_argument("output_dir", type=Path)
+    parser.add_argument("--split-subdir", default="2v2")
+    parser.add_argument("--train-fraction", type=float, default=0.95)
+    parser.add_argument("--max-replays", type=int, default=0)
+    parser.add_argument("--shard-size", type=int, default=50000)
+    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--interpolation", choices=("none", "linear", "rocketsim"), default="rocketsim")
+    parser.add_argument("--no-predict-pyr", action="store_true")
+    parser.add_argument("--max-update-age", type=float, default=0.0)
+    parser.add_argument("--action-target-mode", choices=("weighted", "best"), default="weighted")
+    parser.add_argument("--dodge-deadzone", type=float, default=0.5)
+    args = parser.parse_args()
+
+    if args.workers < 1:
+        raise SystemExit("--workers must be at least 1.")
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    replay_paths = _find_replays(args.dataset_root, args.split_subdir)
+    if args.max_replays > 0:
+        replay_paths = replay_paths[: args.max_replays]
+    if not replay_paths:
+        raise SystemExit("No replay files found for the requested split.")
+
+    replay_path_strs = [path.as_posix() for path in replay_paths]
+    worker_count = min(args.workers, len(replay_path_strs))
+    worker_config = _build_worker_config(args)
+
+    if worker_count == 1:
+        results = [_process_replay_subset(replay_path_strs, worker_config, "")]
+    else:
+        worker_width = max(2, len(str(worker_count - 1)))
+        jobs = [
+            (
+                replay_path_strs[worker_index::worker_count],
+                worker_config,
+                f"w{worker_index:0{worker_width}d}_",
+            )
+            for worker_index in range(worker_count)
+            if replay_path_strs[worker_index::worker_count]
+        ]
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            results = list(executor.map(_process_replay_subset_job, jobs))
+
+    obs_dims = sorted({result.obs_dim for result in results if result.obs_dim is not None})
+    if not obs_dims:
+        raise SystemExit("No valid observations were produced. Check replay interpolation and parser output.")
+    if len(obs_dims) != 1:
+        raise SystemExit(f"Inconsistent observation widths across workers: {obs_dims}")
+    obs_dim = obs_dims[0]
+
+    train_shards: list[dict[str, Any]] = []
+    val_shards: list[dict[str, Any]] = []
+    exact_samples = 0
+    skipped_replays = 0
+    skipped_unbalanced_frames = 0
+    skipped_bad_obs_frames = 0
+
+    for result in results:
+        train_shards.extend(result.train_shards)
+        val_shards.extend(result.val_shards)
+        exact_samples += result.exact_samples
+        skipped_replays += result.skipped_replays
+        skipped_unbalanced_frames += result.skipped_unbalanced_frames
+        skipped_bad_obs_frames += result.skipped_bad_obs_frames
+
+    train_shards.sort(key=lambda shard: shard["obs_path"])
+    val_shards.sort(key=lambda shard: shard["obs_path"])
 
     if not train_shards:
         raise SystemExit("No training shards were produced. Check dataset path and replay parser dependencies.")
 
-    obs_dim = 132
     _write_manifest(args.output_dir / "train_manifest.json", obs_dim, ACTION_OPTIONS.shape[0], train_shards)
     _write_manifest(args.output_dir / "val_manifest.json", obs_dim, ACTION_OPTIONS.shape[0], val_shards or train_shards)
+    print(f"workers={worker_count}")
     print(f"wrote {len(train_shards)} train shards and {len(val_shards)} val shards")
     print(f"exact_samples={exact_samples}")
-    print(f"skipped_replays={skipped}")
+    print(f"skipped_replays={skipped_replays}")
+    print(f"skipped_unbalanced_frames={skipped_unbalanced_frames}")
+    print(f"skipped_bad_obs_frames={skipped_bad_obs_frames}")
     return 0
 
 

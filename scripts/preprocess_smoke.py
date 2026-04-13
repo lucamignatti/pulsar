@@ -38,7 +38,18 @@ class DefaultObs:
     def build_obs(self, agent_order, state, shared_info):
         obs = {}
         for idx, agent_id in enumerate(agent_order):
-            vec = np.zeros(132, dtype=np.float32)
+            team_num = state.cars[agent_id].team_num
+            ally_count = sum(
+                1 for other_id, other_car in state.cars.items()
+                if other_id != agent_id and other_car.team_num == team_num
+            )
+            enemy_count = sum(
+                1 for other_id, other_car in state.cars.items()
+                if other_id != agent_id and other_car.team_num != team_num
+            )
+            ally_slots = max(ally_count, self.zero_padding - 1)
+            enemy_slots = max(enemy_count, self.zero_padding)
+            vec = np.zeros(52 + 20 * (1 + ally_slots + enemy_slots), dtype=np.float32)
             vec[0] = float(agent_id)
             vec[1] = float(state.frame_index)
             vec[2] = float(idx)
@@ -89,26 +100,25 @@ class Car:
         self.is_demoed = False
 
 class State:
-    def __init__(self, frame_index):
+    def __init__(self, frame_index, teams):
         self.frame_index = frame_index
         self.cars = {
-            0: Car(0),
-            1: Car(0),
-            2: Car(1),
-            3: Car(1),
+            agent_id: Car(team_num)
+            for agent_id, team_num in enumerate(teams)
         }
 
 class Frame:
-    def __init__(self, frame_index, is_last=False):
-        self.state = State(frame_index)
+    def __init__(self, frame_index, teams, is_last=False):
+        self.state = State(frame_index, teams)
         self.actions = {agent_id: [0.0] * 8 for agent_id in self.state.cars}
         self.update_age = {agent_id: 0.0 for agent_id in self.state.cars}
         self.next_scoring_team = 0 if not is_last else None
         self.scoreboard = Scoreboard(go_to_kickoff=is_last, is_over=is_last)
 
 def replay_to_rlgym(replay, interpolation="rocketsim", predict_pyr=True):
-    yield Frame(0, is_last=False)
-    yield Frame(1, is_last=True)
+    yield Frame(0, [0, 0, 0, 1], is_last=False)
+    yield Frame(1, [0, 0, 1, 1], is_last=False)
+    yield Frame(2, [0, 0, 1, 1], is_last=True)
 """,
     )
 
@@ -126,7 +136,8 @@ def main() -> int:
         make_stub_stack(stubs)
         dataset_root = tmp_dir / "dataset/2v2"
         dataset_root.mkdir(parents=True)
-        (dataset_root / "fake.replay").write_bytes(b"stub")
+        (dataset_root / "fake_a.replay").write_bytes(b"stub")
+        (dataset_root / "fake_b.replay").write_bytes(b"stub")
         output_dir = tmp_dir / "out"
 
         env = dict(os.environ)
@@ -140,10 +151,12 @@ def main() -> int:
                 str(script),
                 str(tmp_dir / "dataset"),
                 str(output_dir),
-                "--max-replays",
-                "1",
+                "--train-fraction",
+                "1.0",
                 "--shard-size",
                 "8",
+                "--workers",
+                "2",
             ],
             check=True,
             cwd=repo_root,
