@@ -11,8 +11,25 @@
 namespace pulsar {
 
 struct RewardConfig {
+  struct OnlineDatasetExportConfig {
+    bool enabled = false;
+    std::string output_dir{};
+    int shard_size = 65536;
+    float train_fraction = 0.95F;
+    std::uint64_t seed = 0;
+  };
+
+  struct RefreshConfig {
+    bool enabled = false;
+    std::string candidate_checkpoint{};
+    int check_interval_updates = 1;
+  };
+
   std::string ngp_checkpoint{};
+  std::string ngp_label{};
   float ngp_scale = 1.0F;
+  OnlineDatasetExportConfig online_dataset{};
+  RefreshConfig refresh{};
 };
 
 struct ActionTableConfig {
@@ -115,12 +132,14 @@ struct BehaviorCloningConfig {
 
 struct NextGoalPredictorConfig {
   bool enabled = true;
+  std::string init_checkpoint{};
   int epochs = 10;
   float learning_rate = 3.0e-4F;
   float weight_decay = 1.0e-6F;
   float label_smoothing = 0.0F;
   float max_grad_norm = 1.0F;
   std::vector<float> class_weights{1.0F, 1.0F, 0.25F};
+  bool reuse_normalizer = true;
 };
 
 struct WandbConfig {
@@ -160,11 +179,22 @@ struct CheckpointMetadata {
   std::string device = "cpu";
   std::int64_t global_step = 0;
   std::int64_t update_index = 0;
+  std::string reward_ngp_label{};
+  std::string reward_ngp_checkpoint{};
+  std::string reward_ngp_config_hash{};
+  std::int64_t reward_ngp_global_step = 0;
+  std::int64_t reward_ngp_update_index = 0;
+  std::int64_t reward_ngp_promotion_index = 0;
+  std::int64_t reward_ngp_promoted_global_step = 0;
 };
 
 void to_json(nlohmann::json& j, const ControllerState& value);
 void from_json(const nlohmann::json& j, ControllerState& value);
 
+void to_json(nlohmann::json& j, const RewardConfig::OnlineDatasetExportConfig& value);
+void from_json(const nlohmann::json& j, RewardConfig::OnlineDatasetExportConfig& value);
+void to_json(nlohmann::json& j, const RewardConfig::RefreshConfig& value);
+void from_json(const nlohmann::json& j, RewardConfig::RefreshConfig& value);
 void to_json(nlohmann::json& j, const RewardConfig& value);
 void from_json(const nlohmann::json& j, RewardConfig& value);
 void to_json(nlohmann::json& j, const ActionTableConfig& value);

@@ -28,6 +28,7 @@ class OfflinePretrainer {
 
  private:
   void validate_config() const;
+  void maybe_initialize_from_checkpoint();
   void fit_normalizer();
   OfflineEpochMetrics run_training_epoch(int epoch_index);
   OfflineEpochMetrics evaluate();

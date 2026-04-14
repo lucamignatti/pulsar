@@ -35,8 +35,15 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="pulsar_e2e_") as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
         model_overrides = {
-            "hidden_sizes": [64, 64],
             "use_layer_norm": False,
+            "encoder_dim": 64,
+            "workspace_dim": 64,
+            "stm_slots": 8,
+            "stm_key_dim": 16,
+            "stm_value_dim": 16,
+            "ltm_slots": 8,
+            "ltm_dim": 16,
+            "controller_dim": 64,
         }
         offline_output_dir = run_offline_pretrain(
             repo_root=repo_root,

@@ -116,6 +116,7 @@ if(PULSAR_ENABLE_TORCH)
       cpp/src/model/normalizer.cpp
       cpp/src/training/offline_dataset.cpp
       cpp/src/training/offline_pretrainer.cpp
+      cpp/src/training/online_ngp_dataset_writer.cpp
       cpp/src/training/rollout_storage.cpp
       cpp/src/training/batched_rocketsim_collector.cpp
       cpp/src/training/ppo_math.cpp

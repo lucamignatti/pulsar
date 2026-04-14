@@ -26,7 +26,6 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="pulsar_train_smoke_") as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
         model_overrides = {
-            "hidden_sizes": [64, 64],
             "encoder_dim": 64,
             "workspace_dim": 64,
             "stm_slots": 8,
@@ -49,6 +48,7 @@ def main() -> int:
 
         config = json.loads(ppo_base_config_path.read_text(encoding="utf-8"))
         config["env"]["collision_meshes_path"] = str((repo_root / "collision_meshes").resolve())
+        config["env"]["max_episode_ticks"] = 16
         config["model"].update(model_overrides)
         config["ppo"]["num_envs"] = 4
         config["ppo"]["rollout_length"] = 4
@@ -61,7 +61,26 @@ def main() -> int:
         config["ppo"]["device"] = "cpu"
         config["ppo"]["init_checkpoint"] = str((offline_output_dir / "policy").resolve())
         config["reward"]["ngp_checkpoint"] = str((offline_output_dir / "next_goal").resolve())
+        config["reward"]["ngp_label"] = "bootstrap"
         config["reward"]["ngp_scale"] = 1.0
+        promoted_ngp_dir = tmp_dir / "promoted_next_goal"
+        promoted_ngp_dir.mkdir(parents=True)
+        for child in (offline_output_dir / "next_goal").iterdir():
+            target = promoted_ngp_dir / child.name
+            if child.is_file():
+                target.write_bytes(child.read_bytes())
+        config["reward"]["online_dataset"] = {
+            "enabled": True,
+            "output_dir": str((tmp_dir / "online_ngp_data").resolve()),
+            "shard_size": 8,
+            "train_fraction": 1.0,
+            "seed": 7,
+        }
+        config["reward"]["refresh"] = {
+            "enabled": True,
+            "candidate_checkpoint": str(promoted_ngp_dir.resolve()),
+            "check_interval_updates": 1,
+        }
         config["wandb"]["enabled"] = False
         config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
@@ -84,13 +103,33 @@ def main() -> int:
             "policy_forward_seconds",
             "ppo_forward_backward_seconds",
             "optimizer_step_seconds",
+            "ngp_promotion_index",
+            "ngp_label",
+            "ngp_checkpoint",
+            "ngp_online_samples_written",
         }
         if missing := sorted(required_fields - metrics_lines[-1].keys()):
             raise RuntimeError(f"missing trainer metrics: {missing}")
+        if metrics_lines[-1]["ngp_label"] != "bootstrap":
+            raise RuntimeError("trainer metrics should report the active bootstrap NGP label")
+        if metrics_lines[-1]["ngp_online_samples_written"] <= 0:
+            raise RuntimeError("online NGP dataset export did not record any samples")
+
+        promotion_lines = [
+            json.loads(line)
+            for line in (checkpoint_dir / "ngp_promotions.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        if not promotion_lines:
+            raise RuntimeError("ngp_promotions.jsonl was not written")
 
         for rel in ["update_1/model.pt", "best/model.pt", "final/model.pt"]:
             if not (checkpoint_dir / rel).exists():
                 raise RuntimeError(f"missing checkpoint artifact: {rel}")
+
+        for rel in ["train_manifest.json", "val_manifest.json"]:
+            if not (tmp_dir / "online_ngp_data" / rel).exists():
+                raise RuntimeError(f"missing online NGP dataset manifest: {rel}")
 
     return 0
 

@@ -130,6 +130,15 @@ void append_metrics_line(
       {"ppo_forward_backward_seconds", metrics.ppo_forward_backward_seconds},
       {"optimizer_step_seconds", metrics.optimizer_step_seconds},
       {"self_play_eval_seconds", metrics.self_play_eval_seconds},
+      {"ngp_promotion_index", metrics.ngp_promotion_index},
+      {"ngp_promoted_global_step", metrics.ngp_promoted_global_step},
+      {"ngp_source_global_step", metrics.ngp_source_global_step},
+      {"ngp_source_update_index", metrics.ngp_source_update_index},
+      {"ngp_online_samples_written", metrics.ngp_online_samples_written},
+      {"ngp_online_trajectories_written", metrics.ngp_online_trajectories_written},
+      {"ngp_label", metrics.ngp_label},
+      {"ngp_checkpoint", metrics.ngp_checkpoint},
+      {"ngp_config_hash", metrics.ngp_config_hash},
   };
   for (const auto& [mode, rating] : metrics.elo_ratings) {
     line["elo_" + mode] = rating;
@@ -137,6 +146,31 @@ void append_metrics_line(
 
   std::filesystem::create_directories(checkpoint_dir);
   std::ofstream output(checkpoint_dir / "metrics.jsonl", std::ios::app);
+  output << line.dump() << '\n';
+}
+
+void append_ngp_promotion_line(
+    const std::filesystem::path& checkpoint_dir,
+    std::int64_t global_step,
+    int update_index,
+    const std::string& old_checkpoint,
+    const std::string& new_checkpoint,
+    const TrainerMetrics& metrics) {
+  nlohmann::json line = {
+      {"global_step", global_step},
+      {"update", update_index},
+      {"old_ngp_checkpoint", old_checkpoint},
+      {"new_ngp_checkpoint", new_checkpoint},
+      {"ngp_promotion_index", metrics.ngp_promotion_index},
+      {"ngp_promoted_global_step", metrics.ngp_promoted_global_step},
+      {"ngp_source_global_step", metrics.ngp_source_global_step},
+      {"ngp_source_update_index", metrics.ngp_source_update_index},
+      {"ngp_label", metrics.ngp_label},
+      {"ngp_config_hash", metrics.ngp_config_hash},
+  };
+
+  std::filesystem::create_directories(checkpoint_dir);
+  std::ofstream output(checkpoint_dir / "ngp_promotions.jsonl", std::ios::app);
   output << line.dump() << '\n';
 }
 
@@ -176,6 +210,20 @@ PPOTrainer::PPOTrainer(
 #endif
   model_->to(device_);
   normalizer_.to(device_);
+  if (config_.reward.online_dataset.enabled) {
+    if (config_.reward.online_dataset.output_dir.empty()) {
+      throw std::invalid_argument("reward.online_dataset.output_dir must be set when online dataset export is enabled.");
+    }
+    const std::size_t num_envs = collector_->num_envs();
+    const std::size_t agents_per_env = num_envs == 0 ? 0 : total_agents_ / num_envs;
+    online_ngp_dataset_writer_ = std::make_unique<OnlineNGPDatasetWriter>(
+        config_.reward.online_dataset,
+        config_.reward.online_dataset.output_dir,
+        config_.model.observation_dim,
+        config_.model.action_dim,
+        num_envs,
+        agents_per_env);
+  }
   maybe_initialize_from_checkpoint();
   maybe_initialize_ngp_reward();
 
@@ -255,13 +303,13 @@ void PPOTrainer::maybe_initialize_from_checkpoint() {
   std::cout << "initialized_from_checkpoint=" << base.string() << '\n';
 }
 
-void PPOTrainer::maybe_initialize_ngp_reward() {
-  if (config_.reward.ngp_checkpoint.empty()) {
-    throw std::runtime_error("reward.ngp_checkpoint must be set for PPO training.");
-  }
-
+void PPOTrainer::load_ngp_reward_checkpoint(
+    const std::string& checkpoint_path,
+    const std::string& configured_label,
+    std::int64_t promotion_index,
+    std::int64_t promoted_global_step) {
   namespace fs = std::filesystem;
-  const fs::path base(config_.reward.ngp_checkpoint);
+  const fs::path base(checkpoint_path);
   const ExperimentConfig checkpoint_config = load_experiment_config((base / "config.json").string());
   const CheckpointMetadata metadata = load_checkpoint_metadata((base / "metadata.json").string());
   validate_aux_checkpoint_compatibility(metadata, checkpoint_config, config_, "NGP checkpoint");
@@ -275,8 +323,65 @@ void PPOTrainer::maybe_initialize_ngp_reward() {
   ngp_normalizer_.to(device_);
   ngp_model_->eval();
   ngp_collection_state_ = ngp_model_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
+  active_ngp_checkpoint_ = base.string();
+  active_ngp_label_ = !configured_label.empty() ? configured_label : base.filename().string();
+  active_ngp_config_hash_ = metadata.config_hash;
+  active_ngp_global_step_ = metadata.global_step;
+  active_ngp_update_index_ = metadata.update_index;
+  active_ngp_promotion_index_ = promotion_index;
+  active_ngp_promoted_global_step_ = promoted_global_step;
 
-  std::cout << "initialized_ngp_reward_from_checkpoint=" << base.string() << '\n';
+  std::cout << "initialized_ngp_reward_from_checkpoint=" << base.string()
+            << " ngp_label=" << active_ngp_label_
+            << " ngp_promotion_index=" << active_ngp_promotion_index_
+            << '\n';
+}
+
+void PPOTrainer::maybe_initialize_ngp_reward() {
+  if (config_.reward.ngp_checkpoint.empty()) {
+    throw std::runtime_error("reward.ngp_checkpoint must be set for PPO training.");
+  }
+  load_ngp_reward_checkpoint(config_.reward.ngp_checkpoint, config_.reward.ngp_label, 0, 0);
+}
+
+void PPOTrainer::maybe_promote_ngp_reward(
+    std::int64_t global_step,
+    int update_index,
+    const std::string& checkpoint_dir) {
+  if (!config_.reward.refresh.enabled || config_.reward.refresh.candidate_checkpoint.empty()) {
+    return;
+  }
+  const int interval = std::max(1, config_.reward.refresh.check_interval_updates);
+  if (update_index % interval != 0) {
+    return;
+  }
+
+  namespace fs = std::filesystem;
+  const fs::path candidate = fs::path(config_.reward.refresh.candidate_checkpoint);
+  if (!fs::exists(candidate / "model.pt") || !fs::exists(candidate / "config.json") || !fs::exists(candidate / "metadata.json")) {
+    return;
+  }
+  if (candidate.string() == active_ngp_checkpoint_) {
+    return;
+  }
+
+  const std::string old_checkpoint = active_ngp_checkpoint_;
+  try {
+    load_ngp_reward_checkpoint(candidate.string(), candidate.filename().string(), active_ngp_promotion_index_ + 1, global_step);
+  } catch (const std::exception& exc) {
+    std::cerr << "skipping_ngp_promotion checkpoint=" << candidate.string() << " reason=" << exc.what() << '\n';
+    return;
+  }
+
+  TrainerMetrics promotion_metrics{};
+  promotion_metrics.ngp_promotion_index = active_ngp_promotion_index_;
+  promotion_metrics.ngp_promoted_global_step = active_ngp_promoted_global_step_;
+  promotion_metrics.ngp_source_global_step = active_ngp_global_step_;
+  promotion_metrics.ngp_source_update_index = active_ngp_update_index_;
+  promotion_metrics.ngp_label = active_ngp_label_;
+  promotion_metrics.ngp_checkpoint = active_ngp_checkpoint_;
+  promotion_metrics.ngp_config_hash = active_ngp_config_hash_;
+  append_ngp_promotion_line(checkpoint_dir, global_step, update_index, old_checkpoint, active_ngp_checkpoint_, promotion_metrics);
 }
 
 torch::Tensor PPOTrainer::ngp_scalar(const torch::Tensor& logits) const {
@@ -413,6 +518,13 @@ CheckpointMetadata PPOTrainer::make_checkpoint_metadata(
       .device = config_.ppo.device,
       .global_step = global_step,
       .update_index = update_index,
+      .reward_ngp_label = active_ngp_label_,
+      .reward_ngp_checkpoint = active_ngp_checkpoint_,
+      .reward_ngp_config_hash = active_ngp_config_hash_,
+      .reward_ngp_global_step = active_ngp_global_step_,
+      .reward_ngp_update_index = active_ngp_update_index_,
+      .reward_ngp_promotion_index = active_ngp_promotion_index_,
+      .reward_ngp_promoted_global_step = active_ngp_promoted_global_step_,
   };
 }
 
@@ -517,6 +629,12 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
 
       collector_->step(host_actions_, true, &collector_timings);
       const torch::Tensor dones = collector_->host_dones().to(device_, use_pinned_host_buffers_);
+      if (online_ngp_dataset_writer_) {
+        online_ngp_dataset_writer_->record_step(
+            raw_obs_host,
+            collector_->host_dones(),
+            collector_->host_terminal_next_goal_labels());
+      }
       const auto ngp_start = std::chrono::steady_clock::now();
       torch::Tensor rewards;
       {
@@ -604,6 +722,17 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
     const torch::Tensor active_rewards = rollout_.rewards * rollout_.learner_active;
     const double active_count = rollout_.learner_active.sum().item<double>();
     metrics.reward_mean = active_count > 0.0 ? active_rewards.sum().item<double>() / active_count : 0.0;
+    metrics.ngp_promotion_index = active_ngp_promotion_index_;
+    metrics.ngp_promoted_global_step = active_ngp_promoted_global_step_;
+    metrics.ngp_source_global_step = active_ngp_global_step_;
+    metrics.ngp_source_update_index = active_ngp_update_index_;
+    metrics.ngp_label = active_ngp_label_;
+    metrics.ngp_checkpoint = active_ngp_checkpoint_;
+    metrics.ngp_config_hash = active_ngp_config_hash_;
+    if (online_ngp_dataset_writer_) {
+      metrics.ngp_online_samples_written = online_ngp_dataset_writer_->samples_written();
+      metrics.ngp_online_trajectories_written = online_ngp_dataset_writer_->trajectories_written();
+    }
 
     std::cout << "update=" << update_index
               << " collection_sps=" << metrics.collection_agent_steps_per_second
@@ -613,6 +742,8 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
               << " policy_loss=" << metrics.policy_loss
               << " value_loss=" << metrics.value_loss
               << " entropy=" << metrics.entropy
+              << " ngp=" << metrics.ngp_label
+              << " ngp_promotion_index=" << metrics.ngp_promotion_index
               << " self_play_eval_s=" << metrics.self_play_eval_seconds
               << '\n';
     append_metrics_line(checkpoint_dir, update_index, global_step, metrics);
@@ -642,10 +773,19 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
           {"ppo_forward_backward_seconds", metrics.ppo_forward_backward_seconds},
           {"optimizer_step_seconds", metrics.optimizer_step_seconds},
           {"self_play_eval_seconds", metrics.self_play_eval_seconds},
+          {"ngp_promotion_index", metrics.ngp_promotion_index},
+          {"ngp_promoted_global_step", metrics.ngp_promoted_global_step},
+          {"ngp_source_global_step", metrics.ngp_source_global_step},
+          {"ngp_source_update_index", metrics.ngp_source_update_index},
+          {"ngp_online_samples_written", metrics.ngp_online_samples_written},
+          {"ngp_online_trajectories_written", metrics.ngp_online_trajectories_written},
       };
       for (const auto& [mode, rating] : metrics.elo_ratings) {
         wandb_metrics["elo/" + mode] = rating;
       }
+      wandb_metrics["ngp_label"] = metrics.ngp_label;
+      wandb_metrics["ngp_checkpoint"] = metrics.ngp_checkpoint;
+      wandb_metrics["ngp_config_hash"] = metrics.ngp_config_hash;
       wandb.log(std::move(wandb_metrics));
     }
 
@@ -656,6 +796,10 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
       best_reward_mean_ = metrics.reward_mean;
       save_checkpoint_to_directory(std::filesystem::path(checkpoint_dir) / "best", global_step, update_index + 1);
     }
+    maybe_promote_ngp_reward(global_step, update_index + 1, checkpoint_dir);
+  }
+  if (online_ngp_dataset_writer_) {
+    online_ngp_dataset_writer_->finish();
   }
   save_checkpoint_to_directory(std::filesystem::path(checkpoint_dir) / "final", global_step, updates);
   wandb.finish();

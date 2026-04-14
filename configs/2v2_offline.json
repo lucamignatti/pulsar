@@ -79,12 +79,14 @@
   },
   "next_goal_predictor": {
     "enabled": true,
+    "init_checkpoint": "",
     "epochs": 8,
     "learning_rate": 0.0003,
     "weight_decay": 1e-06,
     "label_smoothing": 0.01,
     "max_grad_norm": 1.0,
-    "class_weights": [1.0, 1.0, 0.25]
+    "class_weights": [1.0, 1.0, 0.25],
+    "reuse_normalizer": true
   },
   "wandb": {
     "enabled": false,

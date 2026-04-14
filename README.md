@@ -155,6 +155,10 @@ The visualization path is aligned with current `RLGym` defaults:
 - Hard-legality action masking is always enabled in the online trainer.
 - `reward.ngp_checkpoint` is required. `pulsar_train` fails fast if it is empty.
 - Online reward is always `reward.ngp_scale * (ngp_t - ngp_{t-1})` from the pretrained next-goal head.
+- The reward model is a frozen copy of the shared actor/critic/NGP architecture. PPO trains the live policy/value model, while the frozen copy is only used for next-goal reward inference.
+- Trainer metrics and checkpoint metadata record which NGP checkpoint was active, its source checkpoint step/update, and the current NGP promotion index.
+- `reward.online_dataset` can export on-policy trajectories as NGP-only tensor manifests while PPO is running. This is intended for training a continuously updated candidate NGP on fresh bot gameplay.
+- `reward.refresh` still supports direct checkpoint promotion at update boundaries, but the recommended automation path is the external dynamic refresh loop below.
 - Self-play snapshots are stored under `policy_versions/` in the run directory when `ppo.self_play.enabled` is true.
 - Only learner-controlled agents contribute rollout entries and `global_step` during self-play episodes.
 - Mixed precision is not part of the current runtime. The trainer runs in FP32 on both CPU and ROCm.
@@ -219,6 +223,37 @@ That produces:
 - `policy/` checkpoint directory compatible with the existing shared C++ model loader
 - `next_goal/` checkpoint directory containing the NGP model plus the same observation normalizer state
 - `offline_metrics.jsonl`
+
+For dynamic NGP refreshes, the intended pattern is:
+
+- keep the active online reward model frozen
+- export fresh on-policy NGP data with `reward.online_dataset`
+- continue fine-tuning a separate candidate NGP from the active checkpoint with `behavior_cloning.enabled = false`
+- mix fresh online data with anchor replay data to avoid catastrophic forgetting
+- evaluate active vs candidate on anchor and recent validation manifests
+- promote only at PPO update boundaries after the candidate clears the promotion thresholds
+
+The controller script for that loop is:
+
+```bash
+.venv/bin/python scripts/ngp_refresh_loop.py \
+  --train-binary ./build/release/pulsar_train \
+  --offline-binary ./build/release/pulsar_offline_train \
+  --ppo-config configs/2v2_ppo.json \
+  --offline-config configs/2v2_offline.json \
+  --run-root /path/to/dynamic_refresh_run \
+  --total-updates 1000
+```
+
+By default it:
+
+- runs PPO in one-update chunks
+- keeps the active reward NGP fixed within each chunk
+- fine-tunes the candidate NGP from the current active checkpoint instead of retraining from scratch
+- trains the candidate on a 70/30 mix of new online data and anchor replay data
+- promotes when recent validation loss improves enough without anchor validation loss regressing past the configured tolerance
+
+If you want to launch a one-off manual refresh yourself, `next_goal_predictor.init_checkpoint` can warm-start `pulsar_offline_train` from an existing `next_goal/` checkpoint. With `next_goal_predictor.reuse_normalizer = true`, the offline trainer keeps using the checkpoint's observation normalizer instead of refitting it.
 
 The offline trainer now runs truncated BPTT over real per-player trajectories. `behavior_cloning.sequence_length` controls the chunk length used for recurrent updates.
 

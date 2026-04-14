@@ -139,6 +139,13 @@ PYBIND11_MODULE(pulsar_native, m) {
         result["device"] = metadata.device;
         result["global_step"] = metadata.global_step;
         result["update_index"] = metadata.update_index;
+        result["reward_ngp_label"] = metadata.reward_ngp_label;
+        result["reward_ngp_checkpoint"] = metadata.reward_ngp_checkpoint;
+        result["reward_ngp_config_hash"] = metadata.reward_ngp_config_hash;
+        result["reward_ngp_global_step"] = metadata.reward_ngp_global_step;
+        result["reward_ngp_update_index"] = metadata.reward_ngp_update_index;
+        result["reward_ngp_promotion_index"] = metadata.reward_ngp_promotion_index;
+        result["reward_ngp_promoted_global_step"] = metadata.reward_ngp_promoted_global_step;
         return result;
       });
 }

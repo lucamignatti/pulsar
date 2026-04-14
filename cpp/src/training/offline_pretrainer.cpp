@@ -16,6 +16,35 @@
 namespace pulsar {
 namespace {
 
+std::string stable_model_signature(const ExperimentConfig& config) {
+  nlohmann::json j = {
+      {"model", config.model},
+      {"value_num_atoms", config.ppo.value_num_atoms},
+      {"value_v_min", config.ppo.value_v_min},
+      {"value_v_max", config.ppo.value_v_max},
+  };
+  return j.dump(-1, ' ', false, nlohmann::json::error_handler_t::strict);
+}
+
+void validate_init_checkpoint_compatibility(
+    const CheckpointMetadata& metadata,
+    const ExperimentConfig& checkpoint_config,
+    const ExperimentConfig& active_config,
+    const char* checkpoint_name) {
+  if (metadata.schema_version != active_config.schema_version) {
+    throw std::runtime_error(std::string(checkpoint_name) + " schema_version does not match the active config.");
+  }
+  if (metadata.obs_schema_version != active_config.obs_schema_version) {
+    throw std::runtime_error(std::string(checkpoint_name) + " obs_schema_version does not match the active config.");
+  }
+  if (metadata.action_table_hash != action_table_hash(active_config.action_table)) {
+    throw std::runtime_error(std::string(checkpoint_name) + " action table hash does not match the active config.");
+  }
+  if (stable_model_signature(checkpoint_config) != stable_model_signature(active_config)) {
+    throw std::runtime_error(std::string(checkpoint_name) + " model/value signature does not match the active config.");
+  }
+}
+
 torch::Tensor weighted_cross_entropy(
     const torch::Tensor& logits,
     const torch::Tensor& labels,
@@ -115,6 +144,7 @@ OfflinePretrainer::OfflinePretrainer(ExperimentConfig config)
                   config_.next_goal_predictor.weight_decay))),
       device_(config_.ppo.device) {
   validate_config();
+  maybe_initialize_from_checkpoint();
   policy_model_->to(device_);
   normalizer_.to(device_);
 }
@@ -137,6 +167,32 @@ void OfflinePretrainer::validate_config() const {
   if (config_.next_goal_predictor.enabled && train_dataset_.next_goal_classes() != 3) {
     throw std::runtime_error("Offline manifest next_goal_classes must be 3 for the shared next-goal head.");
   }
+}
+
+void OfflinePretrainer::maybe_initialize_from_checkpoint() {
+  if (config_.next_goal_predictor.init_checkpoint.empty()) {
+    return;
+  }
+
+  namespace fs = std::filesystem;
+  const fs::path base(config_.next_goal_predictor.init_checkpoint);
+  const ExperimentConfig checkpoint_config = load_experiment_config((base / "config.json").string());
+  const CheckpointMetadata metadata = load_checkpoint_metadata((base / "metadata.json").string());
+  validate_init_checkpoint_compatibility(metadata, checkpoint_config, config_, "Next-goal init checkpoint");
+
+  torch::serialize::InputArchive archive;
+  archive.load_from((base / "model.pt").string());
+  policy_model_->load(archive);
+  normalizer_.load(archive);
+
+  const fs::path optimizer_path = base / "optimizer.pt";
+  if (fs::exists(optimizer_path)) {
+    torch::serialize::InputArchive optimizer_archive;
+    optimizer_archive.load_from(optimizer_path.string());
+    optimizer_.load(optimizer_archive);
+  }
+
+  std::cout << "initialized_next_goal_from_checkpoint=" << base.string() << '\n';
 }
 
 void OfflinePretrainer::fit_normalizer() {
@@ -337,10 +393,36 @@ void OfflinePretrainer::save_next_goal_checkpoint(const std::string& output_dir,
 }
 
 void OfflinePretrainer::train(const std::string& output_dir, const std::string& config_path) {
-  fit_normalizer();
+  if (config_.next_goal_predictor.init_checkpoint.empty() || !config_.next_goal_predictor.reuse_normalizer) {
+    fit_normalizer();
+  }
   WandbLogger wandb(config_.wandb, output_dir, config_path, "offline_pretrain");
 
   const int max_epochs = std::max(config_.behavior_cloning.epochs, config_.next_goal_predictor.epochs);
+  if (max_epochs <= 0) {
+    policy_model_->eval();
+    const OfflineEpochMetrics val_metrics = evaluate();
+    const OfflineEpochMetrics train_metrics{};
+    append_offline_metrics_line(output_dir, 0, train_metrics, val_metrics);
+    if (wandb.enabled()) {
+      wandb.log(nlohmann::json{
+          {"epoch", 0},
+          {"train_policy_loss", train_metrics.policy_loss},
+          {"train_ngp_loss", train_metrics.ngp_loss},
+          {"train_policy_accuracy", train_metrics.policy_accuracy},
+          {"train_ngp_accuracy", train_metrics.ngp_accuracy},
+          {"train_samples", train_metrics.samples},
+          {"val_policy_loss", val_metrics.policy_loss},
+          {"val_ngp_loss", val_metrics.ngp_loss},
+          {"val_policy_accuracy", val_metrics.policy_accuracy},
+          {"val_ngp_accuracy", val_metrics.ngp_accuracy},
+          {"val_samples", val_metrics.samples},
+          {"epoch_seconds", 0.0},
+      });
+    }
+    wandb.finish();
+    return;
+  }
   for (int epoch = 1; epoch <= max_epochs; ++epoch) {
     const auto start = std::chrono::steady_clock::now();
     policy_model_->train();

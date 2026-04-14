@@ -176,6 +176,26 @@ int main() {
       throw std::runtime_error("next goal checkpoint missing");
     }
 
+    pulsar::ExperimentConfig warm_start_config = config;
+    warm_start_config.behavior_cloning.enabled = false;
+    warm_start_config.behavior_cloning.epochs = 0;
+    warm_start_config.next_goal_predictor.init_checkpoint = (root / "output" / "next_goal").string();
+    warm_start_config.next_goal_predictor.epochs = 1;
+    warm_start_config.next_goal_predictor.reuse_normalizer = true;
+    pulsar::OfflinePretrainer warm_start_pretrainer(warm_start_config);
+    warm_start_pretrainer.train((root / "warm_start").string());
+    if (!fs::exists(root / "warm_start" / "next_goal" / "model.pt")) {
+      throw std::runtime_error("warm-start next goal checkpoint missing");
+    }
+
+    pulsar::ExperimentConfig eval_only_config = warm_start_config;
+    eval_only_config.next_goal_predictor.epochs = 0;
+    pulsar::OfflinePretrainer eval_only_pretrainer(eval_only_config);
+    eval_only_pretrainer.train((root / "eval_only").string());
+    if (!fs::exists(root / "eval_only" / "offline_metrics.jsonl")) {
+      throw std::runtime_error("eval-only offline metrics missing");
+    }
+
     config.reward.ngp_checkpoint = (root / "output" / "next_goal").string();
     config.reward.ngp_scale = 1.0F;
     config.ppo.init_checkpoint = (root / "output" / "policy").string();

@@ -57,7 +57,6 @@ def main() -> int:
     keep_tmp_dir = True
     try:
         model_overrides = {
-            "hidden_sizes": [64, 64],
             "encoder_dim": 64,
             "workspace_dim": 64,
             "stm_slots": 8,

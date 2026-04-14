@@ -17,6 +17,7 @@
 #include "pulsar/rl/action_table.hpp"
 #include "pulsar/rl/interfaces.hpp"
 #include "pulsar/training/batched_rocketsim_collector.hpp"
+#include "pulsar/training/online_ngp_dataset_writer.hpp"
 #include "pulsar/training/ppo_math.hpp"
 #include "pulsar/training/rollout_storage.hpp"
 #include "pulsar/training/self_play_manager.hpp"
@@ -46,6 +47,15 @@ struct TrainerMetrics {
   double ppo_forward_backward_seconds = 0.0;
   double optimizer_step_seconds = 0.0;
   double self_play_eval_seconds = 0.0;
+  std::int64_t ngp_promotion_index = 0;
+  std::int64_t ngp_promoted_global_step = 0;
+  std::int64_t ngp_source_global_step = 0;
+  std::int64_t ngp_source_update_index = 0;
+  std::int64_t ngp_online_samples_written = 0;
+  std::int64_t ngp_online_trajectories_written = 0;
+  std::string ngp_label{};
+  std::string ngp_checkpoint{};
+  std::string ngp_config_hash{};
   std::map<std::string, double> elo_ratings{};
 };
 
@@ -71,7 +81,13 @@ class PPOTrainer {
   torch::Tensor confidence_weights(const torch::Tensor& value_logits) const;
   torch::Tensor adaptive_epsilon(const torch::Tensor& value_logits) const;
   void maybe_initialize_from_checkpoint();
+  void load_ngp_reward_checkpoint(
+      const std::string& checkpoint_path,
+      const std::string& configured_label,
+      std::int64_t promotion_index,
+      std::int64_t promoted_global_step);
   void maybe_initialize_ngp_reward();
+  void maybe_promote_ngp_reward(std::int64_t global_step, int update_index, const std::string& checkpoint_dir);
   torch::Tensor ngp_scalar(const torch::Tensor& logits) const;
   void save_checkpoint_to_directory(
       const std::filesystem::path& directory,
@@ -93,6 +109,14 @@ class PPOTrainer {
   torch::Device device_{torch::kCPU};
   SharedActorCritic ngp_model_{nullptr};
   ObservationNormalizer ngp_normalizer_{1};
+  std::unique_ptr<OnlineNGPDatasetWriter> online_ngp_dataset_writer_{};
+  std::string active_ngp_checkpoint_{};
+  std::string active_ngp_label_{};
+  std::string active_ngp_config_hash_{};
+  std::int64_t active_ngp_global_step_ = 0;
+  std::int64_t active_ngp_update_index_ = 0;
+  std::int64_t active_ngp_promotion_index_ = 0;
+  std::int64_t active_ngp_promoted_global_step_ = 0;
   std::size_t total_agents_ = 0;
   ContinuumState collection_state_{};
   ContinuumState opponent_collection_state_{};

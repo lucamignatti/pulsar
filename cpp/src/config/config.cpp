@@ -48,16 +48,54 @@ void from_json(const json& j, ControllerState& value) {
   value.handbrake = j.at("handbrake").get<bool>();
 }
 
+void to_json(json& j, const RewardConfig::OnlineDatasetExportConfig& value) {
+  j = json{
+      {"enabled", value.enabled},
+      {"output_dir", value.output_dir},
+      {"shard_size", value.shard_size},
+      {"train_fraction", value.train_fraction},
+      {"seed", value.seed},
+  };
+}
+
+void from_json(const json& j, RewardConfig::OnlineDatasetExportConfig& value) {
+  value.enabled = j.value("enabled", false);
+  value.output_dir = j.value("output_dir", std::string{});
+  value.shard_size = j.value("shard_size", 65536);
+  value.train_fraction = j.value("train_fraction", 0.95F);
+  value.seed = j.value("seed", static_cast<std::uint64_t>(0));
+}
+
+void to_json(json& j, const RewardConfig::RefreshConfig& value) {
+  j = json{
+      {"enabled", value.enabled},
+      {"candidate_checkpoint", value.candidate_checkpoint},
+      {"check_interval_updates", value.check_interval_updates},
+  };
+}
+
+void from_json(const json& j, RewardConfig::RefreshConfig& value) {
+  value.enabled = j.value("enabled", false);
+  value.candidate_checkpoint = j.value("candidate_checkpoint", std::string{});
+  value.check_interval_updates = j.value("check_interval_updates", 1);
+}
+
 void to_json(json& j, const RewardConfig& value) {
   j = json{
       {"ngp_checkpoint", value.ngp_checkpoint},
+      {"ngp_label", value.ngp_label},
       {"ngp_scale", value.ngp_scale},
+      {"online_dataset", value.online_dataset},
+      {"refresh", value.refresh},
   };
 }
 
 void from_json(const json& j, RewardConfig& value) {
   value.ngp_checkpoint = j.value("ngp_checkpoint", std::string{});
+  value.ngp_label = j.value("ngp_label", std::string{});
   value.ngp_scale = j.value("ngp_scale", 1.0F);
+  value.online_dataset = j.value("online_dataset", RewardConfig::OnlineDatasetExportConfig{});
+  value.refresh = j.value("refresh", RewardConfig::RefreshConfig{});
 }
 
 void to_json(json& j, const ActionTableConfig& value) {
@@ -273,23 +311,27 @@ void from_json(const json& j, BehaviorCloningConfig& value) {
 void to_json(json& j, const NextGoalPredictorConfig& value) {
   j = json{
       {"enabled", value.enabled},
+      {"init_checkpoint", value.init_checkpoint},
       {"epochs", value.epochs},
       {"learning_rate", value.learning_rate},
       {"weight_decay", value.weight_decay},
       {"label_smoothing", value.label_smoothing},
       {"max_grad_norm", value.max_grad_norm},
       {"class_weights", value.class_weights},
+      {"reuse_normalizer", value.reuse_normalizer},
   };
 }
 
 void from_json(const json& j, NextGoalPredictorConfig& value) {
   value.enabled = j.value("enabled", true);
+  value.init_checkpoint = j.value("init_checkpoint", std::string{});
   value.epochs = j.value("epochs", 10);
   value.learning_rate = j.value("learning_rate", 3.0e-4F);
   value.weight_decay = j.value("weight_decay", 1.0e-6F);
   value.label_smoothing = j.value("label_smoothing", 0.0F);
   value.max_grad_norm = j.value("max_grad_norm", 1.0F);
   value.class_weights = j.value("class_weights", std::vector<float>{1.0F, 1.0F, 0.25F});
+  value.reuse_normalizer = j.value("reuse_normalizer", true);
 }
 
 void to_json(json& j, const WandbConfig& value) {
@@ -372,6 +414,13 @@ void to_json(json& j, const CheckpointMetadata& value) {
       {"device", value.device},
       {"global_step", value.global_step},
       {"update_index", value.update_index},
+      {"reward_ngp_label", value.reward_ngp_label},
+      {"reward_ngp_checkpoint", value.reward_ngp_checkpoint},
+      {"reward_ngp_config_hash", value.reward_ngp_config_hash},
+      {"reward_ngp_global_step", value.reward_ngp_global_step},
+      {"reward_ngp_update_index", value.reward_ngp_update_index},
+      {"reward_ngp_promotion_index", value.reward_ngp_promotion_index},
+      {"reward_ngp_promoted_global_step", value.reward_ngp_promoted_global_step},
   };
 }
 
@@ -384,6 +433,13 @@ void from_json(const json& j, CheckpointMetadata& value) {
   value.device = j.at("device").get<std::string>();
   value.global_step = j.at("global_step").get<std::int64_t>();
   value.update_index = j.at("update_index").get<std::int64_t>();
+  value.reward_ngp_label = j.value("reward_ngp_label", std::string{});
+  value.reward_ngp_checkpoint = j.value("reward_ngp_checkpoint", std::string{});
+  value.reward_ngp_config_hash = j.value("reward_ngp_config_hash", std::string{});
+  value.reward_ngp_global_step = j.value("reward_ngp_global_step", static_cast<std::int64_t>(0));
+  value.reward_ngp_update_index = j.value("reward_ngp_update_index", static_cast<std::int64_t>(0));
+  value.reward_ngp_promotion_index = j.value("reward_ngp_promotion_index", static_cast<std::int64_t>(0));
+  value.reward_ngp_promoted_global_step = j.value("reward_ngp_promoted_global_step", static_cast<std::int64_t>(0));
 }
 
 ExperimentConfig load_experiment_config(const std::string& path) {
