@@ -22,6 +22,8 @@ def _normalize_shard_paths(manifest_path: Path, shard: dict[str, Any]) -> dict[s
         "next_goal_path",
         "weights_path",
         "episode_starts_path",
+        "terminated_path",
+        "truncated_path",
     ]:
         value = result.get(key)
         if value:

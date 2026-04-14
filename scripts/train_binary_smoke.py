@@ -59,15 +59,15 @@ def main() -> int:
         config["ppo"]["burn_in"] = 1
         config["ppo"]["collection_workers"] = 0
         config["ppo"]["device"] = "cpu"
-        config["ppo"]["init_checkpoint"] = str((offline_output_dir / "policy").resolve())
-        config["reward"]["ngp_checkpoint"] = str((offline_output_dir / "next_goal").resolve())
+        config["ppo"]["init_checkpoint"] = str(offline_output_dir.resolve())
+        config["reward"]["ngp_checkpoint"] = str(offline_output_dir.resolve())
         config["reward"]["ngp_label"] = "bootstrap"
         config["reward"]["ngp_scale"] = 1.0
         promoted_ngp_dir = tmp_dir / "promoted_next_goal"
         promoted_ngp_dir.mkdir(parents=True)
-        for child in (offline_output_dir / "next_goal").iterdir():
-            target = promoted_ngp_dir / child.name
+        for child in offline_output_dir.iterdir():
             if child.is_file():
+                target = promoted_ngp_dir / child.name
                 target.write_bytes(child.read_bytes())
         config["reward"]["online_dataset"] = {
             "enabled": True,

@@ -89,8 +89,8 @@ def main() -> int:
         config["ppo"]["burn_in"] = 1
         config["ppo"]["collection_workers"] = 0
         config["ppo"]["device"] = "cuda:0"
-        config["ppo"]["init_checkpoint"] = str((offline_output_dir / "policy").resolve())
-        config["reward"]["ngp_checkpoint"] = str((offline_output_dir / "next_goal").resolve())
+        config["ppo"]["init_checkpoint"] = str(offline_output_dir.resolve())
+        config["reward"]["ngp_checkpoint"] = str(offline_output_dir.resolve())
         config["reward"]["ngp_scale"] = 1.0
         config["wandb"]["enabled"] = False
         config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")

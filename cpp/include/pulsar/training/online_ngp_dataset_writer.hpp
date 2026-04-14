@@ -26,6 +26,8 @@ class OnlineNGPDatasetWriter {
   void record_step(
       const torch::Tensor& raw_obs_cpu,
       const torch::Tensor& dones_cpu,
+      const torch::Tensor& terminated_cpu,
+      const torch::Tensor& truncated_cpu,
       const torch::Tensor& terminal_next_goal_labels_cpu);
   void finish();
 
@@ -43,6 +45,8 @@ class OnlineNGPDatasetWriter {
     std::vector<std::int64_t> next_goal{};
     std::vector<float> weights{};
     std::vector<float> episode_starts{};
+    std::vector<float> terminated{};
+    std::vector<float> truncated{};
     std::vector<std::string> shards{};
     std::int64_t shard_index = 0;
   };

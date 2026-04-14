@@ -117,8 +117,12 @@ int main() {
     torch::Tensor next_goal = torch::randint(3, {rows}, torch::TensorOptions().dtype(torch::kLong));
     torch::Tensor weights = torch::ones({rows});
     torch::Tensor episode_starts = torch::zeros({rows});
+    torch::Tensor terminated = torch::zeros({rows});
+    torch::Tensor truncated = torch::zeros({rows});
     episode_starts[0] = 1.0F;
     episode_starts[32] = 1.0F;
+    terminated[31] = 1.0F;
+    terminated[63] = 1.0F;
 
     torch::save(obs, (root / "data" / "obs.pt").string());
     torch::save(actions, (root / "data" / "actions.pt").string());
@@ -126,6 +130,8 @@ int main() {
     torch::save(next_goal, (root / "data" / "next_goal.pt").string());
     torch::save(weights, (root / "data" / "weights.pt").string());
     torch::save(episode_starts, (root / "data" / "episode_starts.pt").string());
+    torch::save(terminated, (root / "data" / "terminated.pt").string());
+    torch::save(truncated, (root / "data" / "truncated.pt").string());
 
     std::ofstream manifest(root / "data" / "manifest.json");
     manifest << R"({
@@ -141,6 +147,8 @@ int main() {
       "next_goal_path": "next_goal.pt",
       "weights_path": "weights.pt",
       "episode_starts_path": "episode_starts.pt",
+      "terminated_path": "terminated.pt",
+      "truncated_path": "truncated.pt",
       "samples": 64
     }
   ]
@@ -165,40 +173,41 @@ int main() {
     config.offline_dataset.batch_size = 16;
     config.behavior_cloning.epochs = 1;
     config.next_goal_predictor.epochs = 1;
+    config.value_pretraining.epochs = 1;
 
     pulsar::OfflinePretrainer pretrainer(config);
     pretrainer.train((root / "output").string());
 
-    if (!fs::exists(root / "output" / "policy" / "model.pt")) {
-      throw std::runtime_error("policy checkpoint missing");
-    }
-    if (!fs::exists(root / "output" / "next_goal" / "model.pt")) {
-      throw std::runtime_error("next goal checkpoint missing");
+    if (!fs::exists(root / "output" / "model.pt")) {
+      throw std::runtime_error("offline checkpoint missing");
     }
 
     pulsar::ExperimentConfig warm_start_config = config;
     warm_start_config.behavior_cloning.enabled = false;
     warm_start_config.behavior_cloning.epochs = 0;
-    warm_start_config.next_goal_predictor.init_checkpoint = (root / "output" / "next_goal").string();
+    warm_start_config.next_goal_predictor.init_checkpoint = (root / "output").string();
     warm_start_config.next_goal_predictor.epochs = 1;
     warm_start_config.next_goal_predictor.reuse_normalizer = true;
+    warm_start_config.value_pretraining.epochs = 1;
     pulsar::OfflinePretrainer warm_start_pretrainer(warm_start_config);
     warm_start_pretrainer.train((root / "warm_start").string());
-    if (!fs::exists(root / "warm_start" / "next_goal" / "model.pt")) {
+    if (!fs::exists(root / "warm_start" / "model.pt")) {
       throw std::runtime_error("warm-start next goal checkpoint missing");
     }
 
     pulsar::ExperimentConfig eval_only_config = warm_start_config;
     eval_only_config.next_goal_predictor.epochs = 0;
+    eval_only_config.value_pretraining.enabled = false;
+    eval_only_config.value_pretraining.epochs = 0;
     pulsar::OfflinePretrainer eval_only_pretrainer(eval_only_config);
     eval_only_pretrainer.train((root / "eval_only").string());
     if (!fs::exists(root / "eval_only" / "offline_metrics.jsonl")) {
       throw std::runtime_error("eval-only offline metrics missing");
     }
 
-    config.reward.ngp_checkpoint = (root / "output" / "next_goal").string();
+    config.reward.ngp_checkpoint = (root / "output").string();
     config.reward.ngp_scale = 1.0F;
-    config.ppo.init_checkpoint = (root / "output" / "policy").string();
+    config.ppo.init_checkpoint = (root / "output").string();
     config.ppo.num_envs = 2;
     config.ppo.rollout_length = 4;
     config.ppo.minibatch_size = 8;

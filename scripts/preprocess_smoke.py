@@ -170,12 +170,18 @@ def main() -> int:
         obs = torch.load(output_dir / shard["obs_path"])
         action_probs = torch.load(output_dir / shard["action_probs_path"])
         episode_starts = torch.load(output_dir / shard["episode_starts_path"])
+        terminated = torch.load(output_dir / shard["terminated_path"])
+        truncated = torch.load(output_dir / shard["truncated_path"])
         if obs.size(1) != 132:
             raise RuntimeError("preprocess obs tensor width mismatch")
         if action_probs.size(1) != 90:
             raise RuntimeError("preprocess action_probs width mismatch")
         if episode_starts[0].item() != 1.0:
             raise RuntimeError("preprocess episode_starts should mark trajectory boundaries")
+        if terminated.numel() != obs.size(0) or truncated.numel() != obs.size(0):
+            raise RuntimeError("preprocess trajectory end flags should align with obs rows")
+        if terminated[-1].item() != 1.0 or truncated[-1].item() != 0.0:
+            raise RuntimeError("preprocess should mark replay-ending trajectories as terminated")
 
     return 0
 

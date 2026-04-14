@@ -107,6 +107,8 @@ BatchedRocketSimCollector::BatchedRocketSimCollector(
   host_snapshot_ids_ = torch::full({static_cast<long>(total_agents_)}, -1, i64);
   host_episode_starts_ = torch::ones({static_cast<long>(total_agents_)}, f32);
   host_dones_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
+  host_terminated_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
+  host_truncated_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   host_terminal_next_goal_labels_ = torch::full({static_cast<long>(total_agents_)}, 2, i64);
   host_post_step_obs_ = torch::empty({static_cast<long>(total_agents_), obs_dim_}, f32);
 
@@ -221,9 +223,13 @@ void BatchedRocketSimCollector::step(
 
   const auto done_reset_start = std::chrono::steady_clock::now();
   float* dones_ptr = host_dones_.data_ptr<float>();
+  float* terminated_ptr = host_terminated_.data_ptr<float>();
+  float* truncated_ptr = host_truncated_.data_ptr<float>();
   std::int64_t* labels_ptr = host_terminal_next_goal_labels_.data_ptr<std::int64_t>();
   float* post_step_obs_ptr = host_post_step_obs_.data_ptr<float>();
   host_dones_.zero_();
+  host_terminated_.zero_();
+  host_truncated_.zero_();
   host_terminal_next_goal_labels_.fill_(2);
 
   executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
@@ -252,8 +258,12 @@ void BatchedRocketSimCollector::step(
         scoring_team = current_state.blue_score > current_state.orange_score ? Team::Blue : Team::Orange;
       }
       for (std::size_t idx = 0; idx < count; ++idx) {
-        const bool done = terminated[idx] != 0 || truncated[idx] != 0;
+        const bool is_terminated = terminated[idx] != 0;
+        const bool is_truncated = truncated[idx] != 0;
+        const bool done = is_terminated || is_truncated;
         dones_ptr[agent_begin + idx] = done ? 1.0F : 0.0F;
+        terminated_ptr[agent_begin + idx] = is_terminated ? 1.0F : 0.0F;
+        truncated_ptr[agent_begin + idx] = is_truncated ? 1.0F : 0.0F;
         if (done) {
           labels_ptr[agent_begin + idx] =
               goal_scored ? (current_state.cars[idx].team == scoring_team ? 0 : 1) : 2;
@@ -294,6 +304,14 @@ const torch::Tensor& BatchedRocketSimCollector::host_episode_starts() const {
 
 const torch::Tensor& BatchedRocketSimCollector::host_dones() const {
   return host_dones_;
+}
+
+const torch::Tensor& BatchedRocketSimCollector::host_terminated() const {
+  return host_terminated_;
+}
+
+const torch::Tensor& BatchedRocketSimCollector::host_truncated() const {
+  return host_truncated_;
 }
 
 const torch::Tensor& BatchedRocketSimCollector::host_terminal_next_goal_labels() const {

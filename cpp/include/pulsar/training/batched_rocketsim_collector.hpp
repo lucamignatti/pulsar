@@ -67,6 +67,8 @@ class BatchedRocketSimCollector {
   [[nodiscard]] const torch::Tensor& host_snapshot_ids() const;
   [[nodiscard]] const torch::Tensor& host_episode_starts() const;
   [[nodiscard]] const torch::Tensor& host_dones() const;
+  [[nodiscard]] const torch::Tensor& host_terminated() const;
+  [[nodiscard]] const torch::Tensor& host_truncated() const;
   [[nodiscard]] const torch::Tensor& host_terminal_next_goal_labels() const;
   [[nodiscard]] const torch::Tensor& host_post_step_obs() const;
 
@@ -93,6 +95,8 @@ class BatchedRocketSimCollector {
   torch::Tensor host_snapshot_ids_;
   torch::Tensor host_episode_starts_;
   torch::Tensor host_dones_;
+  torch::Tensor host_terminated_;
+  torch::Tensor host_truncated_;
   torch::Tensor host_terminal_next_goal_labels_;
   torch::Tensor host_post_step_obs_;
   std::size_t total_agents_ = 0;

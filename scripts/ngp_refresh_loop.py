@@ -33,6 +33,8 @@ def _normalize_shard_paths(manifest_path: Path, shard: dict[str, Any]) -> dict[s
         "next_goal_path",
         "weights_path",
         "episode_starts_path",
+        "terminated_path",
+        "truncated_path",
     ]:
         value = normalized.get(key)
         if value:
@@ -191,6 +193,8 @@ def _make_eval_config(
     config["next_goal_predictor"]["init_checkpoint"] = checkpoint_path
     config["next_goal_predictor"]["epochs"] = 0
     config["next_goal_predictor"]["reuse_normalizer"] = True
+    config["value_pretraining"]["enabled"] = False
+    config["value_pretraining"]["epochs"] = 0
     config["wandb"]["enabled"] = False
     config["wandb"]["job_type"] = "ngp_eval"
     return config
@@ -212,6 +216,8 @@ def _make_candidate_config(
     config["next_goal_predictor"]["init_checkpoint"] = init_checkpoint
     config["next_goal_predictor"]["epochs"] = epochs
     config["next_goal_predictor"]["reuse_normalizer"] = True
+    config["value_pretraining"]["enabled"] = False
+    config["value_pretraining"]["epochs"] = 0
     config["wandb"]["job_type"] = "ngp_refresh_candidate"
     return config
 
@@ -417,7 +423,7 @@ def main() -> int:
         )
         _write_json(candidate_config_path, candidate_config)
         _run([str(offline_binary), str(candidate_config_path), str(candidate_dir)], repo_root)
-        candidate_checkpoint = str((candidate_dir / "next_goal").resolve())
+        candidate_checkpoint = str(candidate_dir.resolve())
         cycle_record["candidate_checkpoint_after_cycle"] = candidate_checkpoint
 
         recent_val_manifest = cycle_dir / "recent_val_manifest.json"

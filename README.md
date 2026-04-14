@@ -94,7 +94,7 @@ ctest --test-dir build/release -L rocm --output-on-failure
 - `pulsar_core`: Config, action tables, done conditions, mutators, and environment scaffolding.
 - `pulsar_torch`: Shared actor-critic model, normalization, GPU rollout storage, and PPO trainer.
 - `pulsar_train`: Standalone trainer entry point.
-- `pulsar_offline_train`: Standalone offline pretrainer for behavior cloning and next-goal prediction.
+- `pulsar_offline_train`: Standalone offline pretrainer for behavior cloning, critic pretraining, and next-goal prediction.
 - `pulsar_native`: Python extension exposing the C++ model and checkpoint helpers.
 - `pulsar_bench`: Lightweight benchmark target for core runtime throughput. It reports both env-steps/sec and agent-steps/sec so comparisons against `RLGym`-style vectorized trainers stay apples-to-apples.
 
@@ -187,7 +187,7 @@ This writes sequence-safe shards:
 
 - `train_manifest.json`
 - `val_manifest.json`
-- shard-local `obs.pt`, `actions.pt`, `action_probs.pt`, `next_goal.pt`, `weights.pt`, and `episode_starts.pt` tensor files
+- shard-local `obs.pt`, `actions.pt`, `action_probs.pt`, `next_goal.pt`, `weights.pt`, `episode_starts.pt`, `terminated.pt`, and `truncated.pt` tensor files
 
 The preprocessor now uses `rlgym-tools` replay parsing and `replay_to_rlgym`, so the offline dataset is built from native `ReplayFrame` objects rather than hand-decoded replay tensors. That gives it:
 
@@ -220,15 +220,17 @@ Then point [configs/2v2_offline.json](configs/2v2_offline.json) at those manifes
 
 That produces:
 
-- `policy/` checkpoint directory compatible with the existing shared C++ model loader
-- `next_goal/` checkpoint directory containing the NGP model plus the same observation normalizer state
+- one shared offline checkpoint directory containing `model.pt`, `config.json`, `metadata.json`,
+  `trunk_optimizer.pt`, `policy_head_optimizer.pt`, `value_head_optimizer.pt`,
+  `ngp_head_optimizer.pt`, and the observation normalizer state
 - `offline_metrics.jsonl`
 
 For dynamic NGP refreshes, the intended pattern is:
 
 - keep the active online reward model frozen
 - export fresh on-policy NGP data with `reward.online_dataset`
-- continue fine-tuning a separate candidate NGP from the active checkpoint with `behavior_cloning.enabled = false`
+- continue fine-tuning a separate candidate NGP from the active checkpoint with
+  `behavior_cloning.enabled = false` and `value_pretraining.enabled = false`
 - mix fresh online data with anchor replay data to avoid catastrophic forgetting
 - evaluate active vs candidate on anchor and recent validation manifests
 - promote only at PPO update boundaries after the candidate clears the promotion thresholds
@@ -253,15 +255,19 @@ By default it:
 - trains the candidate on a 70/30 mix of new online data and anchor replay data
 - promotes when recent validation loss improves enough without anchor validation loss regressing past the configured tolerance
 
-If you want to launch a one-off manual refresh yourself, `next_goal_predictor.init_checkpoint` can warm-start `pulsar_offline_train` from an existing `next_goal/` checkpoint. With `next_goal_predictor.reuse_normalizer = true`, the offline trainer keeps using the checkpoint's observation normalizer instead of refitting it.
+If you want to launch a one-off manual refresh yourself, `next_goal_predictor.init_checkpoint` can warm-start `pulsar_offline_train` from an existing offline checkpoint directory. With `next_goal_predictor.reuse_normalizer = true`, the offline trainer keeps using the checkpoint's observation normalizer instead of refitting it.
 
 The offline trainer now runs truncated BPTT over real per-player trajectories. `behavior_cloning.sequence_length` controls the chunk length used for recurrent updates.
 
-To start PPO from the offline-pretrained policy instead of random initialization, set `ppo.init_checkpoint` in your PPO config to the offline policy checkpoint directory, for example `/path/to/offline_outputs/policy`.
+The critic is pretrained offline too. Its targets are discounted returns induced by the frozen next-goal head over each expert trajectory, with optional bootstrap on truncated endings only. That lets PPO start from a warm actor, warm critic, and warm NGP in one pass over the replay dataset.
+
+Offline pretraining writes one shared checkpoint instead of separate `policy/` and `next_goal/` directories. If PPO uses that same directory for both `ppo.init_checkpoint` and `reward.ngp_checkpoint`, the trainer loads it once, clones the model in memory, and freezes the clone for reward inference.
+
+To start PPO from the offline-pretrained policy instead of random initialization, set `ppo.init_checkpoint` in your PPO config to the offline checkpoint directory, for example `/path/to/offline_outputs`.
 
 To use the trained next-goal predictor online, set:
 
-- `reward.ngp_checkpoint = /path/to/offline_outputs/next_goal`
+- `reward.ngp_checkpoint = /path/to/offline_outputs`
 - `reward.ngp_scale = 1.0`
 
 PPO training now writes:

@@ -102,6 +102,8 @@ class TrajectoryBuffer:
     action_probs: list[np.ndarray] = field(default_factory=list)
     next_goal: list[int] = field(default_factory=list)
     weights: list[float] = field(default_factory=list)
+    terminated: bool = False
+    truncated: bool = False
 
     def clear(self) -> None:
         self.obs.clear()
@@ -109,6 +111,8 @@ class TrajectoryBuffer:
         self.action_probs.clear()
         self.next_goal.clear()
         self.weights.clear()
+        self.terminated = False
+        self.truncated = False
 
     def __bool__(self) -> bool:
         return bool(self.obs)
@@ -235,12 +239,16 @@ def _process_replay_subset(
     train_next_goal: list[int] = []
     train_weights: list[float] = []
     train_episode_starts: list[float] = []
+    train_terminated: list[float] = []
+    train_truncated: list[float] = []
     val_obs: list[np.ndarray] = []
     val_actions: list[int] = []
     val_action_probs: list[np.ndarray] = []
     val_next_goal: list[int] = []
     val_weights: list[float] = []
     val_episode_starts: list[float] = []
+    val_terminated: list[float] = []
+    val_truncated: list[float] = []
     result = WorkerResult()
 
     train_shard_index = 0
@@ -255,6 +263,8 @@ def _process_replay_subset(
         labels: list[int],
         weights: list[float],
         episode_starts: list[float],
+        terminated: list[float],
+        truncated: list[float],
     ) -> None:
         if not obs_rows:
             return
@@ -270,6 +280,8 @@ def _process_replay_subset(
         labels_tensor = torch.tensor(labels, dtype=torch.long)
         weights_tensor = torch.tensor(weights, dtype=torch.float32)
         episode_starts_tensor = torch.tensor(episode_starts, dtype=torch.float32)
+        terminated_tensor = torch.tensor(terminated, dtype=torch.float32)
+        truncated_tensor = torch.tensor(truncated, dtype=torch.float32)
 
         torch.save(obs_tensor, split_dir / f"{shard_name}_obs.pt")
         torch.save(actions_tensor, split_dir / f"{shard_name}_actions.pt")
@@ -277,6 +289,8 @@ def _process_replay_subset(
         torch.save(labels_tensor, split_dir / f"{shard_name}_next_goal.pt")
         torch.save(weights_tensor, split_dir / f"{shard_name}_weights.pt")
         torch.save(episode_starts_tensor, split_dir / f"{shard_name}_episode_starts.pt")
+        torch.save(terminated_tensor, split_dir / f"{shard_name}_terminated.pt")
+        torch.save(truncated_tensor, split_dir / f"{shard_name}_truncated.pt")
 
         target = result.train_shards if split == "train" else result.val_shards
         target.append(
@@ -287,6 +301,8 @@ def _process_replay_subset(
                 "next_goal_path": f"{split}/{shard_name}_next_goal.pt",
                 "weights_path": f"{split}/{shard_name}_weights.pt",
                 "episode_starts_path": f"{split}/{shard_name}_episode_starts.pt",
+                "terminated_path": f"{split}/{shard_name}_terminated.pt",
+                "truncated_path": f"{split}/{shard_name}_truncated.pt",
                 "samples": len(obs_rows),
             }
         )
@@ -296,11 +312,16 @@ def _process_replay_subset(
         labels.clear()
         weights.clear()
         episode_starts.clear()
+        terminated.clear()
+        truncated.clear()
 
-    def append_trajectory(split: str, trajectory: TrajectoryBuffer) -> None:
+    def close_trajectory(split: str, trajectory: TrajectoryBuffer, *, terminated_end: bool, truncated_end: bool) -> None:
         nonlocal train_shard_index, val_shard_index
         if not trajectory:
             return
+
+        trajectory.terminated = terminated_end
+        trajectory.truncated = truncated_end
 
         if split == "train":
             obs_rows = train_obs
@@ -309,6 +330,8 @@ def _process_replay_subset(
             labels = train_next_goal
             weights = train_weights
             episode_starts = train_episode_starts
+            terminated = train_terminated
+            truncated = train_truncated
             shard_index = train_shard_index
         else:
             obs_rows = val_obs
@@ -317,10 +340,23 @@ def _process_replay_subset(
             labels = val_next_goal
             weights = val_weights
             episode_starts = val_episode_starts
+            terminated = val_terminated
+            truncated = val_truncated
             shard_index = val_shard_index
 
         if obs_rows and len(obs_rows) + len(trajectory.obs) > shard_size:
-            flush(split, shard_index, obs_rows, actions, action_probs, labels, weights, episode_starts)
+            flush(
+                split,
+                shard_index,
+                obs_rows,
+                actions,
+                action_probs,
+                labels,
+                weights,
+                episode_starts,
+                terminated,
+                truncated,
+            )
             if split == "train":
                 train_shard_index += 1
             else:
@@ -332,6 +368,10 @@ def _process_replay_subset(
         labels.extend(trajectory.next_goal)
         weights.extend(trajectory.weights)
         episode_starts.extend([1.0] + [0.0] * (len(trajectory.obs) - 1))
+        terminated.extend([0.0] * len(trajectory.obs))
+        truncated.extend([0.0] * len(trajectory.obs))
+        terminated[-1] = 1.0 if trajectory.terminated else 0.0
+        truncated[-1] = 1.0 if trajectory.truncated else 0.0
         trajectory.clear()
 
     for replay_path_str in replay_paths:
@@ -354,7 +394,7 @@ def _process_replay_subset(
                 if not _has_two_cars_per_team(frame.state.cars, blue_team, orange_team):
                     if not first_frame:
                         for agent_id in agent_order:
-                            append_trajectory(split, trajectories[agent_id])
+                            close_trajectory(split, trajectories[agent_id], terminated_end=False, truncated_end=True)
                     result.skipped_unbalanced_frames += 1
                     continue
                 if first_frame:
@@ -381,7 +421,7 @@ def _process_replay_subset(
 
                 if bad_obs_frame:
                     for agent_id in agent_order:
-                        append_trajectory(split, trajectories[agent_id])
+                        close_trajectory(split, trajectories[agent_id], terminated_end=False, truncated_end=True)
                     result.skipped_bad_obs_frames += 1
                     continue
 
@@ -397,7 +437,7 @@ def _process_replay_subset(
                         or replay_action.shape != (8,)
                         or not _is_fresh_update(update_age, max_update_age)
                     ):
-                        append_trajectory(split, trajectory)
+                        close_trajectory(split, trajectory, terminated_end=False, truncated_end=True)
                         continue
 
                     if action_target_mode == "weighted":
@@ -418,7 +458,7 @@ def _process_replay_subset(
                     action_probs = np.asarray(action_probs, dtype=np.float32)
                     total_prob = float(action_probs.sum())
                     if total_prob <= 0.0 or not np.all(np.isfinite(action_probs)):
-                        append_trajectory(split, trajectory)
+                        close_trajectory(split, trajectory, terminated_end=False, truncated_end=True)
                         continue
                     action_probs = action_probs / total_prob
 
@@ -431,10 +471,10 @@ def _process_replay_subset(
 
                 if frame.scoreboard.go_to_kickoff or frame.scoreboard.is_over:
                     for agent_id in agent_order:
-                        append_trajectory(split, trajectories[agent_id])
+                        close_trajectory(split, trajectories[agent_id], terminated_end=True, truncated_end=False)
 
             for trajectory in trajectories.values():
-                append_trajectory(split, trajectory)
+                close_trajectory(split, trajectory, terminated_end=False, truncated_end=True)
         except Exception as exc:
             print(f"error while processing replay: {replay_path} ({exc!r})", flush=True)
             result.skipped_replays += 1
@@ -449,6 +489,8 @@ def _process_replay_subset(
         train_next_goal,
         train_weights,
         train_episode_starts,
+        train_terminated,
+        train_truncated,
     )
     flush(
         "val",
@@ -459,6 +501,8 @@ def _process_replay_subset(
         val_next_goal,
         val_weights,
         val_episode_starts,
+        val_terminated,
+        val_truncated,
     )
     return result
 
@@ -535,13 +579,36 @@ def main() -> int:
                 skipped_bad_obs_frames += result.skipped_bad_obs_frames
                 progress.update(1)
         else:
-            with ProcessPoolExecutor(max_workers=worker_count, max_tasks_per_child=1) as executor:
-                future_to_chunk_size = {
-                    executor.submit(_process_replay_subset_job, job): len(job[0])
-                    for job in jobs
-                }
-                for future in as_completed(future_to_chunk_size):
-                    result = future.result()
+            try:
+                with ProcessPoolExecutor(max_workers=worker_count, max_tasks_per_child=1) as executor:
+                    future_to_chunk_size = {
+                        executor.submit(_process_replay_subset_job, job): len(job[0])
+                        for job in jobs
+                    }
+                    for future in as_completed(future_to_chunk_size):
+                        result = future.result()
+                        if result.obs_dim is not None:
+                            if obs_dim is None:
+                                obs_dim = result.obs_dim
+                            elif obs_dim != result.obs_dim:
+                                raise SystemExit(
+                                    f"Inconsistent observation widths across workers: {[obs_dim, result.obs_dim]}"
+                                )
+                        train_shards.extend(result.train_shards)
+                        val_shards.extend(result.val_shards)
+                        exact_samples += result.exact_samples
+                        skipped_replays += result.skipped_replays
+                        skipped_unbalanced_frames += result.skipped_unbalanced_frames
+                        skipped_bad_obs_frames += result.skipped_bad_obs_frames
+                        progress.update(1)
+            except PermissionError as exc:
+                print(
+                    f"worker_pool_unavailable={exc}; falling back to single-process preprocessing",
+                    flush=True,
+                )
+                worker_count = 1
+                for replay_job, worker_config_chunk, shard_prefix in jobs:
+                    result = _process_replay_subset(replay_job, worker_config_chunk, shard_prefix)
                     if result.obs_dim is not None:
                         if obs_dim is None:
                             obs_dim = result.obs_dim

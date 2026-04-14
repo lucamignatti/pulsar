@@ -88,6 +88,21 @@
     "class_weights": [1.0, 1.0, 0.25],
     "reuse_normalizer": true
   },
+  "value_pretraining": {
+    "enabled": true,
+    "epochs": 8,
+    "learning_rate": 0.0003,
+    "weight_decay": 1e-06,
+    "max_grad_norm": 1.0,
+    "loss_coef": 1.0,
+    "target_sync_interval_epochs": 1,
+    "bootstrap_truncated": true
+  },
+  "offline_optimization": {
+    "trunk_learning_rate": 0.0003,
+    "trunk_weight_decay": 1e-06,
+    "trunk_max_grad_norm": 1.0
+  },
   "wandb": {
     "enabled": false,
     "project": "pulsar",
@@ -99,6 +114,6 @@
     "mode": "online",
     "python_executable": "python3",
     "script_path": "scripts/wandb_stream.py",
-    "tags": ["offline", "bc", "ngp", "continuum"]
+    "tags": ["offline", "bc", "critic", "ngp", "continuum"]
   }
 }

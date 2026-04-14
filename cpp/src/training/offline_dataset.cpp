@@ -65,6 +65,8 @@ OfflineTensorManifest load_offline_tensor_manifest(const std::string& path) {
     shard.next_goal_path = shard_json.value("next_goal_path", std::string{});
     shard.weights_path = shard_json.value("weights_path", std::string{});
     shard.episode_starts_path = shard_json.value("episode_starts_path", std::string{});
+    shard.terminated_path = shard_json.value("terminated_path", std::string{});
+    shard.truncated_path = shard_json.value("truncated_path", std::string{});
     shard.samples = shard_json.at("samples").get<std::int64_t>();
     manifest.shards.push_back(std::move(shard));
   }
@@ -101,6 +103,15 @@ int OfflineTensorDataset::next_goal_classes() const {
 bool OfflineTensorDataset::has_episode_starts() const {
   for (const auto& shard : manifest_.shards) {
     if (shard.episode_starts_path.empty()) {
+      return false;
+    }
+  }
+  return !manifest_.shards.empty();
+}
+
+bool OfflineTensorDataset::has_trajectory_end_flags() const {
+  for (const auto& shard : manifest_.shards) {
+    if (shard.terminated_path.empty() || shard.truncated_path.empty()) {
       return false;
     }
   }
@@ -162,11 +173,27 @@ void OfflineTensorDataset::for_each_batch(
       }
     }
 
+    torch::Tensor terminated;
+    if (!shard.terminated_path.empty()) {
+      terminated = load_tensor_checked((manifest_dir / shard.terminated_path).string()).to(torch::kFloat32).view({-1});
+    } else {
+      terminated = torch::zeros({obs.size(0)}, torch::TensorOptions().dtype(torch::kFloat32));
+    }
+
+    torch::Tensor truncated;
+    if (!shard.truncated_path.empty()) {
+      truncated = load_tensor_checked((manifest_dir / shard.truncated_path).string()).to(torch::kFloat32).view({-1});
+    } else {
+      truncated = torch::zeros({obs.size(0)}, torch::TensorOptions().dtype(torch::kFloat32));
+    }
+
     if (obs.size(0) != weights.size(0) ||
         (actions.defined() && obs.size(0) != actions.size(0)) ||
         (action_probs.defined() && (action_probs.dim() != 2 || obs.size(0) != action_probs.size(0))) ||
         (next_goal.defined() && obs.size(0) != next_goal.size(0)) ||
-        obs.size(0) != episode_starts.size(0)) {
+        obs.size(0) != episode_starts.size(0) ||
+        obs.size(0) != terminated.size(0) ||
+        obs.size(0) != truncated.size(0)) {
       throw std::runtime_error("Offline shard tensors have mismatched leading dimensions.");
     }
 
@@ -192,6 +219,8 @@ void OfflineTensorDataset::for_each_batch(
       }
       batch.weights = weights.index_select(0, batch_indices);
       batch.episode_starts = episode_starts.index_select(0, batch_indices);
+      batch.terminated = terminated.index_select(0, batch_indices);
+      batch.truncated = truncated.index_select(0, batch_indices);
       fn(batch);
     }
   }
@@ -244,11 +273,27 @@ void OfflineTensorDataset::for_each_trajectory(
       }
     }
 
+    torch::Tensor terminated;
+    if (!shard.terminated_path.empty()) {
+      terminated = load_tensor_checked((manifest_dir / shard.terminated_path).string()).to(torch::kFloat32).view({-1});
+    } else {
+      terminated = torch::zeros({obs.size(0)}, torch::TensorOptions().dtype(torch::kFloat32));
+    }
+
+    torch::Tensor truncated;
+    if (!shard.truncated_path.empty()) {
+      truncated = load_tensor_checked((manifest_dir / shard.truncated_path).string()).to(torch::kFloat32).view({-1});
+    } else {
+      truncated = torch::zeros({obs.size(0)}, torch::TensorOptions().dtype(torch::kFloat32));
+    }
+
     if (obs.size(0) != weights.size(0) ||
         (actions.defined() && obs.size(0) != actions.size(0)) ||
         (action_probs.defined() && (action_probs.dim() != 2 || obs.size(0) != action_probs.size(0))) ||
         (next_goal.defined() && obs.size(0) != next_goal.size(0)) ||
-        obs.size(0) != episode_starts.size(0)) {
+        obs.size(0) != episode_starts.size(0) ||
+        obs.size(0) != terminated.size(0) ||
+        obs.size(0) != truncated.size(0)) {
       throw std::runtime_error("Offline shard tensors have mismatched leading dimensions.");
     }
 
@@ -298,6 +343,8 @@ void OfflineTensorDataset::for_each_trajectory(
       }
       batch.weights = weights.narrow(0, start, length);
       batch.episode_starts = episode_starts.narrow(0, start, length);
+      batch.terminated = terminated.narrow(0, start, length);
+      batch.truncated = truncated.narrow(0, start, length);
       fn(batch);
     }
   }

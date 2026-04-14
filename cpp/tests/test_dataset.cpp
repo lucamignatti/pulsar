@@ -25,6 +25,8 @@ std::filesystem::path make_dataset_fixture(bool include_episode_starts, bool mis
   torch::Tensor next_goal = torch::tensor({0, 1, 2, 0}, torch::TensorOptions().dtype(torch::kLong));
   torch::Tensor weights = torch::tensor({1.0F, 2.0F, 1.0F, 1.0F});
   torch::Tensor episode_starts = torch::tensor({1.0F, 0.0F, 1.0F, 0.0F});
+  torch::Tensor terminated = torch::tensor({0.0F, 1.0F, 0.0F, 1.0F});
+  torch::Tensor truncated = torch::zeros({4}, torch::TensorOptions().dtype(torch::kFloat32));
 
   torch::save(obs, (root / "obs.pt").string());
   torch::save(actions, (root / "actions.pt").string());
@@ -34,6 +36,8 @@ std::filesystem::path make_dataset_fixture(bool include_episode_starts, bool mis
   if (include_episode_starts) {
     torch::save(episode_starts, (root / "episode_starts.pt").string());
   }
+  torch::save(terminated, (root / "terminated.pt").string());
+  torch::save(truncated, (root / "truncated.pt").string());
 
   std::ofstream manifest(root / "manifest.json");
   manifest << "{\n"
@@ -51,6 +55,8 @@ std::filesystem::path make_dataset_fixture(bool include_episode_starts, bool mis
   if (include_episode_starts) {
     manifest << "      \"episode_starts_path\": \"episode_starts.pt\",\n";
   }
+  manifest << "      \"terminated_path\": \"terminated.pt\",\n"
+              "      \"truncated_path\": \"truncated.pt\",\n";
   manifest << "      \"samples\": 4\n"
               "    }\n"
               "  ]\n"
@@ -64,6 +70,7 @@ void test_dataset_iteration_and_trajectories() {
   pulsar::OfflineTensorDataset dataset((root / "manifest.json").string());
   pulsar::test::require(dataset.sample_count() == 4, "sample count mismatch");
   pulsar::test::require(dataset.has_episode_starts(), "episode starts should be detected");
+  pulsar::test::require(dataset.has_trajectory_end_flags(), "trajectory end flags should be detected");
 
   std::int64_t seen_rows = 0;
   dataset.for_each_batch(2, false, 7, [&](const pulsar::OfflineTensorBatch& batch) {
@@ -87,6 +94,7 @@ void test_dataset_default_episode_starts_and_mismatch() {
   const fs::path no_starts_root = make_dataset_fixture(false, false);
   pulsar::OfflineTensorDataset no_starts((no_starts_root / "manifest.json").string());
   pulsar::test::require(!no_starts.has_episode_starts(), "episode starts should be absent");
+  pulsar::test::require(no_starts.has_trajectory_end_flags(), "trajectory end flags should still be present");
   bool saw_default_start = false;
   no_starts.for_each_batch(4, false, 7, [&](const pulsar::OfflineTensorBatch& batch) {
     saw_default_start = batch.episode_starts[0].item<float>() > 0.5F;

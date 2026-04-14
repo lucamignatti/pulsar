@@ -142,6 +142,23 @@ struct NextGoalPredictorConfig {
   bool reuse_normalizer = true;
 };
 
+struct ValuePretrainingConfig {
+  bool enabled = true;
+  int epochs = 10;
+  float learning_rate = 3.0e-4F;
+  float weight_decay = 1.0e-6F;
+  float max_grad_norm = 1.0F;
+  float loss_coef = 1.0F;
+  int target_sync_interval_epochs = 1;
+  bool bootstrap_truncated = true;
+};
+
+struct OfflineOptimizationConfig {
+  float trunk_learning_rate = 3.0e-4F;
+  float trunk_weight_decay = 1.0e-6F;
+  float trunk_max_grad_norm = 1.0F;
+};
+
 struct WandbConfig {
   bool enabled = false;
   std::string project = "pulsar";
@@ -167,6 +184,8 @@ struct ExperimentConfig {
   OfflineDatasetConfig offline_dataset{};
   BehaviorCloningConfig behavior_cloning{};
   NextGoalPredictorConfig next_goal_predictor{};
+  ValuePretrainingConfig value_pretraining{};
+  OfflineOptimizationConfig offline_optimization{};
   WandbConfig wandb{};
 };
 
@@ -213,6 +232,10 @@ void to_json(nlohmann::json& j, const BehaviorCloningConfig& value);
 void from_json(const nlohmann::json& j, BehaviorCloningConfig& value);
 void to_json(nlohmann::json& j, const NextGoalPredictorConfig& value);
 void from_json(const nlohmann::json& j, NextGoalPredictorConfig& value);
+void to_json(nlohmann::json& j, const ValuePretrainingConfig& value);
+void from_json(const nlohmann::json& j, ValuePretrainingConfig& value);
+void to_json(nlohmann::json& j, const OfflineOptimizationConfig& value);
+void from_json(const nlohmann::json& j, OfflineOptimizationConfig& value);
 void to_json(nlohmann::json& j, const WandbConfig& value);
 void from_json(const nlohmann::json& j, WandbConfig& value);
 void to_json(nlohmann::json& j, const ExperimentConfig& value);

@@ -30,8 +30,12 @@ def main() -> int:
         next_goal = torch.randint(3, (rows,), dtype=torch.long)
         weights = torch.ones(rows)
         episode_starts = torch.zeros(rows)
+        terminated = torch.zeros(rows)
+        truncated = torch.zeros(rows)
         episode_starts[0] = 1.0
         episode_starts[16] = 1.0
+        terminated[15] = 1.0
+        terminated[31] = 1.0
 
         torch.save(obs, data_dir / "obs.pt")
         torch.save(actions, data_dir / "actions.pt")
@@ -39,6 +43,8 @@ def main() -> int:
         torch.save(next_goal, data_dir / "next_goal.pt")
         torch.save(weights, data_dir / "weights.pt")
         torch.save(episode_starts, data_dir / "episode_starts.pt")
+        torch.save(terminated, data_dir / "terminated.pt")
+        torch.save(truncated, data_dir / "truncated.pt")
 
         (data_dir / "manifest.json").write_text(
             json.dumps(
@@ -55,6 +61,8 @@ def main() -> int:
                             "next_goal_path": "next_goal.pt",
                             "weights_path": "weights.pt",
                             "episode_starts_path": "episode_starts.pt",
+                            "terminated_path": "terminated.pt",
+                            "truncated_path": "truncated.pt",
                             "samples": rows,
                         }
                     ],
@@ -71,6 +79,7 @@ def main() -> int:
         config["offline_dataset"]["batch_size"] = 8
         config["behavior_cloning"]["epochs"] = 1
         config["next_goal_predictor"]["epochs"] = 1
+        config["value_pretraining"]["epochs"] = 1
         config["ppo"]["device"] = "cpu"
         config["wandb"]["enabled"] = False
         config_path = tmp_dir / "config.json"
@@ -82,7 +91,14 @@ def main() -> int:
             cwd=repo_root,
         )
 
-        for rel in ["policy/model.pt", "next_goal/model.pt", "offline_metrics.jsonl"]:
+        for rel in [
+            "model.pt",
+            "trunk_optimizer.pt",
+            "policy_head_optimizer.pt",
+            "value_head_optimizer.pt",
+            "ngp_head_optimizer.pt",
+            "offline_metrics.jsonl",
+        ]:
             if not (output_dir / rel).exists():
                 raise RuntimeError(f"missing offline artifact: {rel}")
 

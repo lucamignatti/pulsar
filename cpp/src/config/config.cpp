@@ -334,6 +334,44 @@ void from_json(const json& j, NextGoalPredictorConfig& value) {
   value.reuse_normalizer = j.value("reuse_normalizer", true);
 }
 
+void to_json(json& j, const ValuePretrainingConfig& value) {
+  j = json{
+      {"enabled", value.enabled},
+      {"epochs", value.epochs},
+      {"learning_rate", value.learning_rate},
+      {"weight_decay", value.weight_decay},
+      {"max_grad_norm", value.max_grad_norm},
+      {"loss_coef", value.loss_coef},
+      {"target_sync_interval_epochs", value.target_sync_interval_epochs},
+      {"bootstrap_truncated", value.bootstrap_truncated},
+  };
+}
+
+void from_json(const json& j, ValuePretrainingConfig& value) {
+  value.enabled = j.value("enabled", true);
+  value.epochs = j.value("epochs", 10);
+  value.learning_rate = j.value("learning_rate", 3.0e-4F);
+  value.weight_decay = j.value("weight_decay", 1.0e-6F);
+  value.max_grad_norm = j.value("max_grad_norm", 1.0F);
+  value.loss_coef = j.value("loss_coef", 1.0F);
+  value.target_sync_interval_epochs = j.value("target_sync_interval_epochs", 1);
+  value.bootstrap_truncated = j.value("bootstrap_truncated", true);
+}
+
+void to_json(json& j, const OfflineOptimizationConfig& value) {
+  j = json{
+      {"trunk_learning_rate", value.trunk_learning_rate},
+      {"trunk_weight_decay", value.trunk_weight_decay},
+      {"trunk_max_grad_norm", value.trunk_max_grad_norm},
+  };
+}
+
+void from_json(const json& j, OfflineOptimizationConfig& value) {
+  value.trunk_learning_rate = j.value("trunk_learning_rate", 3.0e-4F);
+  value.trunk_weight_decay = j.value("trunk_weight_decay", 1.0e-6F);
+  value.trunk_max_grad_norm = j.value("trunk_max_grad_norm", 1.0F);
+}
+
 void to_json(json& j, const WandbConfig& value) {
   j = json{
       {"enabled", value.enabled},
@@ -376,6 +414,8 @@ void to_json(json& j, const ExperimentConfig& value) {
       {"offline_dataset", value.offline_dataset},
       {"behavior_cloning", value.behavior_cloning},
       {"next_goal_predictor", value.next_goal_predictor},
+      {"value_pretraining", value.value_pretraining},
+      {"offline_optimization", value.offline_optimization},
       {"wandb", value.wandb},
   };
 }
@@ -398,6 +438,12 @@ void from_json(const json& j, ExperimentConfig& value) {
   }
   if (j.contains("next_goal_predictor")) {
     value.next_goal_predictor = j.at("next_goal_predictor").get<NextGoalPredictorConfig>();
+  }
+  if (j.contains("value_pretraining")) {
+    value.value_pretraining = j.at("value_pretraining").get<ValuePretrainingConfig>();
+  }
+  if (j.contains("offline_optimization")) {
+    value.offline_optimization = j.at("offline_optimization").get<OfflineOptimizationConfig>();
   }
   if (j.contains("wandb")) {
     value.wandb = j.at("wandb").get<WandbConfig>();

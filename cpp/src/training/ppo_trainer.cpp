@@ -100,6 +100,26 @@ void validate_aux_checkpoint_compatibility(
   }
 }
 
+bool same_checkpoint_directory(const std::string& lhs, const std::string& rhs) {
+  if (lhs.empty() || rhs.empty()) {
+    return false;
+  }
+  namespace fs = std::filesystem;
+  const fs::path lhs_path(lhs);
+  const fs::path rhs_path(rhs);
+  std::error_code ec;
+  if (fs::exists(lhs_path, ec) && fs::exists(rhs_path, ec)) {
+    return fs::equivalent(lhs_path, rhs_path, ec) && !ec;
+  }
+  return lhs_path.lexically_normal() == rhs_path.lexically_normal();
+}
+
+void freeze_model_parameters(const SharedActorCritic& model) {
+  for (auto& parameter : model->parameters()) {
+    parameter.set_requires_grad(false);
+  }
+}
+
 void append_metrics_line(
     const std::filesystem::path& checkpoint_dir,
     int update_index,
@@ -314,13 +334,19 @@ void PPOTrainer::load_ngp_reward_checkpoint(
   const CheckpointMetadata metadata = load_checkpoint_metadata((base / "metadata.json").string());
   validate_aux_checkpoint_compatibility(metadata, checkpoint_config, config_, "NGP checkpoint");
 
-  ngp_model_ = SharedActorCritic(config_.model, config_.ppo);
-  torch::serialize::InputArchive archive;
-  archive.load_from((base / "model.pt").string());
-  ngp_model_->load(archive);
-  ngp_normalizer_.load(archive);
+  if (same_checkpoint_directory(checkpoint_path, config_.ppo.init_checkpoint)) {
+    ngp_model_ = clone_shared_model(model_, device_);
+    ngp_normalizer_ = normalizer_.clone();
+  } else {
+    ngp_model_ = SharedActorCritic(config_.model, config_.ppo);
+    torch::serialize::InputArchive archive;
+    archive.load_from((base / "model.pt").string());
+    ngp_model_->load(archive);
+    ngp_normalizer_.load(archive);
+  }
   ngp_model_->to(device_);
   ngp_normalizer_.to(device_);
+  freeze_model_parameters(ngp_model_);
   ngp_model_->eval();
   ngp_collection_state_ = ngp_model_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
   active_ngp_checkpoint_ = base.string();
@@ -633,6 +659,8 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
         online_ngp_dataset_writer_->record_step(
             raw_obs_host,
             collector_->host_dones(),
+            collector_->host_terminated(),
+            collector_->host_truncated(),
             collector_->host_terminal_next_goal_labels());
       }
       const auto ngp_start = std::chrono::steady_clock::now();

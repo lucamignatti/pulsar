@@ -22,6 +22,8 @@ struct OfflineTensorBatch {
   torch::Tensor next_goal{};
   torch::Tensor weights{};
   torch::Tensor episode_starts{};
+  torch::Tensor terminated{};
+  torch::Tensor truncated{};
 };
 
 struct OfflineTensorShardEntry {
@@ -31,6 +33,8 @@ struct OfflineTensorShardEntry {
   std::string next_goal_path{};
   std::string weights_path{};
   std::string episode_starts_path{};
+  std::string terminated_path{};
+  std::string truncated_path{};
   std::int64_t samples = 0;
 };
 
@@ -52,6 +56,7 @@ class OfflineTensorDataset {
   [[nodiscard]] int action_dim() const;
   [[nodiscard]] int next_goal_classes() const;
   [[nodiscard]] bool has_episode_starts() const;
+  [[nodiscard]] bool has_trajectory_end_flags() const;
   [[nodiscard]] const OfflineTensorManifest& manifest() const;
 
   void for_each_batch(

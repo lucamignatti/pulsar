@@ -22,9 +22,13 @@ def write_synthetic_offline_dataset(
     next_goal = torch.randint(3, (rows,), dtype=torch.long)
     weights = torch.ones(rows)
     episode_starts = torch.zeros(rows)
+    terminated = torch.zeros(rows)
+    truncated = torch.zeros(rows)
     episode_starts[0] = 1.0
     if rows > 16:
         episode_starts[rows // 2] = 1.0
+        terminated[(rows // 2) - 1] = 1.0
+    terminated[rows - 1] = 1.0
 
     torch.save(obs, data_dir / "obs.pt")
     torch.save(actions, data_dir / "actions.pt")
@@ -32,6 +36,8 @@ def write_synthetic_offline_dataset(
     torch.save(next_goal, data_dir / "next_goal.pt")
     torch.save(weights, data_dir / "weights.pt")
     torch.save(episode_starts, data_dir / "episode_starts.pt")
+    torch.save(terminated, data_dir / "terminated.pt")
+    torch.save(truncated, data_dir / "truncated.pt")
 
     manifest_path = data_dir / "manifest.json"
     manifest_path.write_text(
@@ -49,6 +55,8 @@ def write_synthetic_offline_dataset(
                         "next_goal_path": "next_goal.pt",
                         "weights_path": "weights.pt",
                         "episode_starts_path": "episode_starts.pt",
+                        "terminated_path": "terminated.pt",
+                        "truncated_path": "truncated.pt",
                         "samples": rows,
                     }
                 ],
@@ -80,6 +88,7 @@ def run_offline_pretrain(
     config["offline_dataset"]["batch_size"] = 8
     config["behavior_cloning"]["epochs"] = 1
     config["next_goal_predictor"]["epochs"] = 1
+    config["value_pretraining"]["epochs"] = 1
     config["ppo"]["device"] = device
     config["wandb"]["enabled"] = False
     if model_overrides:
