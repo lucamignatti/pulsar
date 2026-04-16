@@ -86,19 +86,32 @@ void RocketSimTransitionEngine::reset(std::uint64_t seed) {
     RocketSim::Init(resolve_collision_meshes_path(config_.collision_meshes_path), true);
   });
 
-  delete arena_;
-  arena_ = RocketSim::Arena::Create(RocketSim::GameMode::SOCCAR);
   if (arena_ == nullptr) {
-    throw std::runtime_error("RocketSim arena creation failed.");
-  }
+    arena_ = RocketSim::Arena::Create(RocketSim::GameMode::SOCCAR);
+    if (arena_ == nullptr) {
+      throw std::runtime_error("RocketSim arena creation failed.");
+    }
 
-  cars_.clear();
-  cars_.reserve(static_cast<std::size_t>(config_.team_size * 2));
-  for (int i = 0; i < config_.team_size; ++i) {
-    cars_.push_back(arena_->AddCar(RocketSim::Team::BLUE));
-  }
-  for (int i = 0; i < config_.team_size; ++i) {
-    cars_.push_back(arena_->AddCar(RocketSim::Team::ORANGE));
+    cars_.clear();
+    cars_.reserve(static_cast<std::size_t>(config_.team_size * 2));
+    for (int i = 0; i < config_.team_size; ++i) {
+      cars_.push_back(arena_->AddCar(RocketSim::Team::BLUE));
+    }
+    for (int i = 0; i < config_.team_size; ++i) {
+      cars_.push_back(arena_->AddCar(RocketSim::Team::ORANGE));
+    }
+
+    arena_->SetGoalScoreCallback(
+        [](RocketSim::Arena*, RocketSim::Team scoring_team, void* user_info) {
+          auto* self = static_cast<RocketSimTransitionEngine*>(user_info);
+          self->state_.goal_scored = true;
+          if (scoring_team == RocketSim::Team::BLUE) {
+            self->state_.blue_score += 1;
+          } else {
+            self->state_.orange_score += 1;
+          }
+        },
+        this);
   }
 
   state_ = {};
@@ -109,19 +122,8 @@ void RocketSimTransitionEngine::reset(std::uint64_t seed) {
   episode_ticks_ = 0;
   last_reset_seed_ = seed;
 
-  arena_->SetGoalScoreCallback(
-      [](RocketSim::Arena*, RocketSim::Team scoring_team, void* user_info) {
-        auto* self = static_cast<RocketSimTransitionEngine*>(user_info);
-        self->state_.goal_scored = true;
-        if (scoring_team == RocketSim::Team::BLUE) {
-          self->state_.blue_score += 1;
-        } else {
-          self->state_.orange_score += 1;
-        }
-      },
-      this);
-
   const int kickoff_seed = config_.randomize_kickoffs ? static_cast<int>(seed) : 0;
+  arena_->tickCount = 0;
   arena_->ResetToRandomKickoff(kickoff_seed);
   sync_state_from_arena();
 #else

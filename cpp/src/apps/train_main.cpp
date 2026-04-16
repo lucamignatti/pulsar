@@ -63,7 +63,6 @@ int main(int argc, char** argv) {
     pulsar::PPOTrainer trainer(
         config,
         std::move(collector),
-        action_parser,
         std::move(self_play_manager),
         std::filesystem::path(argv[2]));
     trainer.train(updates, argv[2], argv[1]);

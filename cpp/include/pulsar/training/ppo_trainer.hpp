@@ -68,7 +68,6 @@ class PPOTrainer {
   PPOTrainer(
       ExperimentConfig config,
       std::unique_ptr<BatchedRocketSimCollector> collector,
-      ActionParserPtr action_parser,
       std::unique_ptr<SelfPlayManager> self_play_manager,
       std::filesystem::path run_output_root = {});
   ~PPOTrainer();
@@ -106,7 +105,7 @@ class PPOTrainer {
       const torch::Tensor& action_masks,
       bool deterministic,
       torch::Tensor* log_probs) const;
-  std::vector<std::int64_t> actions_to_indices(const torch::Tensor& actions) const;
+  torch::Tensor actions_to_cpu(const torch::Tensor& actions) const;
   torch::Tensor categorical_projection(const torch::Tensor& returns) const;
   torch::Tensor confidence_weights(const torch::Tensor& value_logits) const;
   torch::Tensor adaptive_epsilon(const torch::Tensor& value_logits) const;
@@ -161,7 +160,6 @@ class PPOTrainer {
 
   ExperimentConfig config_{};
   std::unique_ptr<BatchedRocketSimCollector> collector_{};
-  ActionParserPtr action_parser_{};
   std::unique_ptr<SelfPlayManager> self_play_manager_{};
   ControllerActionTable action_table_{};
   SharedActorCritic model_{nullptr};
@@ -206,7 +204,6 @@ class PPOTrainer {
   ContinuumState collection_state_{};
   ContinuumState opponent_collection_state_{};
   ContinuumState ngp_collection_state_{};
-  std::vector<ControllerState> host_actions_{};
   bool use_pinned_host_buffers_ = false;
   double best_reward_mean_ = -1.0e30;
 };

@@ -36,6 +36,7 @@ class DiscreteActionParser final : public ActionParser {
       std::span<const std::int64_t> action_indices,
       std::span<ControllerState> out) const override;
   std::vector<std::uint8_t> build_action_mask(const EnvState& state, AgentId agent_id) const override;
+  void build_action_mask_batch(const EnvState& state, std::span<std::uint8_t> out) const override;
   [[nodiscard]] const ControllerActionTable& action_table() const;
 
  private:

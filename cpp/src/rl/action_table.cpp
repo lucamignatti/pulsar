@@ -1,6 +1,7 @@
 #include "pulsar/rl/action_table.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <stdexcept>
 
 namespace pulsar {
@@ -155,6 +156,39 @@ std::vector<std::uint8_t> DiscreteActionParser::build_action_mask(const EnvState
     mask[index] = static_cast<std::uint8_t>(valid ? 1 : 0);
   }
   return mask;
+}
+
+void DiscreteActionParser::build_action_mask_batch(const EnvState& state, std::span<std::uint8_t> out) const {
+  if (state.cars.empty()) {
+    if (!out.empty()) {
+      throw std::invalid_argument("DiscreteActionParser::build_action_mask_batch expected an empty output span.");
+    }
+    return;
+  }
+
+  const std::size_t stride = action_table_.size();
+  const std::size_t expected = state.cars.size() * stride;
+  if (out.size() != expected) {
+    throw std::invalid_argument("DiscreteActionParser::build_action_mask_batch received an output span with the wrong size.");
+  }
+
+  for (std::size_t agent_id = 0; agent_id < state.cars.size(); ++agent_id) {
+    const CarState& car = state.cars[agent_id];
+    std::uint8_t* dst = out.data() + static_cast<std::ptrdiff_t>(agent_id * stride);
+    for (std::size_t index = 0; index < stride; ++index) {
+      const ControllerState& action = action_table_.at(index);
+      bool valid = true;
+
+      if (action.boost && car.boost <= 0.5F) {
+        valid = false;
+      }
+      if (action.jump && !(car.on_ground || car.has_flip)) {
+        valid = false;
+      }
+
+      dst[index] = static_cast<std::uint8_t>(valid ? 1 : 0);
+    }
+  }
 }
 
 const ControllerActionTable& DiscreteActionParser::action_table() const {

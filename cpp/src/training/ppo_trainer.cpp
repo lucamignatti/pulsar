@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -259,12 +258,10 @@ void append_ngp_promotion_line(
 PPOTrainer::PPOTrainer(
     ExperimentConfig config,
     std::unique_ptr<BatchedRocketSimCollector> collector,
-    ActionParserPtr action_parser,
     std::unique_ptr<SelfPlayManager> self_play_manager,
     std::filesystem::path run_output_root)
     : config_(std::move(config)),
       collector_(std::move(collector)),
-      action_parser_(std::move(action_parser)),
       self_play_manager_(std::move(self_play_manager)),
       action_table_(config_.action_table),
       model_(SharedActorCritic(config_.model, config_.ppo)),
@@ -278,14 +275,13 @@ PPOTrainer::PPOTrainer(
       run_output_root_(std::move(run_output_root)),
       ngp_normalizer_(config_.model.observation_dim),
       candidate_ngp_normalizer_(config_.model.observation_dim) {
-  if (!collector_ || !action_parser_) {
-    throw std::invalid_argument("PPOTrainer requires a collector and action parser.");
+  if (!collector_) {
+    throw std::invalid_argument("PPOTrainer requires a collector.");
   }
 
   total_agents_ = collector_->total_agents();
   collection_state_ = model_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
   opponent_collection_state_ = model_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
-  host_actions_.resize(total_agents_);
 #ifdef USE_ROCM
   use_pinned_host_buffers_ = false;
 #else
@@ -363,11 +359,8 @@ torch::Tensor PPOTrainer::sample_actions(
   return sample_masked_actions(logits, action_masks, deterministic, log_probs);
 }
 
-std::vector<std::int64_t> PPOTrainer::actions_to_indices(const torch::Tensor& actions) const {
-  std::vector<std::int64_t> action_indices(static_cast<std::size_t>(actions.size(0)));
-  const torch::Tensor action_cpu = actions.to(torch::kCPU);
-  std::memcpy(action_indices.data(), action_cpu.data_ptr<std::int64_t>(), action_indices.size() * sizeof(std::int64_t));
-  return action_indices;
+torch::Tensor PPOTrainer::actions_to_cpu(const torch::Tensor& actions) const {
+  return actions.contiguous().to(torch::kCPU);
 }
 
 torch::Tensor PPOTrainer::categorical_projection(const torch::Tensor& returns) const {
@@ -1292,9 +1285,7 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
 
     const auto collection_start = std::chrono::steady_clock::now();
     for (int step = 0; step < config_.ppo.rollout_length; ++step) {
-      torch::Tensor raw_obs_host = collector_->collect_observations(&collector_timings);
-      collector_->collect_action_masks(&collector_timings);
-
+      torch::Tensor raw_obs_host = collector_->host_observations();
       const torch::Tensor raw_obs = raw_obs_host.to(device_, use_pinned_host_buffers_);
       const torch::Tensor episode_starts = collector_->host_episode_starts().to(device_, use_pinned_host_buffers_);
       const torch::Tensor action_masks = collector_->host_action_masks().to(device_, use_pinned_host_buffers_).to(torch::kBool);
@@ -1344,12 +1335,14 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
       }
 
       const auto decode_start = std::chrono::steady_clock::now();
-      const std::vector<std::int64_t> action_indices = actions_to_indices(actions);
-      action_parser_->parse_actions_into(action_indices, host_actions_);
+      const torch::Tensor action_indices_cpu = actions_to_cpu(actions);
+      collector_->step(
+          std::span<const std::int64_t>(
+              action_indices_cpu.data_ptr<std::int64_t>(),
+              static_cast<std::size_t>(action_indices_cpu.numel())),
+          &collector_timings);
       metrics.action_decode_seconds +=
           std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
-
-      collector_->step(host_actions_, true, &collector_timings);
       const torch::Tensor dones = collector_->host_dones().to(device_, use_pinned_host_buffers_);
       if (online_ngp_dataset_writer_) {
         online_ngp_dataset_writer_->record_step(
@@ -1371,7 +1364,7 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
       torch::Tensor rewards;
       {
         torch::NoGradGuard no_grad;
-        const torch::Tensor post_step_obs = collector_->host_post_step_obs().to(device_, use_pinned_host_buffers_);
+        const torch::Tensor post_step_obs = collector_->host_observations().to(device_, use_pinned_host_buffers_);
         const torch::Tensor zero_starts = torch::zeros_like(dones);
         const torch::Tensor normalized_post_step_obs = ngp_normalizer_.normalize(post_step_obs);
         PolicyOutput ngp_output =
@@ -1403,7 +1396,7 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
         std::chrono::duration<double>(std::chrono::steady_clock::now() - collection_start).count();
 
     const auto gae_start = std::chrono::steady_clock::now();
-    const torch::Tensor last_obs_host = collector_->collect_observations(&collector_timings);
+    const torch::Tensor last_obs_host = collector_->host_observations();
     const torch::Tensor last_obs = normalizer_.normalize(last_obs_host.to(device_, use_pinned_host_buffers_));
     const torch::Tensor last_episode_starts = collector_->host_episode_starts().to(device_, use_pinned_host_buffers_);
     torch::Tensor last_sampled_value;

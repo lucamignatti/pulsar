@@ -1,5 +1,4 @@
 #include <chrono>
-#include <cstring>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -56,14 +55,8 @@ torch::Tensor ngp_scalar(const torch::Tensor& logits) {
   return probs.select(-1, 0) - probs.select(-1, 1);
 }
 
-std::vector<std::int64_t> actions_to_indices(const torch::Tensor& actions) {
-  std::vector<std::int64_t> action_indices(static_cast<std::size_t>(actions.size(0)));
-  const torch::Tensor action_cpu = actions.to(torch::kCPU);
-  std::memcpy(
-      action_indices.data(),
-      action_cpu.data_ptr<std::int64_t>(),
-      action_indices.size() * sizeof(std::int64_t));
-  return action_indices;
+torch::Tensor actions_to_cpu(const torch::Tensor& actions) {
+  return actions.contiguous().to(torch::kCPU);
 }
 
 #endif
@@ -109,28 +102,16 @@ int main(int argc, char** argv) {
       1024;
 #endif
 
-  auto run = [&](bool include_obs, bool include_masks) {
+  auto run = [&]() {
     pulsar::CollectorTimings timings{};
     for (int i = 0; i < warmup_steps; ++i) {
-      if (include_obs) {
-        collector.collect_observations(&timings);
-      }
-      if (include_masks) {
-        collector.collect_action_masks(&timings);
-      }
-      collector.step(actions, false, &timings);
+      collector.step(actions, &timings);
     }
 
     const auto start = std::chrono::steady_clock::now();
     timings = {};
     for (int i = 0; i < steps; ++i) {
-      if (include_obs) {
-        collector.collect_observations(&timings);
-      }
-      if (include_masks) {
-        collector.collect_action_masks(&timings);
-      }
-      collector.step(actions, false, &timings);
+      collector.step(actions, &timings);
     }
     return std::pair{
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
@@ -157,12 +138,9 @@ int main(int argc, char** argv) {
     InferenceTimings inference{};
     pulsar::ContinuumState policy_state = model->initial_state(static_cast<std::int64_t>(collector.total_agents()), device);
     pulsar::ContinuumState ngp_state = ngp_model->initial_state(static_cast<std::int64_t>(collector.total_agents()), device);
-    std::vector<pulsar::ControllerState> host_actions(collector.total_agents());
 
     for (int i = 0; i < trainer_warmup_steps; ++i) {
-      torch::Tensor raw_obs_host = collector.collect_observations(&timings);
-      collector.collect_action_masks(&timings);
-
+      torch::Tensor raw_obs_host = collector.host_observations();
       const auto copy_start = std::chrono::steady_clock::now();
       const torch::Tensor raw_obs = raw_obs_host.to(device, pin_host_memory);
       const torch::Tensor episode_starts = collector.host_episode_starts().to(device, pin_host_memory);
@@ -187,13 +165,16 @@ int main(int argc, char** argv) {
         chosen_actions = pulsar::sample_masked_actions(output.policy_logits, action_masks, false, nullptr);
       }
 
-      const std::vector<std::int64_t> action_indices = actions_to_indices(chosen_actions);
-      action_parser->parse_actions_into(action_indices, host_actions);
-      collector.step(host_actions, true, &timings);
+      const torch::Tensor action_indices_cpu = actions_to_cpu(chosen_actions);
+      collector.step(
+          std::span<const std::int64_t>(
+              action_indices_cpu.data_ptr<std::int64_t>(),
+              static_cast<std::size_t>(action_indices_cpu.numel())),
+          &timings);
 
       const auto reward_copy_start = std::chrono::steady_clock::now();
       const torch::Tensor dones = collector.host_dones().to(device, pin_host_memory);
-      const torch::Tensor post_step_obs = collector.host_post_step_obs().to(device, pin_host_memory);
+      const torch::Tensor post_step_obs = collector.host_observations().to(device, pin_host_memory);
       inference.obs_copy_seconds +=
           std::chrono::duration<double>(std::chrono::steady_clock::now() - reward_copy_start).count();
       const torch::Tensor zero_starts = torch::zeros_like(dones);
@@ -212,9 +193,7 @@ int main(int argc, char** argv) {
     inference = {};
 
     for (int i = 0; i < trainer_steps; ++i) {
-      torch::Tensor raw_obs_host = collector.collect_observations(&timings);
-      collector.collect_action_masks(&timings);
-
+      torch::Tensor raw_obs_host = collector.host_observations();
       const auto copy_start = std::chrono::steady_clock::now();
       const torch::Tensor raw_obs = raw_obs_host.to(device, pin_host_memory);
       const torch::Tensor episode_starts = collector.host_episode_starts().to(device, pin_host_memory);
@@ -253,16 +232,18 @@ int main(int argc, char** argv) {
       }
 
       const auto decode_start = std::chrono::steady_clock::now();
-      const std::vector<std::int64_t> action_indices = actions_to_indices(chosen_actions);
-      action_parser->parse_actions_into(action_indices, host_actions);
+      const torch::Tensor action_indices_cpu = actions_to_cpu(chosen_actions);
+      collector.step(
+          std::span<const std::int64_t>(
+              action_indices_cpu.data_ptr<std::int64_t>(),
+              static_cast<std::size_t>(action_indices_cpu.numel())),
+          &timings);
       inference.action_decode_seconds +=
           std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
 
-      collector.step(host_actions, true, &timings);
-
       const auto reward_copy_start = std::chrono::steady_clock::now();
       const torch::Tensor dones = collector.host_dones().to(device, pin_host_memory);
-      const torch::Tensor post_step_obs = collector.host_post_step_obs().to(device, pin_host_memory);
+      const torch::Tensor post_step_obs = collector.host_observations().to(device, pin_host_memory);
       inference.obs_copy_seconds +=
           std::chrono::duration<double>(std::chrono::steady_clock::now() - reward_copy_start).count();
       const torch::Tensor zero_starts = torch::zeros_like(dones);
@@ -288,12 +269,14 @@ int main(int argc, char** argv) {
   };
 #endif
 
-  const auto [step_seconds, step_timings] = run(false, false);
-  const auto [collection_seconds, collection_timings] = run(true, true);
+  const auto [collection_seconds, collection_timings] = run();
 #ifdef PULSAR_HAS_TORCH
   const auto [trainer_seconds, trainer_timings, inference_timings] = run_trainer_like();
 #endif
-  const double step_env_steps_per_second = static_cast<double>(steps * num_envs) / step_seconds;
+  const double step_env_steps_per_second =
+      collection_timings.env_step_seconds > 0.0
+          ? static_cast<double>(steps * num_envs) / collection_timings.env_step_seconds
+          : 0.0;
   const double collection_env_steps_per_second = static_cast<double>(steps * num_envs) / collection_seconds;
   const double collection_agent_steps_per_second =
       collection_env_steps_per_second * static_cast<double>(collector.total_agents()) / static_cast<double>(num_envs);
@@ -345,7 +328,7 @@ int main(int argc, char** argv) {
   std::cout << "mask_build_seconds=" << collection_timings.mask_build_seconds << '\n';
   std::cout << "env_step_seconds=" << collection_timings.env_step_seconds << '\n';
   std::cout << "done_reset_seconds=" << collection_timings.done_reset_seconds << '\n';
-  std::cout << "step_only_env_step_seconds=" << step_timings.env_step_seconds << '\n';
+  std::cout << "step_only_env_step_seconds=" << collection_timings.env_step_seconds << '\n';
 #ifdef PULSAR_HAS_TORCH
   std::cout << "trainer_like_obs_build_seconds=" << trainer_timings.obs_build_seconds << '\n';
   std::cout << "trainer_like_mask_build_seconds=" << trainer_timings.mask_build_seconds << '\n';

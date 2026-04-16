@@ -232,8 +232,8 @@ int main() {
     pulsar::PPOTrainer trainer(
         config,
         std::move(collector),
-        action_parser,
-        nullptr);
+        nullptr,
+        root / "ppo");
     trainer.train(1, (root / "ppo").string());
 
     if (!fs::exists(root / "ppo" / "update_1" / "model.pt")) {
@@ -260,8 +260,8 @@ int main() {
       return std::make_unique<pulsar::PPOTrainer>(
           trainer_config,
           std::move(local_collector),
-          local_action_parser,
-          nullptr);
+          nullptr,
+          root / "trainer_factory");
     };
 
     pulsar::ExperimentConfig bad_init_config = config;

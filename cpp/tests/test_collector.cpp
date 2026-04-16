@@ -102,8 +102,7 @@ void test_collector_shapes_self_play_and_reset() {
     };
   });
 
-  const auto obs = collector.collect_observations();
-  collector.collect_action_masks();
+  const auto obs = collector.host_observations();
   pulsar::test::require(obs.sizes() == torch::IntArrayRef({8, 132}), "collector obs shape mismatch");
   pulsar::test::require(
       collector.host_action_masks().sizes() == torch::IntArrayRef({8, 90}),
@@ -122,10 +121,10 @@ void test_collector_shapes_self_play_and_reset() {
       "env1 opponent snapshot id mismatch");
 
   std::vector<pulsar::ControllerState> actions(collector.total_agents(), {.throttle = 1.0F});
-  collector.step(actions, true);
+  collector.step(actions);
   pulsar::test::require(
-      collector.host_post_step_obs().sizes() == torch::IntArrayRef({8, 132}),
-      "collector post-step obs shape mismatch");
+      collector.host_observations().sizes() == torch::IntArrayRef({8, 132}),
+      "collector next-step obs shape mismatch");
   pulsar::test::require(
       collector.host_dones().sum().item<float>() == 8.0F,
       "collector should report done after timeout/reset");
@@ -163,7 +162,7 @@ void test_collector_parity_with_legacy_engine() {
 
   std::vector<float> oracle_obs(collector_engine->num_agents() * obs_builder->obs_dim());
   obs_builder->build_obs_batch(collector_engine->state(), oracle_obs);
-  const auto collector_obs = collector.collect_observations();
+  const auto collector_obs = collector.host_observations();
   const torch::Tensor oracle_obs_tensor =
       torch::from_blob(
           oracle_obs.data(),
@@ -175,7 +174,7 @@ void test_collector_parity_with_legacy_engine() {
       "collector obs parity mismatch");
 
   std::vector<pulsar::ControllerState> actions(collector_engine->num_agents(), {.throttle = 1.0F, .steer = 0.25F});
-  collector.step(actions, false);
+  collector.step(actions);
   pulsar::test::require(collector.host_dones().sum().item<float>() == 0.0F, "one-step parity run should not reset");
 }
 

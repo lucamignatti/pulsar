@@ -58,10 +58,10 @@ class BatchedRocketSimCollector {
   [[nodiscard]] int obs_dim() const;
   [[nodiscard]] int action_dim() const;
 
-  torch::Tensor collect_observations(CollectorTimings* timings = nullptr);
-  void collect_action_masks(CollectorTimings* timings = nullptr);
-  void step(std::span<const ControllerState> actions, bool collect_post_step_obs, CollectorTimings* timings = nullptr);
+  void step(std::span<const ControllerState> actions, CollectorTimings* timings = nullptr);
+  void step(std::span<const std::int64_t> action_indices, CollectorTimings* timings = nullptr);
 
+  [[nodiscard]] const torch::Tensor& host_observations() const;
   [[nodiscard]] const torch::Tensor& host_action_masks() const;
   [[nodiscard]] const torch::Tensor& host_learner_active() const;
   [[nodiscard]] const torch::Tensor& host_snapshot_ids() const;
@@ -70,16 +70,31 @@ class BatchedRocketSimCollector {
   [[nodiscard]] const torch::Tensor& host_terminated() const;
   [[nodiscard]] const torch::Tensor& host_truncated() const;
   [[nodiscard]] const torch::Tensor& host_terminal_next_goal_labels() const;
-  [[nodiscard]] const torch::Tensor& host_post_step_obs() const;
 
  private:
+  struct HostBuffers {
+    torch::Tensor obs{};
+    torch::Tensor action_masks{};
+    torch::Tensor learner_active{};
+    torch::Tensor snapshot_ids{};
+    torch::Tensor episode_starts{};
+  };
+
   struct EnvRuntime {
     TransitionEnginePtr engine;
     SelfPlayAssignment assignment;
     std::uint64_t reset_seed = 0;
+    std::vector<ControllerState> action_scratch{};
+    std::vector<std::uint8_t> terminated_scratch{};
+    std::vector<std::uint8_t> truncated_scratch{};
   };
 
+  [[nodiscard]] HostBuffers allocate_host_buffers(bool pin_host_memory) const;
   void assign_env(std::size_t env_idx, std::uint64_t seed);
+  void finalize_step(CollectorTimings* timings);
+  void initialize(std::vector<TransitionEnginePtr> engines, bool pin_host_memory);
+  void rebuild_host_buffers(HostBuffers& buffers, CollectorTimings* timings);
+  void rebuild_next_buffers(CollectorTimings* timings);
 
   ExperimentConfig config_{};
   ObsBuilderPtr obs_builder_{};
@@ -89,16 +104,12 @@ class BatchedRocketSimCollector {
   std::vector<EnvRuntime> envs_{};
   std::vector<std::size_t> agent_offsets_{};
   AssignmentFn assignment_fn_{};
-  torch::Tensor host_obs_;
-  torch::Tensor host_action_masks_;
-  torch::Tensor host_learner_active_;
-  torch::Tensor host_snapshot_ids_;
-  torch::Tensor host_episode_starts_;
+  HostBuffers current_buffers_{};
+  HostBuffers next_buffers_{};
   torch::Tensor host_dones_;
   torch::Tensor host_terminated_;
   torch::Tensor host_truncated_;
   torch::Tensor host_terminal_next_goal_labels_;
-  torch::Tensor host_post_step_obs_;
   std::size_t total_agents_ = 0;
   int obs_dim_ = 0;
   int action_dim_ = 0;
