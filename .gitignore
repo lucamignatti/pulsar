@@ -16,3 +16,6 @@ __pycache__/
 .vscode/
 collision_meshes/
 rlut_meshes/
+tmp/
+
+tmp/
