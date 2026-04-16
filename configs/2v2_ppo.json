@@ -15,7 +15,26 @@
   },
   "reward": {
     "ngp_checkpoint": "",
-    "ngp_scale": 1.0
+    "ngp_scale": 1.0,
+    "refresh": {
+      "enabled": false,
+      "candidate_checkpoint": "",
+      "check_interval_updates": 4,
+      "train_candidate_in_process": false,
+      "online_train_fraction": 0.7,
+      "anchor_train_manifest": "data/offline/2v2/train_manifest.json",
+      "anchor_val_manifest": "data/offline/2v2/val_manifest.json",
+      "candidate_epochs": 1,
+      "old_data_fraction": 0.3,
+      "min_online_train_samples": 32768,
+      "min_recent_loss_improvement": 0.02,
+      "max_anchor_loss_regression": 0.01,
+      "promotion_cooldown_updates": 4,
+      "train_trunk": false,
+      "max_online_windows": 4,
+      "max_online_samples": 0,
+      "async_candidate_updates": true
+    }
   },
   "action_table": {
     "builtin": "rlgym_lookup_v1",

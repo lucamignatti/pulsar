@@ -4,11 +4,14 @@
 
 #include <c10/core/DeviceGuard.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <random>
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
@@ -120,6 +123,63 @@ void freeze_model_parameters(const SharedActorCritic& model) {
   }
 }
 
+std::vector<torch::Tensor> collect_head_parameters(
+    const SharedActorCritic& model,
+    const std::string& prefix) {
+  std::vector<torch::Tensor> params;
+  for (const auto& item : model->named_parameters(true)) {
+    if (item.key().rfind(prefix, 0) == 0) {
+      params.push_back(item.value());
+    }
+  }
+  return params;
+}
+
+std::vector<torch::Tensor> collect_trunk_parameters(const SharedActorCritic& model) {
+  std::vector<torch::Tensor> params;
+  for (const auto& item : model->named_parameters(true)) {
+    if (item.key().rfind("policy_head.", 0) == 0 ||
+        item.key().rfind("value_head.", 0) == 0 ||
+        item.key().rfind("next_goal_head.", 0) == 0) {
+      continue;
+    }
+    params.push_back(item.value());
+  }
+  return params;
+}
+
+torch::Tensor weighted_cross_entropy(
+    const torch::Tensor& logits,
+    const torch::Tensor& labels,
+    const torch::Tensor& weights,
+    double label_smoothing,
+    const torch::Tensor& class_weights = {}) {
+  auto options = torch::nn::functional::CrossEntropyFuncOptions().reduction(torch::kNone);
+  if (label_smoothing > 0.0) {
+    options = options.label_smoothing(label_smoothing);
+  }
+  if (class_weights.defined()) {
+    options = options.weight(class_weights);
+  }
+  const torch::Tensor per_sample = torch::nn::functional::cross_entropy(logits, labels, options);
+  const torch::Tensor normalized_weights = weights / weights.mean().clamp_min(1.0e-6);
+  return (per_sample * normalized_weights).mean();
+}
+
+double weighted_accuracy(
+    const torch::Tensor& logits,
+    const torch::Tensor& labels,
+    const torch::Tensor& weights) {
+  const torch::Tensor predictions = logits.argmax(-1);
+  const torch::Tensor correct = predictions.eq(labels).to(torch::kFloat32);
+  return ((correct * weights).sum() / weights.sum().clamp_min(1.0e-6)).item<double>();
+}
+
+double relative_improvement(double active_loss, double candidate_loss) {
+  const double scale = std::max(std::abs(active_loss), 1.0e-8);
+  return (active_loss - candidate_loss) / scale;
+}
+
 void append_metrics_line(
     const std::filesystem::path& checkpoint_dir,
     int update_index,
@@ -214,7 +274,8 @@ PPOTrainer::PPOTrainer(
           static_cast<int>(collector_->total_agents()),
           collector_->action_dim())),
       device_(resolve_runtime_device(config_.ppo.device)),
-      ngp_normalizer_(config_.model.observation_dim) {
+      ngp_normalizer_(config_.model.observation_dim),
+      candidate_ngp_normalizer_(config_.model.observation_dim) {
   if (!collector_ || !action_parser_) {
     throw std::invalid_argument("PPOTrainer requires a collector and action parser.");
   }
@@ -234,18 +295,30 @@ PPOTrainer::PPOTrainer(
     if (config_.reward.online_dataset.output_dir.empty()) {
       throw std::invalid_argument("reward.online_dataset.output_dir must be set when online dataset export is enabled.");
     }
-    const std::size_t num_envs = collector_->num_envs();
-    const std::size_t agents_per_env = num_envs == 0 ? 0 : total_agents_ / num_envs;
-    online_ngp_dataset_writer_ = std::make_unique<OnlineNGPDatasetWriter>(
-        config_.reward.online_dataset,
-        config_.reward.online_dataset.output_dir,
-        config_.model.observation_dim,
-        config_.model.action_dim,
-        num_envs,
-        agents_per_env);
   }
+  if (config_.reward.refresh.enabled && config_.reward.refresh.train_candidate_in_process) {
+    if (!config_.reward.online_dataset.enabled) {
+      throw std::invalid_argument("reward.online_dataset.enabled must be true for in-process NGP refresh.");
+    }
+    if (config_.reward.refresh.online_train_fraction <= 0.0F ||
+        config_.reward.refresh.online_train_fraction >= 1.0F) {
+      throw std::invalid_argument(
+          "reward.refresh.online_train_fraction must be in (0, 1) for in-process NGP refresh.");
+    }
+    if (config_.reward.refresh.anchor_train_manifest.empty() ||
+        config_.reward.refresh.anchor_val_manifest.empty()) {
+      throw std::invalid_argument(
+          "reward.refresh.anchor_train_manifest and anchor_val_manifest must be set for in-process NGP refresh.");
+    }
+    if (config_.reward.refresh.candidate_epochs <= 0) {
+      throw std::invalid_argument("reward.refresh.candidate_epochs must be positive for in-process NGP refresh.");
+    }
+  }
+  const std::filesystem::path init_checkpoint_dir =
+      config_.ppo.init_checkpoint.empty() ? std::filesystem::path{} : std::filesystem::path(config_.ppo.init_checkpoint);
   maybe_initialize_from_checkpoint();
   maybe_initialize_ngp_reward();
+  maybe_initialize_in_process_ngp_refresh(init_checkpoint_dir);
 
   if (self_play_manager_ && self_play_manager_->enabled()) {
     collector_->set_self_play_assignment_fn(
@@ -253,6 +326,10 @@ PPOTrainer::PPOTrainer(
           return self_play_manager_->sample_assignment(env_idx, seed);
         });
   }
+}
+
+PPOTrainer::~PPOTrainer() {
+  stop_ngp_refresh_worker();
 }
 
 ContinuumState PPOTrainer::replay_state_until(std::int64_t start_step, const torch::Tensor& agent_indices) {
@@ -319,6 +396,21 @@ void PPOTrainer::maybe_initialize_from_checkpoint() {
   normalizer_.load(archive);
   model_->to(device_);
   normalizer_.to(device_);
+  if (fs::exists(base / "optimizer.pt")) {
+    resumed_global_step_ = metadata.global_step;
+    resumed_update_index_ = metadata.update_index;
+  } else {
+    resumed_global_step_ = 0;
+    resumed_update_index_ = 0;
+  }
+
+  if (fs::exists(base / "active_ngp" / "model.pt")) {
+    load_ngp_reward_checkpoint(
+        (base / "active_ngp").string(),
+        metadata.reward_ngp_label,
+        metadata.reward_ngp_promotion_index,
+        metadata.reward_ngp_promoted_global_step);
+  }
 
   std::cout << "initialized_from_checkpoint=" << base.string() << '\n';
 }
@@ -364,10 +456,596 @@ void PPOTrainer::load_ngp_reward_checkpoint(
 }
 
 void PPOTrainer::maybe_initialize_ngp_reward() {
+  if (ngp_model_) {
+    return;
+  }
   if (config_.reward.ngp_checkpoint.empty()) {
     throw std::runtime_error("reward.ngp_checkpoint must be set for PPO training.");
   }
   load_ngp_reward_checkpoint(config_.reward.ngp_checkpoint, config_.reward.ngp_label, 0, 0);
+}
+
+void PPOTrainer::maybe_initialize_in_process_ngp_refresh(const std::filesystem::path& init_checkpoint_dir) {
+  if (!config_.reward.refresh.enabled || !config_.reward.refresh.train_candidate_in_process) {
+    if (config_.reward.online_dataset.enabled) {
+      const std::size_t num_envs = collector_->num_envs();
+      const std::size_t agents_per_env = num_envs == 0 ? 0 : total_agents_ / num_envs;
+      online_ngp_dataset_writer_ = std::make_unique<OnlineNGPDatasetWriter>(
+          config_.reward.online_dataset,
+          config_.reward.online_dataset.output_dir,
+          config_.model.observation_dim,
+          config_.model.action_dim,
+          num_envs,
+          agents_per_env);
+    }
+    return;
+  }
+
+  const std::size_t num_envs = collector_->num_envs();
+  const std::size_t agents_per_env = num_envs == 0 ? 0 : total_agents_ / num_envs;
+  if (!ngp_replay_buffer_) {
+    ngp_replay_buffer_ = std::make_unique<OnlineNGPReplayBuffer>(
+        config_.reward.online_dataset,
+        config_.reward.refresh,
+        config_.model.observation_dim,
+        num_envs,
+        agents_per_env);
+  }
+  if (anchor_train_trajectories_.empty()) {
+    anchor_train_trajectories_ = load_ngp_trajectories_from_manifest(config_.reward.refresh.anchor_train_manifest);
+  }
+  if (anchor_val_trajectories_.empty()) {
+    anchor_val_trajectories_ = load_ngp_trajectories_from_manifest(config_.reward.refresh.anchor_val_manifest);
+  }
+
+  const std::filesystem::path refresh_state_dir = init_checkpoint_dir / "ngp_refresh_state";
+  if (!init_checkpoint_dir.empty() && std::filesystem::exists(refresh_state_dir / "metadata.json")) {
+    load_in_process_ngp_refresh_state(refresh_state_dir);
+  }
+  ensure_candidate_ngp_initialized();
+  start_ngp_refresh_worker();
+}
+
+void PPOTrainer::ensure_candidate_ngp_initialized() {
+  std::lock_guard<std::mutex> lock(candidate_mutex_);
+  if (candidate_ngp_model_) {
+    return;
+  }
+
+  candidate_ngp_model_ = clone_shared_model(ngp_model_, device_);
+  candidate_ngp_model_->train();
+  candidate_ngp_normalizer_ = ngp_normalizer_.clone();
+  candidate_ngp_normalizer_.to(device_);
+  candidate_trunk_parameters_ = collect_trunk_parameters(candidate_ngp_model_);
+  candidate_ngp_head_parameters_ = collect_head_parameters(candidate_ngp_model_, "next_goal_head.");
+
+  if (!config_.reward.refresh.train_trunk) {
+    for (auto& parameter : candidate_trunk_parameters_) {
+      parameter.set_requires_grad(false);
+    }
+  }
+
+  candidate_trunk_optimizer_.reset();
+  if (config_.reward.refresh.train_trunk && !candidate_trunk_parameters_.empty()) {
+    candidate_trunk_optimizer_ = std::make_unique<torch::optim::AdamW>(
+        candidate_trunk_parameters_,
+        torch::optim::AdamWOptions(config_.offline_optimization.trunk_learning_rate)
+            .weight_decay(config_.offline_optimization.trunk_weight_decay));
+  }
+  candidate_ngp_head_optimizer_ = std::make_unique<torch::optim::AdamW>(
+      candidate_ngp_head_parameters_,
+      torch::optim::AdamWOptions(config_.next_goal_predictor.learning_rate)
+          .weight_decay(config_.next_goal_predictor.weight_decay));
+}
+
+void PPOTrainer::save_model_snapshot(
+    SharedActorCritic model,
+    const ObservationNormalizer& normalizer,
+    const std::filesystem::path& directory,
+    std::int64_t global_step,
+    std::int64_t update_index) const {
+  namespace fs = std::filesystem;
+  fs::remove_all(directory);
+  fs::create_directories(directory);
+  save_experiment_config(config_, (directory / "config.json").string());
+  save_checkpoint_metadata(
+      CheckpointMetadata{
+          .schema_version = config_.schema_version,
+          .obs_schema_version = config_.obs_schema_version,
+          .config_hash = config_hash(config_),
+          .action_table_hash = action_table_hash(config_.action_table),
+          .architecture_name = "continuum_dppo",
+          .device = config_.ppo.device,
+          .global_step = global_step,
+          .update_index = update_index,
+      },
+      (directory / "metadata.json").string());
+
+  torch::serialize::OutputArchive archive;
+  model->save(archive);
+  normalizer.save(archive);
+  archive.save_to((directory / "model.pt").string());
+}
+
+void PPOTrainer::save_candidate_checkpoint(
+    const std::filesystem::path& directory,
+    std::int64_t global_step,
+    std::int64_t update_index) {
+  std::lock_guard<std::mutex> lock(candidate_mutex_);
+  if (!candidate_ngp_model_) {
+    return;
+  }
+  save_model_snapshot(candidate_ngp_model_, candidate_ngp_normalizer_, directory, global_step, update_index);
+  if (candidate_trunk_optimizer_) {
+    torch::serialize::OutputArchive trunk_optimizer_archive;
+    candidate_trunk_optimizer_->save(trunk_optimizer_archive);
+    trunk_optimizer_archive.save_to((directory / "trunk_optimizer.pt").string());
+  }
+  if (candidate_ngp_head_optimizer_) {
+    torch::serialize::OutputArchive head_optimizer_archive;
+    candidate_ngp_head_optimizer_->save(head_optimizer_archive);
+    head_optimizer_archive.save_to((directory / "ngp_head_optimizer.pt").string());
+  }
+}
+
+void PPOTrainer::save_in_process_ngp_refresh_state(const std::filesystem::path& directory) {
+  if (!config_.reward.refresh.enabled || !config_.reward.refresh.train_candidate_in_process || !ngp_replay_buffer_) {
+    return;
+  }
+  namespace fs = std::filesystem;
+  fs::remove_all(directory);
+  fs::create_directories(directory);
+
+  {
+    std::lock_guard<std::mutex> candidate_lock(candidate_mutex_);
+    if (candidate_ngp_model_) {
+      save_model_snapshot(candidate_ngp_model_, candidate_ngp_normalizer_, directory / "candidate_ngp", 0, 0);
+      if (candidate_trunk_optimizer_) {
+        torch::serialize::OutputArchive trunk_optimizer_archive;
+        candidate_trunk_optimizer_->save(trunk_optimizer_archive);
+        trunk_optimizer_archive.save_to((directory / "candidate_ngp" / "trunk_optimizer.pt").string());
+      }
+      if (candidate_ngp_head_optimizer_) {
+        torch::serialize::OutputArchive head_optimizer_archive;
+        candidate_ngp_head_optimizer_->save(head_optimizer_archive);
+        head_optimizer_archive.save_to((directory / "candidate_ngp" / "ngp_head_optimizer.pt").string());
+      }
+    }
+  }
+
+  ngp_replay_buffer_->save(directory / "replay_buffer");
+  nlohmann::json metadata = {
+      {"last_ngp_promotion_update", last_ngp_promotion_update_},
+  };
+  std::ofstream output(directory / "metadata.json");
+  output << metadata.dump(2) << '\n';
+}
+
+void PPOTrainer::load_in_process_ngp_refresh_state(const std::filesystem::path& directory) {
+  std::ifstream input(directory / "metadata.json");
+  if (!input) {
+    return;
+  }
+  nlohmann::json metadata;
+  input >> metadata;
+  last_ngp_promotion_update_ = metadata.value("last_ngp_promotion_update", static_cast<std::int64_t>(0));
+
+  if (ngp_replay_buffer_ && std::filesystem::exists(directory / "replay_buffer" / "metadata.json")) {
+    ngp_replay_buffer_->load(directory / "replay_buffer");
+  }
+
+  const std::filesystem::path candidate_dir = directory / "candidate_ngp";
+  if (!std::filesystem::exists(candidate_dir / "model.pt")) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(candidate_mutex_);
+  candidate_ngp_model_ = SharedActorCritic(config_.model, config_.ppo);
+  torch::serialize::InputArchive archive;
+  archive.load_from((candidate_dir / "model.pt").string());
+  candidate_ngp_model_->load(archive);
+  candidate_ngp_model_->to(device_);
+  candidate_ngp_model_->train();
+  candidate_ngp_normalizer_.load(archive);
+  candidate_ngp_normalizer_.to(device_);
+  candidate_trunk_parameters_ = collect_trunk_parameters(candidate_ngp_model_);
+  candidate_ngp_head_parameters_ = collect_head_parameters(candidate_ngp_model_, "next_goal_head.");
+
+  if (!config_.reward.refresh.train_trunk) {
+    for (auto& parameter : candidate_trunk_parameters_) {
+      parameter.set_requires_grad(false);
+    }
+  }
+  candidate_trunk_optimizer_.reset();
+  if (config_.reward.refresh.train_trunk && !candidate_trunk_parameters_.empty()) {
+    candidate_trunk_optimizer_ = std::make_unique<torch::optim::AdamW>(
+        candidate_trunk_parameters_,
+        torch::optim::AdamWOptions(config_.offline_optimization.trunk_learning_rate)
+            .weight_decay(config_.offline_optimization.trunk_weight_decay));
+    if (std::filesystem::exists(candidate_dir / "trunk_optimizer.pt")) {
+      torch::serialize::InputArchive optimizer_archive;
+      optimizer_archive.load_from((candidate_dir / "trunk_optimizer.pt").string());
+      candidate_trunk_optimizer_->load(optimizer_archive);
+    }
+  }
+  candidate_ngp_head_optimizer_ = std::make_unique<torch::optim::AdamW>(
+      candidate_ngp_head_parameters_,
+      torch::optim::AdamWOptions(config_.next_goal_predictor.learning_rate)
+          .weight_decay(config_.next_goal_predictor.weight_decay));
+  if (std::filesystem::exists(candidate_dir / "ngp_head_optimizer.pt")) {
+    torch::serialize::InputArchive optimizer_archive;
+    optimizer_archive.load_from((candidate_dir / "ngp_head_optimizer.pt").string());
+    candidate_ngp_head_optimizer_->load(optimizer_archive);
+  }
+}
+
+void PPOTrainer::start_ngp_refresh_worker() {
+  if (!config_.reward.refresh.enabled || !config_.reward.refresh.train_candidate_in_process ||
+      !config_.reward.refresh.async_candidate_updates || ngp_refresh_thread_.joinable()) {
+    return;
+  }
+  ngp_refresh_worker_stop_ = false;
+  ngp_refresh_thread_ = std::thread([this]() { ngp_refresh_worker_loop(); });
+}
+
+void PPOTrainer::stop_ngp_refresh_worker() {
+  {
+    std::lock_guard<std::mutex> lock(ngp_refresh_mutex_);
+    ngp_refresh_worker_stop_ = true;
+  }
+  ngp_refresh_cv_.notify_all();
+  if (ngp_refresh_thread_.joinable()) {
+    ngp_refresh_thread_.join();
+  }
+  ngp_refresh_worker_stop_ = false;
+  ngp_refresh_task_pending_ = false;
+  ngp_refresh_task_in_progress_ = false;
+}
+
+void PPOTrainer::train_candidate_on_trajectories(const std::vector<NGPTrajectory>& trajectories, int epochs) {
+  if (!candidate_ngp_model_ || trajectories.empty()) {
+    return;
+  }
+  const torch::Tensor ngp_class_weights =
+      torch::tensor(config_.next_goal_predictor.class_weights, torch::TensorOptions().dtype(torch::kFloat32))
+          .to(device_);
+  const std::int64_t sequence_length = std::max<std::int64_t>(1, config_.behavior_cloning.sequence_length);
+  std::vector<std::size_t> ordering(trajectories.size());
+  std::iota(ordering.begin(), ordering.end(), 0);
+  std::mt19937_64 rng(config_.offline_dataset.seed);
+
+  for (int epoch = 0; epoch < epochs; ++epoch) {
+    if (config_.offline_dataset.shuffle) {
+      std::shuffle(ordering.begin(), ordering.end(), rng);
+    }
+    candidate_ngp_model_->train();
+    for (const std::size_t index : ordering) {
+      const NGPTrajectory& trajectory = trajectories[index];
+      const torch::Tensor obs = trajectory.obs_cpu.to(device_);
+      const torch::Tensor normalized = candidate_ngp_normalizer_.normalize(obs).contiguous();
+      torch::Tensor starts = torch::zeros({normalized.size(0)}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+      if (normalized.size(0) > 0) {
+        starts[0] = 1.0F;
+      }
+      const torch::Tensor weights = torch::ones({normalized.size(0)}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+      const torch::Tensor labels =
+          torch::full({normalized.size(0)}, trajectory.label, torch::TensorOptions().dtype(torch::kLong).device(device_));
+      ContinuumState state = candidate_ngp_model_->initial_state(1, device_);
+
+      for (std::int64_t offset = 0; offset < normalized.size(0); offset += sequence_length) {
+        const std::int64_t length = std::min<std::int64_t>(sequence_length, normalized.size(0) - offset);
+        candidate_ngp_model_->zero_grad();
+        if (candidate_trunk_optimizer_) {
+          candidate_trunk_optimizer_->zero_grad();
+        }
+        candidate_ngp_head_optimizer_->zero_grad();
+
+        const SequenceOutput output = candidate_ngp_model_->forward_sequence(
+            normalized.narrow(0, offset, length).unsqueeze(1),
+            std::move(state),
+            starts.narrow(0, offset, length).unsqueeze(1));
+        const torch::Tensor loss = weighted_cross_entropy(
+            output.next_goal_logits.squeeze(1),
+            labels.narrow(0, offset, length),
+            weights.narrow(0, offset, length),
+            config_.next_goal_predictor.label_smoothing,
+            ngp_class_weights);
+        loss.backward();
+        if (candidate_trunk_optimizer_ && !candidate_trunk_parameters_.empty()) {
+          torch::nn::utils::clip_grad_norm_(
+              candidate_trunk_parameters_,
+              config_.offline_optimization.trunk_max_grad_norm);
+          candidate_trunk_optimizer_->step();
+        }
+        if (!candidate_ngp_head_parameters_.empty()) {
+          torch::nn::utils::clip_grad_norm_(
+              candidate_ngp_head_parameters_,
+              config_.next_goal_predictor.max_grad_norm);
+        }
+        candidate_ngp_head_optimizer_->step();
+        state = output.final_state;
+      }
+    }
+  }
+}
+
+std::pair<double, double> PPOTrainer::evaluate_ngp_trajectories(
+    SharedActorCritic model,
+    const ObservationNormalizer& normalizer,
+    const std::vector<NGPTrajectory>& trajectories) const {
+  if (trajectories.empty()) {
+    return {0.0, 0.0};
+  }
+  const torch::Tensor ngp_class_weights =
+      torch::tensor(config_.next_goal_predictor.class_weights, torch::TensorOptions().dtype(torch::kFloat32))
+          .to(device_);
+  const std::int64_t sequence_length = std::max<std::int64_t>(1, config_.behavior_cloning.sequence_length);
+  double total_loss = 0.0;
+  double total_accuracy = 0.0;
+  std::int64_t total_samples = 0;
+
+  model->eval();
+  for (const auto& trajectory : trajectories) {
+    const torch::Tensor obs = trajectory.obs_cpu.to(device_);
+    const torch::Tensor normalized = normalizer.normalize(obs).contiguous();
+    torch::Tensor starts = torch::zeros({normalized.size(0)}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+    if (normalized.size(0) > 0) {
+      starts[0] = 1.0F;
+    }
+    const torch::Tensor weights = torch::ones({normalized.size(0)}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+    const torch::Tensor labels =
+        torch::full({normalized.size(0)}, trajectory.label, torch::TensorOptions().dtype(torch::kLong).device(device_));
+    ContinuumState state = model->initial_state(1, device_);
+
+    for (std::int64_t offset = 0; offset < normalized.size(0); offset += sequence_length) {
+      const std::int64_t length = std::min<std::int64_t>(sequence_length, normalized.size(0) - offset);
+      torch::NoGradGuard no_grad;
+      const SequenceOutput output = model->forward_sequence(
+          normalized.narrow(0, offset, length).unsqueeze(1),
+          std::move(state),
+          starts.narrow(0, offset, length).unsqueeze(1));
+      const torch::Tensor logits = output.next_goal_logits.squeeze(1);
+      const torch::Tensor chunk_weights = weights.narrow(0, offset, length);
+      const torch::Tensor chunk_labels = labels.narrow(0, offset, length);
+      const torch::Tensor loss = weighted_cross_entropy(
+          logits,
+          chunk_labels,
+          chunk_weights,
+          config_.next_goal_predictor.label_smoothing,
+          ngp_class_weights);
+      total_loss += loss.item<double>() * static_cast<double>(length);
+      total_accuracy += weighted_accuracy(logits, chunk_labels, chunk_weights) * static_cast<double>(length);
+      total_samples += length;
+      state = output.final_state;
+    }
+  }
+
+  if (total_samples <= 0) {
+    return {0.0, 0.0};
+  }
+  return {total_loss / static_cast<double>(total_samples), total_accuracy / static_cast<double>(total_samples)};
+}
+
+PPOTrainer::NGPRefreshResult PPOTrainer::evaluate_candidate_refresh(
+    SharedActorCritic active_model,
+    const ObservationNormalizer& active_normalizer,
+    const std::vector<NGPTrajectory>& recent_val) const {
+  NGPRefreshResult result{};
+  const auto [active_anchor_loss, _active_anchor_acc] =
+      evaluate_ngp_trajectories(active_model, active_normalizer, anchor_val_trajectories_);
+  const auto [active_recent_loss, _active_recent_acc] =
+      evaluate_ngp_trajectories(active_model, active_normalizer, recent_val);
+  const auto [candidate_anchor_loss, _candidate_anchor_acc] =
+      evaluate_ngp_trajectories(candidate_ngp_model_, candidate_ngp_normalizer_, anchor_val_trajectories_);
+  const auto [candidate_recent_loss, _candidate_recent_acc] =
+      evaluate_ngp_trajectories(candidate_ngp_model_, candidate_ngp_normalizer_, recent_val);
+
+  result.active_anchor_loss = active_anchor_loss;
+  result.active_recent_loss = active_recent_loss;
+  result.candidate_anchor_loss = candidate_anchor_loss;
+  result.candidate_recent_loss = candidate_recent_loss;
+  result.recent_loss_improvement = relative_improvement(active_recent_loss, candidate_recent_loss);
+  result.anchor_loss_regression = -relative_improvement(active_anchor_loss, candidate_anchor_loss);
+  result.promote =
+      result.recent_loss_improvement >= config_.reward.refresh.min_recent_loss_improvement &&
+      result.anchor_loss_regression <= config_.reward.refresh.max_anchor_loss_regression;
+  return result;
+}
+
+void PPOTrainer::ngp_refresh_worker_loop() {
+  while (true) {
+    NGPRefreshTask task;
+    {
+      std::unique_lock<std::mutex> lock(ngp_refresh_mutex_);
+      ngp_refresh_cv_.wait(lock, [this]() { return ngp_refresh_worker_stop_ || ngp_refresh_task_pending_; });
+      if (ngp_refresh_worker_stop_ && !ngp_refresh_task_pending_) {
+        break;
+      }
+      if (!ngp_refresh_task_pending_) {
+        continue;
+      }
+      task = std::move(pending_ngp_refresh_task_);
+      ngp_refresh_task_pending_ = false;
+      ngp_refresh_task_in_progress_ = true;
+    }
+
+    NGPRefreshResult result{};
+    result.update_index = task.update_index;
+    result.global_step = task.global_step;
+    result.online_train_samples = ngp_trajectory_sample_count(task.online_train);
+    result.online_val_samples = ngp_trajectory_sample_count(task.online_val);
+
+    {
+      std::lock_guard<std::mutex> candidate_lock(candidate_mutex_);
+      std::vector<NGPTrajectory> training_trajectories = task.online_train;
+      training_trajectories.insert(training_trajectories.end(), task.anchor_train.begin(), task.anchor_train.end());
+      train_candidate_on_trajectories(training_trajectories, config_.reward.refresh.candidate_epochs);
+      NGPRefreshResult eval_result = evaluate_candidate_refresh(task.active_model, task.active_normalizer, task.online_val);
+      result.active_anchor_loss = eval_result.active_anchor_loss;
+      result.active_recent_loss = eval_result.active_recent_loss;
+      result.candidate_anchor_loss = eval_result.candidate_anchor_loss;
+      result.candidate_recent_loss = eval_result.candidate_recent_loss;
+      result.recent_loss_improvement = eval_result.recent_loss_improvement;
+      result.anchor_loss_regression = eval_result.anchor_loss_regression;
+      result.promote = eval_result.promote;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(ngp_refresh_mutex_);
+      latest_ngp_refresh_result_ = std::move(result);
+      ngp_refresh_task_in_progress_ = false;
+      ngp_refresh_result_ready_ = true;
+    }
+  }
+}
+
+void PPOTrainer::maybe_schedule_ngp_refresh_task(std::int64_t global_step, int update_index) {
+  const auto& refresh = config_.reward.refresh;
+  if (!ngp_replay_buffer_) {
+    return;
+  }
+  const std::vector<NGPTrajectory> online_train = ngp_replay_buffer_->train_trajectories();
+  const std::vector<NGPTrajectory> online_val = ngp_replay_buffer_->val_trajectories();
+  const std::int64_t online_train_samples = ngp_trajectory_sample_count(online_train);
+  const std::int64_t online_val_samples = ngp_trajectory_sample_count(online_val);
+  if (online_train_samples < refresh.min_online_train_samples || online_val_samples <= 0) {
+    return;
+  }
+
+  std::vector<NGPTrajectory> anchor_subset;
+  if (refresh.old_data_fraction > 0.0F) {
+    const double old_fraction = static_cast<double>(refresh.old_data_fraction);
+    if (old_fraction >= 1.0) {
+      throw std::runtime_error("reward.refresh.old_data_fraction must be in [0, 1).");
+    }
+    const auto target_anchor_samples = static_cast<std::int64_t>(
+        std::ceil(static_cast<double>(online_train_samples) * old_fraction / (1.0 - old_fraction)));
+    anchor_subset =
+        select_ngp_trajectory_subset(anchor_train_trajectories_, target_anchor_samples, config_.offline_dataset.seed + update_index);
+  }
+
+  NGPRefreshTask task;
+  task.update_index = update_index;
+  task.global_step = global_step;
+  task.online_train = online_train;
+  task.online_val = online_val;
+  task.anchor_train = std::move(anchor_subset);
+  task.active_model = clone_shared_model(ngp_model_, device_);
+  task.active_model->eval();
+  task.active_normalizer = ngp_normalizer_.clone();
+  task.active_normalizer.to(device_);
+
+  if (refresh.async_candidate_updates) {
+    std::lock_guard<std::mutex> lock(ngp_refresh_mutex_);
+    if (ngp_refresh_task_pending_ || ngp_refresh_task_in_progress_ || ngp_refresh_result_ready_) {
+      return;
+    }
+    pending_ngp_refresh_task_ = std::move(task);
+    ngp_refresh_task_pending_ = true;
+    ngp_refresh_cv_.notify_one();
+    return;
+  }
+
+  {
+    std::lock_guard<std::mutex> candidate_lock(candidate_mutex_);
+    std::vector<NGPTrajectory> training_trajectories = task.online_train;
+    training_trajectories.insert(training_trajectories.end(), task.anchor_train.begin(), task.anchor_train.end());
+    train_candidate_on_trajectories(training_trajectories, config_.reward.refresh.candidate_epochs);
+    latest_ngp_refresh_result_ = evaluate_candidate_refresh(task.active_model, task.active_normalizer, task.online_val);
+    latest_ngp_refresh_result_.update_index = update_index;
+    latest_ngp_refresh_result_.global_step = global_step;
+    latest_ngp_refresh_result_.online_train_samples = online_train_samples;
+    latest_ngp_refresh_result_.online_val_samples = online_val_samples;
+  }
+  ngp_refresh_result_ready_ = true;
+}
+
+void PPOTrainer::maybe_collect_ngp_refresh_result(const std::string& checkpoint_dir) {
+  NGPRefreshResult result;
+  {
+    std::lock_guard<std::mutex> lock(ngp_refresh_mutex_);
+    if (!ngp_refresh_result_ready_) {
+      return;
+    }
+    result = latest_ngp_refresh_result_;
+    ngp_refresh_result_ready_ = false;
+  }
+
+  const std::filesystem::path refresh_dir =
+      std::filesystem::path(checkpoint_dir) / "ngp_runtime" / ("update_" + std::to_string(result.update_index));
+  std::filesystem::create_directories(refresh_dir);
+  nlohmann::json summary = {
+      {"update", result.update_index},
+      {"global_step", result.global_step},
+      {"online_train_samples", result.online_train_samples},
+      {"online_val_samples", result.online_val_samples},
+      {"active_anchor_loss", result.active_anchor_loss},
+      {"active_recent_loss", result.active_recent_loss},
+      {"candidate_anchor_loss", result.candidate_anchor_loss},
+      {"candidate_recent_loss", result.candidate_recent_loss},
+      {"recent_loss_improvement", result.recent_loss_improvement},
+      {"anchor_loss_regression", result.anchor_loss_regression},
+      {"promoted", result.promote},
+  };
+  std::ofstream summary_output(refresh_dir / "summary.json");
+  summary_output << summary.dump(2) << '\n';
+
+  if (!result.promote ||
+      result.update_index - last_ngp_promotion_update_ < std::max(1, config_.reward.refresh.promotion_cooldown_updates)) {
+    return;
+  }
+
+  const std::string old_checkpoint = active_ngp_checkpoint_;
+  const std::filesystem::path promoted_dir =
+      std::filesystem::path(checkpoint_dir) / "ngp_versions" /
+      ("promotion_" + std::to_string(static_cast<long long>(active_ngp_promotion_index_ + 1)));
+  save_candidate_checkpoint(promoted_dir, result.global_step, result.update_index);
+
+  {
+    std::lock_guard<std::mutex> candidate_lock(candidate_mutex_);
+    ngp_model_ = clone_shared_model(candidate_ngp_model_, device_);
+    ngp_normalizer_ = candidate_ngp_normalizer_.clone();
+    ngp_normalizer_.to(device_);
+  }
+  freeze_model_parameters(ngp_model_);
+  ngp_model_->eval();
+  ngp_collection_state_ = ngp_model_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
+  active_ngp_checkpoint_ = promoted_dir.string();
+  active_ngp_label_ = promoted_dir.filename().string();
+  active_ngp_config_hash_ = config_hash(config_);
+  active_ngp_global_step_ = result.global_step;
+  active_ngp_update_index_ = result.update_index;
+  active_ngp_promotion_index_ += 1;
+  active_ngp_promoted_global_step_ = result.global_step;
+  last_ngp_promotion_update_ = result.update_index;
+
+  TrainerMetrics promotion_metrics{};
+  promotion_metrics.ngp_promotion_index = active_ngp_promotion_index_;
+  promotion_metrics.ngp_promoted_global_step = active_ngp_promoted_global_step_;
+  promotion_metrics.ngp_source_global_step = active_ngp_global_step_;
+  promotion_metrics.ngp_source_update_index = active_ngp_update_index_;
+  promotion_metrics.ngp_label = active_ngp_label_;
+  promotion_metrics.ngp_checkpoint = active_ngp_checkpoint_;
+  promotion_metrics.ngp_config_hash = active_ngp_config_hash_;
+  append_ngp_promotion_line(checkpoint_dir, result.global_step, result.update_index, old_checkpoint, active_ngp_checkpoint_, promotion_metrics);
+}
+
+void PPOTrainer::maybe_refresh_ngp_candidate_in_process(
+    std::int64_t global_step,
+    int update_index,
+    const std::string& checkpoint_dir) {
+  const auto& refresh = config_.reward.refresh;
+  if (!refresh.enabled || !refresh.train_candidate_in_process || !ngp_replay_buffer_) {
+    return;
+  }
+  const int interval = std::max(1, refresh.check_interval_updates);
+  if (update_index % interval != 0) {
+    return;
+  }
+
+  ngp_replay_buffer_->close_window();
+  maybe_collect_ngp_refresh_result(checkpoint_dir);
+  maybe_schedule_ngp_refresh_task(global_step, update_index);
 }
 
 void PPOTrainer::maybe_promote_ngp_reward(
@@ -582,13 +1260,19 @@ void PPOTrainer::save_checkpoint_to_directory(
   torch::serialize::OutputArchive optimizer_archive;
   optimizer_.save(optimizer_archive);
   optimizer_archive.save_to((directory / "optimizer.pt").string());
+
+  if (ngp_model_) {
+    save_model_snapshot(ngp_model_, ngp_normalizer_, directory / "active_ngp", global_step, update_index);
+  }
+  save_in_process_ngp_refresh_state(directory / "ngp_refresh_state");
 }
 
 void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std::string& config_path) {
-  std::int64_t global_step = 0;
+  std::int64_t global_step = resumed_global_step_;
   WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "ppo_train");
 
   for (int update_index = 0; update_index < updates; ++update_index) {
+    const int current_update_index = static_cast<int>(resumed_update_index_) + update_index + 1;
     const auto update_start = std::chrono::steady_clock::now();
     TrainerMetrics metrics{};
     CollectorTimings collector_timings{};
@@ -657,6 +1341,14 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
       const torch::Tensor dones = collector_->host_dones().to(device_, use_pinned_host_buffers_);
       if (online_ngp_dataset_writer_) {
         online_ngp_dataset_writer_->record_step(
+            raw_obs_host,
+            collector_->host_dones(),
+            collector_->host_terminated(),
+            collector_->host_truncated(),
+            collector_->host_terminal_next_goal_labels());
+      }
+      if (ngp_replay_buffer_) {
+        ngp_replay_buffer_->record_step(
             raw_obs_host,
             collector_->host_dones(),
             collector_->host_terminated(),
@@ -737,7 +1429,7 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
 
     if (self_play_manager_) {
       SelfPlayMetrics self_play_metrics =
-          self_play_manager_->on_update(model_, normalizer_, global_step, update_index + 1);
+          self_play_manager_->on_update(model_, normalizer_, global_step, current_update_index);
       metrics.self_play_eval_seconds = self_play_metrics.eval_seconds;
       metrics.elo_ratings = std::move(self_play_metrics.ratings);
     }
@@ -760,9 +1452,13 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
     if (online_ngp_dataset_writer_) {
       metrics.ngp_online_samples_written = online_ngp_dataset_writer_->samples_written();
       metrics.ngp_online_trajectories_written = online_ngp_dataset_writer_->trajectories_written();
+    } else if (ngp_replay_buffer_) {
+      metrics.ngp_online_samples_written =
+          ngp_replay_buffer_->train_sample_count() + ngp_replay_buffer_->val_sample_count();
+      metrics.ngp_online_trajectories_written = ngp_replay_buffer_->trajectories_written();
     }
 
-    std::cout << "update=" << update_index
+    std::cout << "update=" << current_update_index
               << " collection_sps=" << metrics.collection_agent_steps_per_second
               << " update_sps=" << metrics.update_agent_steps_per_second
               << " overall_sps=" << metrics.overall_agent_steps_per_second
@@ -774,10 +1470,10 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
               << " ngp_promotion_index=" << metrics.ngp_promotion_index
               << " self_play_eval_s=" << metrics.self_play_eval_seconds
               << '\n';
-    append_metrics_line(checkpoint_dir, update_index, global_step, metrics);
+    append_metrics_line(checkpoint_dir, current_update_index, global_step, metrics);
     if (wandb.enabled()) {
       nlohmann::json wandb_metrics = {
-          {"update", update_index},
+          {"update", current_update_index},
           {"global_step", global_step},
           {"collection_agent_steps_per_second", metrics.collection_agent_steps_per_second},
           {"update_agent_steps_per_second", metrics.update_agent_steps_per_second},
@@ -817,19 +1513,30 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
       wandb.log(std::move(wandb_metrics));
     }
 
-    if ((update_index + 1) % config_.ppo.checkpoint_interval == 0) {
-      save_checkpoint(checkpoint_dir, global_step, update_index + 1);
+    if (current_update_index % config_.ppo.checkpoint_interval == 0) {
+      save_checkpoint(checkpoint_dir, global_step, current_update_index);
     }
     if (metrics.reward_mean > best_reward_mean_) {
       best_reward_mean_ = metrics.reward_mean;
-      save_checkpoint_to_directory(std::filesystem::path(checkpoint_dir) / "best", global_step, update_index + 1);
+      save_checkpoint_to_directory(std::filesystem::path(checkpoint_dir) / "best", global_step, current_update_index);
     }
-    maybe_promote_ngp_reward(global_step, update_index + 1, checkpoint_dir);
+    maybe_refresh_ngp_candidate_in_process(global_step, current_update_index, checkpoint_dir);
+    maybe_promote_ngp_reward(global_step, current_update_index, checkpoint_dir);
   }
   if (online_ngp_dataset_writer_) {
     online_ngp_dataset_writer_->finish();
   }
-  save_checkpoint_to_directory(std::filesystem::path(checkpoint_dir) / "final", global_step, updates);
+  if (ngp_replay_buffer_) {
+    ngp_replay_buffer_->close_window();
+    maybe_collect_ngp_refresh_result(checkpoint_dir);
+    maybe_schedule_ngp_refresh_task(global_step, resumed_update_index_ + updates);
+  }
+  stop_ngp_refresh_worker();
+  maybe_collect_ngp_refresh_result(checkpoint_dir);
+  save_checkpoint_to_directory(
+      std::filesystem::path(checkpoint_dir) / "final",
+      global_step,
+      resumed_update_index_ + updates);
   wandb.finish();
 }
 

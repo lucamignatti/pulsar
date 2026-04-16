@@ -131,6 +131,47 @@ def main() -> int:
             if not (tmp_dir / "online_ngp_data" / rel).exists():
                 raise RuntimeError(f"missing online NGP dataset manifest: {rel}")
 
+        integrated_checkpoint_dir = tmp_dir / "integrated_checkpoints"
+        integrated_config_path = tmp_dir / "integrated_config.json"
+        integrated_online_dir = tmp_dir / "online_ngp_integrated"
+        integrated_config = json.loads(json.dumps(config))
+        integrated_config["reward"]["online_dataset"] = {
+            "enabled": True,
+            "output_dir": str(integrated_online_dir.resolve()),
+            "shard_size": 8,
+            "train_fraction": 1.0,
+            "seed": 17,
+        }
+        anchor_manifest = (tmp_dir / "offline_data" / "manifest.json").resolve()
+        integrated_config["reward"]["refresh"] = {
+            "enabled": True,
+            "candidate_checkpoint": "",
+            "check_interval_updates": 1,
+            "train_candidate_in_process": True,
+            "online_train_fraction": 0.7,
+            "anchor_train_manifest": str(anchor_manifest),
+            "anchor_val_manifest": str(anchor_manifest),
+            "candidate_epochs": 1,
+            "old_data_fraction": 0.3,
+            "min_online_train_samples": 8,
+            "min_recent_loss_improvement": -1.0,
+            "max_anchor_loss_regression": 1.0,
+            "promotion_cooldown_updates": 1,
+            "train_trunk": False,
+        }
+        integrated_config_path.write_text(json.dumps(integrated_config, indent=2) + "\n", encoding="utf-8")
+
+        subprocess.run(
+            [str(train_binary), str(integrated_config_path), str(integrated_checkpoint_dir), "2"],
+            check=True,
+            cwd=repo_root,
+        )
+
+        if not (integrated_checkpoint_dir / "ngp_promotions.jsonl").exists():
+            raise RuntimeError("integrated refresh did not write ngp_promotions.jsonl")
+        if not any((integrated_checkpoint_dir / "ngp_versions").glob("promotion_*/model.pt")):
+            raise RuntimeError("integrated refresh did not save a promoted NGP checkpoint")
+
     return 0
 
 

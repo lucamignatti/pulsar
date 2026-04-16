@@ -146,12 +146,23 @@ void OnlineNGPDatasetWriter::finish() {
   write_manifest(val_.shards.empty() ? train_ : val_, output_root_ / "val_manifest.json");
 }
 
+void OnlineNGPDatasetWriter::flush_pending() {
+  flush_split(train_, "train");
+  flush_split(val_, "val");
+  write_manifest(train_, output_root_ / "train_manifest.json");
+  write_manifest(val_.shards.empty() ? train_ : val_, output_root_ / "val_manifest.json");
+}
+
 std::int64_t OnlineNGPDatasetWriter::samples_written() const {
   return samples_written_;
 }
 
 std::int64_t OnlineNGPDatasetWriter::trajectories_written() const {
   return trajectories_written_;
+}
+
+const std::filesystem::path& OnlineNGPDatasetWriter::output_root() const {
+  return output_root_;
 }
 
 std::string OnlineNGPDatasetWriter::choose_split(std::size_t env_idx) const {

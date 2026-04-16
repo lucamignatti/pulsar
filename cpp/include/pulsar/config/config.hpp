@@ -23,6 +23,20 @@ struct RewardConfig {
     bool enabled = false;
     std::string candidate_checkpoint{};
     int check_interval_updates = 1;
+    bool train_candidate_in_process = false;
+    float online_train_fraction = 0.70F;
+    std::string anchor_train_manifest{};
+    std::string anchor_val_manifest{};
+    int candidate_epochs = 1;
+    float old_data_fraction = 0.30F;
+    int min_online_train_samples = 32768;
+    float min_recent_loss_improvement = 0.02F;
+    float max_anchor_loss_regression = 0.01F;
+    int promotion_cooldown_updates = 1;
+    bool train_trunk = false;
+    int max_online_windows = 4;
+    int max_online_samples = 0;
+    bool async_candidate_updates = true;
   };
 
   std::string ngp_checkpoint{};

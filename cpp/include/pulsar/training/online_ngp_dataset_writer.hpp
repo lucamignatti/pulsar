@@ -29,10 +29,12 @@ class OnlineNGPDatasetWriter {
       const torch::Tensor& terminated_cpu,
       const torch::Tensor& truncated_cpu,
       const torch::Tensor& terminal_next_goal_labels_cpu);
+  void flush_pending();
   void finish();
 
   [[nodiscard]] std::int64_t samples_written() const;
   [[nodiscard]] std::int64_t trajectories_written() const;
+  [[nodiscard]] const std::filesystem::path& output_root() const;
 
  private:
   struct AgentTrajectory {

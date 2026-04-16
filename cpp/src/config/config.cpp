@@ -71,6 +71,20 @@ void to_json(json& j, const RewardConfig::RefreshConfig& value) {
       {"enabled", value.enabled},
       {"candidate_checkpoint", value.candidate_checkpoint},
       {"check_interval_updates", value.check_interval_updates},
+      {"train_candidate_in_process", value.train_candidate_in_process},
+      {"online_train_fraction", value.online_train_fraction},
+      {"anchor_train_manifest", value.anchor_train_manifest},
+      {"anchor_val_manifest", value.anchor_val_manifest},
+      {"candidate_epochs", value.candidate_epochs},
+      {"old_data_fraction", value.old_data_fraction},
+      {"min_online_train_samples", value.min_online_train_samples},
+      {"min_recent_loss_improvement", value.min_recent_loss_improvement},
+      {"max_anchor_loss_regression", value.max_anchor_loss_regression},
+      {"promotion_cooldown_updates", value.promotion_cooldown_updates},
+      {"train_trunk", value.train_trunk},
+      {"max_online_windows", value.max_online_windows},
+      {"max_online_samples", value.max_online_samples},
+      {"async_candidate_updates", value.async_candidate_updates},
   };
 }
 
@@ -78,6 +92,20 @@ void from_json(const json& j, RewardConfig::RefreshConfig& value) {
   value.enabled = j.value("enabled", false);
   value.candidate_checkpoint = j.value("candidate_checkpoint", std::string{});
   value.check_interval_updates = j.value("check_interval_updates", 1);
+  value.train_candidate_in_process = j.value("train_candidate_in_process", false);
+  value.online_train_fraction = j.value("online_train_fraction", 0.70F);
+  value.anchor_train_manifest = j.value("anchor_train_manifest", std::string{});
+  value.anchor_val_manifest = j.value("anchor_val_manifest", std::string{});
+  value.candidate_epochs = j.value("candidate_epochs", 1);
+  value.old_data_fraction = j.value("old_data_fraction", 0.30F);
+  value.min_online_train_samples = j.value("min_online_train_samples", 32768);
+  value.min_recent_loss_improvement = j.value("min_recent_loss_improvement", 0.02F);
+  value.max_anchor_loss_regression = j.value("max_anchor_loss_regression", 0.01F);
+  value.promotion_cooldown_updates = j.value("promotion_cooldown_updates", 1);
+  value.train_trunk = j.value("train_trunk", false);
+  value.max_online_windows = j.value("max_online_windows", 4);
+  value.max_online_samples = j.value("max_online_samples", 0);
+  value.async_candidate_updates = j.value("async_candidate_updates", true);
 }
 
 void to_json(json& j, const RewardConfig& value) {
