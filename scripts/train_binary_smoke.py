@@ -172,6 +172,67 @@ def main() -> int:
         if not any((integrated_checkpoint_dir / "ngp_versions").glob("promotion_*/model.pt")):
             raise RuntimeError("integrated refresh did not save a promoted NGP checkpoint")
 
+        resumed_checkpoint_dir = tmp_dir / "integrated_resume_checkpoints"
+        resumed_stage1_config = json.loads(json.dumps(integrated_config))
+        resumed_stage1_config["ppo"]["init_checkpoint"] = str(offline_output_dir.resolve())
+        resumed_stage1_config_path = tmp_dir / "integrated_resume_stage1.json"
+        resumed_stage1_config_path.write_text(
+            json.dumps(resumed_stage1_config, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        subprocess.run(
+            [str(train_binary), str(resumed_stage1_config_path), str(resumed_checkpoint_dir), "1"],
+            check=True,
+            cwd=repo_root,
+        )
+
+        update_1_metadata = json.loads(
+            (resumed_checkpoint_dir / "update_1" / "metadata.json").read_text(encoding="utf-8")
+        )
+        if update_1_metadata["reward_ngp_promotion_index"] < 1:
+            raise RuntimeError("integrated update_1 checkpoint did not persist the promoted NGP for resume")
+
+        resumed_stage2_config = json.loads(json.dumps(integrated_config))
+        resumed_stage2_config["ppo"]["init_checkpoint"] = str((resumed_checkpoint_dir / "update_1").resolve())
+        resumed_stage2_config_path = tmp_dir / "integrated_resume_stage2.json"
+        resumed_stage2_config_path.write_text(
+            json.dumps(resumed_stage2_config, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        subprocess.run(
+            [str(train_binary), str(resumed_stage2_config_path), str(resumed_checkpoint_dir), "1"],
+            check=True,
+            cwd=repo_root,
+        )
+
+        resumed_metrics = [
+            json.loads(line)
+            for line in (resumed_checkpoint_dir / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        if [line["update"] for line in resumed_metrics] != [1, 2]:
+            raise RuntimeError("integrated resume did not preserve PPO update numbering")
+
+        resumed_promotions = [
+            json.loads(line)
+            for line in (resumed_checkpoint_dir / "ngp_promotions.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        if [line["update"] for line in resumed_promotions] != [1, 2]:
+            raise RuntimeError("integrated resume did not preserve NGP promotion history")
+        if len({line["new_ngp_checkpoint"] for line in resumed_promotions}) != 2:
+            raise RuntimeError("integrated resume reused an existing promoted NGP checkpoint path")
+
+        resumed_final_metadata = json.loads(
+            (resumed_checkpoint_dir / "final" / "metadata.json").read_text(encoding="utf-8")
+        )
+        if resumed_final_metadata["update_index"] != 2:
+            raise RuntimeError("integrated final checkpoint did not preserve resumed update index")
+        if resumed_final_metadata["reward_ngp_promotion_index"] < 2:
+            raise RuntimeError("integrated resume did not advance the promoted NGP index after resuming")
+
     return 0
 
 

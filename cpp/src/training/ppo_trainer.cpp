@@ -1270,9 +1270,11 @@ void PPOTrainer::save_checkpoint_to_directory(
 void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std::string& config_path) {
   std::int64_t global_step = resumed_global_step_;
   WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "ppo_train");
+  int last_completed_update_index = static_cast<int>(resumed_update_index_);
 
   for (int update_index = 0; update_index < updates; ++update_index) {
     const int current_update_index = static_cast<int>(resumed_update_index_) + update_index + 1;
+    last_completed_update_index = current_update_index;
     const auto update_start = std::chrono::steady_clock::now();
     TrainerMetrics metrics{};
     CollectorTimings collector_timings{};
@@ -1533,6 +1535,13 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
   }
   stop_ngp_refresh_worker();
   maybe_collect_ngp_refresh_result(checkpoint_dir);
+  if (updates > 0 &&
+      last_completed_update_index % std::max(1, config_.ppo.checkpoint_interval) == 0) {
+    save_checkpoint_to_directory(
+        std::filesystem::path(checkpoint_dir) / ("update_" + std::to_string(last_completed_update_index)),
+        global_step,
+        last_completed_update_index);
+  }
   save_checkpoint_to_directory(
       std::filesystem::path(checkpoint_dir) / "final",
       global_step,
