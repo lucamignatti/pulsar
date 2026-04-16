@@ -8,6 +8,7 @@
 #include "pulsar/env/done.hpp"
 #include "pulsar/env/obs_builder.hpp"
 #include "pulsar/rl/action_table.hpp"
+#include "pulsar/tracing/tracing.hpp"
 #include "pulsar/training/batched_rocketsim_collector.hpp"
 #include "pulsar/training/ppo_trainer.hpp"
 #include "pulsar/training/self_play_manager.hpp"
@@ -15,13 +16,10 @@
 namespace {
 
 bool should_pin_host_memory(const std::string& device) {
-  if (device == "cpu") {
-    return false;
-  }
 #ifdef USE_ROCM
   return false;
 #else
-  return true;
+  return device.rfind("cuda", 0) == 0;
 #endif
 }
 
@@ -34,6 +32,8 @@ int main(int argc, char** argv) {
   }
 
   try {
+    pulsar::tracing::Session trace_session(std::filesystem::path(argv[2]) / "trace.perfetto.json", "pulsar_train");
+    PULSAR_TRACE_SET_THREAD_NAME("main");
     const pulsar::ExperimentConfig config = pulsar::load_experiment_config(argv[1]);
     if (config.reward.ngp_checkpoint.empty()) {
       throw std::runtime_error("pulsar_train requires reward.ngp_checkpoint for the online NGP reward path.");

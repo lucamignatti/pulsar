@@ -4,6 +4,8 @@
 
 #include <torch/torch.h>
 
+#include "pulsar/model/actor_critic.hpp"
+
 namespace pulsar {
 
 class RolloutStorage {
@@ -31,10 +33,13 @@ class RolloutStorage {
       const torch::Tensor& last_sampled_value,
       float gamma,
       float gae_lambda);
+  void set_initial_state(const ContinuumState& state);
+  [[nodiscard]] ContinuumState initial_state_for_agents(const torch::Tensor& agent_indices) const;
 
   [[nodiscard]] int rollout_length() const;
   [[nodiscard]] int num_agents() const;
 
+  ContinuumState initial_state{};
   torch::Tensor obs;
   torch::Tensor episode_starts;
   torch::Tensor action_masks;

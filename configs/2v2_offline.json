@@ -48,7 +48,7 @@
     "device": "cuda",
     "checkpoint_interval": 10,
     "sequence_length": 16,
-    "burn_in": 4,
+    "burn_in": 0,
     "value_v_min": -10.0,
     "value_v_max": 10.0,
     "value_num_atoms": 51,

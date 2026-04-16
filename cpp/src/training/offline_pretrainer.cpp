@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include "pulsar/checkpoint/checkpoint.hpp"
+#include "pulsar/tracing/tracing.hpp"
 #include "pulsar/training/ppo_math.hpp"
 
 namespace pulsar {
@@ -113,17 +114,6 @@ double weighted_accuracy_from_probs(
     const torch::Tensor& weights) {
   const torch::Tensor labels = target_probs.argmax(-1);
   return weighted_accuracy(logits, labels, weights);
-}
-
-ContinuumState detach_state(ContinuumState state) {
-  state.workspace = state.workspace.detach();
-  state.stm_keys = state.stm_keys.detach();
-  state.stm_values = state.stm_values.detach();
-  state.stm_strengths = state.stm_strengths.detach();
-  state.stm_write_index = state.stm_write_index.detach();
-  state.ltm_coeffs = state.ltm_coeffs.detach();
-  state.timestep = state.timestep.detach();
-  return state;
 }
 
 torch::Tensor ngp_scalar(const torch::Tensor& logits) {
@@ -267,6 +257,7 @@ void OfflinePretrainer::maybe_initialize_from_checkpoint() {
 }
 
 void OfflinePretrainer::fit_normalizer() {
+  PULSAR_TRACE_SCOPE_CAT("offline", "fit_normalizer");
   normalizer_.to(device_);
   train_dataset_.for_each_batch(
       config_.offline_dataset.batch_size,
@@ -284,6 +275,7 @@ OfflineEpochMetrics OfflinePretrainer::run_epoch(
     int epoch_index,
     SharedActorCritic target_model,
     const ObservationNormalizer& target_normalizer) {
+  PULSAR_TRACE_SCOPE_CAT("offline", training ? "run_training_epoch" : "run_eval_epoch");
   OfflineEpochMetrics metrics{};
   const bool train_policy = training && config_.behavior_cloning.enabled &&
                             epoch_index <= config_.behavior_cloning.epochs;
@@ -305,10 +297,18 @@ OfflineEpochMetrics OfflinePretrainer::run_epoch(
       shuffle,
       seed,
       [&](const OfflineTensorBatch& batch) {
-        const torch::Tensor obs = batch.obs.to(device_);
-        const torch::Tensor weights = batch.weights.to(device_);
-        const torch::Tensor normalized = normalizer_.normalize(obs).contiguous();
-        const torch::Tensor starts = batch.episode_starts.to(device_).to(torch::kFloat32).contiguous();
+        PULSAR_TRACE_SCOPE_CAT("offline", "trajectory");
+        torch::Tensor obs;
+        torch::Tensor weights;
+        torch::Tensor normalized;
+        torch::Tensor starts;
+        {
+          PULSAR_TRACE_SCOPE_CAT("offline", "copy_and_normalize");
+          obs = batch.obs.to(device_);
+          weights = batch.weights.to(device_);
+          normalized = normalizer_.normalize(obs).contiguous();
+          starts = batch.episode_starts.to(device_).to(torch::kFloat32).contiguous();
+        }
         const std::int64_t total_rows = normalized.size(0);
         if (total_rows <= 0) {
           return;
@@ -317,6 +317,7 @@ OfflineEpochMetrics OfflinePretrainer::run_epoch(
         torch::Tensor value_targets = torch::zeros({total_rows}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
         torch::Tensor value_mask = torch::zeros({total_rows}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
         if (eval_value && total_rows > 1) {
+          PULSAR_TRACE_SCOPE_CAT("offline", "target_value_build");
           const torch::Tensor terminated = batch.terminated.to(device_).to(torch::kFloat32).contiguous();
           const torch::Tensor truncated = batch.truncated.to(device_).to(torch::kFloat32).contiguous();
           ContinuumState target_state = target_model->initial_state(1, device_);
@@ -350,6 +351,7 @@ OfflineEpochMetrics OfflinePretrainer::run_epoch(
         const torch::Tensor next_goal = batch.next_goal.defined() ? batch.next_goal.to(device_) : torch::Tensor{};
 
         for (std::int64_t offset = 0; offset < total_rows; offset += sequence_length) {
+          PULSAR_TRACE_SCOPE_CAT("offline", "chunk");
           const std::int64_t chunk_length = std::min<std::int64_t>(sequence_length, total_rows - offset);
           const torch::Tensor chunk_obs = normalized.narrow(0, offset, chunk_length).unsqueeze(1);
           const torch::Tensor chunk_starts = starts.narrow(0, offset, chunk_length).unsqueeze(1);
@@ -425,7 +427,11 @@ OfflineEpochMetrics OfflinePretrainer::run_epoch(
 
           if (!training) {
             torch::NoGradGuard no_grad;
-            SequenceOutput output = policy_model_->forward_sequence(chunk_obs, state, chunk_starts);
+            SequenceOutput output;
+            {
+              PULSAR_TRACE_SCOPE_CAT("offline", "sequence_forward");
+              output = policy_model_->forward_sequence(chunk_obs, state, chunk_starts);
+            }
             compute_losses(output, nullptr);
             state = detach_state(std::move(output.final_state));
             metrics.samples += chunk_length;
@@ -442,48 +448,65 @@ OfflineEpochMetrics OfflinePretrainer::run_epoch(
             value_head_optimizer_.zero_grad();
             ngp_head_optimizer_.zero_grad();
 
-            SequenceOutput output = policy_model_->forward_sequence(chunk_obs, state, chunk_starts);
+            SequenceOutput output;
+            {
+              PULSAR_TRACE_SCOPE_CAT("offline", "sequence_forward");
+              output = policy_model_->forward_sequence(chunk_obs, state, chunk_starts);
+            }
             torch::Tensor total_loss =
                 torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-            compute_losses(output, &total_loss);
+            {
+              PULSAR_TRACE_SCOPE_CAT("offline", "loss_math");
+              compute_losses(output, &total_loss);
+            }
 
             if (total_loss.requires_grad()) {
-              total_loss.backward();
-              if (!trunk_parameters_.empty()) {
-                torch::nn::utils::clip_grad_norm_(
-                    trunk_parameters_,
-                    config_.offline_optimization.trunk_max_grad_norm);
+              {
+                PULSAR_TRACE_SCOPE_CAT("offline", "backward");
+                total_loss.backward();
+                if (!trunk_parameters_.empty()) {
+                  torch::nn::utils::clip_grad_norm_(
+                      trunk_parameters_,
+                      config_.offline_optimization.trunk_max_grad_norm);
+                }
+                if (train_policy && !policy_head_parameters_.empty()) {
+                  torch::nn::utils::clip_grad_norm_(
+                      policy_head_parameters_,
+                      config_.behavior_cloning.max_grad_norm);
+                }
+                if (train_value && !value_head_parameters_.empty()) {
+                  torch::nn::utils::clip_grad_norm_(
+                      value_head_parameters_,
+                      config_.value_pretraining.max_grad_norm);
+                }
+                if (train_ngp && !ngp_head_parameters_.empty()) {
+                  torch::nn::utils::clip_grad_norm_(
+                      ngp_head_parameters_,
+                      config_.next_goal_predictor.max_grad_norm);
+                }
               }
-              if (train_policy && !policy_head_parameters_.empty()) {
-                torch::nn::utils::clip_grad_norm_(
-                    policy_head_parameters_,
-                    config_.behavior_cloning.max_grad_norm);
-              }
-              if (train_value && !value_head_parameters_.empty()) {
-                torch::nn::utils::clip_grad_norm_(
-                    value_head_parameters_,
-                    config_.value_pretraining.max_grad_norm);
-              }
-              if (train_ngp && !ngp_head_parameters_.empty()) {
-                torch::nn::utils::clip_grad_norm_(
-                    ngp_head_parameters_,
-                    config_.next_goal_predictor.max_grad_norm);
-              }
-              trunk_optimizer_.step();
-              if (train_policy && has_policy_targets) {
-                policy_head_optimizer_.step();
-              }
-              if (train_value && has_value_targets) {
-                value_head_optimizer_.step();
-              }
-              if (train_ngp && has_ngp_targets) {
-                ngp_head_optimizer_.step();
+              {
+                PULSAR_TRACE_SCOPE_CAT("offline", "optimizer_step");
+                trunk_optimizer_.step();
+                if (train_policy && has_policy_targets) {
+                  policy_head_optimizer_.step();
+                }
+                if (train_value && has_value_targets) {
+                  value_head_optimizer_.step();
+                }
+                if (train_ngp && has_ngp_targets) {
+                  ngp_head_optimizer_.step();
+                }
               }
             }
             state = detach_state(std::move(output.final_state));
           } else {
             torch::NoGradGuard no_grad;
-            SequenceOutput output = policy_model_->forward_sequence(chunk_obs, state, chunk_starts);
+            SequenceOutput output;
+            {
+              PULSAR_TRACE_SCOPE_CAT("offline", "sequence_forward");
+              output = policy_model_->forward_sequence(chunk_obs, state, chunk_starts);
+            }
             compute_losses(output, nullptr);
             state = detach_state(std::move(output.final_state));
           }
@@ -521,6 +544,7 @@ OfflineEpochMetrics OfflinePretrainer::evaluate(
 }
 
 void OfflinePretrainer::save_checkpoint(const std::string& output_dir, int epoch_index) const {
+  PULSAR_TRACE_SCOPE_CAT("checkpoint", "save_offline_checkpoint");
   namespace fs = std::filesystem;
   const fs::path base = fs::path(output_dir);
   fs::create_directories(base);
@@ -562,6 +586,7 @@ void OfflinePretrainer::save_checkpoint(const std::string& output_dir, int epoch
 }
 
 void OfflinePretrainer::train(const std::string& output_dir, const std::string& config_path) {
+  PULSAR_TRACE_SCOPE_CAT("offline", "train");
   if (config_.next_goal_predictor.init_checkpoint.empty() || !config_.next_goal_predictor.reuse_normalizer) {
     fit_normalizer();
   }
@@ -612,6 +637,7 @@ void OfflinePretrainer::train(const std::string& output_dir, const std::string& 
   ObservationNormalizer training_target_normalizer = normalizer_.clone();
   int target_epoch = 0;
   for (int epoch = 1; epoch <= max_epochs; ++epoch) {
+    PULSAR_TRACE_SCOPE_CAT("offline", "epoch");
     if (config_.value_pretraining.enabled &&
         (!training_target || epoch == 1 ||
          epoch - target_epoch >= std::max(1, config_.value_pretraining.target_sync_interval_epochs))) {

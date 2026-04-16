@@ -2,6 +2,8 @@
 
 #ifdef PULSAR_HAS_TORCH
 
+#include "pulsar/training/ppo_math.hpp"
+
 namespace pulsar {
 
 RolloutStorage::RolloutStorage(
@@ -63,6 +65,14 @@ void RolloutStorage::compute_returns_and_advantages(
     returns[step] = advantages[step] + sampled_values[step];
     next_value = sampled_values[step];
   }
+}
+
+void RolloutStorage::set_initial_state(const ContinuumState& state) {
+  initial_state = clone_state(state);
+}
+
+ContinuumState RolloutStorage::initial_state_for_agents(const torch::Tensor& agent_indices) const {
+  return gather_state(initial_state, agent_indices);
 }
 
 int RolloutStorage::rollout_length() const {

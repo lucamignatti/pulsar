@@ -156,10 +156,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> SharedActorCriticImpl::r
   const torch::Tensor stm_read = torch::bmm(stm_weights.unsqueeze(1), state.stm_values).squeeze(1);
 
   const torch::Tensor ltm_query = ltm_query_proj_->forward(query_input);
-  const torch::Tensor ltm_scores =
-      torch::matmul(ltm_query, ltm_basis_keys_.to(ltm_query.device()).transpose(0, 1)) + state.ltm_coeffs;
+  const torch::Tensor ltm_scores = torch::matmul(ltm_query, ltm_basis_keys_.transpose(0, 1)) + state.ltm_coeffs;
   const torch::Tensor ltm_weights = torch::softmax(ltm_scores, -1);
-  const torch::Tensor ltm_read = torch::matmul(ltm_weights, ltm_basis_values_.to(ltm_query.device()));
+  const torch::Tensor ltm_read = torch::matmul(ltm_weights, ltm_basis_values_);
 
   const torch::Tensor stm_ctx = stm_context_proj_->forward(stm_read);
   const torch::Tensor ltm_ctx = ltm_context_proj_->forward(ltm_read);
@@ -200,9 +199,11 @@ ContinuumState SharedActorCriticImpl::maybe_consolidate(
   return state;
 }
 
-PolicyOutput SharedActorCriticImpl::forward_step(torch::Tensor obs, ContinuumState state, torch::Tensor episode_starts) {
+PolicyOutput SharedActorCriticImpl::forward_encoded_step(
+    torch::Tensor encoded,
+    ContinuumState state,
+    torch::Tensor episode_starts) {
   state = apply_episode_starts(std::move(state), std::move(episode_starts));
-  const torch::Tensor encoded = encoder_->forward(obs);
   const auto [stm_ctx, ltm_ctx, query_input] = read_memories(encoded, state);
   const torch::Tensor gate_input = torch::cat({encoded, state.workspace, stm_ctx, ltm_ctx}, -1);
   const torch::Tensor gate = torch::sigmoid(gate_proj_->forward(gate_input));
@@ -230,8 +231,16 @@ PolicyOutput SharedActorCriticImpl::forward_step(torch::Tensor obs, ContinuumSta
   };
 }
 
+PolicyOutput SharedActorCriticImpl::forward_step(torch::Tensor obs, ContinuumState state, torch::Tensor episode_starts) {
+  return forward_encoded_step(encoder_->forward(obs), std::move(state), std::move(episode_starts));
+}
+
 SequenceOutput SharedActorCriticImpl::forward_sequence(torch::Tensor obs_seq, ContinuumState state, torch::Tensor episode_starts) {
   const auto time = obs_seq.size(0);
+  const auto batch = obs_seq.size(1);
+  const torch::Tensor encoded_seq =
+      encoder_->forward(obs_seq.reshape({time * batch, config_.observation_dim}))
+          .reshape({time, batch, config_.encoder_dim});
   std::vector<torch::Tensor> policy_logits;
   std::vector<torch::Tensor> value_logits;
   std::vector<torch::Tensor> expected_values;
@@ -248,7 +257,7 @@ SequenceOutput SharedActorCriticImpl::forward_sequence(torch::Tensor obs_seq, Co
     if (episode_starts.defined()) {
       starts = episode_starts[t];
     }
-    PolicyOutput out = forward_step(obs_seq[t], std::move(state), starts);
+    PolicyOutput out = forward_encoded_step(encoded_seq[t], std::move(state), starts);
     policy_logits.push_back(out.policy_logits);
     value_logits.push_back(out.value_logits);
     expected_values.push_back(out.expected_values);
@@ -269,19 +278,18 @@ SequenceOutput SharedActorCriticImpl::forward_sequence(torch::Tensor obs_seq, Co
 
 torch::Tensor SharedActorCriticImpl::expected_value(torch::Tensor value_logits) const {
   const torch::Tensor probs = torch::softmax(value_logits, -1);
-  return (probs * support_.to(value_logits.device())).sum(-1);
+  return (probs * support_).sum(-1);
 }
 
 torch::Tensor SharedActorCriticImpl::sample_value(torch::Tensor value_logits) const {
   const torch::Tensor indices = sample_categorical_from_logits(value_logits);
-  return support_.to(value_logits.device()).index_select(0, indices);
+  return support_.index_select(0, indices);
 }
 
 torch::Tensor SharedActorCriticImpl::value_variance(torch::Tensor value_logits) const {
   const torch::Tensor probs = torch::softmax(value_logits, -1);
-  const torch::Tensor support = support_.to(value_logits.device());
-  const torch::Tensor mean = (probs * support).sum(-1);
-  const torch::Tensor second = (probs * support.pow(2)).sum(-1);
+  const torch::Tensor mean = (probs * support_).sum(-1);
+  const torch::Tensor second = (probs * support_.pow(2)).sum(-1);
   return (second - mean.pow(2)).clamp_min(0.0);
 }
 

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -55,6 +56,7 @@ class OnlineNGPReplayBuffer {
   [[nodiscard]] std::int64_t val_sample_count() const;
   [[nodiscard]] std::int64_t trajectories_written() const;
   [[nodiscard]] std::size_t retained_window_count() const;
+  [[nodiscard]] std::shared_ptr<OnlineNGPReplayBuffer> clone() const;
 
   void save(const std::filesystem::path& directory) const;
   void load(const std::filesystem::path& directory);

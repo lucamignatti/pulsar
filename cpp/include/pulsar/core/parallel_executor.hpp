@@ -5,9 +5,12 @@
 #include <cstddef>
 #include <functional>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
+
+#include "pulsar/tracing/tracing.hpp"
 
 namespace pulsar {
 
@@ -82,6 +85,10 @@ class ParallelExecutor {
   }
 
   void worker_loop(std::size_t worker_index) {
+#if defined(PULSAR_ENABLE_TRACING)
+    const std::string thread_name = "parallel_executor_" + std::to_string(worker_index);
+    PULSAR_TRACE_SET_THREAD_NAME(thread_name);
+#endif
     std::size_t local_generation = 0;
     while (true) {
       const std::function<void(std::size_t, std::size_t)>* task = nullptr;

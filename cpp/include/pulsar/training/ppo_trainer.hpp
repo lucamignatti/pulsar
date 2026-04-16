@@ -7,6 +7,8 @@
 #include <memory>
 #include <condition_variable>
 #include <mutex>
+#include <deque>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -69,9 +71,11 @@ class PPOTrainer {
       ExperimentConfig config,
       std::unique_ptr<BatchedRocketSimCollector> collector,
       std::unique_ptr<SelfPlayManager> self_play_manager,
-      std::filesystem::path run_output_root = {});
+      std::filesystem::path run_output_root = {},
+      bool log_initialization = true);
   ~PPOTrainer();
 
+  TrainerMetrics benchmark(int warmup_updates, int measured_updates);
   void train(int updates, const std::string& checkpoint_dir, const std::string& config_path = "");
 
  private:
@@ -99,7 +103,49 @@ class PPOTrainer {
     bool promote = false;
   };
 
-  ContinuumState replay_state_until(std::int64_t start_step, const torch::Tensor& agent_indices);
+  struct ModelSnapshot {
+    SharedActorCritic model{nullptr};
+    ObservationNormalizer normalizer{1};
+  };
+
+  struct RefreshStateSnapshot {
+    std::optional<ModelSnapshot> candidate_ngp{};
+    std::optional<std::string> candidate_trunk_optimizer_bytes{};
+    std::optional<std::string> candidate_ngp_head_optimizer_bytes{};
+    std::shared_ptr<OnlineNGPReplayBuffer> replay_buffer{};
+    std::int64_t last_ngp_promotion_update = 0;
+  };
+
+  struct CheckpointSnapshot {
+    CheckpointMetadata metadata{};
+    ModelSnapshot policy{};
+    std::optional<std::string> optimizer_bytes{};
+    std::optional<ModelSnapshot> active_ngp{};
+    std::optional<RefreshStateSnapshot> refresh_state{};
+  };
+
+  struct CandidateCheckpointSnapshot {
+    ModelSnapshot candidate{};
+    std::optional<std::string> trunk_optimizer_bytes{};
+    std::optional<std::string> ngp_head_optimizer_bytes{};
+    std::int64_t global_step = 0;
+    std::int64_t update_index = 0;
+  };
+
+  enum class PersistenceKind {
+    RollingCheckpoint,
+    BestCheckpoint,
+    FinalCheckpoint,
+    CandidateCheckpoint,
+  };
+
+  struct PersistenceRequest {
+    PersistenceKind kind = PersistenceKind::RollingCheckpoint;
+    std::filesystem::path directory{};
+    std::shared_ptr<CheckpointSnapshot> checkpoint{};
+    std::shared_ptr<CandidateCheckpointSnapshot> candidate{};
+  };
+
   torch::Tensor sample_actions(
       const torch::Tensor& logits,
       const torch::Tensor& action_masks,
@@ -129,14 +175,30 @@ class PPOTrainer {
       const std::filesystem::path& directory,
       std::int64_t global_step,
       std::int64_t update_index) const;
-  void save_candidate_checkpoint(
-      const std::filesystem::path& directory,
+  [[nodiscard]] std::shared_ptr<CheckpointSnapshot> capture_checkpoint_snapshot(
       std::int64_t global_step,
       std::int64_t update_index);
-  void save_in_process_ngp_refresh_state(const std::filesystem::path& directory);
+  [[nodiscard]] std::shared_ptr<CandidateCheckpointSnapshot> capture_candidate_checkpoint_snapshot(
+      std::int64_t global_step,
+      std::int64_t update_index);
+  void write_refresh_state_snapshot(
+      const RefreshStateSnapshot& snapshot,
+      const std::filesystem::path& directory) const;
+  void write_checkpoint_snapshot(
+      const CheckpointSnapshot& snapshot,
+      const std::filesystem::path& directory) const;
+  void write_candidate_checkpoint_snapshot(
+      const CandidateCheckpointSnapshot& snapshot,
+      const std::filesystem::path& directory) const;
   void load_in_process_ngp_refresh_state(const std::filesystem::path& directory);
   void start_ngp_refresh_worker();
   void stop_ngp_refresh_worker();
+  void start_persistence_worker();
+  void flush_persistence_worker();
+  void stop_persistence_worker();
+  void enqueue_persistence_request(PersistenceRequest request);
+  void persistence_worker_loop();
+  void rethrow_persistence_error_if_any();
   void maybe_schedule_ngp_refresh_task(std::int64_t global_step, int update_index);
   void maybe_collect_ngp_refresh_result(const std::string& checkpoint_dir);
   void ngp_refresh_worker_loop();
@@ -150,13 +212,12 @@ class PPOTrainer {
       const ObservationNormalizer& normalizer,
       const std::vector<NGPTrajectory>& trajectories) const;
   torch::Tensor ngp_scalar(const torch::Tensor& logits) const;
-  void save_checkpoint_to_directory(
-      const std::filesystem::path& directory,
-      std::int64_t global_step,
-      std::int64_t update_index);
+  torch::Tensor compute_rollout_ngp_rewards(
+      const torch::Tensor& obs_seq,
+      const torch::Tensor& episode_starts_seq);
+  TrainerMetrics run_update(std::int64_t* global_step, int current_update_index);
   TrainerMetrics update_policy();
   CheckpointMetadata make_checkpoint_metadata(std::int64_t global_step, std::int64_t update_index) const;
-  void save_checkpoint(const std::string& checkpoint_dir, std::int64_t global_step, std::int64_t update_index);
 
   ExperimentConfig config_{};
   std::unique_ptr<BatchedRocketSimCollector> collector_{};
@@ -168,6 +229,7 @@ class PPOTrainer {
   RolloutStorage rollout_;
   torch::Device device_{torch::kCPU};
   std::filesystem::path run_output_root_{};
+  bool log_initialization_ = true;
   SharedActorCritic ngp_model_{nullptr};
   ObservationNormalizer ngp_normalizer_{1};
   std::unique_ptr<OnlineNGPDatasetWriter> online_ngp_dataset_writer_{};
@@ -194,6 +256,14 @@ class PPOTrainer {
   std::string active_ngp_checkpoint_{};
   std::string active_ngp_label_{};
   std::string active_ngp_config_hash_{};
+  std::thread persistence_thread_{};
+  std::mutex persistence_mutex_{};
+  std::condition_variable persistence_cv_{};
+  std::condition_variable persistence_idle_cv_{};
+  std::deque<PersistenceRequest> persistence_requests_{};
+  std::exception_ptr persistence_error_{};
+  bool persistence_worker_stop_ = false;
+  bool persistence_request_in_progress_ = false;
   std::int64_t active_ngp_global_step_ = 0;
   std::int64_t active_ngp_update_index_ = 0;
   std::int64_t active_ngp_promotion_index_ = 0;

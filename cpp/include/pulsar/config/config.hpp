@@ -99,8 +99,8 @@ struct PPOConfig {
   int collection_workers = 0;
   std::string init_checkpoint{};
   int rollout_length = 256;
-  int minibatch_size = 2048;
-  int epochs = 4;
+  int minibatch_size = 32768;
+  int epochs = 3;
   float gamma = 0.99F;
   float gae_lambda = 0.95F;
   float clip_range = 0.2F;
@@ -111,7 +111,7 @@ struct PPOConfig {
   std::string device = "cpu";
   int checkpoint_interval = 10;
   int sequence_length = 16;
-  int burn_in = 4;
+  int burn_in = 0;
   float value_v_min = -10.0F;
   float value_v_max = 10.0F;
   int value_num_atoms = 51;

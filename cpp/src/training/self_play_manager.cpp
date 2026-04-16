@@ -14,6 +14,7 @@
 #include "pulsar/env/mutators.hpp"
 #include "pulsar/env/rocketsim_engine.hpp"
 #include "pulsar/rl/action_table.hpp"
+#include "pulsar/tracing/tracing.hpp"
 #include "pulsar/training/ppo_math.hpp"
 
 namespace pulsar {
@@ -26,41 +27,6 @@ torch::Tensor masked_argmax(const torch::Tensor& logits, const torch::Tensor& ac
 
 torch::Tensor masked_sample(const torch::Tensor& logits, const torch::Tensor& action_masks) {
   return sample_masked_actions(logits, action_masks, false, nullptr);
-}
-
-torch::Tensor gather_state_tensor(const torch::Tensor& tensor, const torch::Tensor& indices) {
-  if (!tensor.defined()) {
-    return tensor;
-  }
-  return tensor.index_select(0, indices);
-}
-
-ContinuumState gather_state(const ContinuumState& state, const torch::Tensor& indices) {
-  return {
-      gather_state_tensor(state.workspace, indices),
-      gather_state_tensor(state.stm_keys, indices),
-      gather_state_tensor(state.stm_values, indices),
-      gather_state_tensor(state.stm_strengths, indices),
-      gather_state_tensor(state.stm_write_index, indices),
-      gather_state_tensor(state.ltm_coeffs, indices),
-      gather_state_tensor(state.timestep, indices),
-  };
-}
-
-void scatter_state_tensor(torch::Tensor& dst, const torch::Tensor& indices, const torch::Tensor& src) {
-  if (dst.defined() && src.defined()) {
-    dst.index_copy_(0, indices, src);
-  }
-}
-
-void scatter_state(ContinuumState& dst, const torch::Tensor& indices, const ContinuumState& src) {
-  scatter_state_tensor(dst.workspace, indices, src.workspace);
-  scatter_state_tensor(dst.stm_keys, indices, src.stm_keys);
-  scatter_state_tensor(dst.stm_values, indices, src.stm_values);
-  scatter_state_tensor(dst.stm_strengths, indices, src.stm_strengths);
-  scatter_state_tensor(dst.stm_write_index, indices, src.stm_write_index);
-  scatter_state_tensor(dst.ltm_coeffs, indices, src.ltm_coeffs);
-  scatter_state_tensor(dst.timestep, indices, src.timestep);
 }
 
 void update_elo_impl(double& winner, double& loser, double k_factor) {
@@ -138,6 +104,7 @@ void SelfPlayManager::infer_opponent_actions(
     ContinuumState& opponent_state,
     torch::Tensor* out_actions,
     double* inference_seconds) {
+  PULSAR_TRACE_SCOPE_CAT("self_play", "infer_opponent_actions");
   if (out_actions == nullptr) {
     throw std::invalid_argument("SelfPlayManager::infer_opponent_actions requires an output tensor.");
   }
@@ -189,6 +156,7 @@ SelfPlayMetrics SelfPlayManager::on_update(
     const ObservationNormalizer& current_normalizer,
     std::int64_t global_step,
     int update_index) {
+  PULSAR_TRACE_SCOPE_CAT("self_play", "on_update");
   SelfPlayMetrics metrics{};
   if (!enabled()) {
     return metrics;
@@ -214,6 +182,7 @@ SelfPlayMetrics SelfPlayManager::on_update(
 }
 
 void SelfPlayManager::load_existing_snapshots() {
+  PULSAR_TRACE_SCOPE_CAT("self_play", "load_existing_snapshots");
   snapshots_.clear();
   if (!std::filesystem::exists(snapshot_root_)) {
     return;
@@ -297,6 +266,7 @@ void SelfPlayManager::add_snapshot(
     const ObservationNormalizer& current_normalizer,
     std::int64_t global_step,
     int update_index) {
+  PULSAR_TRACE_SCOPE_CAT("self_play", "add_snapshot");
   Snapshot snapshot{
       .global_step = global_step,
       .update_index = update_index,
@@ -314,6 +284,7 @@ void SelfPlayManager::add_snapshot(
 SelfPlayMetrics SelfPlayManager::evaluate_current(
     SharedActorCritic& current_model,
     const ObservationNormalizer& current_normalizer) {
+  PULSAR_TRACE_SCOPE_CAT("self_play", "evaluate_current");
   SelfPlayMetrics metrics{};
   metrics.snapshot_count = static_cast<int>(snapshots_.size());
   if (snapshots_.empty()) {

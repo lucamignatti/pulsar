@@ -50,6 +50,7 @@ option(PULSAR_ENABLE_ROCKETSIM "Enable RocketSim-backed simulation" ON)
 option(PULSAR_DISABLE_ROCM "Disable ROCm integration and ROCm-only tests even when ROCm is available." OFF)
 option(PULSAR_FETCH_JSON "Fetch nlohmann_json when not provided by the system" ON)
 option(PULSAR_FETCH_PYBIND11 "Fetch pybind11 when not provided by the system" OFF)
+option(PULSAR_ENABLE_TRACING "Enable Perfetto-compatible trace instrumentation" OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CTest)
@@ -84,6 +85,7 @@ add_library(
   cpp/src/env/rocketsim_engine.cpp
   cpp/src/checkpoint/checkpoint.cpp
   cpp/src/logging/wandb_logger.cpp
+  cpp/src/tracing/tracing.cpp
 )
 
 target_include_directories(
@@ -105,6 +107,10 @@ if(TARGET RocketSim)
 endif()
 
 target_compile_features(pulsar_core PUBLIC cxx_std_20)
+
+if(PULSAR_ENABLE_TRACING)
+  target_compile_definitions(pulsar_core PUBLIC PULSAR_ENABLE_TRACING=1)
+endif()
 
 if(PULSAR_ENABLE_TORCH)
   pulsar_find_torch()

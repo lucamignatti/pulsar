@@ -377,6 +377,10 @@ std::size_t OnlineNGPReplayBuffer::retained_window_count() const {
   return windows_.size();
 }
 
+std::shared_ptr<OnlineNGPReplayBuffer> OnlineNGPReplayBuffer::clone() const {
+  return std::make_shared<OnlineNGPReplayBuffer>(*this);
+}
+
 std::string OnlineNGPReplayBuffer::choose_split() const {
   const double train_fraction =
       std::clamp(static_cast<double>(refresh_config_.online_train_fraction), 0.0, 1.0);

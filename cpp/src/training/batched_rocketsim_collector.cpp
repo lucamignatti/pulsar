@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "pulsar/rl/action_table.hpp"
+#include "pulsar/tracing/tracing.hpp"
 
 namespace pulsar {
 namespace {
@@ -65,6 +66,7 @@ BatchedRocketSimCollector::BatchedRocketSimCollector(
 void BatchedRocketSimCollector::initialize(
     std::vector<TransitionEnginePtr> engines,
     bool pin_host_memory) {
+  PULSAR_TRACE_SCOPE_CAT("collector", "initialize");
   if (!obs_builder_ || !action_parser_ || !done_condition_) {
     throw std::invalid_argument("BatchedRocketSimCollector requires non-null components.");
   }
@@ -179,6 +181,7 @@ void BatchedRocketSimCollector::assign_env(std::size_t env_idx, std::uint64_t se
 }
 
 void BatchedRocketSimCollector::rebuild_host_buffers(HostBuffers& buffers, CollectorTimings* timings) {
+  PULSAR_TRACE_SCOPE_CAT("collector", "rebuild_host_buffers");
   const auto obs_start = std::chrono::steady_clock::now();
   float* obs_ptr = buffers.obs.data_ptr<float>();
   const std::size_t obs_stride = static_cast<std::size_t>(obs_dim_);
@@ -231,11 +234,13 @@ void BatchedRocketSimCollector::rebuild_host_buffers(HostBuffers& buffers, Colle
 }
 
 void BatchedRocketSimCollector::rebuild_next_buffers(CollectorTimings* timings) {
+  PULSAR_TRACE_SCOPE_CAT("collector", "rebuild_next_buffers");
   next_buffers_.episode_starts.copy_(host_dones_);
   rebuild_host_buffers(next_buffers_, timings);
 }
 
 void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
+  PULSAR_TRACE_SCOPE_CAT("collector", "finalize_step");
   const auto done_reset_start = std::chrono::steady_clock::now();
   float* dones_ptr = host_dones_.data_ptr<float>();
   float* terminated_ptr = host_terminated_.data_ptr<float>();
@@ -296,6 +301,7 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
 }
 
 void BatchedRocketSimCollector::step(std::span<const ControllerState> actions, CollectorTimings* timings) {
+  PULSAR_TRACE_SCOPE_CAT("collector", "step_controller");
   if (actions.size() != total_agents_) {
     throw std::invalid_argument("BatchedRocketSimCollector::step action span has incorrect size.");
   }
@@ -319,6 +325,7 @@ void BatchedRocketSimCollector::step(std::span<const ControllerState> actions, C
 }
 
 void BatchedRocketSimCollector::step(std::span<const std::int64_t> action_indices, CollectorTimings* timings) {
+  PULSAR_TRACE_SCOPE_CAT("collector", "step_discrete");
   if (action_indices.size() != total_agents_) {
     throw std::invalid_argument("BatchedRocketSimCollector::step action span has incorrect size.");
   }

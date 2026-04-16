@@ -58,6 +58,7 @@ class SharedActorCriticImpl : public torch::nn::Module {
   [[nodiscard]] const PPOConfig& ppo_config() const;
 
  private:
+  PolicyOutput forward_encoded_step(torch::Tensor encoded, ContinuumState state, torch::Tensor episode_starts = {});
   [[nodiscard]] ContinuumState apply_episode_starts(ContinuumState state, torch::Tensor episode_starts) const;
   [[nodiscard]] std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> read_memories(
       const torch::Tensor& encoded,

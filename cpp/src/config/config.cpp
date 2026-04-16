@@ -281,7 +281,7 @@ void from_json(const json& j, PPOConfig& value) {
   value.device = j.at("device").get<std::string>();
   value.checkpoint_interval = j.at("checkpoint_interval").get<int>();
   value.sequence_length = j.value("sequence_length", 16);
-  value.burn_in = j.value("burn_in", 4);
+  value.burn_in = j.value("burn_in", 0);
   value.value_v_min = j.value("value_v_min", -10.0F);
   value.value_v_max = j.value("value_v_max", 10.0F);
   value.value_num_atoms = j.value("value_num_atoms", 51);
