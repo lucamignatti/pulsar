@@ -131,6 +131,8 @@ You can optionally pass a third argument to limit the number of PPO updates:
 ./build/release/pulsar_train configs/2v2_ppo.json /path/to/run_outputs 100
 ```
 
+The shipped `configs/2v2_ppo.json` enables online NGP dataset export and in-process NGP refresh by default. When `reward.online_dataset.output_dir` is left empty, `pulsar_train` writes the online NGP shards under `online_ngp/` inside the run directory.
+
 If `ppo.self_play.enabled` is true, self-play policy snapshots are written under `policy_versions/` inside the run directory.
 
 ### 4. Visualize a Checkpoint

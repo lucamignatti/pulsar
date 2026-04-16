@@ -69,7 +69,8 @@ class PPOTrainer {
       ExperimentConfig config,
       std::unique_ptr<BatchedRocketSimCollector> collector,
       ActionParserPtr action_parser,
-      std::unique_ptr<SelfPlayManager> self_play_manager);
+      std::unique_ptr<SelfPlayManager> self_play_manager,
+      std::filesystem::path run_output_root = {});
   ~PPOTrainer();
 
   void train(int updates, const std::string& checkpoint_dir, const std::string& config_path = "");
@@ -168,6 +169,7 @@ class PPOTrainer {
   torch::optim::Adam optimizer_;
   RolloutStorage rollout_;
   torch::Device device_{torch::kCPU};
+  std::filesystem::path run_output_root_{};
   SharedActorCritic ngp_model_{nullptr};
   ObservationNormalizer ngp_normalizer_{1};
   std::unique_ptr<OnlineNGPDatasetWriter> online_ngp_dataset_writer_{};

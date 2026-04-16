@@ -16,11 +16,18 @@
   "reward": {
     "ngp_checkpoint": "",
     "ngp_scale": 1.0,
+    "online_dataset": {
+      "enabled": true,
+      "output_dir": "",
+      "shard_size": 65536,
+      "train_fraction": 0.95,
+      "seed": 7
+    },
     "refresh": {
-      "enabled": false,
+      "enabled": true,
       "candidate_checkpoint": "",
       "check_interval_updates": 4,
-      "train_candidate_in_process": false,
+      "train_candidate_in_process": true,
       "online_train_fraction": 0.7,
       "anchor_train_manifest": "data/offline/2v2/train_manifest.json",
       "anchor_val_manifest": "data/offline/2v2/val_manifest.json",

@@ -260,7 +260,8 @@ PPOTrainer::PPOTrainer(
     ExperimentConfig config,
     std::unique_ptr<BatchedRocketSimCollector> collector,
     ActionParserPtr action_parser,
-    std::unique_ptr<SelfPlayManager> self_play_manager)
+    std::unique_ptr<SelfPlayManager> self_play_manager,
+    std::filesystem::path run_output_root)
     : config_(std::move(config)),
       collector_(std::move(collector)),
       action_parser_(std::move(action_parser)),
@@ -274,6 +275,7 @@ PPOTrainer::PPOTrainer(
           static_cast<int>(collector_->total_agents()),
           collector_->action_dim())),
       device_(resolve_runtime_device(config_.ppo.device)),
+      run_output_root_(std::move(run_output_root)),
       ngp_normalizer_(config_.model.observation_dim),
       candidate_ngp_normalizer_(config_.model.observation_dim) {
   if (!collector_ || !action_parser_) {
@@ -291,6 +293,11 @@ PPOTrainer::PPOTrainer(
 #endif
   model_->to(device_);
   normalizer_.to(device_);
+  if (config_.reward.online_dataset.enabled && config_.reward.online_dataset.output_dir.empty()) {
+    const std::filesystem::path default_output =
+        run_output_root_.empty() ? std::filesystem::path("online_ngp") : run_output_root_ / "online_ngp";
+    config_.reward.online_dataset.output_dir = default_output.string();
+  }
   if (config_.reward.online_dataset.enabled) {
     if (config_.reward.online_dataset.output_dir.empty()) {
       throw std::invalid_argument("reward.online_dataset.output_dir must be set when online dataset export is enabled.");
@@ -397,6 +404,9 @@ void PPOTrainer::maybe_initialize_from_checkpoint() {
   model_->to(device_);
   normalizer_.to(device_);
   if (fs::exists(base / "optimizer.pt")) {
+    torch::serialize::InputArchive optimizer_archive;
+    optimizer_archive.load_from((base / "optimizer.pt").string());
+    optimizer_.load(optimizer_archive);
     resumed_global_step_ = metadata.global_step;
     resumed_update_index_ = metadata.update_index;
   } else {
