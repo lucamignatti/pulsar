@@ -84,6 +84,8 @@ ctest --test-dir build/release -L rocm --output-on-failure
 ./build/release/pulsar_bench
 ```
 
+`pulsar_bench` reports both collector-only throughput and a trainer-like collection loop that uses randomly initialized learner and NGP models, so the benchmark includes model inference overhead in addition to RocketSim stepping.
+
 ## Core Binaries
 
 - `pulsar_offline_train`: offline pretraining
