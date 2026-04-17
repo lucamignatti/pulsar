@@ -1,28 +1,29 @@
 # Pulsar
 
-`Pulsar` is a modular Rocket League bot platform built around a high-throughput C++ training runtime and a thin Python evaluation and visualization layer.
+`Pulsar` is a modular Rocket League bot training stack built around a high-throughput C++ runtime and a thin Python visualization/evaluation layer.
 
-The current training loop has two stages:
+The current training path has two stages:
 
-1. Offline pretrain a shared policy and next-goal head on replay-derived tensor data.
-2. Run synchronous PPO self-play online, using the pretrained next-goal checkpoint as the reward model.
+1. Offline pretrain a shared policy with behavior cloning, value pretraining, and a next-goal predictor on replay-derived tensor manifests.
+2. Run synchronous PPO self-play online, using the pretrained next-goal checkpoint as the reward path and optionally exporting fresh online NGP data for refresh.
 
-The project is organized around a single shared model stack, hard action masking, GPU execution, and a lightweight Python surface for inspection and playback.
+The codebase is centered on a shared model stack, hard action masking, GPU execution, and a lightweight Python surface for inspection and playback.
 
 ## Design Goals
 
 - Fast vectorized C++ trainer
 - Shared C++ backbone for model architecture
 - No hand-written reward function
-- Good performance
+- ROCm-friendly Linux build path
 
 ## Repository Layout
 
 - `cpp/`: runtime, model, training code, tests, and benchmarks
-- `python/`: thin visualization package and CLI
+- `python/pulsar_viz/`: visualization and evaluation package
 - `configs/`: shared experiment configs
-- `scripts/`: setup, preprocessing, and utility scripts
+- `scripts/`: setup, preprocessing, smoke tests, and utility scripts
 - `docs/`: platform-specific notes such as ROCm setup
+- `external/RocketSim/`: vendored RocketSim submodule
 
 ## Requirements
 
@@ -44,12 +45,11 @@ python3 -m venv .venv
 . .venv/bin/activate
 pip install --upgrade pip
 pip install torch pybind11
-pip install -e .[viz]
-pip install -e .[offline]
+pip install -e '.[viz,offline]'
 python3 scripts/collision_mesh_downloader.py
 ```
 
-If you only need the Python visualization environment, `scripts/setup_python_dev.sh` is a shorter shortcut.
+If you only need the Python visualization environment, `scripts/setup_python_dev.sh` is a shorter shortcut. It bootstraps a Python 3.12 virtualenv and installs the viz extras.
 
 Build the project:
 
@@ -58,7 +58,7 @@ cmake -S . -B build/release \
   -DCMAKE_PREFIX_PATH="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')" \
   -Dpybind11_DIR="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')" \
   -DPython3_EXECUTABLE="$(which python)"
-cmake --build build/release
+cmake --build build/release --parallel
 ```
 
 Notes:
@@ -80,6 +80,7 @@ Useful focused commands:
 ```bash
 ctest --test-dir build/release -L reference --output-on-failure
 ctest --test-dir build/release -L smoke --output-on-failure
+ctest --test-dir build/release -L benchmark --output-on-failure
 ctest --test-dir build/release -L rocm --output-on-failure
 ./build/release/pulsar_bench
 ```
@@ -117,7 +118,7 @@ Update `configs/2v2_offline.json` so `offline_dataset.train_manifest` and `offli
 ./build/release/pulsar_offline_train configs/2v2_offline.json /path/to/offline_outputs
 ```
 
-This writes an offline checkpoint directory plus `offline_metrics.jsonl`.
+This writes `config.json`, `metadata.json`, `model.pt`, optimizer snapshots, and `offline_metrics.jsonl` into the output directory.
 
 ### 3. Run Online PPO
 
