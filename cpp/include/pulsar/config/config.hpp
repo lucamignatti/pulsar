@@ -184,6 +184,7 @@ struct WandbConfig {
   std::string mode = "online";
   std::string python_executable = "python3";
   std::string script_path = "scripts/wandb_stream.py";
+  double log_interval_seconds = 30.0;
   std::vector<std::string> tags{};
 };
 

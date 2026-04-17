@@ -213,6 +213,51 @@ void average_offline_benchmark_metrics(OfflineBenchmarkMetrics* aggregate, doubl
   aggregate->eval_samples = static_cast<std::int64_t>(static_cast<double>(aggregate->eval_samples) / count);
 }
 
+OfflineEpochMetrics averaged_epoch_metrics(OfflineEpochMetrics metrics) {
+  if (metrics.policy_samples > 0) {
+    metrics.policy_loss /= static_cast<double>(metrics.policy_samples);
+    metrics.policy_accuracy /= static_cast<double>(metrics.policy_samples);
+  }
+  if (metrics.ngp_samples > 0) {
+    metrics.ngp_loss /= static_cast<double>(metrics.ngp_samples);
+    metrics.ngp_accuracy /= static_cast<double>(metrics.ngp_samples);
+  }
+  if (metrics.value_samples > 0) {
+    metrics.value_loss /= static_cast<double>(metrics.value_samples);
+  }
+  return metrics;
+}
+
+nlohmann::json make_live_offline_metrics_payload(
+    const char* phase,
+    int epoch_index,
+    const OfflineEpochMetrics& metrics,
+    double elapsed_seconds,
+    std::int64_t total_samples) {
+  const OfflineEpochMetrics averaged = averaged_epoch_metrics(metrics);
+  const std::string prefix = std::string("live_") + phase + "_";
+  nlohmann::json payload = {
+      {"epoch", epoch_index},
+      {"live_phase", phase},
+      {"live_elapsed_seconds", elapsed_seconds},
+      {"live_total_samples", total_samples},
+  };
+  payload[prefix + "samples"] = metrics.samples;
+  payload[prefix + "samples_per_second"] =
+      elapsed_seconds > 0.0 ? static_cast<double>(metrics.samples) / elapsed_seconds : 0.0;
+  payload[prefix + "progress"] =
+      total_samples > 0 ? static_cast<double>(metrics.samples) / static_cast<double>(total_samples) : 0.0;
+  payload[prefix + "policy_loss"] = averaged.policy_loss;
+  payload[prefix + "ngp_loss"] = averaged.ngp_loss;
+  payload[prefix + "value_loss"] = averaged.value_loss;
+  payload[prefix + "policy_accuracy"] = averaged.policy_accuracy;
+  payload[prefix + "ngp_accuracy"] = averaged.ngp_accuracy;
+  payload[prefix + "policy_samples"] = metrics.policy_samples;
+  payload[prefix + "ngp_samples"] = metrics.ngp_samples;
+  payload[prefix + "value_samples"] = metrics.value_samples;
+  return payload;
+}
+
 }  // namespace
 
 OfflinePretrainer::OfflinePretrainer(ExperimentConfig config)
@@ -326,9 +371,15 @@ OfflineEpochMetrics OfflinePretrainer::run_epoch(
     bool training,
     int epoch_index,
     SharedActorCritic target_model,
-    const ObservationNormalizer& target_normalizer) {
+    const ObservationNormalizer& target_normalizer,
+    const std::function<void(const OfflineEpochMetrics&, double, std::int64_t)>& progress_callback) {
   PULSAR_TRACE_SCOPE_CAT("offline", training ? "run_training_epoch" : "run_eval_epoch");
   OfflineEpochMetrics metrics{};
+  const auto epoch_start = std::chrono::steady_clock::now();
+  const bool should_report_progress =
+      static_cast<bool>(progress_callback) && config_.wandb.log_interval_seconds > 0.0;
+  const double progress_interval_seconds = std::max(1.0, config_.wandb.log_interval_seconds);
+  double last_progress_report_seconds = 0.0;
   const bool train_policy = training && config_.behavior_cloning.enabled &&
                             epoch_index <= config_.behavior_cloning.epochs;
   const bool train_ngp = training && config_.next_goal_predictor.enabled &&
@@ -344,6 +395,17 @@ OfflineEpochMetrics OfflinePretrainer::run_epoch(
       torch::tensor(config_.next_goal_predictor.class_weights, torch::TensorOptions().dtype(torch::kFloat32))
           .to(device_);
   const std::int64_t sequence_length = std::max<std::int64_t>(1, config_.behavior_cloning.sequence_length);
+  auto maybe_report_progress = [&]() {
+    if (!should_report_progress || metrics.samples <= 0) {
+      return;
+    }
+    const double elapsed_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - epoch_start).count();
+    if (elapsed_seconds - last_progress_report_seconds < progress_interval_seconds) {
+      return;
+    }
+    progress_callback(metrics, elapsed_seconds, dataset.sample_count());
+    last_progress_report_seconds = elapsed_seconds;
+  };
 
   dataset.for_each_packed_trajectory_batch(
       config_.offline_dataset.batch_size,
@@ -548,6 +610,7 @@ OfflineEpochMetrics OfflinePretrainer::run_epoch(
             compute_losses(output, nullptr);
             state = detach_state(std::move(output.final_state));
             metrics.samples += valid_rows;
+            maybe_report_progress();
             continue;
           }
 
@@ -625,35 +688,25 @@ OfflineEpochMetrics OfflinePretrainer::run_epoch(
           }
 
           metrics.samples += valid_rows;
+          maybe_report_progress();
         }
       });
-
-  if (metrics.policy_samples > 0) {
-    metrics.policy_loss /= static_cast<double>(metrics.policy_samples);
-    metrics.policy_accuracy /= static_cast<double>(metrics.policy_samples);
-  }
-  if (metrics.ngp_samples > 0) {
-    metrics.ngp_loss /= static_cast<double>(metrics.ngp_samples);
-    metrics.ngp_accuracy /= static_cast<double>(metrics.ngp_samples);
-  }
-  if (metrics.value_samples > 0) {
-    metrics.value_loss /= static_cast<double>(metrics.value_samples);
-  }
-
-  return metrics;
+  return averaged_epoch_metrics(metrics);
 }
 
 OfflineEpochMetrics OfflinePretrainer::run_training_epoch(
     int epoch_index,
     SharedActorCritic target_model,
-    const ObservationNormalizer& target_normalizer) {
-  return run_epoch(train_dataset_, true, epoch_index, target_model, target_normalizer);
+    const ObservationNormalizer& target_normalizer,
+    const std::function<void(const OfflineEpochMetrics&, double, std::int64_t)>& progress_callback) {
+  return run_epoch(train_dataset_, true, epoch_index, target_model, target_normalizer, progress_callback);
 }
 
 OfflineEpochMetrics OfflinePretrainer::evaluate(
     SharedActorCritic target_model,
-    const ObservationNormalizer& target_normalizer) {
-  return run_epoch(val_dataset_, false, 0, target_model, target_normalizer);
+    const ObservationNormalizer& target_normalizer,
+    const std::function<void(const OfflineEpochMetrics&, double, std::int64_t)>& progress_callback) {
+  return run_epoch(val_dataset_, false, 0, target_model, target_normalizer, progress_callback);
 }
 
 void OfflinePretrainer::save_checkpoint(const std::string& output_dir, int epoch_index) const {
@@ -704,6 +757,20 @@ void OfflinePretrainer::train(const std::string& output_dir, const std::string& 
     fit_normalizer();
   }
   WandbLogger wandb(config_.wandb, output_dir, config_path, "offline_pretrain");
+  auto make_live_progress_callback = [&](const char* phase, int epoch_index) {
+    const std::string phase_name(phase);
+    return [&, phase_name, epoch_index](const OfflineEpochMetrics& metrics, double elapsed_seconds, std::int64_t total_samples) {
+      if (!wandb.enabled()) {
+        return;
+      }
+      wandb.log(make_live_offline_metrics_payload(
+          phase_name.c_str(),
+          epoch_index,
+          metrics,
+          elapsed_seconds,
+          total_samples));
+    };
+  };
 
   const int max_epochs = std::max({config_.behavior_cloning.epochs, config_.next_goal_predictor.epochs, config_.value_pretraining.epochs});
   if (max_epochs <= 0) {
@@ -715,7 +782,11 @@ void OfflinePretrainer::train(const std::string& output_dir, const std::string& 
       eval_normalizer.to(device_);
     }
     policy_model_->eval();
-    const OfflineEpochMetrics val_metrics = evaluate(eval_target, eval_normalizer);
+    const OfflineEpochMetrics val_metrics = evaluate(
+        eval_target,
+        eval_normalizer,
+        wandb.enabled() ? make_live_progress_callback("val", 0)
+                        : std::function<void(const OfflineEpochMetrics&, double, std::int64_t)>{});
     const OfflineEpochMetrics train_metrics{};
     append_offline_metrics_line(output_dir, 0, train_metrics, val_metrics);
     if (wandb.enabled()) {
@@ -763,7 +834,12 @@ void OfflinePretrainer::train(const std::string& output_dir, const std::string& 
 
     const auto start = std::chrono::steady_clock::now();
     policy_model_->train();
-    const OfflineEpochMetrics train_metrics = run_training_epoch(epoch, training_target, training_target_normalizer);
+    const OfflineEpochMetrics train_metrics = run_training_epoch(
+        epoch,
+        training_target,
+        training_target_normalizer,
+        wandb.enabled() ? make_live_progress_callback("train", epoch)
+                        : std::function<void(const OfflineEpochMetrics&, double, std::int64_t)>{});
 
     SharedActorCritic eval_target = nullptr;
     ObservationNormalizer eval_normalizer = normalizer_.clone();
@@ -773,7 +849,11 @@ void OfflinePretrainer::train(const std::string& output_dir, const std::string& 
       eval_normalizer.to(device_);
     }
     policy_model_->eval();
-    const OfflineEpochMetrics val_metrics = evaluate(eval_target, eval_normalizer);
+    const OfflineEpochMetrics val_metrics = evaluate(
+        eval_target,
+        eval_normalizer,
+        wandb.enabled() ? make_live_progress_callback("val", epoch)
+                        : std::function<void(const OfflineEpochMetrics&, double, std::int64_t)>{});
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
     std::cout << "epoch=" << epoch

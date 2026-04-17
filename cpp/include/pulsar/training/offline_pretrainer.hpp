@@ -2,6 +2,7 @@
 
 #ifdef PULSAR_HAS_TORCH
 
+#include <functional>
 #include <string>
 
 #include "pulsar/config/config.hpp"
@@ -47,16 +48,19 @@ class OfflinePretrainer {
   OfflineEpochMetrics run_training_epoch(
       int epoch_index,
       SharedActorCritic target_model,
-      const ObservationNormalizer& target_normalizer);
+      const ObservationNormalizer& target_normalizer,
+      const std::function<void(const OfflineEpochMetrics&, double, std::int64_t)>& progress_callback = {});
   OfflineEpochMetrics evaluate(
       SharedActorCritic target_model,
-      const ObservationNormalizer& target_normalizer);
+      const ObservationNormalizer& target_normalizer,
+      const std::function<void(const OfflineEpochMetrics&, double, std::int64_t)>& progress_callback = {});
   OfflineEpochMetrics run_epoch(
       const OfflineTensorDataset& dataset,
       bool training,
       int epoch_index,
       SharedActorCritic target_model,
-      const ObservationNormalizer& target_normalizer);
+      const ObservationNormalizer& target_normalizer,
+      const std::function<void(const OfflineEpochMetrics&, double, std::int64_t)>& progress_callback = {});
   void save_checkpoint(const std::string& output_dir, int epoch_index) const;
 
   ExperimentConfig config_{};

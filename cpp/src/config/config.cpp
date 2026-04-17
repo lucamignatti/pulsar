@@ -412,6 +412,7 @@ void to_json(json& j, const WandbConfig& value) {
       {"mode", value.mode},
       {"python_executable", value.python_executable},
       {"script_path", value.script_path},
+      {"log_interval_seconds", value.log_interval_seconds},
       {"tags", value.tags},
   };
 }
@@ -427,6 +428,7 @@ void from_json(const json& j, WandbConfig& value) {
   value.mode = j.value("mode", std::string{"online"});
   value.python_executable = j.value("python_executable", std::string{"python3"});
   value.script_path = j.value("script_path", std::string{"scripts/wandb_stream.py"});
+  value.log_interval_seconds = j.value("log_interval_seconds", 30.0);
   value.tags = j.value("tags", std::vector<std::string>{});
 }
 
