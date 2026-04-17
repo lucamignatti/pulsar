@@ -1,6 +1,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -15,6 +16,7 @@
 #include "pulsar/rl/action_table.hpp"
 #include "pulsar/tracing/tracing.hpp"
 #include "pulsar/training/batched_rocketsim_collector.hpp"
+#include "pulsar/training/offline_pretrainer.hpp"
 #include "pulsar/training/ppo_trainer.hpp"
 
 #ifdef PULSAR_HAS_TORCH
@@ -79,6 +81,67 @@ std::filesystem::path create_seed_checkpoint(
   normalizer.save(archive);
   archive.save_to((checkpoint_dir / "model.pt").string());
   return checkpoint_dir;
+}
+
+std::filesystem::path create_offline_benchmark_manifest(const pulsar::ExperimentConfig& config) {
+  const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+  const std::filesystem::path root =
+      std::filesystem::temp_directory_path() / ("pulsar_bench_offline_" + std::to_string(stamp));
+  std::filesystem::create_directories(root);
+
+  constexpr std::int64_t kTrajectoryLength = 64;
+  constexpr std::int64_t kTrajectoryCount = 16;
+  const std::int64_t rows = kTrajectoryLength * kTrajectoryCount;
+  const std::int64_t obs_dim = config.model.observation_dim;
+  const std::int64_t action_dim = config.model.action_dim;
+
+  torch::Tensor obs = torch::randn({rows, obs_dim});
+  torch::Tensor actions = torch::randint(action_dim, {rows}, torch::TensorOptions().dtype(torch::kLong));
+  torch::Tensor action_probs = torch::one_hot(actions, action_dim).to(torch::kFloat32);
+  torch::Tensor next_goal = torch::randint(3, {rows}, torch::TensorOptions().dtype(torch::kLong));
+  torch::Tensor weights = torch::ones({rows}, torch::TensorOptions().dtype(torch::kFloat32));
+  torch::Tensor episode_starts = torch::zeros({rows}, torch::TensorOptions().dtype(torch::kFloat32));
+  torch::Tensor terminated = torch::zeros({rows}, torch::TensorOptions().dtype(torch::kFloat32));
+  torch::Tensor truncated = torch::zeros({rows}, torch::TensorOptions().dtype(torch::kFloat32));
+  for (std::int64_t trajectory = 0; trajectory < kTrajectoryCount; ++trajectory) {
+    const std::int64_t start = trajectory * kTrajectoryLength;
+    episode_starts.index_put_({start}, 1.0F);
+    terminated.index_put_({start + kTrajectoryLength - 1}, 1.0F);
+  }
+
+  torch::save(obs, (root / "obs.pt").string());
+  torch::save(actions, (root / "actions.pt").string());
+  torch::save(action_probs, (root / "action_probs.pt").string());
+  torch::save(next_goal, (root / "next_goal.pt").string());
+  torch::save(weights, (root / "weights.pt").string());
+  torch::save(episode_starts, (root / "episode_starts.pt").string());
+  torch::save(terminated, (root / "terminated.pt").string());
+  torch::save(truncated, (root / "truncated.pt").string());
+
+  std::ofstream manifest(root / "manifest.json");
+  manifest << "{\n"
+              "  \"schema_version\": 1,\n"
+              "  \"observation_dim\": "
+           << obs_dim << ",\n"
+           << "  \"action_dim\": " << action_dim << ",\n"
+           << "  \"next_goal_classes\": 3,\n"
+              "  \"shards\": [\n"
+              "    {\n"
+              "      \"obs_path\": \"obs.pt\",\n"
+              "      \"actions_path\": \"actions.pt\",\n"
+              "      \"action_probs_path\": \"action_probs.pt\",\n"
+              "      \"next_goal_path\": \"next_goal.pt\",\n"
+              "      \"weights_path\": \"weights.pt\",\n"
+              "      \"episode_starts_path\": \"episode_starts.pt\",\n"
+              "      \"terminated_path\": \"terminated.pt\",\n"
+              "      \"truncated_path\": \"truncated.pt\",\n"
+              "      \"samples\": "
+           << rows << "\n"
+           << "    }\n"
+              "  ]\n"
+              "}\n";
+  manifest.close();
+  return root / "manifest.json";
 }
 
 #endif
@@ -151,8 +214,11 @@ int main(int argc, char** argv) {
 #ifdef PULSAR_HAS_TORCH
   const torch::Device device = resolve_runtime_device(device_name);
   pulsar::TrainerMetrics trainer_metrics{};
+  pulsar::OfflineBenchmarkMetrics offline_metrics{};
   const int trainer_warmup_updates = device.is_cpu() ? 0 : 1;
   const int trainer_updates = device.is_cpu() ? 1 : 2;
+  const int offline_warmup_epochs = device.is_cpu() ? 0 : 1;
+  const int offline_measured_epochs = device.is_cpu() ? 1 : 2;
 
   {
     PULSAR_TRACE_SCOPE_CAT("bench", "trainer");
@@ -182,6 +248,25 @@ int main(int argc, char** argv) {
     std::filesystem::remove_all(seed_checkpoint);
   }
 
+  {
+    PULSAR_TRACE_SCOPE_CAT("bench", "offline_trainer");
+    const std::filesystem::path offline_manifest = create_offline_benchmark_manifest(config);
+    pulsar::ExperimentConfig offline_config = config;
+    offline_config.ppo.device = device.str();
+    offline_config.offline_dataset.train_manifest = offline_manifest.string();
+    offline_config.offline_dataset.val_manifest = offline_manifest.string();
+    offline_config.offline_dataset.batch_size = 512;
+    offline_config.behavior_cloning.epochs = offline_warmup_epochs + offline_measured_epochs + 1;
+    offline_config.next_goal_predictor.epochs = offline_warmup_epochs + offline_measured_epochs + 1;
+    offline_config.value_pretraining.epochs = offline_warmup_epochs + offline_measured_epochs + 1;
+    offline_config.next_goal_predictor.init_checkpoint.clear();
+    offline_config.wandb.enabled = false;
+
+    pulsar::OfflinePretrainer offline_pretrainer(offline_config);
+    offline_metrics = offline_pretrainer.benchmark(offline_warmup_epochs, offline_measured_epochs);
+    std::filesystem::remove_all(offline_manifest.parent_path());
+  }
+
   const double agents_per_env = static_cast<double>(collector.total_agents()) / static_cast<double>(num_envs);
   const double trainer_collection_env_steps_per_second =
       trainer_metrics.collection_agent_steps_per_second / agents_per_env;
@@ -197,6 +282,14 @@ int main(int argc, char** argv) {
       trainer_overall_env_steps_per_second * static_cast<double>(config.env.tick_skip);
   const double trainer_overall_agent_ticks_per_second =
       trainer_metrics.overall_agent_steps_per_second * static_cast<double>(config.env.tick_skip);
+  const double offline_train_samples_per_second =
+      offline_metrics.train_epoch_seconds > 0.0
+          ? static_cast<double>(offline_metrics.train_samples) / offline_metrics.train_epoch_seconds
+          : 0.0;
+  const double offline_eval_samples_per_second =
+      offline_metrics.eval_epoch_seconds > 0.0
+          ? static_cast<double>(offline_metrics.eval_samples) / offline_metrics.eval_epoch_seconds
+          : 0.0;
 #endif
 
   std::cout << "backend="
@@ -242,6 +335,19 @@ int main(int argc, char** argv) {
   std::cout << "trainer_like_sim_ticks_per_second=" << trainer_overall_sim_ticks_per_second << '\n';
   std::cout << "trainer_like_agent_ticks_per_second=" << trainer_overall_agent_ticks_per_second << '\n';
   std::cout << "trainer_like_steps=" << (trainer_updates * config.ppo.rollout_length) << '\n';
+  std::cout << "offline_mode=offline_pretrain\n";
+  std::cout << "offline_batch_size=512\n";
+  std::cout << "offline_sequence_length=" << config.behavior_cloning.sequence_length << '\n';
+  std::cout << "offline_warmup_epochs=" << offline_warmup_epochs << '\n';
+  std::cout << "offline_measured_epochs=" << offline_measured_epochs << '\n';
+  std::cout << "offline_fit_normalizer_seconds=" << offline_metrics.fit_normalizer_seconds << '\n';
+  std::cout << "offline_train_epoch_seconds=" << offline_metrics.train_epoch_seconds << '\n';
+  std::cout << "offline_eval_epoch_seconds=" << offline_metrics.eval_epoch_seconds << '\n';
+  std::cout << "offline_overall_epoch_seconds=" << offline_metrics.overall_seconds << '\n';
+  std::cout << "offline_train_samples=" << offline_metrics.train_samples << '\n';
+  std::cout << "offline_eval_samples=" << offline_metrics.eval_samples << '\n';
+  std::cout << "offline_train_samples_per_second=" << offline_train_samples_per_second << '\n';
+  std::cout << "offline_eval_samples_per_second=" << offline_eval_samples_per_second << '\n';
 #endif
   std::cout << "agents=" << collector.total_agents() / static_cast<std::size_t>(num_envs) << '\n';
   std::cout << "tick_skip=" << config.env.tick_skip << '\n';

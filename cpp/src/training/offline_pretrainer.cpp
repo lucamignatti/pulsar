@@ -129,6 +129,35 @@ torch::Tensor categorical_projection(const ExperimentConfig& config, const torch
       config.ppo.value_num_atoms);
 }
 
+std::int64_t count_valid_rows_in_window(
+    const std::vector<std::int64_t>& lengths,
+    std::int64_t offset,
+    std::int64_t window_length) {
+  std::int64_t count = 0;
+  for (const std::int64_t length : lengths) {
+    if (length <= offset) {
+      continue;
+    }
+    count += std::min<std::int64_t>(window_length, length - offset);
+  }
+  return count;
+}
+
+std::int64_t count_value_rows_in_window(
+    const std::vector<std::int64_t>& lengths,
+    std::int64_t offset,
+    std::int64_t window_length) {
+  std::int64_t count = 0;
+  for (const std::int64_t length : lengths) {
+    const std::int64_t active_length = length - 1;
+    if (active_length <= offset) {
+      continue;
+    }
+    count += std::min<std::int64_t>(window_length, active_length - offset);
+  }
+  return count;
+}
+
 void append_offline_metrics_line(
     const std::filesystem::path& output_dir,
     int epoch_index,
@@ -159,6 +188,29 @@ void append_offline_metrics_line(
   std::filesystem::create_directories(output_dir);
   std::ofstream output(output_dir / "offline_metrics.jsonl", std::ios::app);
   output << line.dump() << '\n';
+}
+
+void accumulate_offline_benchmark_metrics(
+    OfflineBenchmarkMetrics* aggregate,
+    const OfflineBenchmarkMetrics& metrics) {
+  aggregate->fit_normalizer_seconds += metrics.fit_normalizer_seconds;
+  aggregate->train_epoch_seconds += metrics.train_epoch_seconds;
+  aggregate->eval_epoch_seconds += metrics.eval_epoch_seconds;
+  aggregate->overall_seconds += metrics.overall_seconds;
+  aggregate->train_samples += metrics.train_samples;
+  aggregate->eval_samples += metrics.eval_samples;
+}
+
+void average_offline_benchmark_metrics(OfflineBenchmarkMetrics* aggregate, double count) {
+  if (count <= 0.0) {
+    return;
+  }
+  aggregate->fit_normalizer_seconds /= count;
+  aggregate->train_epoch_seconds /= count;
+  aggregate->eval_epoch_seconds /= count;
+  aggregate->overall_seconds /= count;
+  aggregate->train_samples = static_cast<std::int64_t>(static_cast<double>(aggregate->train_samples) / count);
+  aggregate->eval_samples = static_cast<std::int64_t>(static_cast<double>(aggregate->eval_samples) / count);
 }
 
 }  // namespace
@@ -293,134 +345,195 @@ OfflineEpochMetrics OfflinePretrainer::run_epoch(
           .to(device_);
   const std::int64_t sequence_length = std::max<std::int64_t>(1, config_.behavior_cloning.sequence_length);
 
-  dataset.for_each_trajectory(
+  dataset.for_each_packed_trajectory_batch(
+      config_.offline_dataset.batch_size,
       shuffle,
       seed,
-      [&](const OfflineTensorBatch& batch) {
-        PULSAR_TRACE_SCOPE_CAT("offline", "trajectory");
+      [&](const OfflineTensorPackedBatch& batch) {
+        PULSAR_TRACE_SCOPE_CAT("offline", "trajectory_batch");
         torch::Tensor obs;
         torch::Tensor weights;
         torch::Tensor normalized;
         torch::Tensor starts;
+        torch::Tensor valid_mask;
         {
           PULSAR_TRACE_SCOPE_CAT("offline", "copy_and_normalize");
           obs = batch.obs.to(device_);
           weights = batch.weights.to(device_);
           normalized = normalizer_.normalize(obs).contiguous();
           starts = batch.episode_starts.to(device_).to(torch::kFloat32).contiguous();
+          valid_mask = batch.valid_mask.to(device_).contiguous();
         }
-        const std::int64_t total_rows = normalized.size(0);
-        if (total_rows <= 0) {
+        const std::int64_t max_time = normalized.size(0);
+        const std::int64_t packed_count = normalized.size(1);
+        if (max_time <= 0 || packed_count <= 0) {
           return;
         }
 
-        torch::Tensor value_targets = torch::zeros({total_rows}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-        torch::Tensor value_mask = torch::zeros({total_rows}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-        if (eval_value && total_rows > 1) {
+        torch::Tensor value_targets =
+            torch::zeros({max_time, packed_count}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+        torch::Tensor value_mask =
+            torch::zeros({max_time, packed_count}, torch::TensorOptions().dtype(torch::kBool).device(device_));
+        if (eval_value && max_time > 1) {
           PULSAR_TRACE_SCOPE_CAT("offline", "target_value_build");
           const torch::Tensor terminated = batch.terminated.to(device_).to(torch::kFloat32).contiguous();
           const torch::Tensor truncated = batch.truncated.to(device_).to(torch::kFloat32).contiguous();
-          ContinuumState target_state = target_model->initial_state(1, device_);
+          ContinuumState target_state = target_model->initial_state(packed_count, device_);
           torch::NoGradGuard no_grad;
           const torch::Tensor target_normalized = target_normalizer.normalize(obs).contiguous();
-          SequenceOutput target_output =
-              target_model->forward_sequence(target_normalized.unsqueeze(1), target_state, starts.unsqueeze(1));
-          const torch::Tensor target_scores = ngp_scalar(target_output.next_goal_logits.squeeze(1));
+          SequenceOutput target_output = target_model->forward_sequence(target_normalized, target_state, starts);
+          const torch::Tensor target_scores = ngp_scalar(target_output.next_goal_logits);
+          const torch::Tensor transition_mask =
+              valid_mask.narrow(0, 0, max_time - 1).logical_and(valid_mask.narrow(0, 1, max_time - 1));
           const torch::Tensor rewards =
               config_.reward.ngp_scale *
-              (target_scores.narrow(0, 1, total_rows - 1) - target_scores.narrow(0, 0, total_rows - 1));
-          torch::Tensor bootstrap = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-          if (config_.value_pretraining.bootstrap_truncated &&
-              truncated.index({total_rows - 1}).item<float>() > 0.5F &&
-              terminated.index({total_rows - 1}).item<float>() <= 0.5F) {
-            bootstrap = target_model->expected_value(
-                target_output.value_logits.squeeze(1).index({total_rows - 1}).unsqueeze(0)).squeeze(0);
+              (target_scores.narrow(0, 1, max_time - 1) - target_scores.narrow(0, 0, max_time - 1));
+
+          std::vector<std::int64_t> last_step_values;
+          last_step_values.reserve(batch.lengths.size());
+          for (const std::int64_t length : batch.lengths) {
+            last_step_values.push_back(std::max<std::int64_t>(0, length - 1));
           }
+
+          const torch::Tensor last_indices =
+              torch::tensor(last_step_values, torch::TensorOptions().dtype(torch::kLong).device(device_));
+          torch::Tensor bootstrap =
+              torch::zeros({packed_count}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+          if (config_.value_pretraining.bootstrap_truncated) {
+            const torch::Tensor last_truncated =
+                truncated.transpose(0, 1).gather(1, last_indices.unsqueeze(1)).squeeze(1);
+            const torch::Tensor last_terminated =
+                terminated.transpose(0, 1).gather(1, last_indices.unsqueeze(1)).squeeze(1);
+            const torch::Tensor value_logits_bta = target_output.value_logits.permute({1, 0, 2});
+            const std::int64_t atom_count = value_logits_bta.size(2);
+            const torch::Tensor gathered_last_logits =
+                value_logits_bta
+                    .gather(
+                        1,
+                        last_indices.view({packed_count, 1, 1}).expand({packed_count, 1, atom_count}))
+                    .squeeze(1);
+            const torch::Tensor bootstrap_mask =
+                last_truncated.gt(0.5F).logical_and(last_terminated.le(0.5F));
+            const torch::Tensor bootstrap_values = target_model->expected_value(gathered_last_logits);
+            bootstrap = torch::where(
+                bootstrap_mask,
+                bootstrap_values,
+                torch::zeros_like(bootstrap_values));
+          }
+
           torch::Tensor running = bootstrap;
-          for (std::int64_t t = total_rows - 2; t >= 0; --t) {
-            running = rewards.index({t}) + config_.ppo.gamma * running;
-            value_targets.index_put_({t}, running);
-            value_mask.index_put_({t}, 1.0F);
+          for (std::int64_t t = max_time - 2; t >= 0; --t) {
+            const torch::Tensor active = transition_mask.select(0, t);
+            running = torch::where(active, rewards.select(0, t) + config_.ppo.gamma * running, running);
+            value_targets.select(0, t).copy_(
+                torch::where(active, running, torch::zeros_like(running)));
+            value_mask.select(0, t).copy_(active);
           }
         }
 
-        ContinuumState state = policy_model_->initial_state(1, device_);
+        ContinuumState state = policy_model_->initial_state(packed_count, device_);
         const torch::Tensor actions = batch.actions.defined() ? batch.actions.to(device_) : torch::Tensor{};
         const torch::Tensor action_probs =
             batch.action_probs.defined() ? batch.action_probs.to(device_) : torch::Tensor{};
         const torch::Tensor next_goal = batch.next_goal.defined() ? batch.next_goal.to(device_) : torch::Tensor{};
 
-        for (std::int64_t offset = 0; offset < total_rows; offset += sequence_length) {
+        for (std::int64_t offset = 0; offset < max_time; offset += sequence_length) {
           PULSAR_TRACE_SCOPE_CAT("offline", "chunk");
-          const std::int64_t chunk_length = std::min<std::int64_t>(sequence_length, total_rows - offset);
-          const torch::Tensor chunk_obs = normalized.narrow(0, offset, chunk_length).unsqueeze(1);
-          const torch::Tensor chunk_starts = starts.narrow(0, offset, chunk_length).unsqueeze(1);
+          const std::int64_t chunk_length = std::min<std::int64_t>(sequence_length, max_time - offset);
+          const std::int64_t valid_rows = count_valid_rows_in_window(batch.lengths, offset, chunk_length);
+          if (valid_rows <= 0) {
+            continue;
+          }
+          const std::int64_t active_value_rows = count_value_rows_in_window(batch.lengths, offset, chunk_length);
+          const torch::Tensor chunk_obs = normalized.narrow(0, offset, chunk_length);
+          const torch::Tensor chunk_starts = starts.narrow(0, offset, chunk_length);
           const torch::Tensor chunk_weights = weights.narrow(0, offset, chunk_length);
+          const torch::Tensor chunk_valid = valid_mask.narrow(0, offset, chunk_length);
           const bool has_policy_targets = actions.defined() || action_probs.defined();
           const bool has_ngp_targets = next_goal.defined();
           const torch::Tensor chunk_value_mask = value_mask.narrow(0, offset, chunk_length);
-          const bool has_value_targets = chunk_value_mask.sum().item<float>() > 0.5F;
+          const bool has_value_targets = active_value_rows > 0;
 
           auto compute_losses = [&](const SequenceOutput& output, torch::Tensor* total_loss) {
             if (eval_policy && has_policy_targets) {
-              const torch::Tensor logits = output.policy_logits.squeeze(1);
-              torch::Tensor loss;
-              if (action_probs.defined()) {
-                const torch::Tensor chunk_action_probs = action_probs.narrow(0, offset, chunk_length);
-                loss = weighted_soft_cross_entropy(logits, chunk_action_probs, chunk_weights);
-                metrics.policy_accuracy +=
-                    weighted_accuracy_from_probs(logits, chunk_action_probs, chunk_weights) * static_cast<double>(chunk_length);
-              } else {
-                const torch::Tensor chunk_actions = actions.narrow(0, offset, chunk_length);
-                loss = weighted_cross_entropy(
-                    logits,
-                    chunk_actions,
-                    chunk_weights,
-                    config_.behavior_cloning.label_smoothing);
-                metrics.policy_accuracy +=
-                    weighted_accuracy(logits, chunk_actions, chunk_weights) * static_cast<double>(chunk_length);
-              }
-              metrics.policy_loss += loss.item<double>() * static_cast<double>(chunk_length);
-              metrics.policy_samples += chunk_length;
-              if (train_policy && total_loss != nullptr) {
-                *total_loss = *total_loss + loss;
+              const torch::Tensor flat_valid = chunk_valid.reshape({-1});
+              const torch::Tensor flat_weights = chunk_weights.reshape({-1}).index({flat_valid});
+              const torch::Tensor flat_logits =
+                  output.policy_logits.reshape({-1, output.policy_logits.size(2)}).index({flat_valid});
+              if (flat_logits.size(0) > 0) {
+                torch::Tensor loss;
+                if (action_probs.defined()) {
+                  const torch::Tensor flat_action_probs =
+                      action_probs.narrow(0, offset, chunk_length)
+                          .reshape({-1, action_probs.size(2)})
+                          .index({flat_valid});
+                  loss = weighted_soft_cross_entropy(flat_logits, flat_action_probs, flat_weights);
+                  metrics.policy_accuracy +=
+                      weighted_accuracy_from_probs(flat_logits, flat_action_probs, flat_weights) *
+                      static_cast<double>(flat_logits.size(0));
+                } else {
+                  const torch::Tensor flat_actions =
+                      actions.narrow(0, offset, chunk_length).reshape({-1}).index({flat_valid});
+                  loss = weighted_cross_entropy(
+                      flat_logits,
+                      flat_actions,
+                      flat_weights,
+                      config_.behavior_cloning.label_smoothing);
+                  metrics.policy_accuracy +=
+                      weighted_accuracy(flat_logits, flat_actions, flat_weights) *
+                      static_cast<double>(flat_logits.size(0));
+                }
+                metrics.policy_loss += loss.item<double>() * static_cast<double>(flat_logits.size(0));
+                metrics.policy_samples += flat_logits.size(0);
+                if (train_policy && total_loss != nullptr) {
+                  *total_loss = *total_loss + loss;
+                }
               }
             }
 
             if (eval_ngp && has_ngp_targets) {
-              const torch::Tensor chunk_labels = next_goal.narrow(0, offset, chunk_length);
-              const torch::Tensor logits = output.next_goal_logits.squeeze(1);
-              const torch::Tensor loss = weighted_cross_entropy(
-                  logits,
-                  chunk_labels,
-                  chunk_weights,
-                  config_.next_goal_predictor.label_smoothing,
-                  ngp_class_weights);
-              metrics.ngp_loss += loss.item<double>() * static_cast<double>(chunk_length);
-              metrics.ngp_accuracy +=
-                  weighted_accuracy(logits, chunk_labels, chunk_weights) * static_cast<double>(chunk_length);
-              metrics.ngp_samples += chunk_length;
-              if (train_ngp && total_loss != nullptr) {
-                *total_loss = *total_loss + loss;
+              const torch::Tensor flat_valid = chunk_valid.reshape({-1});
+              const torch::Tensor flat_weights = chunk_weights.reshape({-1}).index({flat_valid});
+              const torch::Tensor flat_labels =
+                  next_goal.narrow(0, offset, chunk_length).reshape({-1}).index({flat_valid});
+              const torch::Tensor flat_logits =
+                  output.next_goal_logits.reshape({-1, output.next_goal_logits.size(2)}).index({flat_valid});
+              if (flat_logits.size(0) > 0) {
+                const torch::Tensor loss = weighted_cross_entropy(
+                    flat_logits,
+                    flat_labels,
+                    flat_weights,
+                    config_.next_goal_predictor.label_smoothing,
+                    ngp_class_weights);
+                metrics.ngp_loss += loss.item<double>() * static_cast<double>(flat_logits.size(0));
+                metrics.ngp_accuracy +=
+                    weighted_accuracy(flat_logits, flat_labels, flat_weights) * static_cast<double>(flat_logits.size(0));
+                metrics.ngp_samples += flat_logits.size(0);
+                if (train_ngp && total_loss != nullptr) {
+                  *total_loss = *total_loss + loss;
+                }
               }
             }
 
             if (eval_value && has_value_targets) {
-              const torch::Tensor logits = output.value_logits.squeeze(1);
-              const torch::Tensor active = chunk_value_mask > 0.5F;
-              const torch::Tensor active_logits = logits.index({active});
-              const torch::Tensor active_returns = value_targets.narrow(0, offset, chunk_length).index({active});
-              const torch::Tensor active_weights = chunk_weights.index({active});
-              const torch::Tensor target_dist = categorical_projection(config_, active_returns);
-              const torch::Tensor per_sample =
-                  -(target_dist * torch::log_softmax(active_logits, -1)).sum(-1);
-              const torch::Tensor normalized_weights = active_weights / active_weights.mean().clamp_min(1.0e-6);
-              const torch::Tensor loss = (per_sample * normalized_weights).mean();
-              const auto value_samples = active_returns.size(0);
-              metrics.value_loss += loss.item<double>() * static_cast<double>(value_samples);
-              metrics.value_samples += value_samples;
-              if (train_value && total_loss != nullptr) {
-                *total_loss = *total_loss + config_.value_pretraining.loss_coef * loss;
+              const torch::Tensor active = chunk_value_mask.reshape({-1});
+              const torch::Tensor active_logits =
+                  output.value_logits.reshape({-1, output.value_logits.size(2)}).index({active});
+              if (active_logits.size(0) > 0) {
+                const torch::Tensor active_returns =
+                    value_targets.narrow(0, offset, chunk_length).reshape({-1}).index({active});
+                const torch::Tensor active_weights = chunk_weights.reshape({-1}).index({active});
+                const torch::Tensor target_dist = categorical_projection(config_, active_returns);
+                const torch::Tensor per_sample =
+                    -(target_dist * torch::log_softmax(active_logits, -1)).sum(-1);
+                const torch::Tensor normalized_weights = active_weights / active_weights.mean().clamp_min(1.0e-6);
+                const torch::Tensor loss = (per_sample * normalized_weights).mean();
+                const auto value_samples = active_returns.size(0);
+                metrics.value_loss += loss.item<double>() * static_cast<double>(value_samples);
+                metrics.value_samples += value_samples;
+                if (train_value && total_loss != nullptr) {
+                  *total_loss = *total_loss + config_.value_pretraining.loss_coef * loss;
+                }
               }
             }
           };
@@ -434,7 +547,7 @@ OfflineEpochMetrics OfflinePretrainer::run_epoch(
             }
             compute_losses(output, nullptr);
             state = detach_state(std::move(output.final_state));
-            metrics.samples += chunk_length;
+            metrics.samples += valid_rows;
             continue;
           }
 
@@ -511,7 +624,7 @@ OfflineEpochMetrics OfflinePretrainer::run_epoch(
             state = detach_state(std::move(output.final_state));
           }
 
-          metrics.samples += chunk_length;
+          metrics.samples += valid_rows;
         }
       });
 
@@ -707,6 +820,69 @@ void OfflinePretrainer::train(const std::string& output_dir, const std::string& 
     }
   }
   wandb.finish();
+}
+
+OfflineBenchmarkMetrics OfflinePretrainer::benchmark(int warmup_epochs, int measured_epochs) {
+  PULSAR_TRACE_SCOPE_CAT("offline", "benchmark");
+  const int warmup = std::max(0, warmup_epochs);
+  const int measured = std::max(1, measured_epochs);
+
+  OfflineBenchmarkMetrics setup_metrics{};
+  if (config_.next_goal_predictor.init_checkpoint.empty() || !config_.next_goal_predictor.reuse_normalizer) {
+    const auto fit_start = std::chrono::steady_clock::now();
+    fit_normalizer();
+    setup_metrics.fit_normalizer_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - fit_start).count();
+  }
+
+  auto run_benchmark_epoch = [&](int epoch) {
+    OfflineBenchmarkMetrics metrics{};
+    SharedActorCritic training_target = nullptr;
+    ObservationNormalizer training_target_normalizer = normalizer_.clone();
+    if (config_.value_pretraining.enabled) {
+      training_target = clone_shared_model(policy_model_, device_);
+      training_target->eval();
+      training_target_normalizer.to(device_);
+    }
+
+    const auto train_start = std::chrono::steady_clock::now();
+    policy_model_->train();
+    const OfflineEpochMetrics train_metrics = run_training_epoch(epoch, training_target, training_target_normalizer);
+    metrics.train_epoch_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - train_start).count();
+    metrics.train_samples = train_metrics.samples;
+
+    SharedActorCritic eval_target = nullptr;
+    ObservationNormalizer eval_normalizer = normalizer_.clone();
+    if (config_.value_pretraining.enabled) {
+      eval_target = clone_shared_model(policy_model_, device_);
+      eval_target->eval();
+      eval_normalizer.to(device_);
+    }
+
+    const auto eval_start = std::chrono::steady_clock::now();
+    policy_model_->eval();
+    const OfflineEpochMetrics eval_metrics = evaluate(eval_target, eval_normalizer);
+    metrics.eval_epoch_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - eval_start).count();
+    metrics.eval_samples = eval_metrics.samples;
+    metrics.overall_seconds = metrics.train_epoch_seconds + metrics.eval_epoch_seconds;
+    return metrics;
+  };
+
+  for (int epoch = 1; epoch <= warmup; ++epoch) {
+    PULSAR_TRACE_SCOPE_CAT("offline", "benchmark_warmup");
+    (void)run_benchmark_epoch(epoch);
+  }
+
+  OfflineBenchmarkMetrics aggregate = setup_metrics;
+  for (int index = 0; index < measured; ++index) {
+    PULSAR_TRACE_SCOPE_CAT("offline", "benchmark_measure");
+    const OfflineBenchmarkMetrics epoch_metrics = run_benchmark_epoch(warmup + index + 1);
+    accumulate_offline_benchmark_metrics(&aggregate, epoch_metrics);
+  }
+  average_offline_benchmark_metrics(&aggregate, static_cast<double>(measured));
+  return aggregate;
 }
 
 }  // namespace pulsar

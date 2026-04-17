@@ -2,6 +2,7 @@
 
 #ifdef PULSAR_HAS_TORCH
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <numeric>
@@ -39,6 +40,227 @@ torch::Tensor load_tensor_checked(const std::string& path) {
     }
     return value.toTensor().contiguous();
   }
+}
+
+struct LoadedOfflineShard {
+  torch::Tensor obs{};
+  torch::Tensor actions{};
+  torch::Tensor action_probs{};
+  torch::Tensor next_goal{};
+  torch::Tensor weights{};
+  torch::Tensor episode_starts{};
+  torch::Tensor terminated{};
+  torch::Tensor truncated{};
+};
+
+struct OfflineTensorRange {
+  std::int64_t start = 0;
+  std::int64_t length = 0;
+};
+
+LoadedOfflineShard load_shard_tensors(
+    const std::filesystem::path& manifest_dir,
+    const OfflineTensorShardEntry& shard,
+    int observation_dim) {
+  LoadedOfflineShard loaded;
+  loaded.obs = load_tensor_checked((manifest_dir / shard.obs_path).string());
+  if (loaded.obs.dim() != 2 || loaded.obs.size(1) != observation_dim) {
+    throw std::runtime_error("Offline shard obs tensor has unexpected shape.");
+  }
+
+  if (!shard.actions_path.empty()) {
+    loaded.actions = load_tensor_checked((manifest_dir / shard.actions_path).string()).to(torch::kLong).view({-1});
+  }
+
+  if (!shard.action_probs_path.empty()) {
+    loaded.action_probs =
+        load_tensor_checked((manifest_dir / shard.action_probs_path).string()).to(torch::kFloat32).contiguous();
+  }
+
+  if (!shard.next_goal_path.empty()) {
+    loaded.next_goal = load_tensor_checked((manifest_dir / shard.next_goal_path).string()).to(torch::kLong).view({-1});
+  }
+
+  if (!shard.weights_path.empty()) {
+    loaded.weights = load_tensor_checked((manifest_dir / shard.weights_path).string()).to(torch::kFloat32).view({-1});
+  } else {
+    loaded.weights = torch::ones({loaded.obs.size(0)}, torch::TensorOptions().dtype(torch::kFloat32));
+  }
+
+  if (!shard.episode_starts_path.empty()) {
+    loaded.episode_starts =
+        load_tensor_checked((manifest_dir / shard.episode_starts_path).string()).to(torch::kFloat32).view({-1});
+  } else {
+    loaded.episode_starts = torch::zeros({loaded.obs.size(0)}, torch::TensorOptions().dtype(torch::kFloat32));
+    if (loaded.obs.size(0) > 0) {
+      loaded.episode_starts[0] = 1.0F;
+    }
+  }
+
+  if (!shard.terminated_path.empty()) {
+    loaded.terminated =
+        load_tensor_checked((manifest_dir / shard.terminated_path).string()).to(torch::kFloat32).view({-1});
+  } else {
+    loaded.terminated = torch::zeros({loaded.obs.size(0)}, torch::TensorOptions().dtype(torch::kFloat32));
+  }
+
+  if (!shard.truncated_path.empty()) {
+    loaded.truncated =
+        load_tensor_checked((manifest_dir / shard.truncated_path).string()).to(torch::kFloat32).view({-1});
+  } else {
+    loaded.truncated = torch::zeros({loaded.obs.size(0)}, torch::TensorOptions().dtype(torch::kFloat32));
+  }
+
+  if (loaded.obs.size(0) != loaded.weights.size(0) ||
+      (loaded.actions.defined() && loaded.obs.size(0) != loaded.actions.size(0)) ||
+      (loaded.action_probs.defined() &&
+       (loaded.action_probs.dim() != 2 || loaded.obs.size(0) != loaded.action_probs.size(0))) ||
+      (loaded.next_goal.defined() && loaded.obs.size(0) != loaded.next_goal.size(0)) ||
+      loaded.obs.size(0) != loaded.episode_starts.size(0) ||
+      loaded.obs.size(0) != loaded.terminated.size(0) ||
+      loaded.obs.size(0) != loaded.truncated.size(0)) {
+    throw std::runtime_error("Offline shard tensors have mismatched leading dimensions.");
+  }
+
+  return loaded;
+}
+
+std::vector<OfflineTensorRange> build_trajectory_ranges(const torch::Tensor& episode_starts) {
+  const torch::Tensor episode_cpu = episode_starts.to(torch::kCPU).contiguous();
+  const float* starts_ptr = episode_cpu.data_ptr<float>();
+  std::vector<std::int64_t> trajectory_starts;
+  trajectory_starts.reserve(static_cast<std::size_t>(episode_starts.size(0) / 64 + 1));
+  if (episode_starts.size(0) > 0 && starts_ptr[0] <= 0.5F) {
+    trajectory_starts.push_back(0);
+  }
+  for (std::int64_t i = 0; i < episode_starts.size(0); ++i) {
+    if (starts_ptr[i] > 0.5F) {
+      trajectory_starts.push_back(i);
+    }
+  }
+  if (trajectory_starts.empty()) {
+    trajectory_starts.push_back(0);
+  }
+
+  std::vector<OfflineTensorRange> ranges;
+  ranges.reserve(trajectory_starts.size());
+  for (std::size_t i = 0; i < trajectory_starts.size(); ++i) {
+    const std::int64_t start = trajectory_starts[i];
+    const std::int64_t end = (i + 1 < trajectory_starts.size()) ? trajectory_starts[i + 1] : episode_starts.size(0);
+    const std::int64_t length = end - start;
+    if (length > 0) {
+      ranges.push_back({start, length});
+    }
+  }
+  return ranges;
+}
+
+std::vector<std::int64_t> build_trajectory_order(
+    const std::vector<OfflineTensorRange>& ranges,
+    bool shuffle,
+    std::mt19937_64& rng) {
+  std::vector<std::int64_t> ordering(ranges.size());
+  std::iota(ordering.begin(), ordering.end(), 0);
+  auto compare_by_length = [&](const std::int64_t lhs, const std::int64_t rhs) {
+    return ranges[static_cast<std::size_t>(lhs)].length > ranges[static_cast<std::size_t>(rhs)].length;
+  };
+  if (shuffle) {
+    std::shuffle(ordering.begin(), ordering.end(), rng);
+    constexpr std::size_t kBucketSize = 32;
+    for (std::size_t begin = 0; begin < ordering.size(); begin += kBucketSize) {
+      const std::size_t end = std::min<std::size_t>(ordering.size(), begin + kBucketSize);
+      std::stable_sort(
+          ordering.begin() + static_cast<std::ptrdiff_t>(begin),
+          ordering.begin() + static_cast<std::ptrdiff_t>(end),
+          compare_by_length);
+    }
+    return ordering;
+  }
+
+  std::stable_sort(ordering.begin(), ordering.end(), compare_by_length);
+  return ordering;
+}
+
+OfflineTensorPackedBatch pack_trajectory_batch(
+    const LoadedOfflineShard& loaded,
+    const std::vector<OfflineTensorRange>& ranges,
+    const std::vector<std::int64_t>& packed_indices,
+    int action_dim) {
+  OfflineTensorPackedBatch batch;
+  batch.lengths.reserve(packed_indices.size());
+
+  std::int64_t max_length = 0;
+  for (const std::int64_t range_index : packed_indices) {
+    const auto length = ranges[static_cast<std::size_t>(range_index)].length;
+    batch.lengths.push_back(length);
+    max_length = std::max(max_length, length);
+  }
+
+  const auto packed_count = static_cast<std::int64_t>(packed_indices.size());
+  batch.obs = torch::zeros(
+      {max_length, packed_count, loaded.obs.size(1)},
+      torch::TensorOptions().dtype(loaded.obs.dtype()).device(loaded.obs.device()));
+  batch.weights = torch::zeros(
+      {max_length, packed_count},
+      torch::TensorOptions().dtype(loaded.weights.dtype()).device(loaded.weights.device()));
+  batch.episode_starts = torch::ones(
+      {max_length, packed_count},
+      torch::TensorOptions().dtype(loaded.episode_starts.dtype()).device(loaded.episode_starts.device()));
+  batch.terminated = torch::zeros(
+      {max_length, packed_count},
+      torch::TensorOptions().dtype(loaded.terminated.dtype()).device(loaded.terminated.device()));
+  batch.truncated = torch::zeros(
+      {max_length, packed_count},
+      torch::TensorOptions().dtype(loaded.truncated.dtype()).device(loaded.truncated.device()));
+  batch.valid_mask = torch::zeros(
+      {max_length, packed_count},
+      torch::TensorOptions().dtype(torch::kBool).device(loaded.obs.device()));
+
+  if (loaded.actions.defined()) {
+    batch.actions = torch::zeros(
+        {max_length, packed_count},
+        torch::TensorOptions().dtype(loaded.actions.dtype()).device(loaded.actions.device()));
+  }
+  if (loaded.action_probs.defined()) {
+    batch.action_probs = torch::zeros(
+        {max_length, packed_count, action_dim},
+        torch::TensorOptions().dtype(loaded.action_probs.dtype()).device(loaded.action_probs.device()));
+  }
+  if (loaded.next_goal.defined()) {
+    batch.next_goal = torch::zeros(
+        {max_length, packed_count},
+        torch::TensorOptions().dtype(loaded.next_goal.dtype()).device(loaded.next_goal.device()));
+  }
+
+  for (std::int64_t packed_column = 0; packed_column < packed_count; ++packed_column) {
+    const auto range = ranges[static_cast<std::size_t>(packed_indices[static_cast<std::size_t>(packed_column)])];
+    auto obs_target = batch.obs.select(1, packed_column).narrow(0, 0, range.length);
+    obs_target.copy_(loaded.obs.narrow(0, range.start, range.length));
+    batch.weights.select(1, packed_column).narrow(0, 0, range.length).copy_(
+        loaded.weights.narrow(0, range.start, range.length));
+    batch.episode_starts.select(1, packed_column).narrow(0, 0, range.length).copy_(
+        loaded.episode_starts.narrow(0, range.start, range.length));
+    batch.terminated.select(1, packed_column).narrow(0, 0, range.length).copy_(
+        loaded.terminated.narrow(0, range.start, range.length));
+    batch.truncated.select(1, packed_column).narrow(0, 0, range.length).copy_(
+        loaded.truncated.narrow(0, range.start, range.length));
+    batch.valid_mask.select(1, packed_column).narrow(0, 0, range.length).fill_(true);
+
+    if (loaded.actions.defined()) {
+      batch.actions.select(1, packed_column).narrow(0, 0, range.length).copy_(
+          loaded.actions.narrow(0, range.start, range.length));
+    }
+    if (loaded.action_probs.defined()) {
+      batch.action_probs.select(1, packed_column).narrow(0, 0, range.length).copy_(
+          loaded.action_probs.narrow(0, range.start, range.length));
+    }
+    if (loaded.next_goal.defined()) {
+      batch.next_goal.select(1, packed_column).narrow(0, 0, range.length).copy_(
+          loaded.next_goal.narrow(0, range.start, range.length));
+    }
+  }
+
+  return batch;
 }
 
 }  // namespace
@@ -134,93 +356,32 @@ void OfflineTensorDataset::for_each_batch(
   const std::filesystem::path manifest_dir = std::filesystem::path(manifest_path_).parent_path();
   std::uint64_t shard_seed = seed;
   for (const auto& shard : manifest_.shards) {
-    torch::Tensor obs = load_tensor_checked((manifest_dir / shard.obs_path).string());
-    if (obs.dim() != 2 || obs.size(1) != manifest_.observation_dim) {
-      throw std::runtime_error("Offline shard obs tensor has unexpected shape.");
-    }
+    const LoadedOfflineShard loaded = load_shard_tensors(manifest_dir, shard, manifest_.observation_dim);
 
-    torch::Tensor actions;
-    if (!shard.actions_path.empty()) {
-      actions = load_tensor_checked((manifest_dir / shard.actions_path).string()).to(torch::kLong).view({-1});
-    }
-
-    torch::Tensor action_probs;
-    if (!shard.action_probs_path.empty()) {
-      action_probs =
-          load_tensor_checked((manifest_dir / shard.action_probs_path).string()).to(torch::kFloat32).contiguous();
-    }
-
-    torch::Tensor next_goal;
-    if (!shard.next_goal_path.empty()) {
-      next_goal = load_tensor_checked((manifest_dir / shard.next_goal_path).string()).to(torch::kLong).view({-1});
-    }
-
-    torch::Tensor weights;
-    if (!shard.weights_path.empty()) {
-      weights = load_tensor_checked((manifest_dir / shard.weights_path).string()).to(torch::kFloat32).view({-1});
-    } else {
-      weights = torch::ones({obs.size(0)}, torch::TensorOptions().dtype(torch::kFloat32));
-    }
-
-    torch::Tensor episode_starts;
-    if (!shard.episode_starts_path.empty()) {
-      episode_starts =
-          load_tensor_checked((manifest_dir / shard.episode_starts_path).string()).to(torch::kFloat32).view({-1});
-    } else {
-      episode_starts = torch::zeros({obs.size(0)}, torch::TensorOptions().dtype(torch::kFloat32));
-      if (obs.size(0) > 0) {
-        episode_starts[0] = 1.0F;
-      }
-    }
-
-    torch::Tensor terminated;
-    if (!shard.terminated_path.empty()) {
-      terminated = load_tensor_checked((manifest_dir / shard.terminated_path).string()).to(torch::kFloat32).view({-1});
-    } else {
-      terminated = torch::zeros({obs.size(0)}, torch::TensorOptions().dtype(torch::kFloat32));
-    }
-
-    torch::Tensor truncated;
-    if (!shard.truncated_path.empty()) {
-      truncated = load_tensor_checked((manifest_dir / shard.truncated_path).string()).to(torch::kFloat32).view({-1});
-    } else {
-      truncated = torch::zeros({obs.size(0)}, torch::TensorOptions().dtype(torch::kFloat32));
-    }
-
-    if (obs.size(0) != weights.size(0) ||
-        (actions.defined() && obs.size(0) != actions.size(0)) ||
-        (action_probs.defined() && (action_probs.dim() != 2 || obs.size(0) != action_probs.size(0))) ||
-        (next_goal.defined() && obs.size(0) != next_goal.size(0)) ||
-        obs.size(0) != episode_starts.size(0) ||
-        obs.size(0) != terminated.size(0) ||
-        obs.size(0) != truncated.size(0)) {
-      throw std::runtime_error("Offline shard tensors have mismatched leading dimensions.");
-    }
-
-    torch::Tensor indices = torch::arange(obs.size(0), torch::TensorOptions().dtype(torch::kLong));
+    torch::Tensor indices = torch::arange(loaded.obs.size(0), torch::TensorOptions().dtype(torch::kLong));
     if (shuffle) {
       (void)shard_seed;
-      indices = torch::randperm(obs.size(0), torch::TensorOptions().dtype(torch::kLong));
+      indices = torch::randperm(loaded.obs.size(0), torch::TensorOptions().dtype(torch::kLong));
     }
 
-    for (int64_t offset = 0; offset < obs.size(0); offset += batch_size) {
-      const int64_t length = std::min<int64_t>(batch_size, obs.size(0) - offset);
+    for (int64_t offset = 0; offset < loaded.obs.size(0); offset += batch_size) {
+      const int64_t length = std::min<int64_t>(batch_size, loaded.obs.size(0) - offset);
       const torch::Tensor batch_indices = indices.narrow(0, offset, length);
       OfflineTensorBatch batch;
-      batch.obs = obs.index_select(0, batch_indices);
-      if (actions.defined()) {
-        batch.actions = actions.index_select(0, batch_indices);
+      batch.obs = loaded.obs.index_select(0, batch_indices);
+      if (loaded.actions.defined()) {
+        batch.actions = loaded.actions.index_select(0, batch_indices);
       }
-      if (action_probs.defined()) {
-        batch.action_probs = action_probs.index_select(0, batch_indices);
+      if (loaded.action_probs.defined()) {
+        batch.action_probs = loaded.action_probs.index_select(0, batch_indices);
       }
-      if (next_goal.defined()) {
-        batch.next_goal = next_goal.index_select(0, batch_indices);
+      if (loaded.next_goal.defined()) {
+        batch.next_goal = loaded.next_goal.index_select(0, batch_indices);
       }
-      batch.weights = weights.index_select(0, batch_indices);
-      batch.episode_starts = episode_starts.index_select(0, batch_indices);
-      batch.terminated = terminated.index_select(0, batch_indices);
-      batch.truncated = truncated.index_select(0, batch_indices);
+      batch.weights = loaded.weights.index_select(0, batch_indices);
+      batch.episode_starts = loaded.episode_starts.index_select(0, batch_indices);
+      batch.terminated = loaded.terminated.index_select(0, batch_indices);
+      batch.truncated = loaded.truncated.index_select(0, batch_indices);
       fn(batch);
     }
   }
@@ -234,119 +395,76 @@ void OfflineTensorDataset::for_each_trajectory(
   std::mt19937_64 rng(seed);
 
   for (const auto& shard : manifest_.shards) {
-    torch::Tensor obs = load_tensor_checked((manifest_dir / shard.obs_path).string());
-    if (obs.dim() != 2 || obs.size(1) != manifest_.observation_dim) {
-      throw std::runtime_error("Offline shard obs tensor has unexpected shape.");
-    }
-
-    torch::Tensor actions;
-    if (!shard.actions_path.empty()) {
-      actions = load_tensor_checked((manifest_dir / shard.actions_path).string()).to(torch::kLong).view({-1});
-    }
-
-    torch::Tensor action_probs;
-    if (!shard.action_probs_path.empty()) {
-      action_probs =
-          load_tensor_checked((manifest_dir / shard.action_probs_path).string()).to(torch::kFloat32).contiguous();
-    }
-
-    torch::Tensor next_goal;
-    if (!shard.next_goal_path.empty()) {
-      next_goal = load_tensor_checked((manifest_dir / shard.next_goal_path).string()).to(torch::kLong).view({-1});
-    }
-
-    torch::Tensor weights;
-    if (!shard.weights_path.empty()) {
-      weights = load_tensor_checked((manifest_dir / shard.weights_path).string()).to(torch::kFloat32).view({-1});
-    } else {
-      weights = torch::ones({obs.size(0)}, torch::TensorOptions().dtype(torch::kFloat32));
-    }
-
-    torch::Tensor episode_starts;
-    if (!shard.episode_starts_path.empty()) {
-      episode_starts =
-          load_tensor_checked((manifest_dir / shard.episode_starts_path).string()).to(torch::kFloat32).view({-1});
-    } else {
-      episode_starts = torch::zeros({obs.size(0)}, torch::TensorOptions().dtype(torch::kFloat32));
-      if (obs.size(0) > 0) {
-        episode_starts[0] = 1.0F;
-      }
-    }
-
-    torch::Tensor terminated;
-    if (!shard.terminated_path.empty()) {
-      terminated = load_tensor_checked((manifest_dir / shard.terminated_path).string()).to(torch::kFloat32).view({-1});
-    } else {
-      terminated = torch::zeros({obs.size(0)}, torch::TensorOptions().dtype(torch::kFloat32));
-    }
-
-    torch::Tensor truncated;
-    if (!shard.truncated_path.empty()) {
-      truncated = load_tensor_checked((manifest_dir / shard.truncated_path).string()).to(torch::kFloat32).view({-1});
-    } else {
-      truncated = torch::zeros({obs.size(0)}, torch::TensorOptions().dtype(torch::kFloat32));
-    }
-
-    if (obs.size(0) != weights.size(0) ||
-        (actions.defined() && obs.size(0) != actions.size(0)) ||
-        (action_probs.defined() && (action_probs.dim() != 2 || obs.size(0) != action_probs.size(0))) ||
-        (next_goal.defined() && obs.size(0) != next_goal.size(0)) ||
-        obs.size(0) != episode_starts.size(0) ||
-        obs.size(0) != terminated.size(0) ||
-        obs.size(0) != truncated.size(0)) {
-      throw std::runtime_error("Offline shard tensors have mismatched leading dimensions.");
-    }
-
-    const torch::Tensor episode_cpu = episode_starts.to(torch::kCPU).contiguous();
-    const float* starts_ptr = episode_cpu.data_ptr<float>();
-    std::vector<std::int64_t> trajectory_starts;
-    trajectory_starts.reserve(static_cast<std::size_t>(obs.size(0) / 64 + 1));
-    if (obs.size(0) > 0 && starts_ptr[0] <= 0.5F) {
-      trajectory_starts.push_back(0);
-    }
-    for (std::int64_t i = 0; i < obs.size(0); ++i) {
-      if (starts_ptr[i] > 0.5F) {
-        trajectory_starts.push_back(i);
-      }
-    }
-    if (trajectory_starts.empty()) {
-      trajectory_starts.push_back(0);
-    }
-
-    std::vector<std::int64_t> ordering(trajectory_starts.size());
-    std::iota(ordering.begin(), ordering.end(), 0);
-    if (shuffle) {
-      std::shuffle(ordering.begin(), ordering.end(), rng);
-    }
+    const LoadedOfflineShard loaded = load_shard_tensors(manifest_dir, shard, manifest_.observation_dim);
+    const std::vector<OfflineTensorRange> ranges = build_trajectory_ranges(loaded.episode_starts);
+    const std::vector<std::int64_t> ordering = build_trajectory_order(ranges, shuffle, rng);
 
     for (const std::int64_t order_idx : ordering) {
-      const std::int64_t start = trajectory_starts[static_cast<std::size_t>(order_idx)];
-      const std::int64_t end =
-          (static_cast<std::size_t>(order_idx + 1) < trajectory_starts.size())
-              ? trajectory_starts[static_cast<std::size_t>(order_idx + 1)]
-              : obs.size(0);
-      const std::int64_t length = end - start;
-      if (length <= 0) {
-        continue;
-      }
+      const auto range = ranges[static_cast<std::size_t>(order_idx)];
 
       OfflineTensorBatch batch;
-      batch.obs = obs.narrow(0, start, length);
-      if (actions.defined()) {
-        batch.actions = actions.narrow(0, start, length);
+      batch.obs = loaded.obs.narrow(0, range.start, range.length);
+      if (loaded.actions.defined()) {
+        batch.actions = loaded.actions.narrow(0, range.start, range.length);
       }
-      if (action_probs.defined()) {
-        batch.action_probs = action_probs.narrow(0, start, length);
+      if (loaded.action_probs.defined()) {
+        batch.action_probs = loaded.action_probs.narrow(0, range.start, range.length);
       }
-      if (next_goal.defined()) {
-        batch.next_goal = next_goal.narrow(0, start, length);
+      if (loaded.next_goal.defined()) {
+        batch.next_goal = loaded.next_goal.narrow(0, range.start, range.length);
       }
-      batch.weights = weights.narrow(0, start, length);
-      batch.episode_starts = episode_starts.narrow(0, start, length);
-      batch.terminated = terminated.narrow(0, start, length);
-      batch.truncated = truncated.narrow(0, start, length);
+      batch.weights = loaded.weights.narrow(0, range.start, range.length);
+      batch.episode_starts = loaded.episode_starts.narrow(0, range.start, range.length);
+      batch.terminated = loaded.terminated.narrow(0, range.start, range.length);
+      batch.truncated = loaded.truncated.narrow(0, range.start, range.length);
       fn(batch);
     }
+  }
+}
+
+void OfflineTensorDataset::for_each_packed_trajectory_batch(
+    int max_tokens,
+    bool shuffle,
+    std::uint64_t seed,
+    const std::function<void(const OfflineTensorPackedBatch&)>& fn) const {
+  if (max_tokens <= 0) {
+    throw std::invalid_argument("OfflineTensorDataset packed trajectory batch size must be positive.");
+  }
+
+  const std::filesystem::path manifest_dir = std::filesystem::path(manifest_path_).parent_path();
+  std::mt19937_64 rng(seed);
+
+  for (const auto& shard : manifest_.shards) {
+    const LoadedOfflineShard loaded = load_shard_tensors(manifest_dir, shard, manifest_.observation_dim);
+    const std::vector<OfflineTensorRange> ranges = build_trajectory_ranges(loaded.episode_starts);
+    const std::vector<std::int64_t> ordering = build_trajectory_order(ranges, shuffle, rng);
+
+    std::vector<std::int64_t> packed_indices;
+    packed_indices.reserve(ordering.size());
+    std::int64_t packed_max_length = 0;
+
+    auto flush_batch = [&]() {
+      if (packed_indices.empty()) {
+        return;
+      }
+      fn(pack_trajectory_batch(loaded, ranges, packed_indices, manifest_.action_dim));
+      packed_indices.clear();
+      packed_max_length = 0;
+    };
+
+    for (const std::int64_t order_idx : ordering) {
+      const auto range = ranges[static_cast<std::size_t>(order_idx)];
+      const std::int64_t projected_max_length = std::max(packed_max_length, range.length);
+      const std::int64_t projected_tokens =
+          projected_max_length * static_cast<std::int64_t>(packed_indices.size() + 1);
+      if (!packed_indices.empty() && projected_tokens > max_tokens) {
+        flush_batch();
+      }
+      packed_indices.push_back(order_idx);
+      packed_max_length = std::max(packed_max_length, range.length);
+    }
+
+    flush_batch();
   }
 }
 

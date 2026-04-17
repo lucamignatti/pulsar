@@ -86,6 +86,16 @@ void test_dataset_iteration_and_trajectories() {
     pulsar::test::require(batch.episode_starts[0].item<float>() > 0.5F, "trajectory should start with episode_starts");
   });
   pulsar::test::require(trajectories == 2, "trajectory segmentation mismatch");
+
+  int packed_batches = 0;
+  dataset.for_each_packed_trajectory_batch(4, false, 7, [&](const pulsar::OfflineTensorPackedBatch& batch) {
+    ++packed_batches;
+    pulsar::test::require(batch.obs.size(0) == 2, "packed batch time dimension mismatch");
+    pulsar::test::require(batch.obs.size(1) == 2, "packed batch count mismatch");
+    pulsar::test::require(batch.obs.size(2) == 132, "packed batch obs dim mismatch");
+    pulsar::test::require(batch.valid_mask.all().item<bool>(), "packed batch should be fully valid in this fixture");
+  });
+  pulsar::test::require(packed_batches == 1, "packed trajectory batching mismatch");
   fs::remove_all(root);
 }
 

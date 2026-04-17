@@ -26,6 +26,19 @@ struct OfflineTensorBatch {
   torch::Tensor truncated{};
 };
 
+struct OfflineTensorPackedBatch {
+  torch::Tensor obs{};
+  torch::Tensor actions{};
+  torch::Tensor action_probs{};
+  torch::Tensor next_goal{};
+  torch::Tensor weights{};
+  torch::Tensor episode_starts{};
+  torch::Tensor terminated{};
+  torch::Tensor truncated{};
+  torch::Tensor valid_mask{};
+  std::vector<std::int64_t> lengths{};
+};
+
 struct OfflineTensorShardEntry {
   std::string obs_path{};
   std::string actions_path{};
@@ -69,6 +82,12 @@ class OfflineTensorDataset {
       bool shuffle,
       std::uint64_t seed,
       const std::function<void(const OfflineTensorBatch&)>& fn) const;
+
+  void for_each_packed_trajectory_batch(
+      int max_tokens,
+      bool shuffle,
+      std::uint64_t seed,
+      const std::function<void(const OfflineTensorPackedBatch&)>& fn) const;
 
  private:
   OfflineTensorManifest manifest_{};

@@ -24,11 +24,21 @@ struct OfflineEpochMetrics {
   std::int64_t value_samples = 0;
 };
 
+struct OfflineBenchmarkMetrics {
+  double fit_normalizer_seconds = 0.0;
+  double train_epoch_seconds = 0.0;
+  double eval_epoch_seconds = 0.0;
+  double overall_seconds = 0.0;
+  std::int64_t train_samples = 0;
+  std::int64_t eval_samples = 0;
+};
+
 class OfflinePretrainer {
  public:
   explicit OfflinePretrainer(ExperimentConfig config);
 
   void train(const std::string& output_dir, const std::string& config_path = "");
+  [[nodiscard]] OfflineBenchmarkMetrics benchmark(int warmup_epochs, int measured_epochs);
 
  private:
   void validate_config() const;
