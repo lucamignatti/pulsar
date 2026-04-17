@@ -148,8 +148,3 @@ pulsar-viz \
 ```
 
 The Python side stays intentionally thin: it loads the shared config, loads the native model, builds an evaluation environment, and runs a visualization episode through `RLViser`.
-
-## Optional Tools
-
-- `wandb` logging is configured through the `wandb` block in the JSON experiment configs.
-- `scripts/ngp_refresh_loop.py` orchestrates a longer-running reward-refresh loop around `pulsar_train` and `pulsar_offline_train` if you want automated NGP promotion.
