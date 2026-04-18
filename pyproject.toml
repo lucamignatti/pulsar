@@ -16,6 +16,7 @@ dependencies = [
 viz = [
   "rlgym[rl-rlviser]>=2.0.1,<3",
   "rocketsim>=2.2.0",
+  "rlgym-tools>=2.6.4",
 ]
 offline = [
   "kagglehub>=0.3.10",

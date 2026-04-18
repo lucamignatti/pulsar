@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import random
+import time
 from typing import Any
 
 import numpy as np
@@ -19,12 +21,23 @@ def _select_actions(model: Any, observations: dict[Any, np.ndarray], config: dic
 
 
 def run_viz_episode(model: Any, env: Any, renderer: Any, config: dict[str, Any], seed: int = 0) -> None:
-    observations = env.reset(seed=seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    try:
+        observations = env.reset(seed=seed)
+    except TypeError:
+        observations = env.reset()
     model.reset(len(observations))
+    renderer.render(env.state, {})
     done = False
+    step_seconds = config["env"]["tick_skip"] / config["env"]["tick_rate"]
 
     while not done:
+        step_start = time.perf_counter()
         actions = _select_actions(model, observations, config)
         observations, _, terminated, truncated = env.step(actions)
         renderer.render(env.state, {})
         done = all(terminated.values()) or all(truncated.values())
+        remaining = step_seconds - (time.perf_counter() - step_start)
+        if remaining > 0.0:
+            time.sleep(remaining)

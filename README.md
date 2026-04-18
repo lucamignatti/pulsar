@@ -147,4 +147,14 @@ pulsar-viz \
   --device cpu
 ```
 
-The Python side stays intentionally thin: it loads the shared config, loads the native model, builds an evaluation environment, and runs a visualization episode through `RLViser`.
+You can also target `RocketSimVis` instead of `RLViser`:
+
+```bash
+pulsar-viz \
+  --config configs/2v2_ppo.json \
+  --checkpoint /path/to/checkpoint/model.pt \
+  --device cpu \
+  --renderer rocketsimvis
+```
+
+The Python side stays intentionally thin: it loads the shared config, loads the native model, builds an evaluation environment, and runs a visualization episode through either `RLViser` or `RocketSimVis`.

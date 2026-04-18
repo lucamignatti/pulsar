@@ -13,13 +13,11 @@ def _require_rlgym() -> Any:
         from rlgym.rocket_league.action_parsers import LookupTableAction, RepeatAction
         from rlgym.rocket_league.done_conditions import GoalCondition, NoTouchTimeoutCondition, TimeoutCondition
         from rlgym.rocket_league.obs_builders import DefaultObs
-        from rlgym.rocket_league.rlviser import RLViserRenderer
         from rlgym.rocket_league.sim.rocketsim_engine import RocketSimEngine
         from rlgym.rocket_league.state_mutators import FixedTeamSizeMutator, KickoffMutator, MutatorSequence
     except ImportError as exc:
         raise RuntimeError(
-            "rlgym and rlviser are required for visualization. Install the project with "
-            "`pip install .[viz]` and ensure the RLViser runtime is available."
+            "rlgym is required for visualization. Install the project with `pip install .[viz]`."
         ) from exc
 
     return {
@@ -30,7 +28,6 @@ def _require_rlgym() -> Any:
         "NoTouchTimeoutCondition": NoTouchTimeoutCondition,
         "TimeoutCondition": TimeoutCondition,
         "DefaultObs": DefaultObs,
-        "RLViserRenderer": RLViserRenderer,
         "RocketSimEngine": RocketSimEngine,
         "FixedTeamSizeMutator": FixedTeamSizeMutator,
         "KickoffMutator": KickoffMutator,
@@ -52,12 +49,45 @@ class EvalBundle:
     renderer: Any
 
 
-def make_eval_env(config: dict[str, Any]) -> EvalBundle:
+def _make_renderer(
+    renderer_backend: str,
+    env_cfg: dict[str, Any],
+    udp_ip: str,
+    udp_port: int,
+) -> Any:
+    if renderer_backend == "rlviser":
+        try:
+            from rlgym.rocket_league.rlviser import RLViserRenderer
+        except ImportError as exc:
+            raise RuntimeError(
+                "The RLViser backend requires `rlgym[rl-rlviser]` and a working RLViser runtime."
+            ) from exc
+        return RLViserRenderer(tick_rate=env_cfg["tick_rate"] / env_cfg["tick_skip"])
+
+    if renderer_backend == "rocketsimvis":
+        try:
+            from rlgym_tools.rocket_league.renderers.rocketsimvis_renderer import RocketSimVisRenderer
+        except ImportError as exc:
+            raise RuntimeError(
+                "The RocketSimVis backend requires `rlgym-tools`. Install the project with "
+                "`pip install .[viz,offline]` or add `rlgym-tools` to the environment."
+            ) from exc
+        return RocketSimVisRenderer(udp_ip=udp_ip, udp_port=udp_port)
+
+    raise ValueError(f"Unsupported renderer backend: {renderer_backend}")
+
+
+def make_eval_env(
+    config: dict[str, Any],
+    renderer_backend: str = "rlviser",
+    udp_ip: str = "127.0.0.1",
+    udp_port: int = 9273,
+) -> EvalBundle:
     mods = _require_rlgym()
     env_cfg = config["env"]
     os.environ.setdefault("RS_COLLISION_MESHES", env_cfg.get("collision_meshes_path", "collision_meshes"))
 
-    renderer = mods["RLViserRenderer"](tick_rate=env_cfg["tick_rate"] / env_cfg["tick_skip"])
+    renderer = _make_renderer(renderer_backend, env_cfg, udp_ip, udp_port)
     state_mutator = mods["MutatorSequence"](
         mods["FixedTeamSizeMutator"](blue_size=env_cfg["team_size"], orange_size=env_cfg["team_size"]),
         mods["KickoffMutator"](),

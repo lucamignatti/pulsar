@@ -27,9 +27,9 @@ class PySharedModel {
         model_(load_shared_model(checkpoint_dir_, device_)),
         normalizer_(config_.model.observation_dim),
         torch_device_(device_) {
-    validate_checkpoint_metadata(metadata_, config_);
+    validate_inference_checkpoint_metadata(metadata_, config_);
     torch::serialize::InputArchive archive;
-    archive.load_from(checkpoint_dir_ + "/model.pt");
+    archive.load_from(checkpoint_dir_ + "/model.pt", torch_device_);
     normalizer_.load(archive);
     normalizer_.to(torch_device_);
   }

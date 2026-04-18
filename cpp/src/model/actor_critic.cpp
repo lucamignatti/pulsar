@@ -316,13 +316,14 @@ SharedActorCritic load_shared_model(const std::string& checkpoint_path, const st
   const fs::path base(checkpoint_path);
   const ExperimentConfig config = load_experiment_config((base / "config.json").string());
   const CheckpointMetadata metadata = load_checkpoint_metadata((base / "metadata.json").string());
-  validate_checkpoint_metadata(metadata, config);
+  validate_inference_checkpoint_metadata(metadata, config);
 
   SharedActorCritic model(config.model, config.ppo);
   torch::serialize::InputArchive archive;
-  archive.load_from((base / "model.pt").string());
+  const torch::Device torch_device(device);
+  archive.load_from((base / "model.pt").string(), torch_device);
   model->load(archive);
-  model->to(torch::Device(device));
+  model->to(torch_device);
   model->eval();
   return model;
 }

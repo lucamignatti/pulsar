@@ -44,4 +44,16 @@ void validate_checkpoint_metadata(const CheckpointMetadata& metadata, const Expe
   }
 }
 
+void validate_inference_checkpoint_metadata(const CheckpointMetadata& metadata, const ExperimentConfig& config) {
+  if (metadata.schema_version != config.schema_version) {
+    throw std::runtime_error("Checkpoint schema_version does not match config.");
+  }
+  if (metadata.obs_schema_version != config.obs_schema_version) {
+    throw std::runtime_error("Checkpoint obs_schema_version does not match config.");
+  }
+  if (metadata.action_table_hash != action_table_hash(config.action_table)) {
+    throw std::runtime_error("Checkpoint action table hash does not match the active config.");
+  }
+}
+
 }  // namespace pulsar

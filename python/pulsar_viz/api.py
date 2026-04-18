@@ -24,8 +24,13 @@ def load_shared_model(checkpoint_path: str | Path, device: str = "cpu") -> Any:
     return pulsar_native.load_shared_model(str(checkpoint_path), device)
 
 
-def make_eval_env(config: dict[str, Any]) -> EvalBundle:
-    return _make_eval_env(config)
+def make_eval_env(
+    config: dict[str, Any],
+    renderer_backend: str = "rlviser",
+    udp_ip: str = "127.0.0.1",
+    udp_port: int = 9273,
+) -> EvalBundle:
+    return _make_eval_env(config, renderer_backend=renderer_backend, udp_ip=udp_ip, udp_port=udp_port)
 
 
 def run_viz_episode(model: Any, env: Any, renderer: Any, config: dict[str, Any], seed: int = 0) -> None:
