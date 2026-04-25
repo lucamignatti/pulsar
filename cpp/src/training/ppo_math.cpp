@@ -25,11 +25,19 @@ torch::Tensor clone_tensor(const torch::Tensor& tensor) {
   return tensor.detach().clone();
 }
 
+torch::Tensor tensor_to_device(const torch::Tensor& tensor, const torch::Device& device) {
+  if (!tensor.defined()) {
+    return tensor;
+  }
+  return tensor.to(device);
+}
+
 torch::Tensor gather_tensor(const torch::Tensor& tensor, const torch::Tensor& indices) {
   if (!tensor.defined()) {
     return tensor;
   }
-  return tensor.index_select(0, indices);
+  const torch::Tensor local_indices = indices.to(tensor.device());
+  return tensor.index_select(0, local_indices);
 }
 
 void scatter_tensor(torch::Tensor& dst, const torch::Tensor& indices, const torch::Tensor& src) {
@@ -138,6 +146,17 @@ ContinuumState clone_state(const ContinuumState& state) {
       clone_tensor(state.ltm_coeffs),
       clone_tensor(state.timestep),
   };
+}
+
+ContinuumState state_to_device(ContinuumState state, const torch::Device& device) {
+  state.workspace = tensor_to_device(state.workspace, device);
+  state.stm_keys = tensor_to_device(state.stm_keys, device);
+  state.stm_values = tensor_to_device(state.stm_values, device);
+  state.stm_strengths = tensor_to_device(state.stm_strengths, device);
+  state.stm_write_index = tensor_to_device(state.stm_write_index, device);
+  state.ltm_coeffs = tensor_to_device(state.ltm_coeffs, device);
+  state.timestep = tensor_to_device(state.timestep, device);
+  return state;
 }
 
 ContinuumState gather_state(const ContinuumState& state, const torch::Tensor& indices) {

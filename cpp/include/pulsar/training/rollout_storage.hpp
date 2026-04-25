@@ -55,6 +55,7 @@ class RolloutStorage {
  private:
   int rollout_length_ = 0;
   int num_agents_ = 0;
+  torch::Device device_{torch::kCPU};
 };
 
 }  // namespace pulsar

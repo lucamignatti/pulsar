@@ -27,6 +27,7 @@ torch::Tensor compute_adaptive_epsilon(
     const torch::Tensor& value_logits);
 ContinuumState detach_state(ContinuumState state);
 ContinuumState clone_state(const ContinuumState& state);
+ContinuumState state_to_device(ContinuumState state, const torch::Device& device);
 ContinuumState gather_state(const ContinuumState& state, const torch::Tensor& indices);
 void scatter_state(ContinuumState& dst, const torch::Tensor& indices, const ContinuumState& src);
 

@@ -12,7 +12,6 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <limits>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -36,22 +35,12 @@ RolloutStorage make_rollout_storage(
     const ExperimentConfig& config,
     int num_agents,
     int action_dim) {
-  const torch::Device device = resolve_runtime_device(config.ppo.device);
-  if (device.is_cuda()) {
-    c10::DeviceGuard device_guard(device);
-    return RolloutStorage(
-        config.ppo.rollout_length,
-        num_agents,
-        config.model.observation_dim,
-        action_dim,
-        device);
-  }
   return RolloutStorage(
       config.ppo.rollout_length,
       num_agents,
       config.model.observation_dim,
       action_dim,
-      device);
+      torch::Device(torch::kCPU));
 }
 
 std::string stable_model_signature(const ExperimentConfig& config) {
@@ -99,17 +88,6 @@ void validate_aux_checkpoint_compatibility(
   if (stable_model_signature(checkpoint_config) != stable_model_signature(active_config)) {
     throw std::runtime_error(std::string(checkpoint_name) + " model/value signature does not match the active config.");
   }
-}
-
-int resolve_ppo_max_agents_per_batch(const torch::Device& device) {
-  if (const char* value = std::getenv("PULSAR_PPO_MAX_AGENTS_PER_BATCH")) {
-    try {
-      return std::max(1, std::stoi(value));
-    } catch (...) {
-      return 512;
-    }
-  }
-  return device.is_cuda() ? 512 : std::numeric_limits<int>::max();
 }
 
 int resolve_ngp_refresh_threads() {
@@ -419,15 +397,6 @@ PPOTrainer::PPOTrainer(
   }
   const std::filesystem::path init_checkpoint_dir =
       config_.ppo.init_checkpoint.empty() ? std::filesystem::path{} : std::filesystem::path(config_.ppo.init_checkpoint);
-  if (log_initialization_) {
-    const int configured_agents_per_batch = std::max(1, config_.ppo.minibatch_size / std::max(1, config_.ppo.sequence_length));
-    const int capped_agents_per_batch = std::min(
-        configured_agents_per_batch,
-        resolve_ppo_max_agents_per_batch(device_));
-    std::cout << "ppo_agents_per_batch=" << capped_agents_per_batch
-              << " configured_agents_per_batch=" << configured_agents_per_batch
-              << '\n';
-  }
   if (config_.reward.refresh.enabled && config_.reward.refresh.train_candidate_in_process) {
     const int refresh_threads = resolve_ngp_refresh_threads();
     torch::set_num_threads(refresh_threads);
@@ -1578,19 +1547,16 @@ TrainerMetrics PPOTrainer::update_policy() {
   const auto update_start = std::chrono::steady_clock::now();
   TrainerMetrics metrics{};
   const int seq_len = std::max(1, config_.ppo.sequence_length);
-  const int configured_agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
-  const int agents_per_batch = std::min(
-      configured_agents_per_batch,
-      resolve_ppo_max_agents_per_batch(device_));
+  const int agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
   const auto total_agents = static_cast<int>(rollout_.num_agents());
   std::int64_t metric_steps = 0;
 
   for (int epoch = 0; epoch < config_.ppo.epochs; ++epoch) {
-    const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(device_));
+    const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
     for (int agent_offset = 0; agent_offset < total_agents; agent_offset += agents_per_batch) {
       const int count = std::min(agents_per_batch, total_agents - agent_offset);
       const torch::Tensor agent_indices = perm.narrow(0, agent_offset, count);
-      ContinuumState state = rollout_.initial_state_for_agents(agent_indices);
+      ContinuumState state = state_to_device(rollout_.initial_state_for_agents(agent_indices), device_);
 
       for (int seq_start = 0; seq_start < rollout_.rollout_length(); seq_start += seq_len) {
         const int chunk_start = seq_start;
@@ -1599,9 +1565,10 @@ TrainerMetrics PPOTrainer::update_policy() {
         const int burn = seq_start == 0 ? std::min(std::max(0, config_.ppo.burn_in), chunk_steps) : 0;
         const int loss_start = chunk_start + burn;
         const int loss_steps = chunk_steps - burn;
-        const torch::Tensor obs = rollout_.obs.narrow(0, chunk_start, chunk_steps).index_select(1, agent_indices);
+        const torch::Tensor obs =
+            rollout_.obs.narrow(0, chunk_start, chunk_steps).index_select(1, agent_indices).to(device_);
         const torch::Tensor episode_starts =
-            rollout_.episode_starts.narrow(0, chunk_start, chunk_steps).index_select(1, agent_indices);
+            rollout_.episode_starts.narrow(0, chunk_start, chunk_steps).index_select(1, agent_indices).to(device_);
 
         const auto ppo_start = std::chrono::steady_clock::now();
         SequenceOutput output;
@@ -1615,21 +1582,21 @@ TrainerMetrics PPOTrainer::update_policy() {
         }
 
         torch::Tensor advantages =
-            rollout_.advantages.narrow(0, loss_start, loss_steps).index_select(1, agent_indices);
+            rollout_.advantages.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1.0e-6);
 
         torch::Tensor policy_logits = output.policy_logits.narrow(0, burn, loss_steps);
         torch::Tensor value_logits = output.value_logits.narrow(0, burn, loss_steps);
         const torch::Tensor action_masks =
-            rollout_.action_masks.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(torch::kBool);
+            rollout_.action_masks.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_).to(torch::kBool);
         const torch::Tensor learner_active =
-            rollout_.learner_active.narrow(0, loss_start, loss_steps).index_select(1, agent_indices);
+            rollout_.learner_active.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
         const torch::Tensor actions =
-            rollout_.actions.narrow(0, loss_start, loss_steps).index_select(1, agent_indices);
+            rollout_.actions.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
         const torch::Tensor old_log_probs =
-            rollout_.log_probs.narrow(0, loss_start, loss_steps).index_select(1, agent_indices);
+            rollout_.log_probs.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
         const torch::Tensor returns =
-            rollout_.returns.narrow(0, loss_start, loss_steps).index_select(1, agent_indices);
+            rollout_.returns.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
 
         const torch::Tensor flat_policy_logits = policy_logits.reshape({-1, config_.model.action_dim});
         const torch::Tensor flat_action_masks = action_masks.reshape({-1, config_.model.action_dim});
@@ -1930,7 +1897,10 @@ TrainerMetrics PPOTrainer::run_update(std::int64_t* global_step, int current_upd
   }
   metrics.policy_forward_seconds +=
       std::chrono::duration<double>(std::chrono::steady_clock::now() - bootstrap_start).count();
-  rollout_.compute_returns_and_advantages(last_sampled_value, config_.ppo.gamma, config_.ppo.gae_lambda);
+  rollout_.compute_returns_and_advantages(
+      last_sampled_value.to(rollout_.rewards.device()),
+      config_.ppo.gamma,
+      config_.ppo.gae_lambda);
   metrics.gae_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - gae_start).count();
 
   TrainerMetrics update_metrics = update_policy();

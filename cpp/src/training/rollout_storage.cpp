@@ -12,7 +12,7 @@ RolloutStorage::RolloutStorage(
     int obs_dim,
     int action_dim,
     torch::Device device)
-    : rollout_length_(rollout_length), num_agents_(num_agents) {
+    : rollout_length_(rollout_length), num_agents_(num_agents), device_(device) {
   obs = torch::zeros({rollout_length, num_agents, obs_dim}, device);
   episode_starts = torch::zeros({rollout_length, num_agents}, device);
   action_masks = torch::zeros(
@@ -68,7 +68,7 @@ void RolloutStorage::compute_returns_and_advantages(
 }
 
 void RolloutStorage::set_initial_state(const ContinuumState& state) {
-  initial_state = clone_state(state);
+  initial_state = state_to_device(clone_state(state), device_);
 }
 
 ContinuumState RolloutStorage::initial_state_for_agents(const torch::Tensor& agent_indices) const {
