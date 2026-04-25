@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -98,6 +99,17 @@ void validate_aux_checkpoint_compatibility(
   if (stable_model_signature(checkpoint_config) != stable_model_signature(active_config)) {
     throw std::runtime_error(std::string(checkpoint_name) + " model/value signature does not match the active config.");
   }
+}
+
+int resolve_ppo_max_agents_per_batch(const torch::Device& device) {
+  if (const char* value = std::getenv("PULSAR_PPO_MAX_AGENTS_PER_BATCH")) {
+    try {
+      return std::max(1, std::stoi(value));
+    } catch (...) {
+      return 512;
+    }
+  }
+  return device.is_cuda() ? 512 : std::numeric_limits<int>::max();
 }
 
 int resolve_ngp_refresh_threads() {
@@ -407,6 +419,15 @@ PPOTrainer::PPOTrainer(
   }
   const std::filesystem::path init_checkpoint_dir =
       config_.ppo.init_checkpoint.empty() ? std::filesystem::path{} : std::filesystem::path(config_.ppo.init_checkpoint);
+  if (log_initialization_) {
+    const int configured_agents_per_batch = std::max(1, config_.ppo.minibatch_size / std::max(1, config_.ppo.sequence_length));
+    const int capped_agents_per_batch = std::min(
+        configured_agents_per_batch,
+        resolve_ppo_max_agents_per_batch(device_));
+    std::cout << "ppo_agents_per_batch=" << capped_agents_per_batch
+              << " configured_agents_per_batch=" << configured_agents_per_batch
+              << '\n';
+  }
   if (config_.reward.refresh.enabled && config_.reward.refresh.train_candidate_in_process) {
     const int refresh_threads = resolve_ngp_refresh_threads();
     torch::set_num_threads(refresh_threads);
@@ -1555,7 +1576,10 @@ TrainerMetrics PPOTrainer::update_policy() {
   const auto update_start = std::chrono::steady_clock::now();
   TrainerMetrics metrics{};
   const int seq_len = std::max(1, config_.ppo.sequence_length);
-  const int agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
+  const int configured_agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
+  const int agents_per_batch = std::min(
+      configured_agents_per_batch,
+      resolve_ppo_max_agents_per_batch(device_));
   const auto total_agents = static_cast<int>(rollout_.num_agents());
   std::int64_t metric_steps = 0;
 
