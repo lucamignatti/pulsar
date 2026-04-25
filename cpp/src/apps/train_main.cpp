@@ -27,7 +27,8 @@ bool should_pin_host_memory(const std::string& device) {
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::cerr << "usage: pulsar_train <config.json> <checkpoint_dir> [updates]\n";
+    std::cerr << "usage: pulsar_train <config.json> <checkpoint_dir> [updates]\n"
+              << "       omit updates, or pass <=0, to train indefinitely\n";
     return 1;
   }
 
@@ -59,7 +60,7 @@ int main(int argc, char** argv) {
           torch::Device(config.ppo.device));
     }
 
-    const int updates = argc > 3 ? std::stoi(argv[3]) : 100;
+    const int updates = argc > 3 ? std::stoi(argv[3]) : 0;
     pulsar::PPOTrainer trainer(
         config,
         std::move(collector),

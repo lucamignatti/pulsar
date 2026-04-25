@@ -128,7 +128,7 @@ Set `reward.ngp_checkpoint` in `configs/2v2_ppo.json` to the offline checkpoint 
 ./build/release/pulsar_train configs/2v2_ppo.json /path/to/run_outputs
 ```
 
-You can optionally pass a third argument to limit the number of PPO updates:
+By default this runs until stopped. You can optionally pass a positive third argument to limit the number of PPO updates:
 
 ```bash
 ./build/release/pulsar_train configs/2v2_ppo.json /path/to/run_outputs 100

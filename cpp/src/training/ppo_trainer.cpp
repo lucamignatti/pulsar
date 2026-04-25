@@ -1968,8 +1968,9 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
   std::int64_t global_step = resumed_global_step_;
   WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "ppo_train");
   int last_completed_update_index = static_cast<int>(resumed_update_index_);
+  const bool unlimited_updates = updates <= 0;
 
-  for (int update_index = 0; update_index < updates; ++update_index) {
+  for (int update_index = 0; unlimited_updates || update_index < updates; ++update_index) {
     rethrow_persistence_error_if_any();
     const int current_update_index = static_cast<int>(resumed_update_index_) + update_index + 1;
     last_completed_update_index = current_update_index;
@@ -2061,11 +2062,11 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
   if (ngp_replay_buffer_) {
     ngp_replay_buffer_->close_window();
     maybe_collect_ngp_refresh_result(checkpoint_dir);
-    maybe_schedule_ngp_refresh_task(global_step, resumed_update_index_ + updates);
+    maybe_schedule_ngp_refresh_task(global_step, last_completed_update_index);
   }
   stop_ngp_refresh_worker();
   maybe_collect_ngp_refresh_result(checkpoint_dir);
-  if (updates > 0 &&
+  if (last_completed_update_index > resumed_update_index_ &&
       last_completed_update_index % std::max(1, config_.ppo.checkpoint_interval) == 0) {
     enqueue_persistence_request(PersistenceRequest{
         .kind = PersistenceKind::RollingCheckpoint,
@@ -2076,7 +2077,7 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
   enqueue_persistence_request(PersistenceRequest{
       .kind = PersistenceKind::FinalCheckpoint,
       .directory = std::filesystem::path(checkpoint_dir) / "final",
-      .checkpoint = capture_checkpoint_snapshot(global_step, resumed_update_index_ + updates),
+      .checkpoint = capture_checkpoint_snapshot(global_step, last_completed_update_index),
   });
   flush_persistence_worker();
   wandb.finish();
