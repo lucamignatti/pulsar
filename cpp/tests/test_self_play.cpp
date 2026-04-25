@@ -93,6 +93,10 @@ void test_opponent_inference_and_elo_math() {
   pulsar::test::require(actions[0].item<std::int64_t>() == 0, "non-opponent slot should remain untouched");
   pulsar::test::require(actions[1].item<std::int64_t>() == 7, "opponent slot should obey mask");
   pulsar::test::require(actions[2].item<std::int64_t>() == 7, "opponent slot should obey mask");
+  pulsar::test::require(!actions.requires_grad(), "opponent actions should be inference-only");
+  pulsar::test::require(!opponent_state.workspace.requires_grad(), "opponent workspace state should be detached");
+  pulsar::test::require(!opponent_state.stm_keys.requires_grad(), "opponent STM key state should be detached");
+  pulsar::test::require(!opponent_state.stm_values.requires_grad(), "opponent STM value state should be detached");
   pulsar::test::require(inference_seconds >= 0.0, "inference timing should be recorded");
 
   double winner = 1000.0;

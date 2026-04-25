@@ -124,6 +124,7 @@ void SelfPlayManager::infer_opponent_actions(
     }
   }
 
+  torch::NoGradGuard no_grad;
   const bool deterministic = config_.ppo.self_play.training_opponent_policy != "stochastic";
   for (std::size_t snapshot_index = 0; snapshot_index < grouped.size(); ++snapshot_index) {
     if (grouped[snapshot_index].empty()) {
@@ -142,7 +143,7 @@ void SelfPlayManager::infer_opponent_actions(
     const torch::Tensor sampled_actions =
         deterministic ? masked_argmax(output.policy_logits, masks) : masked_sample(output.policy_logits, masks);
     actions.index_copy_(0, indices, sampled_actions);
-    scatter_state(opponent_state, indices, output.state);
+    scatter_state(opponent_state, indices, detach_state(std::move(output.state)));
   }
 
   if (inference_seconds != nullptr) {
@@ -270,12 +271,12 @@ void SelfPlayManager::add_snapshot(
   Snapshot snapshot{
       .global_step = global_step,
       .update_index = update_index,
-      .model = clone_shared_model(current_model, torch::Device(torch::kCPU)),
+      .model = clone_shared_model(current_model, device_),
       .normalizer = current_normalizer.clone(),
       .ratings = current_ratings_,
   };
   snapshot.model->eval();
-  snapshot.normalizer.to(torch::Device(torch::kCPU));
+  snapshot.normalizer.to(device_);
   snapshots_.push_back(std::move(snapshot));
   save_snapshot(snapshots_.back());
   trim_snapshots();
