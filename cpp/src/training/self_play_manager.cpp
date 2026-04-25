@@ -200,7 +200,7 @@ void SelfPlayManager::load_existing_snapshots() {
   for (const auto& directory : directories) {
     const ExperimentConfig snapshot_config = load_experiment_config((directory / "config.json").string());
     const CheckpointMetadata metadata = load_checkpoint_metadata((directory / "metadata.json").string());
-    validate_checkpoint_metadata(metadata, snapshot_config);
+    validate_inference_checkpoint_metadata(metadata, snapshot_config);
 
     Snapshot snapshot{
         .global_step = metadata.global_step,
