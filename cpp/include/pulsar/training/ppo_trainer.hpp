@@ -228,6 +228,7 @@ class PPOTrainer {
   torch::optim::Adam optimizer_;
   RolloutStorage rollout_;
   torch::Device device_{torch::kCPU};
+  torch::Device ngp_refresh_device_{torch::kCPU};
   std::filesystem::path run_output_root_{};
   bool log_initialization_ = true;
   SharedActorCritic ngp_model_{nullptr};

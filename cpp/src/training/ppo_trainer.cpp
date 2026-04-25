@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -97,6 +98,21 @@ void validate_aux_checkpoint_compatibility(
   if (stable_model_signature(checkpoint_config) != stable_model_signature(active_config)) {
     throw std::runtime_error(std::string(checkpoint_name) + " model/value signature does not match the active config.");
   }
+}
+
+int resolve_ngp_refresh_threads() {
+  if (const char* value = std::getenv("PULSAR_NGP_REFRESH_THREADS")) {
+    try {
+      return std::max(1, std::stoi(value));
+    } catch (...) {
+      return 1;
+    }
+  }
+  const unsigned int detected = std::thread::hardware_concurrency();
+  if (detected == 0) {
+    return 4;
+  }
+  return std::max(1U, detected / 2U);
 }
 
 bool same_checkpoint_directory(const std::string& lhs, const std::string& rhs) {
@@ -391,6 +407,13 @@ PPOTrainer::PPOTrainer(
   }
   const std::filesystem::path init_checkpoint_dir =
       config_.ppo.init_checkpoint.empty() ? std::filesystem::path{} : std::filesystem::path(config_.ppo.init_checkpoint);
+  if (config_.reward.refresh.enabled && config_.reward.refresh.train_candidate_in_process) {
+    const int refresh_threads = resolve_ngp_refresh_threads();
+    torch::set_num_threads(refresh_threads);
+    if (log_initialization_) {
+      std::cout << "ngp_refresh_device=cpu ngp_refresh_threads=" << refresh_threads << '\n';
+    }
+  }
   maybe_initialize_from_checkpoint();
   maybe_initialize_ngp_reward();
   maybe_initialize_in_process_ngp_refresh(init_checkpoint_dir);
@@ -593,10 +616,10 @@ void PPOTrainer::ensure_candidate_ngp_initialized() {
     return;
   }
 
-  candidate_ngp_model_ = clone_shared_model(ngp_model_, device_);
+  candidate_ngp_model_ = clone_shared_model(ngp_model_, ngp_refresh_device_);
   candidate_ngp_model_->train();
   candidate_ngp_normalizer_ = ngp_normalizer_.clone();
-  candidate_ngp_normalizer_.to(device_);
+  candidate_ngp_normalizer_.to(ngp_refresh_device_);
   candidate_trunk_parameters_ = collect_trunk_parameters(candidate_ngp_model_);
   candidate_ngp_head_parameters_ = collect_head_parameters(candidate_ngp_model_, "next_goal_head.");
 
@@ -844,10 +867,10 @@ void PPOTrainer::load_in_process_ngp_refresh_state(const std::filesystem::path& 
   torch::serialize::InputArchive archive;
   archive.load_from((candidate_dir / "model.pt").string());
   candidate_ngp_model_->load(archive);
-  candidate_ngp_model_->to(device_);
+  candidate_ngp_model_->to(ngp_refresh_device_);
   candidate_ngp_model_->train();
   candidate_ngp_normalizer_.load(archive);
-  candidate_ngp_normalizer_.to(device_);
+  candidate_ngp_normalizer_.to(ngp_refresh_device_);
   candidate_trunk_parameters_ = collect_trunk_parameters(candidate_ngp_model_);
   candidate_ngp_head_parameters_ = collect_head_parameters(candidate_ngp_model_, "next_goal_head.");
 
@@ -1038,7 +1061,7 @@ void PPOTrainer::train_candidate_on_trajectories(const std::vector<NGPTrajectory
   }
   const torch::Tensor ngp_class_weights =
       torch::tensor(config_.next_goal_predictor.class_weights, torch::TensorOptions().dtype(torch::kFloat32))
-          .to(device_);
+          .to(ngp_refresh_device_);
   const std::int64_t sequence_length = std::max<std::int64_t>(1, config_.behavior_cloning.sequence_length);
   std::vector<std::size_t> ordering(trajectories.size());
   std::iota(ordering.begin(), ordering.end(), 0);
@@ -1051,16 +1074,16 @@ void PPOTrainer::train_candidate_on_trajectories(const std::vector<NGPTrajectory
     candidate_ngp_model_->train();
     for (const std::size_t index : ordering) {
       const NGPTrajectory& trajectory = trajectories[index];
-      const torch::Tensor obs = trajectory.obs_cpu.to(device_);
+      const torch::Tensor obs = trajectory.obs_cpu.to(ngp_refresh_device_);
       const torch::Tensor normalized = candidate_ngp_normalizer_.normalize(obs).contiguous();
-      torch::Tensor starts = torch::zeros({normalized.size(0)}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+      torch::Tensor starts = torch::zeros({normalized.size(0)}, torch::TensorOptions().dtype(torch::kFloat32).device(ngp_refresh_device_));
       if (normalized.size(0) > 0) {
         starts[0] = 1.0F;
       }
-      const torch::Tensor weights = torch::ones({normalized.size(0)}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+      const torch::Tensor weights = torch::ones({normalized.size(0)}, torch::TensorOptions().dtype(torch::kFloat32).device(ngp_refresh_device_));
       const torch::Tensor labels =
-          torch::full({normalized.size(0)}, trajectory.label, torch::TensorOptions().dtype(torch::kLong).device(device_));
-      ContinuumState state = candidate_ngp_model_->initial_state(1, device_);
+          torch::full({normalized.size(0)}, trajectory.label, torch::TensorOptions().dtype(torch::kLong).device(ngp_refresh_device_));
+      ContinuumState state = candidate_ngp_model_->initial_state(1, ngp_refresh_device_);
 
       for (std::int64_t offset = 0; offset < normalized.size(0); offset += sequence_length) {
         const std::int64_t length = std::min<std::int64_t>(sequence_length, normalized.size(0) - offset);
@@ -1109,7 +1132,7 @@ std::pair<double, double> PPOTrainer::evaluate_ngp_trajectories(
   }
   const torch::Tensor ngp_class_weights =
       torch::tensor(config_.next_goal_predictor.class_weights, torch::TensorOptions().dtype(torch::kFloat32))
-          .to(device_);
+          .to(ngp_refresh_device_);
   const std::int64_t sequence_length = std::max<std::int64_t>(1, config_.behavior_cloning.sequence_length);
   double total_loss = 0.0;
   double total_accuracy = 0.0;
@@ -1117,16 +1140,16 @@ std::pair<double, double> PPOTrainer::evaluate_ngp_trajectories(
 
   model->eval();
   for (const auto& trajectory : trajectories) {
-    const torch::Tensor obs = trajectory.obs_cpu.to(device_);
+    const torch::Tensor obs = trajectory.obs_cpu.to(ngp_refresh_device_);
     const torch::Tensor normalized = normalizer.normalize(obs).contiguous();
-    torch::Tensor starts = torch::zeros({normalized.size(0)}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+    torch::Tensor starts = torch::zeros({normalized.size(0)}, torch::TensorOptions().dtype(torch::kFloat32).device(ngp_refresh_device_));
     if (normalized.size(0) > 0) {
       starts[0] = 1.0F;
     }
-    const torch::Tensor weights = torch::ones({normalized.size(0)}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+    const torch::Tensor weights = torch::ones({normalized.size(0)}, torch::TensorOptions().dtype(torch::kFloat32).device(ngp_refresh_device_));
     const torch::Tensor labels =
-        torch::full({normalized.size(0)}, trajectory.label, torch::TensorOptions().dtype(torch::kLong).device(device_));
-    ContinuumState state = model->initial_state(1, device_);
+        torch::full({normalized.size(0)}, trajectory.label, torch::TensorOptions().dtype(torch::kLong).device(ngp_refresh_device_));
+    ContinuumState state = model->initial_state(1, ngp_refresh_device_);
 
     for (std::int64_t offset = 0; offset < normalized.size(0); offset += sequence_length) {
       const std::int64_t length = std::min<std::int64_t>(sequence_length, normalized.size(0) - offset);
@@ -1235,10 +1258,10 @@ void PPOTrainer::ngp_refresh_worker_loop() {
                 << " samples=" << ngp_trajectory_sample_count(anchor_val)
                 << '\n';
 
-      SharedActorCritic active_model = clone_shared_model(ngp_model_, device_);
+      SharedActorCritic active_model = clone_shared_model(ngp_model_, ngp_refresh_device_);
       active_model->eval();
       ObservationNormalizer active_normalizer = ngp_normalizer_.clone();
-      active_normalizer.to(device_);
+      active_normalizer.to(ngp_refresh_device_);
 
       {
         std::lock_guard<std::mutex> candidate_lock(candidate_mutex_);
@@ -1349,10 +1372,10 @@ void PPOTrainer::maybe_schedule_ngp_refresh_task(std::int64_t global_step, int u
               << " trajectories=" << anchor_val.size()
               << " samples=" << ngp_trajectory_sample_count(anchor_val)
               << '\n';
-    SharedActorCritic active_model = clone_shared_model(ngp_model_, device_);
+    SharedActorCritic active_model = clone_shared_model(ngp_model_, ngp_refresh_device_);
     active_model->eval();
     ObservationNormalizer active_normalizer = ngp_normalizer_.clone();
-    active_normalizer.to(device_);
+    active_normalizer.to(ngp_refresh_device_);
 
     std::lock_guard<std::mutex> candidate_lock(candidate_mutex_);
     std::vector<NGPTrajectory> training_trajectories = task.online_train;
