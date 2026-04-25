@@ -1137,7 +1137,7 @@ void PPOTrainer::train_candidate_on_trajectories(const std::vector<NGPTrajectory
               config_.next_goal_predictor.max_grad_norm);
         }
         candidate_ngp_head_optimizer_->step();
-        state = output.final_state;
+        state = detach_state(std::move(output.final_state));
       }
     }
   }
@@ -1365,6 +1365,7 @@ void PPOTrainer::maybe_schedule_ngp_refresh_task(std::int64_t global_step, int u
     pending_ngp_refresh_task_ = std::move(task);
     ngp_refresh_task_pending_ = true;
     ngp_refresh_cv_.notify_one();
+    ngp_replay_buffer_->clear_completed_windows();
     return;
   }
 
@@ -1408,6 +1409,7 @@ void PPOTrainer::maybe_schedule_ngp_refresh_task(std::int64_t global_step, int u
     latest_ngp_refresh_result_.online_train_samples = online_train_samples;
     latest_ngp_refresh_result_.online_val_samples = online_val_samples;
   }
+  ngp_replay_buffer_->clear_completed_windows();
   ngp_refresh_result_ready_ = true;
 }
 
