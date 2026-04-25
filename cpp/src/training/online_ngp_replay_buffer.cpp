@@ -319,48 +319,47 @@ std::vector<NGPTrajectory> AnchorManifest::sample(
     return load_all();
   }
 
-  std::vector<std::size_t> shuffled(index_.size());
-  std::iota(shuffled.begin(), shuffled.end(), 0);
-  std::mt19937_64 rng(seed);
-  std::shuffle(shuffled.begin(), shuffled.end(), rng);
-
-  struct SelectedEntry {
-    int shard_index;
-    std::int64_t start;
-    std::int64_t length;
-    std::int64_t label;
-  };
-  std::vector<SelectedEntry> selected;
-  std::int64_t samples = 0;
-  for (const std::size_t pos : shuffled) {
-    const auto& ref = index_[pos];
-    selected.push_back({ref.shard_index, ref.start_step, ref.num_steps, ref.label});
-    samples += ref.num_steps;
-    if (samples >= target_samples) {
-      break;
+  std::vector<std::vector<std::size_t>> refs_by_shard(manifest_.shards.size());
+  for (std::size_t ref_idx = 0; ref_idx < index_.size(); ++ref_idx) {
+    const int shard_idx = index_[ref_idx].shard_index;
+    if (shard_idx >= 0 && shard_idx < static_cast<int>(refs_by_shard.size())) {
+      refs_by_shard[static_cast<std::size_t>(shard_idx)].push_back(ref_idx);
     }
   }
 
-  const std::filesystem::path manifest_dir = std::filesystem::path(manifest_path_).parent_path();
-  std::vector<NGPTrajectory> result;
-  result.reserve(selected.size());
-
-  std::map<int, std::vector<std::size_t>> shard_groups;
-  for (std::size_t i = 0; i < selected.size(); ++i) {
-    shard_groups[selected[i].shard_index].push_back(i);
+  std::vector<std::size_t> shard_order;
+  shard_order.reserve(refs_by_shard.size());
+  for (std::size_t shard_idx = 0; shard_idx < refs_by_shard.size(); ++shard_idx) {
+    if (!refs_by_shard[shard_idx].empty()) {
+      shard_order.push_back(shard_idx);
+    }
   }
 
-  for (const auto& [shard_idx, sel_indices] : shard_groups) {
+  std::mt19937_64 rng(seed);
+  std::shuffle(shard_order.begin(), shard_order.end(), rng);
+
+  const std::filesystem::path manifest_dir = std::filesystem::path(manifest_path_).parent_path();
+  std::vector<NGPTrajectory> result;
+  std::int64_t samples = 0;
+
+  for (const std::size_t shard_idx : shard_order) {
+    auto refs = refs_by_shard[shard_idx];
+    std::shuffle(refs.begin(), refs.end(), rng);
+
     const auto& shard = manifest_.shards[shard_idx];
     const torch::Tensor obs =
         load_tensor_checked((manifest_dir / shard.obs_path).string()).to(torch::kFloat32);
 
-    for (const std::size_t sel_idx : sel_indices) {
-      const auto& entry = selected[sel_idx];
+    for (const std::size_t ref_idx : refs) {
+      const auto& ref = index_[ref_idx];
       NGPTrajectory traj;
-      traj.obs_cpu = obs.narrow(0, entry.start, entry.length).clone().to(torch::kCPU);
-      traj.label = entry.label;
+      traj.obs_cpu = obs.narrow(0, ref.start_step, ref.num_steps).clone().to(torch::kCPU);
+      traj.label = ref.label;
+      samples += ref.num_steps;
       result.push_back(std::move(traj));
+      if (samples >= target_samples) {
+        return result;
+      }
     }
   }
 

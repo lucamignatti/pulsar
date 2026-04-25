@@ -84,7 +84,8 @@ class PPOTrainer {
     std::int64_t global_step = 0;
     std::vector<NGPTrajectory> online_train{};
     std::vector<NGPTrajectory> online_val{};
-    std::vector<NGPTrajectory> anchor_train{};
+    std::int64_t target_anchor_samples = 0;
+    std::uint64_t anchor_seed = 0;
     SharedActorCritic active_model{nullptr};
     ObservationNormalizer active_normalizer{1};
   };
