@@ -86,8 +86,6 @@ class PPOTrainer {
     std::vector<NGPTrajectory> online_val{};
     std::int64_t target_anchor_samples = 0;
     std::uint64_t anchor_seed = 0;
-    SharedActorCritic active_model{nullptr};
-    ObservationNormalizer active_normalizer{1};
   };
 
   struct NGPRefreshResult {

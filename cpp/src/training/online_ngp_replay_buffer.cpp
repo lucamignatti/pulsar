@@ -246,59 +246,13 @@ void AnchorManifest::build(const std::string& manifest_path, int obs_dim) {
 
   index_.clear();
   total_samples_ = 0;
-
-  const std::filesystem::path manifest_dir = std::filesystem::path(manifest_path_).parent_path();
-
-  for (int shard_idx = 0; shard_idx < static_cast<int>(manifest_.shards.size()); ++shard_idx) {
-    const auto& shard = manifest_.shards[shard_idx];
-
-    torch::Tensor episode_starts =
-        load_tensor_checked((manifest_dir / shard.episode_starts_path).string())
-            .to(torch::kFloat32)
-            .view({-1});
-    torch::Tensor next_goal =
-        load_tensor_checked((manifest_dir / shard.next_goal_path).string())
-            .to(torch::kLong)
-            .view({-1});
-
-    const torch::Tensor starts_cpu = episode_starts.to(torch::kCPU).contiguous();
-    const float* starts_ptr = starts_cpu.data_ptr<float>();
-
-    std::vector<std::int64_t> trajectory_starts;
-    if (episode_starts.size(0) > 0 && starts_ptr[0] <= 0.5F) {
-      trajectory_starts.push_back(0);
-    }
-    for (std::int64_t i = 0; i < episode_starts.size(0); ++i) {
-      if (starts_ptr[i] > 0.5F) {
-        trajectory_starts.push_back(i);
-      }
-    }
-    if (trajectory_starts.empty()) {
-      trajectory_starts.push_back(0);
-    }
-
-    for (std::size_t t = 0; t < trajectory_starts.size(); ++t) {
-      const std::int64_t start = trajectory_starts[t];
-      const std::int64_t end =
-          t + 1 < trajectory_starts.size() ? trajectory_starts[t + 1] : episode_starts.size(0);
-      const std::int64_t length = end - start;
-      if (length <= 0) {
-        continue;
-      }
-
-      AnchorTrajectoryRef ref;
-      ref.shard_index = shard_idx;
-      ref.start_step = start;
-      ref.num_steps = length;
-      ref.label = next_goal[start].item<std::int64_t>();
-      total_samples_ += length;
-      index_.push_back(ref);
-    }
+  for (const auto& shard : manifest_.shards) {
+    total_samples_ += shard.samples;
   }
 }
 
 bool AnchorManifest::empty() const {
-  return index_.empty();
+  return manifest_.shards.empty() || total_samples_ <= 0;
 }
 
 std::int64_t AnchorManifest::total_samples() const {
@@ -312,25 +266,17 @@ std::int64_t AnchorManifest::num_trajectories() const {
 std::vector<NGPTrajectory> AnchorManifest::sample(
     std::int64_t target_samples,
     std::uint64_t seed) const {
-  if (target_samples <= 0 || index_.empty()) {
+  if (target_samples <= 0 || manifest_.shards.empty()) {
     return {};
   }
   if (target_samples >= total_samples_) {
     return load_all();
   }
 
-  std::vector<std::vector<std::size_t>> refs_by_shard(manifest_.shards.size());
-  for (std::size_t ref_idx = 0; ref_idx < index_.size(); ++ref_idx) {
-    const int shard_idx = index_[ref_idx].shard_index;
-    if (shard_idx >= 0 && shard_idx < static_cast<int>(refs_by_shard.size())) {
-      refs_by_shard[static_cast<std::size_t>(shard_idx)].push_back(ref_idx);
-    }
-  }
-
   std::vector<std::size_t> shard_order;
-  shard_order.reserve(refs_by_shard.size());
-  for (std::size_t shard_idx = 0; shard_idx < refs_by_shard.size(); ++shard_idx) {
-    if (!refs_by_shard[shard_idx].empty()) {
+  shard_order.reserve(manifest_.shards.size());
+  for (std::size_t shard_idx = 0; shard_idx < manifest_.shards.size(); ++shard_idx) {
+    if (manifest_.shards[shard_idx].samples > 0) {
       shard_order.push_back(shard_idx);
     }
   }
@@ -343,19 +289,49 @@ std::vector<NGPTrajectory> AnchorManifest::sample(
   std::int64_t samples = 0;
 
   for (const std::size_t shard_idx : shard_order) {
-    auto refs = refs_by_shard[shard_idx];
-    std::shuffle(refs.begin(), refs.end(), rng);
-
     const auto& shard = manifest_.shards[shard_idx];
+    const torch::Tensor episode_starts =
+        load_tensor_checked((manifest_dir / shard.episode_starts_path).string())
+            .to(torch::kFloat32)
+            .view({-1});
+    const torch::Tensor next_goal =
+        load_tensor_checked((manifest_dir / shard.next_goal_path).string())
+            .to(torch::kLong)
+            .view({-1});
     const torch::Tensor obs =
         load_tensor_checked((manifest_dir / shard.obs_path).string()).to(torch::kFloat32);
 
-    for (const std::size_t ref_idx : refs) {
-      const auto& ref = index_[ref_idx];
+    const torch::Tensor starts_cpu = episode_starts.to(torch::kCPU).contiguous();
+    const float* starts_ptr = starts_cpu.data_ptr<float>();
+    std::vector<std::int64_t> trajectory_starts;
+    if (episode_starts.size(0) > 0 && starts_ptr[0] <= 0.5F) {
+      trajectory_starts.push_back(0);
+    }
+    for (std::int64_t i = 0; i < episode_starts.size(0); ++i) {
+      if (starts_ptr[i] > 0.5F) {
+        trajectory_starts.push_back(i);
+      }
+    }
+    if (trajectory_starts.empty()) {
+      trajectory_starts.push_back(0);
+    }
+
+    std::vector<std::size_t> local_order(trajectory_starts.size());
+    std::iota(local_order.begin(), local_order.end(), 0);
+    std::shuffle(local_order.begin(), local_order.end(), rng);
+
+    for (const std::size_t local_idx : local_order) {
+      const std::int64_t start = trajectory_starts[local_idx];
+      const std::int64_t end =
+          local_idx + 1 < trajectory_starts.size() ? trajectory_starts[local_idx + 1] : obs.size(0);
+      const std::int64_t length = end - start;
+      if (length <= 0) {
+        continue;
+      }
       NGPTrajectory traj;
-      traj.obs_cpu = obs.narrow(0, ref.start_step, ref.num_steps).clone().to(torch::kCPU);
-      traj.label = ref.label;
-      samples += ref.num_steps;
+      traj.obs_cpu = obs.narrow(0, start, length).clone().to(torch::kCPU);
+      traj.label = next_goal[start].item<std::int64_t>();
+      samples += length;
       result.push_back(std::move(traj));
       if (samples >= target_samples) {
         return result;

@@ -565,8 +565,7 @@ void PPOTrainer::maybe_initialize_in_process_ngp_refresh(const std::filesystem::
   if (anchor_train_manifest_.empty()) {
     anchor_train_manifest_.build(config_.reward.refresh.anchor_train_manifest, config_.model.observation_dim);
     if (log_initialization_) {
-      std::cout << "ngp_anchor_train_index manifest=" << config_.reward.refresh.anchor_train_manifest
-                << " trajectories=" << anchor_train_manifest_.num_trajectories()
+      std::cout << "ngp_anchor_train_manifest manifest=" << config_.reward.refresh.anchor_train_manifest
                 << " samples=" << anchor_train_manifest_.total_samples()
                 << '\n';
     }
@@ -574,8 +573,7 @@ void PPOTrainer::maybe_initialize_in_process_ngp_refresh(const std::filesystem::
   if (anchor_val_manifest_.empty()) {
     anchor_val_manifest_.build(config_.reward.refresh.anchor_val_manifest, config_.model.observation_dim);
     if (log_initialization_) {
-      std::cout << "ngp_anchor_val_index manifest=" << config_.reward.refresh.anchor_val_manifest
-                << " trajectories=" << anchor_val_manifest_.num_trajectories()
+      std::cout << "ngp_anchor_val_manifest manifest=" << config_.reward.refresh.anchor_val_manifest
                 << " samples=" << anchor_val_manifest_.total_samples()
                 << '\n';
     }
@@ -1204,52 +1202,77 @@ void PPOTrainer::ngp_refresh_worker_loop() {
       ngp_refresh_task_in_progress_ = true;
     }
 
-    PULSAR_TRACE_SCOPE_CAT("ngp_refresh", "worker_task");
-    NGPRefreshResult result{};
-    result.update_index = task.update_index;
-    result.global_step = task.global_step;
-    result.online_train_samples = ngp_trajectory_sample_count(task.online_train);
-    result.online_val_samples = ngp_trajectory_sample_count(task.online_val);
+    try {
+      PULSAR_TRACE_SCOPE_CAT("ngp_refresh", "worker_task");
+      NGPRefreshResult result{};
+      result.update_index = task.update_index;
+      result.global_step = task.global_step;
+      result.online_train_samples = ngp_trajectory_sample_count(task.online_train);
+      result.online_val_samples = ngp_trajectory_sample_count(task.online_val);
 
-    std::vector<NGPTrajectory> anchor_train;
-    if (task.target_anchor_samples > 0) {
-      std::cout << "ngp_anchor_sample_start update=" << task.update_index
-                << " target_samples=" << task.target_anchor_samples
+      std::vector<NGPTrajectory> anchor_train;
+      if (task.target_anchor_samples > 0) {
+        std::cout << "ngp_anchor_sample_start update=" << task.update_index
+                  << " target_samples=" << task.target_anchor_samples
+                  << '\n';
+        anchor_train = anchor_train_manifest_.sample(task.target_anchor_samples, task.anchor_seed);
+        std::cout << "ngp_anchor_sample_done update=" << task.update_index
+                  << " trajectories=" << anchor_train.size()
+                  << " samples=" << ngp_trajectory_sample_count(anchor_train)
+                  << '\n';
+      }
+
+      const std::int64_t target_anchor_val_samples = std::max<std::int64_t>(
+          1,
+          task.target_anchor_samples > 0 ? task.target_anchor_samples : ngp_trajectory_sample_count(task.online_val));
+      std::cout << "ngp_anchor_val_sample_start update=" << task.update_index
+                << " target_samples=" << target_anchor_val_samples
                 << '\n';
-      anchor_train = anchor_train_manifest_.sample(task.target_anchor_samples, task.anchor_seed);
-      std::cout << "ngp_anchor_sample_done update=" << task.update_index
-                << " trajectories=" << anchor_train.size()
-                << " samples=" << ngp_trajectory_sample_count(anchor_train)
+      const std::vector<NGPTrajectory> anchor_val =
+          anchor_val_manifest_.sample(target_anchor_val_samples, task.anchor_seed ^ 0x9e3779b97f4a7c15ULL);
+      std::cout << "ngp_anchor_val_sample_done update=" << task.update_index
+                << " trajectories=" << anchor_val.size()
+                << " samples=" << ngp_trajectory_sample_count(anchor_val)
                 << '\n';
-    }
 
-    std::cout << "ngp_anchor_val_load_start update=" << task.update_index << '\n';
-    const std::vector<NGPTrajectory> anchor_val = anchor_val_manifest_.load_all();
-    std::cout << "ngp_anchor_val_load_done update=" << task.update_index
-              << " trajectories=" << anchor_val.size()
-              << " samples=" << ngp_trajectory_sample_count(anchor_val)
-              << '\n';
+      SharedActorCritic active_model = clone_shared_model(ngp_model_, device_);
+      active_model->eval();
+      ObservationNormalizer active_normalizer = ngp_normalizer_.clone();
+      active_normalizer.to(device_);
 
-    {
-      std::lock_guard<std::mutex> candidate_lock(candidate_mutex_);
-      std::vector<NGPTrajectory> training_trajectories = task.online_train;
-      training_trajectories.insert(training_trajectories.end(), anchor_train.begin(), anchor_train.end());
-      train_candidate_on_trajectories(training_trajectories, config_.reward.refresh.candidate_epochs);
-      NGPRefreshResult eval_result = evaluate_candidate_refresh(task.active_model, task.active_normalizer, task.online_val, anchor_val);
-      result.active_anchor_loss = eval_result.active_anchor_loss;
-      result.active_recent_loss = eval_result.active_recent_loss;
-      result.candidate_anchor_loss = eval_result.candidate_anchor_loss;
-      result.candidate_recent_loss = eval_result.candidate_recent_loss;
-      result.recent_loss_improvement = eval_result.recent_loss_improvement;
-      result.anchor_loss_regression = eval_result.anchor_loss_regression;
-      result.promote = eval_result.promote;
-    }
+      {
+        std::lock_guard<std::mutex> candidate_lock(candidate_mutex_);
+        std::vector<NGPTrajectory> training_trajectories = task.online_train;
+        training_trajectories.insert(training_trajectories.end(), anchor_train.begin(), anchor_train.end());
+        train_candidate_on_trajectories(training_trajectories, config_.reward.refresh.candidate_epochs);
+        NGPRefreshResult eval_result = evaluate_candidate_refresh(active_model, active_normalizer, task.online_val, anchor_val);
+        result.active_anchor_loss = eval_result.active_anchor_loss;
+        result.active_recent_loss = eval_result.active_recent_loss;
+        result.candidate_anchor_loss = eval_result.candidate_anchor_loss;
+        result.candidate_recent_loss = eval_result.candidate_recent_loss;
+        result.recent_loss_improvement = eval_result.recent_loss_improvement;
+        result.anchor_loss_regression = eval_result.anchor_loss_regression;
+        result.promote = eval_result.promote;
+      }
 
-    {
+      {
+        std::lock_guard<std::mutex> lock(ngp_refresh_mutex_);
+        latest_ngp_refresh_result_ = std::move(result);
+        ngp_refresh_task_in_progress_ = false;
+        ngp_refresh_result_ready_ = true;
+      }
+    } catch (const std::exception& exc) {
+      std::cerr << "ngp_refresh_worker_error update=" << task.update_index
+                << " reason=" << exc.what() << '\n';
       std::lock_guard<std::mutex> lock(ngp_refresh_mutex_);
-      latest_ngp_refresh_result_ = std::move(result);
       ngp_refresh_task_in_progress_ = false;
-      ngp_refresh_result_ready_ = true;
+      ngp_refresh_result_ready_ = false;
+    } catch (...) {
+      std::cerr << "ngp_refresh_worker_error update=" << task.update_index
+                << " reason=unknown\n";
+      std::lock_guard<std::mutex> lock(ngp_refresh_mutex_);
+      ngp_refresh_task_in_progress_ = false;
+      ngp_refresh_result_ready_ = false;
     }
   }
 }
@@ -1292,10 +1315,6 @@ void PPOTrainer::maybe_schedule_ngp_refresh_task(std::int64_t global_step, int u
   task.online_val = online_val;
   task.target_anchor_samples = target_anchor_samples;
   task.anchor_seed = config_.offline_dataset.seed + static_cast<std::uint64_t>(update_index);
-  task.active_model = clone_shared_model(ngp_model_, device_);
-  task.active_model->eval();
-  task.active_normalizer = ngp_normalizer_.clone();
-  task.active_normalizer.to(device_);
 
   if (refresh.async_candidate_updates) {
     std::lock_guard<std::mutex> lock(ngp_refresh_mutex_);
@@ -1318,17 +1337,28 @@ void PPOTrainer::maybe_schedule_ngp_refresh_task(std::int64_t global_step, int u
                 << '\n';
     }
 
-    std::cout << "ngp_anchor_val_load_start update=" << update_index << '\n';
-    const std::vector<NGPTrajectory> anchor_val = anchor_val_manifest_.load_all();
-    std::cout << "ngp_anchor_val_load_done update=" << update_index
+    const std::int64_t target_anchor_val_samples = std::max<std::int64_t>(
+        1,
+        task.target_anchor_samples > 0 ? task.target_anchor_samples : ngp_trajectory_sample_count(task.online_val));
+    std::cout << "ngp_anchor_val_sample_start update=" << update_index
+              << " target_samples=" << target_anchor_val_samples
+              << '\n';
+    const std::vector<NGPTrajectory> anchor_val =
+        anchor_val_manifest_.sample(target_anchor_val_samples, task.anchor_seed ^ 0x9e3779b97f4a7c15ULL);
+    std::cout << "ngp_anchor_val_sample_done update=" << update_index
               << " trajectories=" << anchor_val.size()
               << " samples=" << ngp_trajectory_sample_count(anchor_val)
               << '\n';
+    SharedActorCritic active_model = clone_shared_model(ngp_model_, device_);
+    active_model->eval();
+    ObservationNormalizer active_normalizer = ngp_normalizer_.clone();
+    active_normalizer.to(device_);
+
     std::lock_guard<std::mutex> candidate_lock(candidate_mutex_);
     std::vector<NGPTrajectory> training_trajectories = task.online_train;
     training_trajectories.insert(training_trajectories.end(), anchor_train.begin(), anchor_train.end());
     train_candidate_on_trajectories(training_trajectories, config_.reward.refresh.candidate_epochs);
-    latest_ngp_refresh_result_ = evaluate_candidate_refresh(task.active_model, task.active_normalizer, task.online_val, anchor_val);
+    latest_ngp_refresh_result_ = evaluate_candidate_refresh(active_model, active_normalizer, task.online_val, anchor_val);
     latest_ngp_refresh_result_.update_index = update_index;
     latest_ngp_refresh_result_.global_step = global_step;
     latest_ngp_refresh_result_.online_train_samples = online_train_samples;
