@@ -519,7 +519,7 @@ void PPOTrainer::load_ngp_reward_checkpoint(
   validate_aux_checkpoint_compatibility(metadata, checkpoint_config, config_, "NGP checkpoint");
 
   if (same_checkpoint_directory(checkpoint_path, config_.ppo.init_checkpoint)) {
-    ngp_model_ = clone_shared_model(model_, device_);
+    ngp_model_ = clone_shared_model(model_, ngp_refresh_device_);
     ngp_normalizer_ = normalizer_.clone();
   } else {
     ngp_model_ = SharedActorCritic(config_.model, config_.ppo);
@@ -528,11 +528,11 @@ void PPOTrainer::load_ngp_reward_checkpoint(
     ngp_model_->load(archive);
     ngp_normalizer_.load(archive);
   }
-  ngp_model_->to(device_);
-  ngp_normalizer_.to(device_);
+  ngp_model_->to(ngp_refresh_device_);
+  ngp_normalizer_.to(ngp_refresh_device_);
   freeze_model_parameters(ngp_model_);
   ngp_model_->eval();
-  ngp_collection_state_ = ngp_model_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
+  ngp_collection_state_ = ngp_model_->initial_state(static_cast<std::int64_t>(total_agents_), ngp_refresh_device_);
   active_ngp_checkpoint_ = base.string();
   active_ngp_label_ = !configured_label.empty() ? configured_label : base.filename().string();
   active_ngp_config_hash_ = metadata.config_hash;
@@ -1440,13 +1440,13 @@ void PPOTrainer::maybe_collect_ngp_refresh_result(const std::string& checkpoint_
 
   {
     std::lock_guard<std::mutex> candidate_lock(candidate_mutex_);
-    ngp_model_ = clone_shared_model(candidate_ngp_model_, device_);
+    ngp_model_ = clone_shared_model(candidate_ngp_model_, ngp_refresh_device_);
     ngp_normalizer_ = candidate_ngp_normalizer_.clone();
-    ngp_normalizer_.to(device_);
+    ngp_normalizer_.to(ngp_refresh_device_);
   }
   freeze_model_parameters(ngp_model_);
   ngp_model_->eval();
-  ngp_collection_state_ = ngp_model_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
+  ngp_collection_state_ = ngp_model_->initial_state(static_cast<std::int64_t>(total_agents_), ngp_refresh_device_);
   active_ngp_checkpoint_ = promoted_dir.string();
   active_ngp_label_ = promoted_dir.filename().string();
   active_ngp_config_hash_ = config_hash(config_);
@@ -1537,14 +1537,17 @@ torch::Tensor PPOTrainer::compute_rollout_ngp_rewards(
     const torch::Tensor& episode_starts_seq) {
   PULSAR_TRACE_SCOPE_CAT("ppo", "reward_model");
   torch::NoGradGuard no_grad;
-  const torch::Tensor normalized_obs = ngp_normalizer_.normalize(obs_seq);
+  const torch::Tensor obs_cpu = obs_seq.to(ngp_refresh_device_);
+  const torch::Tensor starts_cpu = episode_starts_seq.to(ngp_refresh_device_);
+  const torch::Tensor normalized_obs = ngp_normalizer_.normalize(obs_cpu);
   SequenceOutput output =
-      ngp_model_->forward_sequence(normalized_obs, std::move(ngp_collection_state_), episode_starts_seq);
+      ngp_model_->forward_sequence(normalized_obs, std::move(ngp_collection_state_), starts_cpu);
   ngp_collection_state_ = std::move(output.final_state);
   const torch::Tensor scalar_values = ngp_scalar(output.next_goal_logits);
-  return config_.reward.ngp_scale *
-         (scalar_values.narrow(0, 1, scalar_values.size(0) - 1) -
-          scalar_values.narrow(0, 0, scalar_values.size(0) - 1));
+  const torch::Tensor rewards = config_.reward.ngp_scale *
+      (scalar_values.narrow(0, 1, scalar_values.size(0) - 1) -
+       scalar_values.narrow(0, 0, scalar_values.size(0) - 1));
+  return rewards.to(device_);
 }
 
 TrainerMetrics PPOTrainer::update_policy() {
