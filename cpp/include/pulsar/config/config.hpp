@@ -42,6 +42,9 @@ struct RewardConfig {
   std::string ngp_checkpoint{};
   std::string ngp_label{};
   float ngp_scale = 1.0F;
+  float touch_reward = 0.02F;
+  float goal_reward = 1.0F;
+  float concede_penalty = 1.0F;
   OnlineDatasetExportConfig online_dataset{};
   RefreshConfig refresh{};
 };

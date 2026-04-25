@@ -107,8 +107,10 @@ void RocketSimTransitionEngine::reset(std::uint64_t seed) {
           self->state_.goal_scored = true;
           if (scoring_team == RocketSim::Team::BLUE) {
             self->state_.blue_score += 1;
+            self->state_.last_scoring_team = Team::Blue;
           } else {
             self->state_.orange_score += 1;
+            self->state_.last_scoring_team = Team::Orange;
           }
         },
         this);
@@ -298,9 +300,11 @@ void RocketSimTransitionEngine::apply_placeholder_dynamics(std::span<const Contr
   if (state_.ball.position.y > 5120.0F) {
     state_.blue_score += 1;
     state_.goal_scored = true;
+    state_.last_scoring_team = Team::Blue;
   } else if (state_.ball.position.y < -5120.0F) {
     state_.orange_score += 1;
     state_.goal_scored = true;
+    state_.last_scoring_team = Team::Orange;
   }
 }
 

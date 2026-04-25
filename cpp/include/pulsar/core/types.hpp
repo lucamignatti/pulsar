@@ -83,6 +83,7 @@ struct EnvState {
   int blue_score = 0;
   int orange_score = 0;
   bool goal_scored = false;
+  Team last_scoring_team = Team::Blue;
   bool kickoff_pause = false;
   int last_touch_agent = -1;
   int last_touch_tick = 0;

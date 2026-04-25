@@ -5,7 +5,7 @@
 The current training path has two stages:
 
 1. Offline pretrain a shared policy with behavior cloning, value pretraining, and a next-goal predictor on replay-derived tensor manifests.
-2. Run synchronous PPO self-play online, using the pretrained next-goal checkpoint as the reward path and optionally exporting fresh online NGP data for refresh.
+2. Run synchronous PPO self-play online, using the pretrained next-goal checkpoint as dense shaping plus sparse touch/goal rewards, and optionally exporting fresh online NGP data for refresh.
 
 The codebase is centered on a shared model stack, hard action masking, GPU execution, and a lightweight Python surface for inspection and playback.
 
@@ -13,7 +13,7 @@ The codebase is centered on a shared model stack, hard action masking, GPU execu
 
 - Fast vectorized C++ trainer
 - Shared C++ backbone for model architecture
-- No hand-written reward function
+- Minimal event rewards with NGP dense shaping
 - ROCm-friendly Linux build path
 
 ## Repository Layout

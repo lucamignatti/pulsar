@@ -195,6 +195,7 @@ void append_metrics_line(
       {"overall_agent_steps_per_second", metrics.overall_agent_steps_per_second},
       {"update_seconds", metrics.update_seconds},
       {"reward_mean", metrics.reward_mean},
+      {"event_reward_mean", metrics.event_reward_mean},
       {"policy_loss", metrics.policy_loss},
       {"value_loss", metrics.value_loss},
       {"entropy", metrics.entropy},
@@ -262,6 +263,7 @@ void accumulate_trainer_metrics(TrainerMetrics* total, const TrainerMetrics& val
   total->overall_agent_steps_per_second += value.overall_agent_steps_per_second;
   total->update_seconds += value.update_seconds;
   total->reward_mean += value.reward_mean;
+  total->event_reward_mean += value.event_reward_mean;
   total->policy_loss += value.policy_loss;
   total->value_loss += value.value_loss;
   total->entropy += value.entropy;
@@ -287,6 +289,7 @@ void average_trainer_metrics(TrainerMetrics* total, double count) {
   total->overall_agent_steps_per_second /= count;
   total->update_seconds /= count;
   total->reward_mean /= count;
+  total->event_reward_mean /= count;
   total->policy_loss /= count;
   total->value_loss /= count;
   total->entropy /= count;
@@ -1747,9 +1750,6 @@ TrainerMetrics PPOTrainer::run_update(std::int64_t* global_step, int current_upd
   torch::Tensor ngp_episode_starts_seq = torch::empty(
       {config_.ppo.rollout_length + 1, static_cast<long>(total_agents_)},
       torch::TensorOptions().dtype(torch::kFloat32));
-  const torch::Tensor zero_rewards = torch::zeros(
-      {static_cast<long>(total_agents_)},
-      torch::TensorOptions().dtype(torch::kFloat32).device(device_));
 
   const auto collection_start = std::chrono::steady_clock::now();
   {
@@ -1857,7 +1857,7 @@ TrainerMetrics PPOTrainer::run_update(std::int64_t* global_step, int current_upd
             learner_active,
             actions,
             log_probs,
-            zero_rewards,
+            collector_->host_event_rewards().to(device_, use_pinned_host_buffers_),
             dones,
             sampled_values);
       }
@@ -1868,6 +1868,10 @@ TrainerMetrics PPOTrainer::run_update(std::int64_t* global_step, int current_upd
   }
   const double collection_seconds =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - collection_start).count();
+  const double active_count = rollout_.learner_active.sum().item<double>();
+  const torch::Tensor active_event_rewards = rollout_.rewards * rollout_.learner_active;
+  metrics.event_reward_mean =
+      active_count > 0.0 ? active_event_rewards.sum().item<double>() / active_count : 0.0;
 
   const auto gae_start = std::chrono::steady_clock::now();
   torch::Tensor last_raw_obs;
@@ -1884,7 +1888,7 @@ TrainerMetrics PPOTrainer::run_update(std::int64_t* global_step, int current_upd
   ngp_episode_starts_seq[config_.ppo.rollout_length].copy_(collector_->host_episode_starts());
   const auto reward_model_start = std::chrono::steady_clock::now();
   const torch::Tensor rewards_cpu = compute_rollout_ngp_rewards(ngp_obs_seq, ngp_episode_starts_seq);
-  rollout_.rewards.copy_(rewards_cpu);
+  rollout_.rewards.add_(rewards_cpu);
   metrics.reward_model_seconds +=
       std::chrono::duration<double>(std::chrono::steady_clock::now() - reward_model_start).count();
   torch::Tensor last_sampled_value;
@@ -1943,7 +1947,6 @@ TrainerMetrics PPOTrainer::run_update(std::int64_t* global_step, int current_upd
                 std::max(std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count(), 1.0e-9)
           : 0.0;
   const torch::Tensor active_rewards = rollout_.rewards * rollout_.learner_active;
-  const double active_count = rollout_.learner_active.sum().item<double>();
   metrics.reward_mean = active_count > 0.0 ? active_rewards.sum().item<double>() / active_count : 0.0;
   metrics.ngp_promotion_index = active_ngp_promotion_index_;
   metrics.ngp_promoted_global_step = active_ngp_promoted_global_step_;
@@ -1988,6 +1991,7 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
               << " update_sps=" << metrics.update_agent_steps_per_second
               << " overall_sps=" << metrics.overall_agent_steps_per_second
               << " reward_mean=" << metrics.reward_mean
+              << " event_reward_mean=" << metrics.event_reward_mean
               << " policy_loss=" << metrics.policy_loss
               << " value_loss=" << metrics.value_loss
               << " entropy=" << metrics.entropy
@@ -2005,6 +2009,7 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
           {"overall_agent_steps_per_second", metrics.overall_agent_steps_per_second},
           {"update_seconds", metrics.update_seconds},
           {"reward_mean", metrics.reward_mean},
+          {"event_reward_mean", metrics.event_reward_mean},
           {"policy_loss", metrics.policy_loss},
           {"value_loss", metrics.value_loss},
           {"entropy", metrics.entropy},

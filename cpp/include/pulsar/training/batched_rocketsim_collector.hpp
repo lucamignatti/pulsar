@@ -69,6 +69,7 @@ class BatchedRocketSimCollector {
   [[nodiscard]] const torch::Tensor& host_dones() const;
   [[nodiscard]] const torch::Tensor& host_terminated() const;
   [[nodiscard]] const torch::Tensor& host_truncated() const;
+  [[nodiscard]] const torch::Tensor& host_event_rewards() const;
   [[nodiscard]] const torch::Tensor& host_terminal_next_goal_labels() const;
 
  private:
@@ -109,6 +110,7 @@ class BatchedRocketSimCollector {
   torch::Tensor host_dones_;
   torch::Tensor host_terminated_;
   torch::Tensor host_truncated_;
+  torch::Tensor host_event_rewards_;
   torch::Tensor host_terminal_next_goal_labels_;
   std::size_t total_agents_ = 0;
   int obs_dim_ = 0;

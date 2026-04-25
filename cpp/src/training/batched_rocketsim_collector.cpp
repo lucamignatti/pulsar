@@ -119,6 +119,7 @@ void BatchedRocketSimCollector::initialize(
   host_dones_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   host_terminated_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   host_truncated_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
+  host_event_rewards_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   host_terminal_next_goal_labels_ = torch::full({static_cast<long>(total_agents_)}, 2, i64);
 
   for (std::size_t env_idx = 0; env_idx < envs_.size(); ++env_idx) {
@@ -245,10 +246,12 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
   float* dones_ptr = host_dones_.data_ptr<float>();
   float* terminated_ptr = host_terminated_.data_ptr<float>();
   float* truncated_ptr = host_truncated_.data_ptr<float>();
+  float* rewards_ptr = host_event_rewards_.data_ptr<float>();
   std::int64_t* labels_ptr = host_terminal_next_goal_labels_.data_ptr<std::int64_t>();
   host_dones_.zero_();
   host_terminated_.zero_();
   host_truncated_.zero_();
+  host_event_rewards_.zero_();
   host_terminal_next_goal_labels_.fill_(2);
 
   executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
@@ -265,12 +268,16 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
           envs_[env_idx].truncated_scratch);
 
       bool reset_needed = false;
-      Team scoring_team = Team::Blue;
       const bool goal_scored = current_state.goal_scored;
-      if (goal_scored) {
-        scoring_team = current_state.blue_score > current_state.orange_score ? Team::Blue : Team::Orange;
-      }
+      const Team scoring_team = current_state.last_scoring_team;
       for (std::size_t idx = 0; idx < count; ++idx) {
+        const CarState& car = current_state.cars[idx];
+        float event_reward = car.ball_touched ? config_.reward.touch_reward : 0.0F;
+        if (goal_scored) {
+          event_reward +=
+              car.team == scoring_team ? config_.reward.goal_reward : -config_.reward.concede_penalty;
+        }
+        rewards_ptr[agent_begin + idx] = event_reward;
         const bool is_terminated = envs_[env_idx].terminated_scratch[idx] != 0;
         const bool is_truncated = envs_[env_idx].truncated_scratch[idx] != 0;
         const bool done = is_terminated || is_truncated;
@@ -279,7 +286,7 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         truncated_ptr[agent_begin + idx] = is_truncated ? 1.0F : 0.0F;
         if (done) {
           labels_ptr[agent_begin + idx] =
-              goal_scored ? (current_state.cars[idx].team == scoring_team ? 0 : 1) : 2;
+              goal_scored ? (car.team == scoring_team ? 0 : 1) : 2;
         }
         reset_needed = reset_needed || done;
       }
@@ -381,6 +388,10 @@ const torch::Tensor& BatchedRocketSimCollector::host_terminated() const {
 
 const torch::Tensor& BatchedRocketSimCollector::host_truncated() const {
   return host_truncated_;
+}
+
+const torch::Tensor& BatchedRocketSimCollector::host_event_rewards() const {
+  return host_event_rewards_;
 }
 
 const torch::Tensor& BatchedRocketSimCollector::host_terminal_next_goal_labels() const {

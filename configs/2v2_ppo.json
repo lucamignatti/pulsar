@@ -16,6 +16,9 @@
   "reward": {
     "ngp_checkpoint": "",
     "ngp_scale": 1.0,
+    "touch_reward": 0.02,
+    "goal_reward": 1.0,
+    "concede_penalty": 1.0,
     "online_dataset": {
       "enabled": true,
       "output_dir": "",

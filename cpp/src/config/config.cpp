@@ -113,6 +113,9 @@ void to_json(json& j, const RewardConfig& value) {
       {"ngp_checkpoint", value.ngp_checkpoint},
       {"ngp_label", value.ngp_label},
       {"ngp_scale", value.ngp_scale},
+      {"touch_reward", value.touch_reward},
+      {"goal_reward", value.goal_reward},
+      {"concede_penalty", value.concede_penalty},
       {"online_dataset", value.online_dataset},
       {"refresh", value.refresh},
   };
@@ -122,6 +125,9 @@ void from_json(const json& j, RewardConfig& value) {
   value.ngp_checkpoint = j.value("ngp_checkpoint", std::string{});
   value.ngp_label = j.value("ngp_label", std::string{});
   value.ngp_scale = j.value("ngp_scale", 1.0F);
+  value.touch_reward = j.value("touch_reward", 0.02F);
+  value.goal_reward = j.value("goal_reward", 1.0F);
+  value.concede_penalty = j.value("concede_penalty", 1.0F);
   value.online_dataset = j.value("online_dataset", RewardConfig::OnlineDatasetExportConfig{});
   value.refresh = j.value("refresh", RewardConfig::RefreshConfig{});
 }

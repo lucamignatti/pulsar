@@ -36,6 +36,7 @@ struct TrainerMetrics {
   double overall_agent_steps_per_second = 0.0;
   double update_seconds = 0.0;
   double reward_mean = 0.0;
+  double event_reward_mean = 0.0;
   double policy_loss = 0.0;
   double value_loss = 0.0;
   double entropy = 0.0;
