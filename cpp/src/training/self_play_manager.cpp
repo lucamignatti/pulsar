@@ -270,12 +270,12 @@ void SelfPlayManager::add_snapshot(
   Snapshot snapshot{
       .global_step = global_step,
       .update_index = update_index,
-      .model = clone_shared_model(current_model, device_),
+      .model = clone_shared_model(current_model, torch::Device(torch::kCPU)),
       .normalizer = current_normalizer.clone(),
       .ratings = current_ratings_,
   };
   snapshot.model->eval();
-  snapshot.normalizer.to(device_);
+  snapshot.normalizer.to(torch::Device(torch::kCPU));
   snapshots_.push_back(std::move(snapshot));
   save_snapshot(snapshots_.back());
   trim_snapshots();

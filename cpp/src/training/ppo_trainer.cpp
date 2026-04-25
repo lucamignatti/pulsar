@@ -1529,17 +1529,16 @@ torch::Tensor PPOTrainer::compute_rollout_ngp_rewards(
     const torch::Tensor& episode_starts_seq) {
   PULSAR_TRACE_SCOPE_CAT("ppo", "reward_model");
   torch::NoGradGuard no_grad;
-  const torch::Tensor obs_cpu = obs_seq.to(ngp_refresh_device_);
-  const torch::Tensor starts_cpu = episode_starts_seq.to(ngp_refresh_device_);
+  const torch::Tensor obs_cpu = obs_seq;
+  const torch::Tensor starts_cpu = episode_starts_seq;
   const torch::Tensor normalized_obs = ngp_normalizer_.normalize(obs_cpu);
   SequenceOutput output =
       ngp_model_->forward_sequence(normalized_obs, std::move(ngp_collection_state_), starts_cpu);
   ngp_collection_state_ = std::move(output.final_state);
   const torch::Tensor scalar_values = ngp_scalar(output.next_goal_logits);
-  const torch::Tensor rewards = config_.reward.ngp_scale *
-      (scalar_values.narrow(0, 1, scalar_values.size(0) - 1) -
-       scalar_values.narrow(0, 0, scalar_values.size(0) - 1));
-  return rewards.to(device_);
+  return config_.reward.ngp_scale *
+         (scalar_values.narrow(0, 1, scalar_values.size(0) - 1) -
+          scalar_values.narrow(0, 0, scalar_values.size(0) - 1));
 }
 
 TrainerMetrics PPOTrainer::update_policy() {
@@ -1744,10 +1743,10 @@ TrainerMetrics PPOTrainer::run_update(std::int64_t* global_step, int current_upd
   std::int64_t collected_agent_steps = 0;
   torch::Tensor ngp_obs_seq = torch::empty(
       {config_.ppo.rollout_length + 1, static_cast<long>(total_agents_), config_.model.observation_dim},
-      torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+      torch::TensorOptions().dtype(torch::kFloat32));
   torch::Tensor ngp_episode_starts_seq = torch::empty(
       {config_.ppo.rollout_length + 1, static_cast<long>(total_agents_)},
-      torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+      torch::TensorOptions().dtype(torch::kFloat32));
   const torch::Tensor zero_rewards = torch::zeros(
       {static_cast<long>(total_agents_)},
       torch::TensorOptions().dtype(torch::kFloat32).device(device_));
@@ -1779,8 +1778,8 @@ TrainerMetrics PPOTrainer::run_update(std::int64_t* global_step, int current_upd
       torch::Tensor current_actions;
       torch::Tensor log_probs;
       torch::Tensor sampled_values;
-      ngp_obs_seq[step].copy_(raw_obs);
-      ngp_episode_starts_seq[step].copy_(episode_starts);
+      ngp_obs_seq[step].copy_(raw_obs_host);
+      ngp_episode_starts_seq[step].copy_(collector_->host_episode_starts());
 
       const auto policy_start = std::chrono::steady_clock::now();
       {
@@ -1881,10 +1880,11 @@ TrainerMetrics PPOTrainer::run_update(std::int64_t* global_step, int current_upd
     last_obs = normalizer_.normalize(last_raw_obs);
     last_episode_starts = collector_->host_episode_starts().to(device_, use_pinned_host_buffers_);
   }
-  ngp_obs_seq[config_.ppo.rollout_length].copy_(last_raw_obs);
-  ngp_episode_starts_seq[config_.ppo.rollout_length].copy_(last_episode_starts);
+  ngp_obs_seq[config_.ppo.rollout_length].copy_(collector_->host_observations());
+  ngp_episode_starts_seq[config_.ppo.rollout_length].copy_(collector_->host_episode_starts());
   const auto reward_model_start = std::chrono::steady_clock::now();
-  rollout_.rewards.copy_(compute_rollout_ngp_rewards(ngp_obs_seq, ngp_episode_starts_seq));
+  const torch::Tensor rewards_cpu = compute_rollout_ngp_rewards(ngp_obs_seq, ngp_episode_starts_seq);
+  rollout_.rewards.copy_(rewards_cpu);
   metrics.reward_model_seconds +=
       std::chrono::duration<double>(std::chrono::steady_clock::now() - reward_model_start).count();
   torch::Tensor last_sampled_value;
