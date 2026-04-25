@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .config import ensure_checkpoint_config_matches as _ensure_checkpoint_config_matches
 from .config import load_config as _load_config
@@ -33,8 +33,26 @@ def make_eval_env(
     return _make_eval_env(config, renderer_backend=renderer_backend, udp_ip=udp_ip, udp_port=udp_port)
 
 
-def run_viz_episode(model: Any, env: Any, renderer: Any, config: dict[str, Any], seed: int = 0) -> None:
-    _run_viz_episode(model, env, renderer, config, seed)
+def run_viz_episode(
+    model: Any,
+    env: Any,
+    renderer: Any,
+    config: dict[str, Any],
+    seed: int = 0,
+    realtime: bool = True,
+    policy_mode: str = "deterministic",
+    startup_hook: Callable[[], None] | None = None,
+) -> None:
+    _run_viz_episode(
+        model,
+        env,
+        renderer,
+        config,
+        seed,
+        realtime=realtime,
+        policy_mode=policy_mode,
+        startup_hook=startup_hook,
+    )
 
 
 def ensure_checkpoint_config_matches(config: dict[str, Any], checkpoint_path: str | Path) -> None:

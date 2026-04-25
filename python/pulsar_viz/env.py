@@ -11,10 +11,9 @@ def _require_rlgym() -> Any:
     try:
         from rlgym.api import RLGym
         from rlgym.rocket_league.action_parsers import LookupTableAction, RepeatAction
-        from rlgym.rocket_league.done_conditions import GoalCondition, NoTouchTimeoutCondition, TimeoutCondition
         from rlgym.rocket_league.obs_builders import DefaultObs
         from rlgym.rocket_league.sim.rocketsim_engine import RocketSimEngine
-        from rlgym.rocket_league.state_mutators import FixedTeamSizeMutator, KickoffMutator, MutatorSequence
+        from rlgym.rocket_league.state_mutators import FixedTeamSizeMutator, MutatorSequence
     except ImportError as exc:
         raise RuntimeError(
             "rlgym is required for visualization. Install the project with `pip install .[viz]`."
@@ -24,14 +23,27 @@ def _require_rlgym() -> Any:
         "RLGym": RLGym,
         "LookupTableAction": LookupTableAction,
         "RepeatAction": RepeatAction,
-        "GoalCondition": GoalCondition,
-        "NoTouchTimeoutCondition": NoTouchTimeoutCondition,
-        "TimeoutCondition": TimeoutCondition,
         "DefaultObs": DefaultObs,
         "RocketSimEngine": RocketSimEngine,
         "FixedTeamSizeMutator": FixedTeamSizeMutator,
-        "KickoffMutator": KickoffMutator,
         "MutatorSequence": MutatorSequence,
+    }
+
+
+def _require_rlgym_tools() -> Any:
+    try:
+        from rlgym_tools.rocket_league.done_conditions.game_condition import GameCondition
+        from rlgym_tools.rocket_league.shared_info_providers.scoreboard_provider import ScoreboardProvider
+        from rlgym_tools.rocket_league.state_mutators.game_mutator import GameMutator
+    except ImportError as exc:
+        raise RuntimeError(
+            "rlgym-tools is required for full-match visualization. Install the project with `pip install .[viz]`."
+        ) from exc
+
+    return {
+        "GameCondition": GameCondition,
+        "ScoreboardProvider": ScoreboardProvider,
+        "GameMutator": GameMutator,
     }
 
 
@@ -84,13 +96,19 @@ def make_eval_env(
     udp_port: int = 9273,
 ) -> EvalBundle:
     mods = _require_rlgym()
+    tool_mods = _require_rlgym_tools()
     env_cfg = config["env"]
     os.environ.setdefault("RS_COLLISION_MESHES", env_cfg.get("collision_meshes_path", "collision_meshes"))
 
     renderer = _make_renderer(renderer_backend, env_cfg, udp_ip, udp_port)
+    game_length_seconds = float(env_cfg.get("game_length_seconds", 300.0))
+    kickoff_timer_seconds = float(env_cfg.get("kickoff_timer_seconds", 5.0))
     state_mutator = mods["MutatorSequence"](
         mods["FixedTeamSizeMutator"](blue_size=env_cfg["team_size"], orange_size=env_cfg["team_size"]),
-        mods["KickoffMutator"](),
+        tool_mods["GameMutator"](
+            game_length_seconds=game_length_seconds,
+            kickoff_timer_seconds=kickoff_timer_seconds,
+        ),
     )
 
     env = mods["RLGym"](
@@ -99,8 +117,8 @@ def make_eval_env(
         action_parser=mods["RepeatAction"](mods["LookupTableAction"](), repeats=env_cfg["tick_skip"]),
         reward_fn=ZeroReward(),
         transition_engine=mods["RocketSimEngine"](),
-        termination_cond=mods["GoalCondition"](),
-        truncation_cond=mods["NoTouchTimeoutCondition"](env_cfg["no_touch_timeout_seconds"]),
+        termination_cond=tool_mods["GameCondition"](),
+        shared_info_provider=tool_mods["ScoreboardProvider"](),
         renderer=renderer,
     )
     return EvalBundle(env=env, renderer=renderer)

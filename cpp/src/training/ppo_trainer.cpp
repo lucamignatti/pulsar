@@ -562,11 +562,11 @@ void PPOTrainer::maybe_initialize_in_process_ngp_refresh(const std::filesystem::
         num_envs,
         agents_per_env);
   }
-  if (anchor_train_trajectories_.empty()) {
-    anchor_train_trajectories_ = load_ngp_trajectories_from_manifest(config_.reward.refresh.anchor_train_manifest);
+  if (anchor_train_manifest_.empty()) {
+    anchor_train_manifest_.build(config_.reward.refresh.anchor_train_manifest, config_.model.observation_dim);
   }
-  if (anchor_val_trajectories_.empty()) {
-    anchor_val_trajectories_ = load_ngp_trajectories_from_manifest(config_.reward.refresh.anchor_val_manifest);
+  if (anchor_val_manifest_.empty()) {
+    anchor_val_manifest_.build(config_.reward.refresh.anchor_val_manifest, config_.model.observation_dim);
   }
 
   const std::filesystem::path refresh_state_dir = init_checkpoint_dir / "ngp_refresh_state";
@@ -1150,15 +1150,16 @@ std::pair<double, double> PPOTrainer::evaluate_ngp_trajectories(
 PPOTrainer::NGPRefreshResult PPOTrainer::evaluate_candidate_refresh(
     SharedActorCritic active_model,
     const ObservationNormalizer& active_normalizer,
-    const std::vector<NGPTrajectory>& recent_val) const {
+    const std::vector<NGPTrajectory>& recent_val,
+    const std::vector<NGPTrajectory>& anchor_val) const {
   PULSAR_TRACE_SCOPE_CAT("ngp_refresh", "evaluate_candidate");
   NGPRefreshResult result{};
   const auto [active_anchor_loss, _active_anchor_acc] =
-      evaluate_ngp_trajectories(active_model, active_normalizer, anchor_val_trajectories_);
+      evaluate_ngp_trajectories(active_model, active_normalizer, anchor_val);
   const auto [active_recent_loss, _active_recent_acc] =
       evaluate_ngp_trajectories(active_model, active_normalizer, recent_val);
   const auto [candidate_anchor_loss, _candidate_anchor_acc] =
-      evaluate_ngp_trajectories(candidate_ngp_model_, candidate_ngp_normalizer_, anchor_val_trajectories_);
+      evaluate_ngp_trajectories(candidate_ngp_model_, candidate_ngp_normalizer_, anchor_val);
   const auto [candidate_recent_loss, _candidate_recent_acc] =
       evaluate_ngp_trajectories(candidate_ngp_model_, candidate_ngp_normalizer_, recent_val);
 
@@ -1198,12 +1199,14 @@ void PPOTrainer::ngp_refresh_worker_loop() {
     result.online_train_samples = ngp_trajectory_sample_count(task.online_train);
     result.online_val_samples = ngp_trajectory_sample_count(task.online_val);
 
+    const std::vector<NGPTrajectory> anchor_val = anchor_val_manifest_.load_all();
+
     {
       std::lock_guard<std::mutex> candidate_lock(candidate_mutex_);
       std::vector<NGPTrajectory> training_trajectories = task.online_train;
       training_trajectories.insert(training_trajectories.end(), task.anchor_train.begin(), task.anchor_train.end());
       train_candidate_on_trajectories(training_trajectories, config_.reward.refresh.candidate_epochs);
-      NGPRefreshResult eval_result = evaluate_candidate_refresh(task.active_model, task.active_normalizer, task.online_val);
+      NGPRefreshResult eval_result = evaluate_candidate_refresh(task.active_model, task.active_normalizer, task.online_val, anchor_val);
       result.active_anchor_loss = eval_result.active_anchor_loss;
       result.active_recent_loss = eval_result.active_recent_loss;
       result.candidate_anchor_loss = eval_result.candidate_anchor_loss;
@@ -1245,7 +1248,7 @@ void PPOTrainer::maybe_schedule_ngp_refresh_task(std::int64_t global_step, int u
     const auto target_anchor_samples = static_cast<std::int64_t>(
         std::ceil(static_cast<double>(online_train_samples) * old_fraction / (1.0 - old_fraction)));
     anchor_subset =
-        select_ngp_trajectory_subset(anchor_train_trajectories_, target_anchor_samples, config_.offline_dataset.seed + update_index);
+        anchor_train_manifest_.sample(target_anchor_samples, config_.offline_dataset.seed + update_index);
   }
 
   NGPRefreshTask task;
@@ -1271,11 +1274,12 @@ void PPOTrainer::maybe_schedule_ngp_refresh_task(std::int64_t global_step, int u
   }
 
   {
+    const std::vector<NGPTrajectory> anchor_val = anchor_val_manifest_.load_all();
     std::lock_guard<std::mutex> candidate_lock(candidate_mutex_);
     std::vector<NGPTrajectory> training_trajectories = task.online_train;
     training_trajectories.insert(training_trajectories.end(), task.anchor_train.begin(), task.anchor_train.end());
     train_candidate_on_trajectories(training_trajectories, config_.reward.refresh.candidate_epochs);
-    latest_ngp_refresh_result_ = evaluate_candidate_refresh(task.active_model, task.active_normalizer, task.online_val);
+    latest_ngp_refresh_result_ = evaluate_candidate_refresh(task.active_model, task.active_normalizer, task.online_val, anchor_val);
     latest_ngp_refresh_result_.update_index = update_index;
     latest_ngp_refresh_result_.global_step = global_step;
     latest_ngp_refresh_result_.online_train_samples = online_train_samples;

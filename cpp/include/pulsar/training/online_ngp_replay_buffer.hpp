@@ -12,6 +12,7 @@
 #include <torch/torch.h>
 
 #include "pulsar/config/config.hpp"
+#include "pulsar/training/offline_dataset.hpp"
 
 namespace pulsar {
 
@@ -26,6 +27,37 @@ std::vector<NGPTrajectory> select_ngp_trajectory_subset(
     const std::vector<NGPTrajectory>& trajectories,
     std::int64_t target_samples,
     std::uint64_t seed);
+
+struct AnchorTrajectoryRef {
+  int shard_index = 0;
+  std::int64_t start_step = 0;
+  std::int64_t num_steps = 0;
+  std::int64_t label = 0;
+};
+
+class AnchorManifest {
+ public:
+  AnchorManifest() = default;
+
+  void build(const std::string& manifest_path, int obs_dim);
+
+  [[nodiscard]] bool empty() const;
+  [[nodiscard]] std::int64_t total_samples() const;
+  [[nodiscard]] std::int64_t num_trajectories() const;
+
+  [[nodiscard]] std::vector<NGPTrajectory> sample(
+      std::int64_t target_samples,
+      std::uint64_t seed) const;
+
+  [[nodiscard]] std::vector<NGPTrajectory> load_all() const;
+
+ private:
+  std::string manifest_path_{};
+  int obs_dim_ = 0;
+  OfflineTensorManifest manifest_{};
+  std::vector<AnchorTrajectoryRef> index_{};
+  std::int64_t total_samples_ = 0;
+};
 
 class OnlineNGPReplayBuffer {
  public:

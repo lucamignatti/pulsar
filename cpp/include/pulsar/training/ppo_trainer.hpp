@@ -206,7 +206,8 @@ class PPOTrainer {
   NGPRefreshResult evaluate_candidate_refresh(
       SharedActorCritic active_model,
       const ObservationNormalizer& active_normalizer,
-      const std::vector<NGPTrajectory>& recent_val) const;
+      const std::vector<NGPTrajectory>& recent_val,
+      const std::vector<NGPTrajectory>& anchor_val) const;
   std::pair<double, double> evaluate_ngp_trajectories(
       SharedActorCritic model,
       const ObservationNormalizer& normalizer,
@@ -234,8 +235,8 @@ class PPOTrainer {
   ObservationNormalizer ngp_normalizer_{1};
   std::unique_ptr<OnlineNGPDatasetWriter> online_ngp_dataset_writer_{};
   std::unique_ptr<OnlineNGPReplayBuffer> ngp_replay_buffer_{};
-  std::vector<NGPTrajectory> anchor_train_trajectories_{};
-  std::vector<NGPTrajectory> anchor_val_trajectories_{};
+  AnchorManifest anchor_train_manifest_{};
+  AnchorManifest anchor_val_manifest_{};
   SharedActorCritic candidate_ngp_model_{nullptr};
   ObservationNormalizer candidate_ngp_normalizer_{1};
   std::vector<torch::Tensor> candidate_trunk_parameters_{};

@@ -143,7 +143,7 @@ If `ppo.self_play.enabled` is true, self-play policy snapshots are written under
 ```bash
 pulsar-viz \
   --config configs/2v2_ppo.json \
-  --checkpoint /path/to/checkpoint/model.pt \
+  --checkpoint /path/to/checkpoint \
   --device cpu
 ```
 
@@ -152,9 +152,21 @@ You can also target `RocketSimVis` instead of `RLViser`:
 ```bash
 pulsar-viz \
   --config configs/2v2_ppo.json \
-  --checkpoint /path/to/checkpoint/model.pt \
+  --checkpoint /path/to/checkpoint \
   --device cpu \
   --renderer rocketsimvis
 ```
 
-The Python side stays intentionally thin: it loads the shared config, loads the native model, builds an evaluation environment, and runs a visualization episode through either `RLViser` or `RocketSimVis`.
+To write a video file from the actual `RLViser` window on macOS, add `--video-out`:
+
+```bash
+pulsar-viz \
+  --config configs/2v2_ppo.json \
+  --checkpoint /path/to/checkpoint \
+  --device cpu \
+  --video-out /path/to/eval.mp4
+```
+
+`--video-out` currently requires `--renderer rlviser`. The recorder captures the real RLViser window via macOS screen capture, so the terminal or Python process needs Screen Recording permission, and window inspection also requires Accessibility permission.
+
+The Python side stays intentionally thin: it loads the shared config, loads the native model, builds an evaluation environment, and runs a visualization episode through `RLViser` or `RocketSimVis`.
