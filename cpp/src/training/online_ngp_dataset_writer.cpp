@@ -239,6 +239,50 @@ void OnlineNGPDatasetWriter::flush_split(SplitBuffers& buffers, const std::strin
 
   write_manifest(train_, output_root_ / "train_manifest.json");
   write_manifest(val_.shards.empty() ? train_ : val_, output_root_ / "val_manifest.json");
+
+  if (config_.max_shards > 0) {
+    prune_old_shards(train_, output_root_ / "train");
+    prune_old_shards(val_, output_root_ / "val");
+  }
+}
+
+void OnlineNGPDatasetWriter::prune_old_shards(const SplitBuffers& buffers, const std::filesystem::path& split_dir) const {
+  if (buffers.shards.size() <= static_cast<std::size_t>(config_.max_shards)) {
+    return;
+  }
+  namespace fs = std::filesystem;
+  if (!fs::exists(split_dir)) {
+    return;
+  }
+  std::vector<std::pair<int, fs::path>> shard_files;
+  for (const auto& entry : fs::directory_iterator(split_dir)) {
+    if (!entry.is_regular_file()) {
+      continue;
+    }
+    const std::string name = entry.path().filename().string();
+    if (name.rfind("shard_", 0) != 0) {
+      continue;
+    }
+    const auto underscore2 = name.find('_', 6);
+    if (underscore2 == std::string::npos) {
+      continue;
+    }
+    try {
+      int idx = std::stoi(name.substr(6, underscore2 - 6));
+      shard_files.emplace_back(idx, entry.path());
+    } catch (...) {
+      continue;
+    }
+  }
+  if (shard_files.size() <= static_cast<std::size_t>(config_.max_shards)) {
+    return;
+  }
+  std::sort(shard_files.begin(), shard_files.end(),
+            [](const auto& a, const auto& b) { return a.first > b.first; });
+  for (std::size_t i = static_cast<std::size_t>(config_.max_shards); i < shard_files.size(); ++i) {
+    std::error_code ec;
+    fs::remove(shard_files[i].second, ec);
+  }
 }
 
 void OnlineNGPDatasetWriter::write_manifest(const SplitBuffers& buffers, const std::filesystem::path& path) const {

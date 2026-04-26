@@ -199,6 +199,9 @@ class PPOTrainer {
   void enqueue_persistence_request(PersistenceRequest request);
   void persistence_worker_loop();
   void rethrow_persistence_error_if_any();
+  void prune_old_rolling_checkpoints(const std::string& checkpoint_dir) const;
+  void prune_old_ngp_versions(const std::string& checkpoint_dir) const;
+  void prune_old_ngp_runtime_summaries(const std::string& checkpoint_dir) const;
   void maybe_schedule_ngp_refresh_task(std::int64_t global_step, int update_index);
   void maybe_collect_ngp_refresh_result(const std::string& checkpoint_dir);
   void ngp_refresh_worker_loop();

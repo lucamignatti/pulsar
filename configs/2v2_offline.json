@@ -47,6 +47,7 @@
     "max_grad_norm": 1.0,
     "device": "cuda",
     "checkpoint_interval": 10,
+    "max_rolling_checkpoints": 5,
     "sequence_length": 16,
     "burn_in": 0,
     "value_v_min": -10.0,

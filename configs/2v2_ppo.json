@@ -43,7 +43,9 @@
       "train_trunk": false,
       "max_online_windows": 4,
       "max_online_samples": 0,
-      "async_candidate_updates": true
+      "async_candidate_updates": true,
+      "max_ngp_versions": 10,
+      "max_ngp_runtime_summaries": 100
     }
   },
   "action_table": {

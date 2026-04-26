@@ -17,6 +17,7 @@ struct RewardConfig {
     int shard_size = 65536;
     float train_fraction = 0.95F;
     std::uint64_t seed = 0;
+    int max_shards = 0;  // 0 = unlimited (default); >0 prunes oldest shards when exceeded
   };
 
   struct RefreshConfig {
@@ -37,6 +38,8 @@ struct RewardConfig {
     int max_online_windows = 4;
     int max_online_samples = 0;
     bool async_candidate_updates = true;
+    int max_ngp_versions = 10;  // maximum promoted NGP checkpoints to retain on disk
+    int max_ngp_runtime_summaries = 100;  // maximum ngp_runtime/update_* summary dirs to retain
   };
 
   std::string ngp_checkpoint{};
@@ -113,6 +116,7 @@ struct PPOConfig {
   float max_grad_norm = 1.0F;
   std::string device = "cpu";
   int checkpoint_interval = 10;
+  int max_rolling_checkpoints = 5;  // maximum rolling (update_N) checkpoints to retain on disk
   int sequence_length = 16;
   int burn_in = 0;
   float value_v_min = -10.0F;

@@ -55,6 +55,7 @@ void to_json(json& j, const RewardConfig::OnlineDatasetExportConfig& value) {
       {"shard_size", value.shard_size},
       {"train_fraction", value.train_fraction},
       {"seed", value.seed},
+      {"max_shards", value.max_shards},
   };
 }
 
@@ -64,6 +65,7 @@ void from_json(const json& j, RewardConfig::OnlineDatasetExportConfig& value) {
   value.shard_size = j.value("shard_size", 65536);
   value.train_fraction = j.value("train_fraction", 0.95F);
   value.seed = j.value("seed", static_cast<std::uint64_t>(0));
+  value.max_shards = j.value("max_shards", 0);
 }
 
 void to_json(json& j, const RewardConfig::RefreshConfig& value) {
@@ -85,6 +87,8 @@ void to_json(json& j, const RewardConfig::RefreshConfig& value) {
       {"max_online_windows", value.max_online_windows},
       {"max_online_samples", value.max_online_samples},
       {"async_candidate_updates", value.async_candidate_updates},
+      {"max_ngp_versions", value.max_ngp_versions},
+      {"max_ngp_runtime_summaries", value.max_ngp_runtime_summaries},
   };
 }
 
@@ -106,6 +110,8 @@ void from_json(const json& j, RewardConfig::RefreshConfig& value) {
   value.max_online_windows = j.value("max_online_windows", 4);
   value.max_online_samples = j.value("max_online_samples", 0);
   value.async_candidate_updates = j.value("async_candidate_updates", true);
+  value.max_ngp_versions = j.value("max_ngp_versions", 10);
+  value.max_ngp_runtime_summaries = j.value("max_ngp_runtime_summaries", 100);
 }
 
 void to_json(json& j, const RewardConfig& value) {
@@ -253,6 +259,7 @@ void to_json(json& j, const PPOConfig& value) {
       {"max_grad_norm", value.max_grad_norm},
       {"device", value.device},
       {"checkpoint_interval", value.checkpoint_interval},
+      {"max_rolling_checkpoints", value.max_rolling_checkpoints},
       {"sequence_length", value.sequence_length},
       {"burn_in", value.burn_in},
       {"value_v_min", value.value_v_min},
@@ -286,6 +293,7 @@ void from_json(const json& j, PPOConfig& value) {
   value.max_grad_norm = j.at("max_grad_norm").get<float>();
   value.device = j.at("device").get<std::string>();
   value.checkpoint_interval = j.at("checkpoint_interval").get<int>();
+  value.max_rolling_checkpoints = j.value("max_rolling_checkpoints", 5);
   value.sequence_length = j.value("sequence_length", 16);
   value.burn_in = j.value("burn_in", 0);
   value.value_v_min = j.value("value_v_min", -10.0F);

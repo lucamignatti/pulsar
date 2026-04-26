@@ -47,6 +47,20 @@ void test_snapshot_save_load_trim_and_assignment() {
   pulsar::test::require(reloaded.has_snapshots(), "reloaded manager should see snapshots");
   const auto assignment = reloaded.sample_assignment(0, 7);
   pulsar::test::require(assignment.enabled, "assignment should be enabled with opponent_probability=1");
+
+  pulsar::ExperimentConfig reward_changed_config = config;
+  reward_changed_config.reward.touch_reward += 1.0F;
+  reward_changed_config.reward.goal_reward += 1.0F;
+  reward_changed_config.reward.concede_penalty += 1.0F;
+  pulsar::SelfPlayManager reward_changed_reloaded(
+      reward_changed_config,
+      root,
+      obs_builder,
+      action_parser,
+      torch::kCPU);
+  pulsar::test::require(
+      reward_changed_reloaded.has_snapshots(),
+      "self-play snapshot load should tolerate reward-only config changes");
 }
 
 void test_opponent_inference_and_elo_math() {

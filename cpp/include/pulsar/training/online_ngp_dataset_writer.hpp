@@ -56,6 +56,7 @@ class OnlineNGPDatasetWriter {
   [[nodiscard]] std::string choose_split(std::size_t env_idx) const;
   void flush_ready_split(const std::string& split);
   void flush_split(SplitBuffers& buffers, const std::string& split);
+  void prune_old_shards(const SplitBuffers& buffers, const std::filesystem::path& split_dir) const;
   void write_manifest(const SplitBuffers& buffers, const std::filesystem::path& path) const;
 
   RewardConfig::OnlineDatasetExportConfig config_{};

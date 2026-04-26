@@ -1415,6 +1415,7 @@ void PPOTrainer::maybe_collect_ngp_refresh_result(const std::string& checkpoint_
   };
   std::ofstream summary_output(refresh_dir / "summary.json");
   summary_output << summary.dump(2) << '\n';
+  prune_old_ngp_runtime_summaries(checkpoint_dir);
 
   if (!result.promote ||
       result.update_index - last_ngp_promotion_update_ < std::max(1, config_.reward.refresh.promotion_cooldown_updates)) {
@@ -1460,6 +1461,7 @@ void PPOTrainer::maybe_collect_ngp_refresh_result(const std::string& checkpoint_
   promotion_metrics.ngp_checkpoint = active_ngp_checkpoint_;
   promotion_metrics.ngp_config_hash = active_ngp_config_hash_;
   append_ngp_promotion_line(checkpoint_dir, result.global_step, result.update_index, old_checkpoint, active_ngp_checkpoint_, promotion_metrics);
+  prune_old_ngp_versions(checkpoint_dir);
 }
 
 void PPOTrainer::maybe_refresh_ngp_candidate_in_process(
@@ -1966,6 +1968,110 @@ TrainerMetrics PPOTrainer::run_update(std::int64_t* global_step, int current_upd
   return metrics;
 }
 
+void PPOTrainer::prune_old_rolling_checkpoints(const std::string& checkpoint_dir) const {
+  const int max_checkpoints = config_.ppo.max_rolling_checkpoints;
+  if (max_checkpoints <= 0) {
+    return;
+  }
+  namespace fs = std::filesystem;
+  std::vector<std::pair<int, fs::path>> entries;
+  for (const auto& entry : fs::directory_iterator(checkpoint_dir)) {
+    if (!entry.is_directory()) {
+      continue;
+    }
+    const std::string name = entry.path().filename().string();
+    if (name.rfind("update_", 0) != 0) {
+      continue;
+    }
+    try {
+      int update_idx = std::stoi(name.substr(7));
+      entries.emplace_back(update_idx, entry.path());
+    } catch (...) {
+      continue;
+    }
+  }
+  std::sort(entries.begin(), entries.end(),
+            [](const auto& a, const auto& b) { return a.first > b.first; });
+  for (std::size_t i = static_cast<std::size_t>(max_checkpoints); i < entries.size(); ++i) {
+    std::error_code ec;
+    fs::remove_all(entries[i].second, ec);
+    if (!ec) {
+      std::cout << "pruned_rolling_checkpoint=" << entries[i].second.string() << '\n';
+    }
+  }
+}
+
+void PPOTrainer::prune_old_ngp_versions(const std::string& checkpoint_dir) const {
+  const int max_versions = config_.reward.refresh.max_ngp_versions;
+  if (max_versions <= 0) {
+    return;
+  }
+  namespace fs = std::filesystem;
+  const fs::path versions_dir = fs::path(checkpoint_dir) / "ngp_versions";
+  if (!fs::exists(versions_dir)) {
+    return;
+  }
+  std::vector<std::pair<int, fs::path>> entries;
+  for (const auto& entry : fs::directory_iterator(versions_dir)) {
+    if (!entry.is_directory()) {
+      continue;
+    }
+    const std::string name = entry.path().filename().string();
+    if (name.rfind("promotion_", 0) != 0) {
+      continue;
+    }
+    try {
+      int idx = std::stoi(name.substr(10));
+      entries.emplace_back(idx, entry.path());
+    } catch (...) {
+      continue;
+    }
+  }
+  std::sort(entries.begin(), entries.end(),
+            [](const auto& a, const auto& b) { return a.first > b.first; });
+  for (std::size_t i = static_cast<std::size_t>(max_versions); i < entries.size(); ++i) {
+    std::error_code ec;
+    fs::remove_all(entries[i].second, ec);
+    if (!ec) {
+      std::cout << "pruned_ngp_version=" << entries[i].second.string() << '\n';
+    }
+  }
+}
+
+void PPOTrainer::prune_old_ngp_runtime_summaries(const std::string& checkpoint_dir) const {
+  const int max_summaries = config_.reward.refresh.max_ngp_runtime_summaries;
+  if (max_summaries <= 0) {
+    return;
+  }
+  namespace fs = std::filesystem;
+  const fs::path runtime_dir = fs::path(checkpoint_dir) / "ngp_runtime";
+  if (!fs::exists(runtime_dir)) {
+    return;
+  }
+  std::vector<std::pair<int, fs::path>> entries;
+  for (const auto& entry : fs::directory_iterator(runtime_dir)) {
+    if (!entry.is_directory()) {
+      continue;
+    }
+    const std::string name = entry.path().filename().string();
+    if (name.rfind("update_", 0) != 0) {
+      continue;
+    }
+    try {
+      int idx = std::stoi(name.substr(7));
+      entries.emplace_back(idx, entry.path());
+    } catch (...) {
+      continue;
+    }
+  }
+  std::sort(entries.begin(), entries.end(),
+            [](const auto& a, const auto& b) { return a.first > b.first; });
+  for (std::size_t i = static_cast<std::size_t>(max_summaries); i < entries.size(); ++i) {
+    std::error_code ec;
+    fs::remove_all(entries[i].second, ec);
+  }
+}
+
 void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std::string& config_path) {
   PULSAR_TRACE_SCOPE_CAT("ppo", "train");
   std::int64_t global_step = resumed_global_step_;
@@ -2049,6 +2155,7 @@ void PPOTrainer::train(int updates, const std::string& checkpoint_dir, const std
           .directory = std::filesystem::path(checkpoint_dir) / ("update_" + std::to_string(current_update_index)),
           .checkpoint = ensure_update_snapshot(),
       });
+      prune_old_rolling_checkpoints(checkpoint_dir);
     }
     if (metrics.reward_mean > best_reward_mean_) {
       best_reward_mean_ = metrics.reward_mean;
