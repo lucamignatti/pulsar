@@ -178,7 +178,7 @@ OfflineEpochMetrics average_metrics(OfflineEpochMetrics metrics) {
   return metrics;
 }
 
-void configure_cuda_runtime_for_h100(const torch::Device& device) {
+void configure_cuda_runtime(const torch::Device& device) {
   if (!device.is_cuda()) {
     return;
   }
@@ -208,7 +208,7 @@ OfflinePretrainer::OfflinePretrainer(ExperimentConfig config)
           torch::optim::AdamWOptions(config_.offline_pretraining.evaluator_learning_rate)
               .weight_decay(config_.future_evaluator.weight_decay))),
       device_(config_.lfpo.device) {
-  configure_cuda_runtime_for_h100(device_);
+  configure_cuda_runtime(device_);
   validate_config();
   actor_->to(device_);
   evaluator_->to(device_);

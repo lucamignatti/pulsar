@@ -47,7 +47,7 @@ option(PULSAR_ENABLE_PYTHON "Enable Python bindings and visualization helpers" O
 option(PULSAR_ENABLE_TESTS "Build unit and smoke tests" ON)
 option(PULSAR_ENABLE_BENCHMARKS "Build benchmark targets" ON)
 option(PULSAR_ENABLE_ROCKETSIM "Enable RocketSim-backed simulation" ON)
-option(PULSAR_ENABLE_CUDA_H100_SMOKE "Enable CUDA/H100 integration smoke test when Python and Torch are available." ON)
+option(PULSAR_ENABLE_CUDA_SMOKE "Enable CUDA integration smoke test when Python and Torch are available." ON)
 option(
   PULSAR_ENABLE_CXX_TORCH_IO_TESTS
   "Enable standalone C++ libtorch serialization/checkpoint unit tests. Disabled by default because CUDA Linux libtorch builds can segfault or hang during standalone test process teardown; the production binary smokes cover these paths."
@@ -344,17 +344,17 @@ if(PULSAR_ENABLE_TESTS AND Python3_EXECUTABLE)
   set_tests_properties(pulsar_preprocess_smoke PROPERTIES LABELS "smoke;dataset")
 endif()
 
-if(PULSAR_ENABLE_TESTS AND PULSAR_ENABLE_CUDA_H100_SMOKE AND TARGET pulsar_lfpo_train AND TARGET pulsar_lfpo_pretrain AND Python3_EXECUTABLE)
+if(PULSAR_ENABLE_TESTS AND PULSAR_ENABLE_CUDA_SMOKE AND TARGET pulsar_lfpo_train AND TARGET pulsar_lfpo_pretrain AND Python3_EXECUTABLE)
   add_test(
-    NAME pulsar_cuda_h100_smoke
+    NAME pulsar_cuda_smoke
     COMMAND
       ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/cuda_h100_smoke.py
+      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/cuda_smoke.py
       ${CMAKE_CURRENT_SOURCE_DIR}
       $<TARGET_FILE:pulsar_lfpo_train>
       $<TARGET_FILE:pulsar_lfpo_pretrain>
       ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_lfpo.json
       ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_offline.json
   )
-  set_tests_properties(pulsar_cuda_h100_smoke PROPERTIES LABELS "cuda;h100;smoke" SKIP_RETURN_CODE 77)
+  set_tests_properties(pulsar_cuda_smoke PROPERTIES LABELS "cuda;smoke" SKIP_RETURN_CODE 77)
 endif()

@@ -1,16 +1,16 @@
-# Linux + CUDA H100 Notes
+# Linux + CUDA Notes
 
-`Pulsar` now targets NVIDIA H100 systems for production LFPO training. The intended deployment stack is:
+`Pulsar` targets NVIDIA CUDA systems for production LFPO training. H100 is the high-throughput target, but CUDA validation runs on any CUDA-capable GPU. The intended deployment stack is:
 
 - NVIDIA driver with CUDA 12.x support
-- CUDA-enabled PyTorch built for `sm_90`
+- CUDA-enabled PyTorch
 - `RocketSim` available to the C++ build
 - Python package extras for `rlgym`, `rocketsim`, and `rlviser-py`
 
 ## Suggested Build Flow
 
 1. Install a current NVIDIA driver and CUDA 12.x toolkit on the host.
-2. Verify the H100 with `nvidia-smi` and confirm compute capability 9.0.
+2. Verify CUDA visibility with `nvidia-smi`.
 3. Initialize the vendored `RocketSim` submodule with `git submodule update --init --recursive`.
 4. Download the soccar collision meshes with `python3 scripts/collision_mesh_downloader.py`.
 5. Install a CUDA-enabled PyTorch build in the virtualenv.
@@ -43,7 +43,7 @@ cmake --build build/release --parallel
 
 - Use `lfpo.device = "cuda"` or `"cuda:0"` in LFPO configs.
 - CUDA pinned host buffers are enabled for collector-to-GPU transfers when the runtime device is CUDA.
-- The CUDA/H100 smoke test enables TF32 matmul and cuDNN paths through PyTorch before running the LFPO pretrain/train slice.
+- The CUDA smoke test enables TF32 matmul and cuDNN paths through PyTorch when supported before running the LFPO pretrain/train slice.
 
 ## Expected External Inputs
 
@@ -67,5 +67,5 @@ If the Torch targets are enabled, also validate:
 
 - `pulsar_lfpo_pretrain` writes the Continuum actor plus `future_evaluator/`.
 - `pulsar_lfpo_train` loads that checkpoint via `lfpo.init_checkpoint` and runs on `cuda:0`.
-- The CUDA smoke test is skipped on non-H100 machines and runs only when a CUDA-enabled PyTorch build sees an H100 or `sm_90` device.
+- The CUDA smoke test is skipped only when no CUDA device is available or PyTorch is not CUDA-enabled.
 - Python bindings are optional. If `Python3 Development.Module` is unavailable, CMake skips `pulsar_native` without blocking the C++ trainer build.

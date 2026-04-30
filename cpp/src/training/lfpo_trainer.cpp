@@ -47,7 +47,7 @@ void freeze_parameters(const FutureEvaluator& evaluator) {
   }
 }
 
-void configure_cuda_runtime_for_h100(const torch::Device& device) {
+void configure_cuda_runtime(const torch::Device& device) {
   if (!device.is_cuda()) {
     return;
   }
@@ -219,7 +219,7 @@ LFPOTrainer::LFPOTrainer(
   collection_trajectory_ids_ =
       torch::arange(static_cast<long>(total_agents_), torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
   next_trajectory_id_ = static_cast<std::int64_t>(total_agents_);
-  configure_cuda_runtime_for_h100(device_);
+  configure_cuda_runtime(device_);
   use_pinned_host_buffers_ = device_.is_cuda();
   actor_->to(device_);
   evaluator_->to(device_);
