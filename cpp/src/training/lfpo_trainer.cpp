@@ -256,19 +256,23 @@ torch::Tensor LFPOTrainer::sample_candidate_actions(
     const torch::Tensor& logits,
     const torch::Tensor& action_masks,
     torch::Tensor* log_probs) const {
-  std::vector<torch::Tensor> actions;
-  std::vector<torch::Tensor> logs;
-  actions.reserve(static_cast<std::size_t>(config_.lfpo.candidate_count));
-  logs.reserve(static_cast<std::size_t>(config_.lfpo.candidate_count));
-  for (int index = 0; index < config_.lfpo.candidate_count; ++index) {
-    torch::Tensor current_log_probs;
-    actions.push_back(sample_actions(logits, action_masks, false, &current_log_probs));
-    logs.push_back(current_log_probs);
-  }
+  const torch::Tensor masked = apply_action_mask_to_logits(logits, action_masks);
+  const torch::Tensor action_log_probs = torch::log_softmax(masked, -1);
+  const auto options = masked.options();
+  const torch::Tensor uniform =
+      torch::rand(
+          {masked.size(0), config_.lfpo.candidate_count, masked.size(1)},
+          options)
+          .clamp_(1.0e-6, 1.0 - 1.0e-6);
+  const torch::Tensor gumbel = -torch::log(-torch::log(uniform));
+  const torch::Tensor actions = (masked.unsqueeze(1) + gumbel).argmax(-1);
   if (log_probs != nullptr) {
-    *log_probs = torch::stack(logs, -1);
+    *log_probs =
+        action_log_probs.unsqueeze(1).expand({masked.size(0), config_.lfpo.candidate_count, masked.size(1)})
+            .gather(-1, actions.unsqueeze(-1))
+            .squeeze(-1);
   }
-  return torch::stack(actions, -1);
+  return actions;
 }
 
 void LFPOTrainer::maybe_initialize_from_checkpoint() {

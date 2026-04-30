@@ -3,6 +3,8 @@
 #include <cstdlib>
 #include <iostream>
 
+#include <torch/cuda.h>
+
 #include "pulsar/model/future_evaluator.hpp"
 #include "pulsar/model/latent_future_actor.hpp"
 #include "pulsar/training/lfpo_math.hpp"
@@ -11,6 +13,12 @@ namespace {
 
 double seconds_since(std::chrono::steady_clock::time_point start) {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+}
+
+void synchronize_if_cuda(const torch::Device& device) {
+  if (device.is_cuda()) {
+    torch::cuda::synchronize(device.index());
+  }
 }
 
 pulsar::ModelConfig benchmark_model_config() {
@@ -46,7 +54,10 @@ pulsar::FutureEvaluatorConfig benchmark_evaluator_config() {
 
 int main(int argc, char** argv) {
   const int updates = argc > 1 ? std::max(1, std::atoi(argv[1])) : 1;
-  const int batch = argc > 2 ? std::max(1, std::atoi(argv[2])) : 32;
+  const int batch = argc > 2 ? std::max(1, std::atoi(argv[2])) : 4096;
+  const torch::Device device =
+      argc > 3 ? torch::Device(argv[3])
+               : (torch::cuda::is_available() ? torch::Device(torch::kCUDA, 0) : torch::Device(torch::kCPU));
   const int candidates = 8;
   const int sequence = 8;
 
@@ -54,7 +65,11 @@ int main(int argc, char** argv) {
   const pulsar::FutureEvaluatorConfig evaluator_config = benchmark_evaluator_config();
   pulsar::LatentFutureActor actor(model_config);
   pulsar::FutureEvaluator evaluator(evaluator_config, model_config.observation_dim);
+  actor->to(device);
+  evaluator->to(device);
   torch::optim::Adam optimizer(actor->parameters(), torch::optim::AdamOptions(3.0e-4));
+
+  std::cout << "device=" << device.str() << '\n';
 
   double policy_forward_seconds = 0.0;
   double evaluator_seconds = 0.0;
@@ -62,29 +77,37 @@ int main(int argc, char** argv) {
   std::int64_t samples = 0;
 
   for (int update = 0; update < updates; ++update) {
-    torch::Tensor obs = torch::randn({sequence, batch, model_config.observation_dim});
-    torch::Tensor starts = torch::zeros({sequence, batch});
-    auto state = actor->initial_state(batch, torch::kCPU);
+    torch::Tensor obs = torch::randn({sequence, batch, model_config.observation_dim}, device);
+    torch::Tensor starts = torch::zeros({sequence, batch}, device);
+    auto state = actor->initial_state(batch, device);
+    synchronize_if_cuda(device);
     auto forward_start = std::chrono::steady_clock::now();
     const pulsar::ActorSequenceOutput output = actor->forward_sequence(obs, std::move(state), starts);
+    synchronize_if_cuda(device);
     policy_forward_seconds += seconds_since(forward_start);
 
     const torch::Tensor features = output.features.reshape({sequence * batch, actor->feature_dim()});
     const torch::Tensor candidate_actions =
-        torch::randint(model_config.action_dim, {sequence * batch, candidates}, torch::TensorOptions().dtype(torch::kLong));
+        torch::randint(
+            model_config.action_dim,
+            {sequence * batch, candidates},
+            torch::TensorOptions().dtype(torch::kLong).device(device));
     const torch::Tensor feature_candidates =
         features.unsqueeze(1).expand({features.size(0), candidates, actor->feature_dim()}).reshape({-1, actor->feature_dim()});
 
+    synchronize_if_cuda(device);
     auto lfpo_start = std::chrono::steady_clock::now();
     const torch::Tensor predicted =
         actor->predict_future_latents(feature_candidates, candidate_actions.reshape({-1}))
             .reshape({features.size(0), candidates, model_config.future_horizon_count, model_config.future_latent_dim});
+    synchronize_if_cuda(device);
     auto evaluator_start = std::chrono::steady_clock::now();
     const torch::Tensor scores = pulsar::latent_action_scores(evaluator->classify_embeddings(predicted));
+    synchronize_if_cuda(device);
     evaluator_seconds += seconds_since(evaluator_start);
     const torch::Tensor advantages = pulsar::relative_candidate_advantages(scores);
     const torch::Tensor logits = output.policy_logits.reshape({sequence * batch, model_config.action_dim});
-    const torch::Tensor masks = torch::ones(logits.sizes(), torch::TensorOptions().dtype(torch::kBool));
+    const torch::Tensor masks = torch::ones(logits.sizes(), torch::TensorOptions().dtype(torch::kBool).device(device));
     const torch::Tensor log_probs =
         torch::log_softmax(pulsar::apply_action_mask_to_logits(logits, masks), -1).gather(1, candidate_actions);
     const torch::Tensor loss =
@@ -93,6 +116,7 @@ int main(int argc, char** argv) {
     optimizer.zero_grad();
     loss.backward();
     optimizer.step();
+    synchronize_if_cuda(device);
     lfpo_seconds += seconds_since(lfpo_start);
     samples += sequence * batch;
   }
