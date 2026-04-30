@@ -133,10 +133,10 @@ int main() {
   try {
     test_snapshot_save_load_trim_and_assignment();
     test_opponent_inference_and_elo_math();
-    std::cout << "pulsar_self_play_tests passed\n";
-    return EXIT_SUCCESS;
+    std::cout << "pulsar_self_play_tests passed\n" << std::flush;
+    std::_Exit(EXIT_SUCCESS);
   } catch (const std::exception& exc) {
-    std::cerr << "pulsar_self_play_tests failed: " << exc.what() << '\n';
-    return EXIT_FAILURE;
+    std::cerr << "pulsar_self_play_tests failed: " << exc.what() << '\n' << std::flush;
+    std::_Exit(EXIT_FAILURE);
   }
 }

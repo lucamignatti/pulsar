@@ -148,10 +148,10 @@ int main() {
   try {
     test_dataset_iteration_and_trajectories();
     test_dataset_default_episode_starts_and_mismatch();
-    std::cout << "pulsar_dataset_tests passed\n";
-    return EXIT_SUCCESS;
+    std::cout << "pulsar_dataset_tests passed\n" << std::flush;
+    std::_Exit(EXIT_SUCCESS);
   } catch (const std::exception& exc) {
-    std::cerr << "pulsar_dataset_tests failed: " << exc.what() << '\n';
-    return EXIT_FAILURE;
+    std::cerr << "pulsar_dataset_tests failed: " << exc.what() << '\n' << std::flush;
+    std::_Exit(EXIT_FAILURE);
   }
 }

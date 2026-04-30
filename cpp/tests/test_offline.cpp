@@ -232,10 +232,10 @@ int main() {
     }
 
     fs::remove_all(root);
-    std::cout << "pulsar_offline_tests passed\n";
-    return EXIT_SUCCESS;
+    std::cout << "pulsar_offline_tests passed\n" << std::flush;
+    std::_Exit(EXIT_SUCCESS);
   } catch (const std::exception& exc) {
-    std::cerr << "pulsar_offline_tests failed: " << exc.what() << '\n';
-    return EXIT_FAILURE;
+    std::cerr << "pulsar_offline_tests failed: " << exc.what() << '\n' << std::flush;
+    std::_Exit(EXIT_FAILURE);
   }
 }
