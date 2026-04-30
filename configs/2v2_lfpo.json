@@ -41,11 +41,11 @@
     "future_horizon_count": 3
   },
   "lfpo": {
-    "num_envs": 256,
-    "collection_workers": 0,
+    "num_envs": 512,
+    "collection_workers": 16,
     "init_checkpoint": "",
     "rollout_length": 256,
-    "minibatch_size": 32768,
+    "minibatch_size": 65536,
     "update_epochs": 3,
     "clip_range": 0.2,
     "entropy_coef": 0.01,
@@ -54,7 +54,7 @@
     "behavior_prior_decay_updates": 0,
     "learning_rate": 0.0002,
     "max_grad_norm": 1.0,
-    "device": "cuda",
+    "device": "cuda:0",
     "checkpoint_interval": 10,
     "max_rolling_checkpoints": 5,
     "sequence_length": 16,

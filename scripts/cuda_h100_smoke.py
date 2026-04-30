@@ -19,23 +19,21 @@ def skip(message: str) -> int:
     return 77
 
 
-def rocm_arch_name() -> str:
+def cuda_device_name() -> str:
     props = torch.cuda.get_device_properties(0)
-    for attr in ("gcnArchName", "gcn_arch_name"):
-        value = getattr(props, attr, "")
-        if value:
-            return str(value).split(":", 1)[0]
-    name = str(getattr(props, "name", ""))
-    if "gfx" in name:
-        suffix = name.split("gfx", 1)[1].split()[0].strip()
-        return f"gfx{suffix}"
-    return ""
+    return str(getattr(props, "name", ""))
+
+
+def is_h100() -> bool:
+    props = torch.cuda.get_device_properties(0)
+    name = cuda_device_name().lower()
+    return "h100" in name or (int(getattr(props, "major", 0)) == 9 and int(getattr(props, "minor", 0)) == 0)
 
 
 def main() -> int:
     if len(sys.argv) != 6:
         raise SystemExit(
-            "usage: rocm_smoke.py <repo_root> <pulsar_lfpo_train> <pulsar_lfpo_pretrain> "
+            "usage: cuda_h100_smoke.py <repo_root> <pulsar_lfpo_train> <pulsar_lfpo_pretrain> "
             "<lfpo_base_config> <offline_base_config>"
         )
 
@@ -46,14 +44,16 @@ def main() -> int:
     offline_base_config_path = Path(sys.argv[5]).resolve()
 
     if not torch.cuda.is_available():
-        return skip("ROCm smoke requires an available CUDA/ROCm device")
-    if not getattr(torch.version, "hip", None):
-        return skip("ROCm smoke requires a HIP-enabled PyTorch build")
-    arch = rocm_arch_name()
-    if not arch:
-        return skip("ROCm smoke could not determine the current GPU architecture")
+        return skip("CUDA/H100 smoke requires an available CUDA device")
+    if not getattr(torch.version, "cuda", None):
+        return skip("CUDA/H100 smoke requires a CUDA-enabled PyTorch build")
+    if not is_h100():
+        return skip(f"CUDA/H100 smoke requires H100 or sm_90; found {cuda_device_name()}")
 
-    tmp_dir = Path(tempfile.mkdtemp(prefix="pulsar_rocm_smoke_"))
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="pulsar_cuda_h100_smoke_"))
     keep_tmp_dir = True
     try:
         model_overrides = {
@@ -108,8 +108,8 @@ def main() -> int:
         config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
         command = [str(train_binary), str(config_path), str(checkpoint_dir), "1"]
-        print(f"ROCm smoke temp dir: {tmp_dir}")
-        print("ROCm smoke command:", " ".join(command))
+        print(f"CUDA/H100 smoke temp dir: {tmp_dir}")
+        print("CUDA/H100 smoke command:", " ".join(command))
         try:
             subprocess.run(
                 command,
@@ -117,7 +117,7 @@ def main() -> int:
                 cwd=repo_root,
             )
         except subprocess.CalledProcessError:
-            print(f"ROCm smoke failed; preserving temp dir: {tmp_dir}", file=sys.stderr)
+            print(f"CUDA/H100 smoke failed; preserving temp dir: {tmp_dir}", file=sys.stderr)
             raise
 
         metrics_lines = [
@@ -126,17 +126,17 @@ def main() -> int:
             if line.strip()
         ]
         if not metrics_lines:
-            raise RuntimeError("ROCm smoke did not emit metrics")
+            raise RuntimeError("CUDA/H100 smoke did not emit metrics")
         for field in ["policy_loss", "latent_loss", "entropy"]:
             value = float(metrics_lines[-1][field])
             if not math.isfinite(value):
-                raise RuntimeError(f"non-finite metric in ROCm smoke: {field}={value}")
+                raise RuntimeError(f"non-finite metric in CUDA/H100 smoke: {field}={value}")
         if not (checkpoint_dir / "final" / "model.pt").exists():
-            raise RuntimeError("ROCm smoke did not write final checkpoint")
+            raise RuntimeError("CUDA/H100 smoke did not write final checkpoint")
         keep_tmp_dir = False
     finally:
         if keep_tmp_dir:
-            print(f"ROCm smoke preserved temp dir: {tmp_dir}")
+            print(f"CUDA/H100 smoke preserved temp dir: {tmp_dir}")
         else:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 

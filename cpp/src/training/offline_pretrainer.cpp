@@ -10,6 +10,7 @@
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
+#include <ATen/Context.h>
 
 #include "pulsar/checkpoint/checkpoint.hpp"
 #include "pulsar/training/lfpo_math.hpp"
@@ -177,6 +178,14 @@ OfflineEpochMetrics average_metrics(OfflineEpochMetrics metrics) {
   return metrics;
 }
 
+void configure_cuda_runtime_for_h100(const torch::Device& device) {
+  if (!device.is_cuda()) {
+    return;
+  }
+  at::globalContext().setAllowTF32CuBLAS(true);
+  at::globalContext().setAllowTF32CuDNN(true);
+}
+
 }  // namespace
 
 OfflinePretrainer::OfflinePretrainer(ExperimentConfig config)
@@ -199,6 +208,7 @@ OfflinePretrainer::OfflinePretrainer(ExperimentConfig config)
           torch::optim::AdamWOptions(config_.offline_pretraining.evaluator_learning_rate)
               .weight_decay(config_.future_evaluator.weight_decay))),
       device_(config_.lfpo.device) {
+  configure_cuda_runtime_for_h100(device_);
   validate_config();
   actor_->to(device_);
   evaluator_->to(device_);

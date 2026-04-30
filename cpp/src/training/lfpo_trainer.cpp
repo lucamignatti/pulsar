@@ -12,6 +12,7 @@
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
+#include <ATen/Context.h>
 
 #include "pulsar/tracing/tracing.hpp"
 #include "pulsar/training/lfpo_math.hpp"
@@ -44,6 +45,14 @@ void freeze_parameters(const FutureEvaluator& evaluator) {
   for (auto& parameter : evaluator->parameters()) {
     parameter.set_requires_grad(false);
   }
+}
+
+void configure_cuda_runtime_for_h100(const torch::Device& device) {
+  if (!device.is_cuda()) {
+    return;
+  }
+  at::globalContext().setAllowTF32CuBLAS(true);
+  at::globalContext().setAllowTF32CuDNN(true);
 }
 
 void append_metrics_line(
@@ -210,11 +219,8 @@ LFPOTrainer::LFPOTrainer(
   collection_trajectory_ids_ =
       torch::arange(static_cast<long>(total_agents_), torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
   next_trajectory_id_ = static_cast<std::int64_t>(total_agents_);
-#ifdef USE_ROCM
-  use_pinned_host_buffers_ = false;
-#else
+  configure_cuda_runtime_for_h100(device_);
   use_pinned_host_buffers_ = device_.is_cuda();
-#endif
   actor_->to(device_);
   evaluator_->to(device_);
   target_evaluator_->to(device_);

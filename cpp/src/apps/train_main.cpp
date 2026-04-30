@@ -16,11 +16,7 @@
 namespace {
 
 bool should_pin_host_memory(const std::string& device) {
-#ifdef USE_ROCM
-  return false;
-#else
   return device.rfind("cuda", 0) == 0;
-#endif
 }
 
 }  // namespace

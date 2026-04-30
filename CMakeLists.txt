@@ -47,7 +47,7 @@ option(PULSAR_ENABLE_PYTHON "Enable Python bindings and visualization helpers" O
 option(PULSAR_ENABLE_TESTS "Build unit and smoke tests" ON)
 option(PULSAR_ENABLE_BENCHMARKS "Build benchmark targets" ON)
 option(PULSAR_ENABLE_ROCKETSIM "Enable RocketSim-backed simulation" ON)
-option(PULSAR_DISABLE_ROCM "Disable ROCm integration and ROCm-only tests even when ROCm is available." OFF)
+option(PULSAR_ENABLE_CUDA_H100_SMOKE "Enable CUDA/H100 integration smoke test when Python and Torch are available." ON)
 option(PULSAR_FETCH_JSON "Fetch nlohmann_json when not provided by the system" ON)
 option(PULSAR_FETCH_PYBIND11 "Fetch pybind11 when not provided by the system" OFF)
 option(PULSAR_ENABLE_TRACING "Enable Perfetto-compatible trace instrumentation" OFF)
@@ -317,17 +317,17 @@ if(PULSAR_ENABLE_TESTS AND Python3_EXECUTABLE)
   set_tests_properties(pulsar_preprocess_smoke PROPERTIES LABELS "smoke;dataset")
 endif()
 
-if(PULSAR_ENABLE_TESTS AND PULSAR_ROCM_FOUND AND NOT PULSAR_DISABLE_ROCM AND TARGET pulsar_lfpo_train AND TARGET pulsar_lfpo_pretrain AND Python3_EXECUTABLE)
+if(PULSAR_ENABLE_TESTS AND PULSAR_ENABLE_CUDA_H100_SMOKE AND TARGET pulsar_lfpo_train AND TARGET pulsar_lfpo_pretrain AND Python3_EXECUTABLE)
   add_test(
-    NAME pulsar_rocm_smoke
+    NAME pulsar_cuda_h100_smoke
     COMMAND
       ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/rocm_smoke.py
+      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/cuda_h100_smoke.py
       ${CMAKE_CURRENT_SOURCE_DIR}
       $<TARGET_FILE:pulsar_lfpo_train>
       $<TARGET_FILE:pulsar_lfpo_pretrain>
       ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_lfpo.json
       ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_offline.json
   )
-  set_tests_properties(pulsar_rocm_smoke PROPERTIES LABELS "rocm;smoke" SKIP_RETURN_CODE 77)
+  set_tests_properties(pulsar_cuda_h100_smoke PROPERTIES LABELS "cuda;h100;smoke" SKIP_RETURN_CODE 77)
 endif()

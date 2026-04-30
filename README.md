@@ -15,7 +15,7 @@ The actor remains the Continuum recurrent memory architecture, but its heads are
 - Sparse terminal outcomes as the only ground-truth reward signal
 - Separate transformer future evaluator with fixed horizons `[8, 32, 96]`
 - Continuum actor with policy and latent future prediction heads
-- ROCm-friendly Linux build path
+- CUDA/H100 production build path
 
 ## Repository Layout
 
@@ -23,7 +23,7 @@ The actor remains the Continuum recurrent memory architecture, but its heads are
 - `python/pulsar_viz/`: visualization and evaluation package
 - `configs/`: LFPO experiment configs
 - `scripts/`: setup, preprocessing, smoke tests, and utility scripts
-- `docs/`: platform-specific notes such as ROCm setup
+- `docs/`: platform-specific notes such as CUDA/H100 setup
 - `external/RocketSim/`: vendored RocketSim submodule
 
 ## Requirements
@@ -58,11 +58,14 @@ cmake -S . -B build/release \
 cmake --build build/release --parallel
 ```
 
+For the H100 deployment target, see [docs/cuda_h100_linux.md](docs/cuda_h100_linux.md).
+
 ## Validation
 
 ```bash
 ctest --test-dir build/release --output-on-failure
 ctest --test-dir build/release -L smoke --output-on-failure
+ctest --test-dir build/release -L cuda --output-on-failure
 ./build/release/pulsar_bench
 ```
 
