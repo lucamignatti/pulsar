@@ -74,9 +74,10 @@ struct LFPOConfig {
   int burn_in = 0;
   int candidate_count = 8;
   int evaluator_update_interval = 4;
-  int evaluator_target_update_interval = 500;
+  int evaluator_target_update_interval = 1;
   float evaluator_target_ema_tau = 0.01F;
   int online_window_capacity = 64;
+  float evaluator_anchor_ratio = 0.25F;
 };
 
 struct FutureEvaluatorConfig {
@@ -92,6 +93,7 @@ struct FutureEvaluatorConfig {
   float weight_decay = 1.0e-6F;
   float max_grad_norm = 1.0F;
   std::vector<float> class_weights{1.0F, 1.0F, 0.25F};
+  float future_delta_loss_coef = 0.1F;
 };
 
 struct OfflineDatasetConfig {

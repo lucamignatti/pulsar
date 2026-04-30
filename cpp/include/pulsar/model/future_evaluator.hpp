@@ -16,6 +16,7 @@ namespace pulsar {
 struct FutureEvaluationOutput {
   torch::Tensor embeddings;
   torch::Tensor outcome_logits;
+  torch::Tensor delta_predictions;
 };
 
 class FutureEvaluatorImpl : public torch::nn::Module {
@@ -36,12 +37,14 @@ class FutureEvaluatorImpl : public torch::nn::Module {
   torch::nn::TransformerEncoder transformer_{nullptr};
   torch::nn::ModuleList embedding_heads_{};
   torch::nn::ModuleList outcome_heads_{};
+  torch::nn::ModuleList delta_heads_{};
   torch::Tensor position_embedding_;
 };
 
 TORCH_MODULE(FutureEvaluator);
 
 FutureEvaluator clone_future_evaluator(const FutureEvaluator& source, const torch::Device& device);
+void ema_update_future_evaluator(const FutureEvaluator& target, const FutureEvaluator& source, float tau);
 
 #else
 

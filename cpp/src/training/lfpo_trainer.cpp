@@ -15,6 +15,7 @@
 #include <ATen/Context.h>
 
 #include "pulsar/tracing/tracing.hpp"
+#include "pulsar/training/future_window_builder.hpp"
 #include "pulsar/training/lfpo_math.hpp"
 
 namespace pulsar {
@@ -70,6 +71,10 @@ void append_metrics_line(
       {"policy_loss", metrics.policy_loss},
       {"latent_loss", metrics.latent_loss},
       {"evaluator_loss", metrics.evaluator_loss},
+      {"evaluator_online_loss", metrics.evaluator_online_loss},
+      {"evaluator_anchor_loss", metrics.evaluator_anchor_loss},
+      {"evaluator_outcome_loss", metrics.evaluator_outcome_loss},
+      {"evaluator_delta_loss", metrics.evaluator_delta_loss},
       {"entropy", metrics.entropy},
       {"obs_build_seconds", metrics.obs_build_seconds},
       {"mask_build_seconds", metrics.mask_build_seconds},
@@ -82,6 +87,10 @@ void append_metrics_line(
       {"self_play_eval_seconds", metrics.self_play_eval_seconds},
       {"online_outcome_samples", metrics.online_outcome_samples},
       {"online_outcome_trajectories", metrics.online_outcome_trajectories},
+      {"evaluator_online_samples", metrics.evaluator_online_samples},
+      {"evaluator_anchor_samples", metrics.evaluator_anchor_samples},
+      {"evaluator_outcome_samples", metrics.evaluator_outcome_samples},
+      {"evaluator_delta_samples", metrics.evaluator_delta_samples},
       {"evaluator_target_update_index", metrics.evaluator_target_update_index},
   };
   for (const auto& [mode, rating] : metrics.elo_ratings) {
@@ -104,7 +113,6 @@ RolloutFutureTargets build_rollout_targets(
     const ObservationNormalizer& evaluator_normalizer,
     FutureEvaluator target_evaluator,
     const torch::Device& device) {
-  const int max_h = target_evaluator->max_horizon();
   const int horizon_count = static_cast<int>(config.future_evaluator.horizons.size());
   const int time = rollout.rollout_length();
   const int agents = rollout.num_agents();
@@ -118,67 +126,126 @@ RolloutFutureTargets build_rollout_targets(
   torch::Tensor known_mask = torch::zeros(
       {time, agents},
       torch::TensorOptions().dtype(torch::kBool).device(device));
+  const FutureWindowBatch target_windows = build_future_windows_from_rollout(
+      RolloutWindowSource{
+          .obs = rollout.raw_obs.to(torch::kCPU),
+          .final_obs = rollout.final_raw_obs.to(torch::kCPU),
+          .terminal_obs = rollout.terminal_raw_obs.to(torch::kCPU),
+          .dones = rollout.dones.to(torch::kCPU),
+          .trajectory_ids = rollout.trajectory_ids.to(torch::kCPU),
+          .terminal_outcomes = rollout.terminal_outcomes.to(torch::kCPU),
+      },
+      config.future_evaluator,
+      config.future_evaluator.outcome_classes);
 
-  std::vector<torch::Tensor> windows;
-  std::vector<std::int64_t> row_t;
-  std::vector<std::int64_t> row_a;
-  std::vector<std::vector<bool>> row_horizon_masks;
-  const torch::Tensor raw = rollout.raw_obs.to(torch::kCPU);
-  const torch::Tensor dones = rollout.dones.to(torch::kCPU);
-  const torch::Tensor labels = rollout.terminal_outcomes.to(torch::kCPU);
-
-  for (int agent = 0; agent < agents; ++agent) {
-    for (int t = 0; t < time; ++t) {
-      int done_step = -1;
-      std::int64_t outcome = 2;
-      for (int future_t = t; future_t < time; ++future_t) {
-        if (dones[future_t][agent].item<float>() > 0.5F) {
-          done_step = future_t;
-          outcome = labels[future_t][agent].item<std::int64_t>();
-          break;
-        }
-      }
-      if (done_step < 0) {
-        continue;
-      }
-      torch::Tensor window = torch::zeros({max_h + 1, obs_dim}, raw.options());
-      for (int dt = 0; dt <= max_h; ++dt) {
-        const int src_t = std::min(t + dt, done_step);
-        window[dt].copy_(raw[src_t][agent]);
-      }
-      std::vector<bool> masks;
-      masks.reserve(static_cast<std::size_t>(horizon_count));
-      for (const int horizon : config.future_evaluator.horizons) {
-        const bool terminal_known = outcome == 0 || outcome == 1;
-        masks.push_back(terminal_known || (t + horizon <= done_step));
-      }
-      windows.push_back(window);
-      row_t.push_back(t);
-      row_a.push_back(agent);
-      row_horizon_masks.push_back(std::move(masks));
-    }
-  }
-
-  if (windows.empty()) {
+  if (target_windows.windows.size(0) == 0) {
     return {embeddings, horizon_mask, known_mask};
   }
 
   torch::NoGradGuard no_grad;
-  const torch::Tensor stacked = torch::stack(windows, 0).to(device);
+  const torch::Tensor stacked = target_windows.windows.to(device);
   const torch::Tensor normalized = evaluator_normalizer
                                        .normalize(stacked.reshape({-1, obs_dim}))
                                        .reshape_as(stacked);
   const FutureEvaluationOutput output = target_evaluator->forward_windows(normalized);
-  for (std::size_t row = 0; row < row_t.size(); ++row) {
-    embeddings[row_t[row]][row_a[row]].copy_(output.embeddings[static_cast<long>(row)]);
-    known_mask[row_t[row]][row_a[row]] = true;
+  for (std::int64_t row = 0; row < target_windows.windows.size(0); ++row) {
+    const auto t = target_windows.time_indices[row].item<std::int64_t>();
+    const auto agent = target_windows.column_indices[row].item<std::int64_t>();
+    embeddings[t][agent].copy_(output.embeddings[row]);
+    known_mask[t][agent] = true;
     for (int h = 0; h < horizon_count; ++h) {
-      if (row_horizon_masks[row][static_cast<std::size_t>(h)]) {
-        horizon_mask[row_t[row]][row_a[row]][h] = true;
+      if (target_windows.future_horizon_mask[row][h].item<bool>()) {
+        horizon_mask[t][agent][h] = true;
       }
     }
   }
   return {embeddings, horizon_mask, known_mask};
+}
+
+struct EvaluatorOptimizationStats {
+  double total_loss_sum = 0.0;
+  double outcome_loss_sum = 0.0;
+  double delta_loss_sum = 0.0;
+  std::int64_t total_samples = 0;
+  std::int64_t outcome_samples = 0;
+  std::int64_t delta_samples = 0;
+};
+
+torch::Tensor masked_online_outcome_loss(
+    const torch::Tensor& logits,
+    const torch::Tensor& labels,
+    const torch::Tensor& weights,
+    const torch::Tensor& outcome_horizon_mask,
+    const torch::Tensor& class_weights) {
+  if (logits.numel() == 0 || outcome_horizon_mask.sum().item<std::int64_t>() == 0) {
+    return torch::zeros({}, logits.options());
+  }
+  const auto horizon_count = logits.size(1);
+  const torch::Tensor flat_logits = logits.reshape({-1, logits.size(2)});
+  const torch::Tensor flat_labels = labels.unsqueeze(1).expand({labels.size(0), horizon_count}).reshape({-1});
+  const torch::Tensor flat_weights = weights.unsqueeze(1).expand({weights.size(0), horizon_count}).reshape({-1});
+  const torch::Tensor flat_mask = outcome_horizon_mask.reshape({-1});
+  auto options = torch::nn::functional::CrossEntropyFuncOptions().reduction(torch::kNone).weight(class_weights);
+  const torch::Tensor per = torch::nn::functional::cross_entropy(
+      flat_logits.index({flat_mask}),
+      flat_labels.index({flat_mask}),
+      options);
+  const torch::Tensor active_weights = flat_weights.index({flat_mask});
+  return (per * (active_weights / active_weights.mean().clamp_min(1.0e-6))).mean();
+}
+
+EvaluatorOptimizationStats optimize_evaluator_window_batch(
+    const FutureWindowBatch& windows_cpu,
+    const ExperimentConfig& config,
+    const ObservationNormalizer& evaluator_normalizer,
+    FutureEvaluator evaluator,
+    torch::optim::AdamW& optimizer,
+    const torch::Tensor& class_weights,
+    const torch::Device& device) {
+  EvaluatorOptimizationStats stats;
+  if (!windows_cpu.windows.defined() || windows_cpu.windows.size(0) == 0) {
+    return stats;
+  }
+
+  const torch::Tensor windows_device = windows_cpu.windows.to(device);
+  const torch::Tensor normalized =
+      evaluator_normalizer
+          .normalize(windows_device.reshape({-1, config.model.observation_dim}))
+          .reshape_as(windows_device);
+  const torch::Tensor labels = windows_cpu.labels.to(device);
+  const torch::Tensor weights = windows_cpu.weights.to(device);
+  const torch::Tensor future_mask = windows_cpu.future_horizon_mask.to(device);
+  const torch::Tensor outcome_mask = windows_cpu.outcome_horizon_mask.to(device);
+  const auto delta_samples = future_mask.sum().item<std::int64_t>();
+  const auto outcome_samples = outcome_mask.sum().item<std::int64_t>();
+  if (delta_samples <= 0 && outcome_samples <= 0) {
+    return stats;
+  }
+
+  optimizer.zero_grad();
+  const FutureEvaluationOutput output = evaluator->forward_windows(normalized);
+  const torch::Tensor outcome_loss =
+      masked_online_outcome_loss(output.outcome_logits, labels, weights, outcome_mask, class_weights);
+  const torch::Tensor delta_targets = future_delta_targets(normalized, config.future_evaluator);
+  const torch::Tensor delta_loss =
+      masked_future_delta_loss(output.delta_predictions, delta_targets, future_mask, weights);
+  const torch::Tensor loss =
+      outcome_loss + config.future_evaluator.future_delta_loss_coef * delta_loss;
+  loss.backward();
+  torch::nn::utils::clip_grad_norm_(evaluator->parameters(), config.future_evaluator.max_grad_norm);
+  optimizer.step();
+
+  stats.total_samples = std::max<std::int64_t>(delta_samples, outcome_samples);
+  stats.outcome_samples = outcome_samples;
+  stats.delta_samples = delta_samples;
+  stats.total_loss_sum = loss.item<double>() * static_cast<double>(stats.total_samples);
+  if (outcome_samples > 0) {
+    stats.outcome_loss_sum = outcome_loss.item<double>() * static_cast<double>(outcome_samples);
+  }
+  if (delta_samples > 0) {
+    stats.delta_loss_sum = delta_loss.item<double>() * static_cast<double>(delta_samples);
+  }
+  return stats;
 }
 
 }  // namespace
@@ -231,6 +298,15 @@ LFPOTrainer::LFPOTrainer(
       collector_->num_envs(),
       collector_->num_envs() == 0 ? 0 : total_agents_ / collector_->num_envs(),
       config_.lfpo.online_window_capacity);
+  if (config_.lfpo.evaluator_anchor_ratio > 0.0F && !config_.offline_dataset.train_manifest.empty()) {
+    if (std::filesystem::exists(config_.offline_dataset.train_manifest)) {
+      evaluator_anchor_dataset_ =
+          std::make_unique<OfflineTensorDataset>(config_.offline_dataset.train_manifest);
+    } else if (log_initialization_) {
+      std::cout << "lfpo_evaluator_anchor_manifest_missing="
+                << config_.offline_dataset.train_manifest << '\n';
+    }
+  }
   maybe_initialize_from_checkpoint();
   target_evaluator_ = clone_future_evaluator(evaluator_, device_);
   target_evaluator_->eval();
@@ -332,73 +408,104 @@ void LFPOTrainer::update_evaluator_from_self_play(int update_index, TrainerMetri
   evaluator_->train();
   const torch::Tensor class_weights =
       torch::tensor(config_.future_evaluator.class_weights, torch::TensorOptions().dtype(torch::kFloat32)).to(device_);
-  double total_loss = 0.0;
-  std::int64_t total_samples = 0;
+  EvaluatorOptimizationStats total_stats;
+  EvaluatorOptimizationStats online_stats;
+  EvaluatorOptimizationStats anchor_stats;
   for (const auto& trajectory : trajectories) {
     if (!trajectory.obs_cpu.defined() || trajectory.obs_cpu.size(0) <= 0) {
       continue;
     }
-    const int max_h = evaluator_->max_horizon();
-    const auto steps = trajectory.obs_cpu.size(0);
-    std::vector<torch::Tensor> windows;
-    std::vector<std::vector<bool>> masks;
-    for (std::int64_t t = 0; t < steps; ++t) {
-      torch::Tensor window = torch::zeros(
-          {max_h + 1, config_.model.observation_dim},
-          torch::TensorOptions().dtype(torch::kFloat32));
-      for (int dt = 0; dt <= max_h; ++dt) {
-        const std::int64_t src_t = std::min<std::int64_t>(t + dt, steps - 1);
-        window[dt].copy_(trajectory.obs_cpu[src_t]);
-      }
-      std::vector<bool> horizon_masks;
-      for (const int horizon : config_.future_evaluator.horizons) {
-        horizon_masks.push_back(trajectory.outcome == 0 || trajectory.outcome == 1 || t + horizon < steps);
-      }
-      windows.push_back(window);
-      masks.push_back(std::move(horizon_masks));
-    }
-    if (windows.empty()) {
-      continue;
-    }
-    const torch::Tensor stacked = torch::stack(windows, 0).to(device_);
-    const torch::Tensor normalized = evaluator_normalizer_
-                                         .normalize(stacked.reshape({-1, config_.model.observation_dim}))
-                                         .reshape_as(stacked);
-    const FutureEvaluationOutput output = evaluator_->forward_windows(normalized);
-    const torch::Tensor labels =
-        torch::full({stacked.size(0)}, trajectory.outcome, torch::TensorOptions().dtype(torch::kLong).device(device_));
-    torch::Tensor horizon_mask =
-        torch::zeros({stacked.size(0), static_cast<long>(config_.future_evaluator.horizons.size())},
-                     torch::TensorOptions().dtype(torch::kBool).device(device_));
-    for (std::int64_t row = 0; row < horizon_mask.size(0); ++row) {
-      for (std::int64_t h = 0; h < horizon_mask.size(1); ++h) {
-        if (masks[static_cast<std::size_t>(row)][static_cast<std::size_t>(h)]) {
-          horizon_mask[row][h] = true;
-        }
-      }
-    }
-    const torch::Tensor flat_logits = output.outcome_logits.reshape({-1, config_.future_evaluator.outcome_classes});
-    const torch::Tensor flat_labels =
-        labels.unsqueeze(1).expand({labels.size(0), horizon_mask.size(1)}).reshape({-1});
-    const torch::Tensor flat_mask = horizon_mask.reshape({-1});
-    if (flat_mask.sum().item<std::int64_t>() <= 0) {
-      continue;
-    }
-    evaluator_optimizer_.zero_grad();
-    auto options = torch::nn::functional::CrossEntropyFuncOptions().weight(class_weights);
-    const torch::Tensor loss = torch::nn::functional::cross_entropy(
-        flat_logits.index({flat_mask}),
-        flat_labels.index({flat_mask}),
-        options);
-    loss.backward();
-    torch::nn::utils::clip_grad_norm_(evaluator_->parameters(), config_.future_evaluator.max_grad_norm);
-    evaluator_optimizer_.step();
-    const auto active = flat_mask.sum().item<std::int64_t>();
-    total_loss += loss.item<double>() * static_cast<double>(active);
-    total_samples += active;
+    const FutureWindowBatch windows_cpu = build_future_windows_from_completed_trajectory(
+        trajectory.obs_cpu,
+        trajectory.outcome,
+        config_.future_evaluator,
+        config_.future_evaluator.outcome_classes);
+    const EvaluatorOptimizationStats stats = optimize_evaluator_window_batch(
+        windows_cpu,
+        config_,
+        evaluator_normalizer_,
+        evaluator_,
+        evaluator_optimizer_,
+        class_weights,
+        device_);
+    online_stats.total_loss_sum += stats.total_loss_sum;
+    online_stats.outcome_loss_sum += stats.outcome_loss_sum;
+    online_stats.delta_loss_sum += stats.delta_loss_sum;
+    online_stats.total_samples += stats.total_samples;
+    online_stats.outcome_samples += stats.outcome_samples;
+    online_stats.delta_samples += stats.delta_samples;
+    total_stats.total_loss_sum += stats.total_loss_sum;
+    total_stats.outcome_loss_sum += stats.outcome_loss_sum;
+    total_stats.delta_loss_sum += stats.delta_loss_sum;
+    total_stats.total_samples += stats.total_samples;
+    total_stats.outcome_samples += stats.outcome_samples;
+    total_stats.delta_samples += stats.delta_samples;
   }
-  if (metrics != nullptr && total_samples > 0) {
-    metrics->evaluator_loss = total_loss / static_cast<double>(total_samples);
+
+  const std::int64_t target_anchor_samples =
+      static_cast<std::int64_t>(std::ceil(
+          static_cast<double>(online_stats.delta_samples) *
+          std::max(0.0F, config_.lfpo.evaluator_anchor_ratio)));
+  if (evaluator_anchor_dataset_ && target_anchor_samples > 0) {
+    std::int64_t accumulated_anchor_samples = 0;
+    evaluator_anchor_dataset_->for_each_packed_trajectory_batch_until(
+        config_.offline_dataset.batch_size,
+        true,
+        config_.offline_dataset.seed + static_cast<std::uint64_t>(update_index),
+        [&](const OfflineTensorPackedBatch& batch) {
+          if (accumulated_anchor_samples >= target_anchor_samples) {
+            return false;
+          }
+          const FutureWindowBatch windows_cpu =
+              build_future_windows_from_packed_batch(batch, config_.future_evaluator);
+          const EvaluatorOptimizationStats stats = optimize_evaluator_window_batch(
+              windows_cpu,
+              config_,
+              evaluator_normalizer_,
+              evaluator_,
+              evaluator_optimizer_,
+              class_weights,
+              device_);
+          anchor_stats.total_loss_sum += stats.total_loss_sum;
+          anchor_stats.outcome_loss_sum += stats.outcome_loss_sum;
+          anchor_stats.delta_loss_sum += stats.delta_loss_sum;
+          anchor_stats.total_samples += stats.total_samples;
+          anchor_stats.outcome_samples += stats.outcome_samples;
+          anchor_stats.delta_samples += stats.delta_samples;
+          total_stats.total_loss_sum += stats.total_loss_sum;
+          total_stats.outcome_loss_sum += stats.outcome_loss_sum;
+          total_stats.delta_loss_sum += stats.delta_loss_sum;
+          total_stats.total_samples += stats.total_samples;
+          total_stats.outcome_samples += stats.outcome_samples;
+          total_stats.delta_samples += stats.delta_samples;
+          accumulated_anchor_samples += stats.delta_samples;
+          return accumulated_anchor_samples < target_anchor_samples;
+        });
+  }
+
+  if (metrics != nullptr && total_stats.total_samples > 0) {
+    metrics->evaluator_loss =
+        total_stats.total_loss_sum / static_cast<double>(total_stats.total_samples);
+    if (online_stats.total_samples > 0) {
+      metrics->evaluator_online_loss =
+          online_stats.total_loss_sum / static_cast<double>(online_stats.total_samples);
+    }
+    if (anchor_stats.total_samples > 0) {
+      metrics->evaluator_anchor_loss =
+          anchor_stats.total_loss_sum / static_cast<double>(anchor_stats.total_samples);
+    }
+    if (total_stats.outcome_samples > 0) {
+      metrics->evaluator_outcome_loss =
+          total_stats.outcome_loss_sum / static_cast<double>(total_stats.outcome_samples);
+    }
+    if (total_stats.delta_samples > 0) {
+      metrics->evaluator_delta_loss =
+          total_stats.delta_loss_sum / static_cast<double>(total_stats.delta_samples);
+    }
+    metrics->evaluator_online_samples = online_stats.delta_samples;
+    metrics->evaluator_anchor_samples = anchor_stats.delta_samples;
+    metrics->evaluator_outcome_samples = total_stats.outcome_samples;
+    metrics->evaluator_delta_samples = total_stats.delta_samples;
   }
 }
 
@@ -407,7 +514,7 @@ void LFPOTrainer::update_target_evaluator(int update_index) {
       update_index % config_.lfpo.evaluator_target_update_interval != 0) {
     return;
   }
-  target_evaluator_ = clone_future_evaluator(evaluator_, device_);
+  ema_update_future_evaluator(target_evaluator_, evaluator_, config_.lfpo.evaluator_target_ema_tau);
   target_evaluator_->eval();
   freeze_parameters(target_evaluator_);
   evaluator_target_update_index_ = update_index;
@@ -606,10 +713,11 @@ TrainerMetrics LFPOTrainer::run_update(std::int64_t* global_step, int update_ind
         std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
 
     torch::Tensor dones = collector_->host_dones().to(device_, use_pinned_host_buffers_);
-    outcome_buffer_->record_step(
-        raw_obs_host,
-        collector_->host_dones(),
-        collector_->host_terminal_outcome_labels());
+      outcome_buffer_->record_step(
+          raw_obs_host,
+          collector_->host_dones(),
+          collector_->host_terminal_outcome_labels(),
+          collector_->host_terminal_observations());
 
     rollout_.append(
         step,
@@ -621,9 +729,10 @@ TrainerMetrics LFPOTrainer::run_update(std::int64_t* global_step, int update_ind
         executed_actions.to(torch::kCPU),
         candidate_actions.to(torch::kCPU),
         candidate_log_probs.to(torch::kCPU),
-        collection_trajectory_ids_,
-        dones.to(torch::kCPU),
-        collector_->host_terminal_outcome_labels());
+          collection_trajectory_ids_,
+          dones.to(torch::kCPU),
+          collector_->host_terminal_outcome_labels(),
+          collector_->host_terminal_observations());
     const torch::Tensor done_indices = torch::nonzero(collector_->host_dones() > 0.5F).view({-1});
     if (done_indices.numel() > 0) {
       const auto count = done_indices.size(0);
@@ -760,21 +869,30 @@ void LFPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     std::cout << "update=" << update_index
               << " global_step=" << global_step
               << " policy_loss=" << metrics.policy_loss
-              << " latent_loss=" << metrics.latent_loss
-              << " evaluator_loss=" << metrics.evaluator_loss
-              << " entropy=" << metrics.entropy
-              << '\n';
+                << " latent_loss=" << metrics.latent_loss
+                << " evaluator_loss=" << metrics.evaluator_loss
+                << " evaluator_delta_loss=" << metrics.evaluator_delta_loss
+                << " entropy=" << metrics.entropy
+                << '\n';
     if (wandb.enabled()) {
       wandb.log(nlohmann::json{
           {"update", update_index},
           {"global_step", global_step},
           {"policy_loss", metrics.policy_loss},
-          {"latent_loss", metrics.latent_loss},
-          {"evaluator_loss", metrics.evaluator_loss},
-          {"entropy", metrics.entropy},
-          {"online_outcome_samples", metrics.online_outcome_samples},
-          {"online_outcome_trajectories", metrics.online_outcome_trajectories},
-      });
+            {"latent_loss", metrics.latent_loss},
+            {"evaluator_loss", metrics.evaluator_loss},
+            {"evaluator_online_loss", metrics.evaluator_online_loss},
+            {"evaluator_anchor_loss", metrics.evaluator_anchor_loss},
+            {"evaluator_outcome_loss", metrics.evaluator_outcome_loss},
+            {"evaluator_delta_loss", metrics.evaluator_delta_loss},
+            {"entropy", metrics.entropy},
+            {"online_outcome_samples", metrics.online_outcome_samples},
+            {"online_outcome_trajectories", metrics.online_outcome_trajectories},
+            {"evaluator_online_samples", metrics.evaluator_online_samples},
+            {"evaluator_anchor_samples", metrics.evaluator_anchor_samples},
+            {"evaluator_outcome_samples", metrics.evaluator_outcome_samples},
+            {"evaluator_delta_samples", metrics.evaluator_delta_samples},
+        });
     }
     if (config_.lfpo.checkpoint_interval > 0 && update_index % config_.lfpo.checkpoint_interval == 0) {
       save_checkpoint(std::filesystem::path(checkpoint_dir) / ("update_" + std::to_string(update_index)), global_step, update_index);

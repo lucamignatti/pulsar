@@ -376,6 +376,21 @@ void OfflineTensorDataset::for_each_packed_trajectory_batch(
     bool shuffle,
     std::uint64_t seed,
     const std::function<void(const OfflineTensorPackedBatch&)>& fn) const {
+  for_each_packed_trajectory_batch_until(
+      max_tokens,
+      shuffle,
+      seed,
+      [&](const OfflineTensorPackedBatch& batch) {
+        fn(batch);
+        return true;
+      });
+}
+
+void OfflineTensorDataset::for_each_packed_trajectory_batch_until(
+    int max_tokens,
+    bool shuffle,
+    std::uint64_t seed,
+    const std::function<bool(const OfflineTensorPackedBatch&)>& fn) const {
   if (max_tokens <= 0) {
     throw std::invalid_argument("OfflineTensorDataset max_tokens must be positive.");
   }
@@ -390,7 +405,9 @@ void OfflineTensorDataset::for_each_packed_trajectory_batch(
     for (const std::int64_t range_index : ordering) {
       const std::int64_t length = ranges[static_cast<std::size_t>(range_index)].length;
       if (!packed.empty() && packed_tokens + length > max_tokens) {
-        fn(pack_trajectory_batch(loaded, ranges, packed, manifest_.action_dim));
+        if (!fn(pack_trajectory_batch(loaded, ranges, packed, manifest_.action_dim))) {
+          return;
+        }
         packed.clear();
         packed_tokens = 0;
       }
@@ -398,7 +415,9 @@ void OfflineTensorDataset::for_each_packed_trajectory_batch(
       packed_tokens += length;
     }
     if (!packed.empty()) {
-      fn(pack_trajectory_batch(loaded, ranges, packed, manifest_.action_dim));
+      if (!fn(pack_trajectory_batch(loaded, ranges, packed, manifest_.action_dim))) {
+        return;
+      }
     }
   }
 }

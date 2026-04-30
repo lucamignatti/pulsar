@@ -13,87 +13,11 @@
 #include <ATen/Context.h>
 
 #include "pulsar/checkpoint/checkpoint.hpp"
+#include "pulsar/training/future_window_builder.hpp"
 #include "pulsar/training/lfpo_math.hpp"
 
 namespace pulsar {
 namespace {
-
-struct FutureWindowBatch {
-  torch::Tensor windows;
-  torch::Tensor labels;
-  torch::Tensor weights;
-  torch::Tensor horizon_mask;
-  torch::Tensor time_indices;
-  torch::Tensor column_indices;
-  torch::Tensor actions;
-  torch::Tensor action_probs;
-};
-
-int max_horizon(const FutureEvaluatorConfig& config) {
-  return *std::max_element(config.horizons.begin(), config.horizons.end());
-}
-
-FutureWindowBatch build_future_windows(
-    const OfflineTensorPackedBatch& batch,
-    const FutureEvaluatorConfig& evaluator_config) {
-  const int max_h = max_horizon(evaluator_config);
-  const int horizon_count = static_cast<int>(evaluator_config.horizons.size());
-  const auto obs_dim = batch.obs.size(2);
-
-  std::vector<std::pair<std::int64_t, std::int64_t>> rows;
-  for (std::int64_t column = 0; column < static_cast<std::int64_t>(batch.lengths.size()); ++column) {
-    const std::int64_t length = batch.lengths[static_cast<std::size_t>(column)];
-    for (std::int64_t t = 0; t < length; ++t) {
-      if (!batch.outcome.defined() || batch.outcome_known[t][column].item<float>() <= 0.5F) {
-        continue;
-      }
-      rows.emplace_back(t, column);
-    }
-  }
-
-  const auto row_count = static_cast<std::int64_t>(rows.size());
-  FutureWindowBatch out;
-  out.windows = torch::zeros({row_count, max_h + 1, obs_dim}, batch.obs.options());
-  out.labels = torch::zeros({row_count}, torch::TensorOptions().dtype(torch::kLong));
-  out.weights = torch::ones({row_count}, torch::TensorOptions().dtype(torch::kFloat32));
-  out.horizon_mask = torch::zeros({row_count, horizon_count}, torch::TensorOptions().dtype(torch::kBool));
-  out.time_indices = torch::zeros({row_count}, torch::TensorOptions().dtype(torch::kLong));
-  out.column_indices = torch::zeros({row_count}, torch::TensorOptions().dtype(torch::kLong));
-  if (batch.actions.defined()) {
-    out.actions = torch::zeros({row_count}, batch.actions.options());
-  }
-  if (batch.action_probs.defined()) {
-    out.action_probs = torch::zeros({row_count, batch.action_probs.size(2)}, batch.action_probs.options());
-  }
-
-  for (std::int64_t row = 0; row < row_count; ++row) {
-    const auto [t, column] = rows[static_cast<std::size_t>(row)];
-    const std::int64_t length = batch.lengths[static_cast<std::size_t>(column)];
-    const std::int64_t label = batch.outcome[t][column].item<std::int64_t>();
-    out.labels[row] = label;
-    out.weights[row] = batch.weights[t][column].item<float>();
-    out.time_indices[row] = t;
-    out.column_indices[row] = column;
-    for (int dt = 0; dt <= max_h; ++dt) {
-      const std::int64_t src_t = std::min<std::int64_t>(t + dt, length - 1);
-      out.windows[row][dt].copy_(batch.obs[src_t][column]);
-    }
-    for (int h = 0; h < horizon_count; ++h) {
-      const bool enough_context = t + evaluator_config.horizons[static_cast<std::size_t>(h)] < length;
-      const bool terminal_known = label == 0 || label == 1;
-      if (terminal_known || enough_context) {
-        out.horizon_mask[row][h] = true;
-      }
-    }
-    if (out.actions.defined()) {
-      out.actions[row] = batch.actions[t][column].item<std::int64_t>();
-    }
-    if (out.action_probs.defined()) {
-      out.action_probs[row].copy_(batch.action_probs[t][column]);
-    }
-  }
-  return out;
-}
 
 torch::Tensor masked_outcome_loss(
     const torch::Tensor& logits,
@@ -146,16 +70,20 @@ void append_metrics_line(
     const char* phase,
     const OfflineEpochMetrics& metrics) {
   nlohmann::json line = {
-      {"epoch", epoch_index},
-      {"phase", phase},
-      {"evaluator_loss", metrics.evaluator_loss},
-      {"evaluator_accuracy", metrics.evaluator_accuracy},
+        {"epoch", epoch_index},
+        {"phase", phase},
+        {"evaluator_loss", metrics.evaluator_loss},
+        {"evaluator_outcome_loss", metrics.evaluator_outcome_loss},
+        {"evaluator_delta_loss", metrics.evaluator_delta_loss},
+        {"evaluator_accuracy", metrics.evaluator_accuracy},
       {"behavior_loss", metrics.behavior_loss},
       {"behavior_accuracy", metrics.behavior_accuracy},
       {"latent_loss", metrics.latent_loss},
-      {"samples", metrics.samples},
-      {"evaluator_samples", metrics.evaluator_samples},
-      {"behavior_samples", metrics.behavior_samples},
+        {"samples", metrics.samples},
+        {"evaluator_samples", metrics.evaluator_samples},
+        {"evaluator_outcome_samples", metrics.evaluator_outcome_samples},
+        {"evaluator_delta_samples", metrics.evaluator_delta_samples},
+        {"behavior_samples", metrics.behavior_samples},
       {"latent_samples", metrics.latent_samples},
   };
   std::filesystem::create_directories(output_dir);
@@ -164,10 +92,16 @@ void append_metrics_line(
 }
 
 OfflineEpochMetrics average_metrics(OfflineEpochMetrics metrics) {
-  if (metrics.evaluator_samples > 0) {
-    metrics.evaluator_loss /= static_cast<double>(metrics.evaluator_samples);
-    metrics.evaluator_accuracy /= static_cast<double>(metrics.evaluator_samples);
-  }
+    if (metrics.evaluator_samples > 0) {
+      metrics.evaluator_loss /= static_cast<double>(metrics.evaluator_samples);
+      metrics.evaluator_accuracy /= static_cast<double>(metrics.evaluator_samples);
+    }
+    if (metrics.evaluator_outcome_samples > 0) {
+      metrics.evaluator_outcome_loss /= static_cast<double>(metrics.evaluator_outcome_samples);
+    }
+    if (metrics.evaluator_delta_samples > 0) {
+      metrics.evaluator_delta_loss /= static_cast<double>(metrics.evaluator_delta_samples);
+    }
   if (metrics.behavior_samples > 0) {
     metrics.behavior_loss /= static_cast<double>(metrics.behavior_samples);
     metrics.behavior_accuracy /= static_cast<double>(metrics.behavior_samples);
@@ -258,33 +192,51 @@ OfflineEpochMetrics OfflinePretrainer::train_evaluator_epoch(int epoch_index) {
       config_.offline_dataset.shuffle,
       config_.offline_dataset.seed + static_cast<std::uint64_t>(epoch_index),
       [&](const OfflineTensorPackedBatch& batch) {
-        const FutureWindowBatch windows_cpu = build_future_windows(batch, config_.future_evaluator);
+        const FutureWindowBatch windows_cpu =
+            build_future_windows_from_packed_batch(batch, config_.future_evaluator);
         if (windows_cpu.windows.size(0) == 0) {
           return;
         }
+        const torch::Tensor windows_device = windows_cpu.windows.to(device_);
         const torch::Tensor windows = evaluator_normalizer_
-                                          .normalize(windows_cpu.windows.to(device_).reshape({-1, config_.model.observation_dim}))
-                                          .reshape_as(windows_cpu.windows.to(device_));
+                                          .normalize(windows_device.reshape({-1, config_.model.observation_dim}))
+                                          .reshape_as(windows_device);
         const torch::Tensor labels = windows_cpu.labels.to(device_);
         const torch::Tensor weights = windows_cpu.weights.to(device_);
-        const torch::Tensor horizon_mask = windows_cpu.horizon_mask.to(device_);
+        const torch::Tensor future_mask = windows_cpu.future_horizon_mask.to(device_);
+        const torch::Tensor outcome_mask = windows_cpu.outcome_horizon_mask.to(device_);
         evaluator_optimizer_->zero_grad();
         const FutureEvaluationOutput output = evaluator_->forward_windows(windows);
-        const torch::Tensor loss = masked_outcome_loss(
+        const torch::Tensor outcome_loss = masked_outcome_loss(
             output.outcome_logits,
             labels,
             weights,
-            horizon_mask,
+            outcome_mask,
             class_weights,
             config_.offline_pretraining.label_smoothing);
+        const torch::Tensor delta_targets = future_delta_targets(windows, config_.future_evaluator);
+        const torch::Tensor delta_loss =
+            masked_future_delta_loss(output.delta_predictions, delta_targets, future_mask, weights);
+        const torch::Tensor loss =
+            outcome_loss + config_.future_evaluator.future_delta_loss_coef * delta_loss;
         loss.backward();
         torch::nn::utils::clip_grad_norm_(evaluator_->parameters(), config_.future_evaluator.max_grad_norm);
         evaluator_optimizer_->step();
-        const auto active = horizon_mask.sum().item<std::int64_t>();
+        const auto delta_active = future_mask.sum().item<std::int64_t>();
+        const auto outcome_active = outcome_mask.sum().item<std::int64_t>();
+        const auto active = std::max(delta_active, outcome_active);
         metrics.evaluator_loss += loss.item<double>() * static_cast<double>(active);
-        metrics.evaluator_accuracy += masked_accuracy(output.outcome_logits.detach(), labels, horizon_mask) *
-                                      static_cast<double>(active);
+        if (outcome_active > 0) {
+          metrics.evaluator_outcome_loss += outcome_loss.item<double>() * static_cast<double>(outcome_active);
+          metrics.evaluator_accuracy += masked_accuracy(output.outcome_logits.detach(), labels, outcome_mask) *
+                                        static_cast<double>(outcome_active);
+        }
+        if (delta_active > 0) {
+          metrics.evaluator_delta_loss += delta_loss.item<double>() * static_cast<double>(delta_active);
+        }
         metrics.evaluator_samples += active;
+        metrics.evaluator_outcome_samples += outcome_active;
+        metrics.evaluator_delta_samples += delta_active;
         metrics.samples += windows_cpu.windows.size(0);
       });
   return average_metrics(metrics);
@@ -299,7 +251,8 @@ OfflineEpochMetrics OfflinePretrainer::train_actor_epoch(int epoch_index) {
       config_.offline_dataset.shuffle,
       config_.offline_dataset.seed + static_cast<std::uint64_t>(epoch_index),
       [&](const OfflineTensorPackedBatch& batch) {
-        const FutureWindowBatch windows_cpu = build_future_windows(batch, config_.future_evaluator);
+          const FutureWindowBatch windows_cpu =
+              build_future_windows_from_packed_batch(batch, config_.future_evaluator);
         const torch::Tensor obs = batch.obs.to(device_);
         const torch::Tensor normalized = actor_normalizer_
                                              .normalize(obs.reshape({-1, config_.model.observation_dim}))
@@ -347,10 +300,11 @@ OfflineEpochMetrics OfflinePretrainer::train_actor_epoch(int epoch_index) {
           torch::Tensor target_embeddings;
           {
             torch::NoGradGuard no_grad;
-            const torch::Tensor eval_windows =
-                evaluator_normalizer_
-                    .normalize(windows_cpu.windows.to(device_).reshape({-1, config_.model.observation_dim}))
-                    .reshape_as(windows_cpu.windows.to(device_));
+              const torch::Tensor eval_windows_device = windows_cpu.windows.to(device_);
+              const torch::Tensor eval_windows =
+                  evaluator_normalizer_
+                      .normalize(eval_windows_device.reshape({-1, config_.model.observation_dim}))
+                      .reshape_as(eval_windows_device);
             const FutureEvaluationOutput target = target_evaluator_->forward_windows(eval_windows);
             target_embeddings = target.embeddings.detach();
           }
@@ -358,10 +312,10 @@ OfflineEpochMetrics OfflinePretrainer::train_actor_epoch(int epoch_index) {
           const torch::Tensor col_idx = windows_cpu.column_indices.to(device_);
           const torch::Tensor selected_features = output.features.index({time_idx, col_idx});
           const torch::Tensor pred = actor_->predict_future_latents(selected_features, windows_cpu.actions.to(device_));
-          const torch::Tensor mask = windows_cpu.horizon_mask.to(device_).unsqueeze(-1).to(torch::kFloat32);
-          const torch::Tensor diff = (pred - target_embeddings).pow(2) * mask;
-          latent_loss = diff.sum() / mask.sum().clamp_min(1.0).mul(config_.future_evaluator.latent_dim);
-          const auto active = windows_cpu.horizon_mask.sum().item<std::int64_t>();
+            const torch::Tensor mask = windows_cpu.future_horizon_mask.to(device_).unsqueeze(-1).to(torch::kFloat32);
+            const torch::Tensor diff = (pred - target_embeddings).pow(2) * mask;
+            latent_loss = diff.sum() / mask.sum().clamp_min(1.0).mul(config_.future_evaluator.latent_dim);
+            const auto active = windows_cpu.future_horizon_mask.sum().item<std::int64_t>();
           metrics.latent_loss += latent_loss.item<double>() * static_cast<double>(active);
           metrics.latent_samples += active;
         }
@@ -388,22 +342,25 @@ OfflineEpochMetrics OfflinePretrainer::evaluate() {
       false,
       config_.offline_dataset.seed,
       [&](const OfflineTensorPackedBatch& batch) {
-        const FutureWindowBatch windows_cpu = build_future_windows(batch, config_.future_evaluator);
-        if (windows_cpu.windows.size(0) == 0) {
-          return;
-        }
-        const torch::Tensor windows = evaluator_normalizer_
-                                          .normalize(windows_cpu.windows.to(device_).reshape({-1, config_.model.observation_dim}))
-                                          .reshape_as(windows_cpu.windows.to(device_));
-        const torch::Tensor labels = windows_cpu.labels.to(device_);
-        const torch::Tensor horizon_mask = windows_cpu.horizon_mask.to(device_);
-        const FutureEvaluationOutput output = evaluator_->forward_windows(windows);
-        const auto active = horizon_mask.sum().item<std::int64_t>();
-        metrics.evaluator_accuracy += masked_accuracy(output.outcome_logits, labels, horizon_mask) *
-                                      static_cast<double>(active);
-        metrics.evaluator_samples += active;
-        metrics.samples += windows_cpu.windows.size(0);
-      });
+          const FutureWindowBatch windows_cpu =
+              build_future_windows_from_packed_batch(batch, config_.future_evaluator);
+          if (windows_cpu.windows.size(0) == 0) {
+            return;
+          }
+          const torch::Tensor windows_device = windows_cpu.windows.to(device_);
+          const torch::Tensor windows = evaluator_normalizer_
+                                            .normalize(windows_device.reshape({-1, config_.model.observation_dim}))
+                                            .reshape_as(windows_device);
+          const torch::Tensor labels = windows_cpu.labels.to(device_);
+          const torch::Tensor outcome_mask = windows_cpu.outcome_horizon_mask.to(device_);
+          const FutureEvaluationOutput output = evaluator_->forward_windows(windows);
+          const auto active = outcome_mask.sum().item<std::int64_t>();
+          metrics.evaluator_accuracy += masked_accuracy(output.outcome_logits, labels, outcome_mask) *
+                                        static_cast<double>(active);
+          metrics.evaluator_samples += active;
+          metrics.evaluator_outcome_samples += active;
+          metrics.samples += windows_cpu.windows.size(0);
+        });
   return average_metrics(metrics);
 }
 
@@ -457,10 +414,12 @@ void OfflinePretrainer::train(const std::string& output_dir, const std::string&)
     epoch_index += 1;
     const OfflineEpochMetrics metrics = train_evaluator_epoch(epoch);
     append_metrics_line(output_dir, epoch_index, "future_evaluator", metrics);
-    std::cout << "phase=future_evaluator epoch=" << epoch
-              << " loss=" << metrics.evaluator_loss
-              << " accuracy=" << metrics.evaluator_accuracy
-              << '\n';
+      std::cout << "phase=future_evaluator epoch=" << epoch
+                << " loss=" << metrics.evaluator_loss
+                << " outcome_loss=" << metrics.evaluator_outcome_loss
+                << " delta_loss=" << metrics.evaluator_delta_loss
+                << " accuracy=" << metrics.evaluator_accuracy
+                << '\n';
   }
 
   target_evaluator_ = clone_future_evaluator(evaluator_, device_);

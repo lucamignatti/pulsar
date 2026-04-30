@@ -3,6 +3,7 @@
 #ifdef PULSAR_HAS_TORCH
 
 #include <algorithm>
+#include <cmath>
 #include <sstream>
 #include <stdexcept>
 
@@ -25,6 +26,9 @@ void validate_config(const FutureEvaluatorConfig& config, int observation_dim) {
       config.heads <= 0 || config.feedforward_dim <= 0 || config.outcome_classes <= 0) {
     throw std::invalid_argument("FutureEvaluatorConfig dimensions must be positive.");
   }
+  if (config.future_delta_loss_coef < 0.0F || !std::isfinite(config.future_delta_loss_coef)) {
+    throw std::invalid_argument("FutureEvaluatorConfig.future_delta_loss_coef must be finite and non-negative.");
+  }
 }
 
 }  // namespace
@@ -44,9 +48,11 @@ FutureEvaluatorImpl::FutureEvaluatorImpl(FutureEvaluatorConfig config, int obser
 
   embedding_heads_ = register_module("embedding_heads", torch::nn::ModuleList());
   outcome_heads_ = register_module("outcome_heads", torch::nn::ModuleList());
+  delta_heads_ = register_module("delta_heads", torch::nn::ModuleList());
   for (std::size_t i = 0; i < config_.horizons.size(); ++i) {
     embedding_heads_->push_back(torch::nn::Linear(config_.model_dim, config_.latent_dim));
     outcome_heads_->push_back(torch::nn::Linear(config_.latent_dim, config_.outcome_classes));
+    delta_heads_->push_back(torch::nn::Linear(config_.latent_dim, observation_dim_));
   }
 
   position_embedding_ = register_parameter(
@@ -62,26 +68,31 @@ FutureEvaluationOutput FutureEvaluatorImpl::forward_windows(torch::Tensor window
     throw std::invalid_argument("FutureEvaluator window time dimension is shorter than max horizon.");
   }
   const auto batch = windows.size(0);
-  const torch::Tensor projected = obs_proj_->forward(windows.narrow(1, 0, max_horizon_ + 1));
-  const torch::Tensor sequence_first =
-      (projected + position_embedding_.unsqueeze(0).narrow(1, 0, max_horizon_ + 1)).transpose(0, 1);
-  const torch::Tensor encoded = transformer_->forward(sequence_first).transpose(0, 1);
 
   std::vector<torch::Tensor> embeddings;
   std::vector<torch::Tensor> logits;
+  std::vector<torch::Tensor> deltas;
   embeddings.reserve(config_.horizons.size());
   logits.reserve(config_.horizons.size());
+  deltas.reserve(config_.horizons.size());
   for (std::size_t i = 0; i < config_.horizons.size(); ++i) {
-    const torch::Tensor token = encoded.select(1, config_.horizons[i]);
+    const int horizon = config_.horizons[i];
+    const torch::Tensor projected = obs_proj_->forward(windows.narrow(1, 0, horizon + 1));
+    const torch::Tensor sequence_first =
+        (projected + position_embedding_.unsqueeze(0).narrow(1, 0, horizon + 1)).transpose(0, 1);
+    const torch::Tensor encoded = transformer_->forward(sequence_first).transpose(0, 1);
+    const torch::Tensor token = encoded.select(1, horizon);
     const torch::Tensor embedding =
         torch::tanh(embedding_heads_[i]->as<torch::nn::Linear>()->forward(token));
     embeddings.push_back(embedding);
     logits.push_back(outcome_heads_[i]->as<torch::nn::Linear>()->forward(embedding));
+    deltas.push_back(delta_heads_[i]->as<torch::nn::Linear>()->forward(embedding));
   }
 
   return {
       torch::stack(embeddings, 1).reshape({batch, static_cast<std::int64_t>(config_.horizons.size()), config_.latent_dim}),
       torch::stack(logits, 1).reshape({batch, static_cast<std::int64_t>(config_.horizons.size()), config_.outcome_classes}),
+      torch::stack(deltas, 1).reshape({batch, static_cast<std::int64_t>(config_.horizons.size()), observation_dim_}),
   };
 }
 
@@ -128,6 +139,38 @@ FutureEvaluator clone_future_evaluator(const FutureEvaluator& source, const torc
   clone->load(in);
   clone->to(device);
   return clone;
+}
+
+void ema_update_future_evaluator(const FutureEvaluator& target, const FutureEvaluator& source, float tau) {
+  if (!target || !source) {
+    throw std::invalid_argument("ema_update_future_evaluator requires non-null evaluators.");
+  }
+  if (!std::isfinite(tau)) {
+    throw std::invalid_argument("EMA tau must be finite.");
+  }
+  const float clamped_tau = std::clamp(tau, 0.0F, 1.0F);
+  if (clamped_tau <= 0.0F) {
+    return;
+  }
+
+  torch::NoGradGuard no_grad;
+  const auto target_params = target->parameters();
+  const auto source_params = source->parameters();
+  if (target_params.size() != source_params.size()) {
+    throw std::runtime_error("FutureEvaluator EMA parameter counts differ.");
+  }
+  for (std::size_t i = 0; i < target_params.size(); ++i) {
+    target_params[i].mul_(1.0F - clamped_tau).add_(source_params[i], clamped_tau);
+  }
+
+  const auto target_buffers = target->buffers();
+  const auto source_buffers = source->buffers();
+  if (target_buffers.size() != source_buffers.size()) {
+    throw std::runtime_error("FutureEvaluator EMA buffer counts differ.");
+  }
+  for (std::size_t i = 0; i < target_buffers.size(); ++i) {
+    target_buffers[i].copy_(source_buffers[i]);
+  }
 }
 
 }  // namespace pulsar

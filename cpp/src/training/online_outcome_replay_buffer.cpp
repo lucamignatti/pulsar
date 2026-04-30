@@ -33,24 +33,30 @@ OnlineOutcomeReplayBuffer::OnlineOutcomeReplayBuffer(
 void OnlineOutcomeReplayBuffer::record_step(
     const torch::Tensor& raw_obs_cpu,
     const torch::Tensor& dones_cpu,
-    const torch::Tensor& terminal_outcome_labels_cpu) {
+    const torch::Tensor& terminal_outcome_labels_cpu,
+    const torch::Tensor& terminal_obs_cpu) {
   if (raw_obs_cpu.device().type() != torch::kCPU ||
       dones_cpu.device().type() != torch::kCPU ||
-      terminal_outcome_labels_cpu.device().type() != torch::kCPU) {
+      terminal_outcome_labels_cpu.device().type() != torch::kCPU ||
+      terminal_obs_cpu.device().type() != torch::kCPU) {
     throw std::invalid_argument("OnlineOutcomeReplayBuffer expects CPU tensors.");
   }
   const std::size_t total_agents = num_envs_ * agents_per_env_;
   if (static_cast<std::size_t>(raw_obs_cpu.size(0)) != total_agents ||
       static_cast<std::size_t>(dones_cpu.numel()) != total_agents ||
-      static_cast<std::size_t>(terminal_outcome_labels_cpu.numel()) != total_agents) {
+      static_cast<std::size_t>(terminal_outcome_labels_cpu.numel()) != total_agents ||
+      static_cast<std::size_t>(terminal_obs_cpu.size(0)) != total_agents ||
+      terminal_obs_cpu.size(1) != obs_dim_) {
     throw std::invalid_argument("OnlineOutcomeReplayBuffer tensor sizes disagree.");
   }
   const torch::Tensor obs = raw_obs_cpu.contiguous();
   const torch::Tensor dones = dones_cpu.contiguous();
   const torch::Tensor labels = terminal_outcome_labels_cpu.contiguous();
+  const torch::Tensor terminal_obs = terminal_obs_cpu.contiguous();
   const float* obs_ptr = obs.data_ptr<float>();
   const float* dones_ptr = dones.data_ptr<float>();
   const std::int64_t* labels_ptr = labels.data_ptr<std::int64_t>();
+  const float* terminal_obs_ptr = terminal_obs.data_ptr<float>();
 
   for (std::size_t env_idx = 0; env_idx < num_envs_; ++env_idx) {
     const std::size_t env_base = env_idx * agents_per_env_;
@@ -72,6 +78,10 @@ void OnlineOutcomeReplayBuffer::record_step(
       if (partial.steps == 0) {
         continue;
       }
+      const float* terminal_row =
+          terminal_obs_ptr + static_cast<std::ptrdiff_t>(agent_idx * static_cast<std::size_t>(obs_dim_));
+      partial.obs.insert(partial.obs.end(), terminal_row, terminal_row + obs_dim_);
+      partial.steps += 1;
       OutcomeTrajectory completed;
       completed.obs_cpu =
           torch::from_blob(

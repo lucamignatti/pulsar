@@ -131,6 +131,7 @@ if(PULSAR_ENABLE_TORCH)
       cpp/src/training/online_outcome_dataset_writer.cpp
       cpp/src/training/online_outcome_replay_buffer.cpp
       cpp/src/training/rollout_storage.cpp
+      cpp/src/training/future_window_builder.cpp
       cpp/src/training/batched_rocketsim_collector.cpp
       cpp/src/training/lfpo_math.cpp
       cpp/src/training/lfpo_trainer.cpp
@@ -241,6 +242,16 @@ if(PULSAR_ENABLE_TESTS)
     pulsar_force_target_cxx20(pulsar_lfpo_math_tests)
     add_test(NAME pulsar_lfpo_math_tests COMMAND pulsar_lfpo_math_tests)
     set_tests_properties(pulsar_lfpo_math_tests PROPERTIES LABELS "reference")
+
+    add_executable(
+      pulsar_future_window_tests
+      cpp/tests/test_future_windows.cpp
+    )
+    target_include_directories(pulsar_future_window_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
+    target_link_libraries(pulsar_future_window_tests PRIVATE pulsar_torch)
+    pulsar_force_target_cxx20(pulsar_future_window_tests)
+    add_test(NAME pulsar_future_window_tests COMMAND pulsar_future_window_tests)
+    set_tests_properties(pulsar_future_window_tests PROPERTIES LABELS "reference")
 
     add_executable(
       pulsar_collector_tests

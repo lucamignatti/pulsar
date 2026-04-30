@@ -16,6 +16,7 @@
 #include "pulsar/model/normalizer.hpp"
 #include "pulsar/rl/action_table.hpp"
 #include "pulsar/training/batched_rocketsim_collector.hpp"
+#include "pulsar/training/offline_dataset.hpp"
 #include "pulsar/training/online_outcome_replay_buffer.hpp"
 #include "pulsar/training/rollout_storage.hpp"
 #include "pulsar/training/self_play_manager.hpp"
@@ -30,6 +31,10 @@ struct TrainerMetrics {
   double policy_loss = 0.0;
   double latent_loss = 0.0;
   double evaluator_loss = 0.0;
+  double evaluator_online_loss = 0.0;
+  double evaluator_anchor_loss = 0.0;
+  double evaluator_outcome_loss = 0.0;
+  double evaluator_delta_loss = 0.0;
   double entropy = 0.0;
   double obs_build_seconds = 0.0;
   double mask_build_seconds = 0.0;
@@ -42,6 +47,10 @@ struct TrainerMetrics {
   double self_play_eval_seconds = 0.0;
   std::int64_t online_outcome_samples = 0;
   std::int64_t online_outcome_trajectories = 0;
+  std::int64_t evaluator_online_samples = 0;
+  std::int64_t evaluator_anchor_samples = 0;
+  std::int64_t evaluator_outcome_samples = 0;
+  std::int64_t evaluator_delta_samples = 0;
   std::int64_t evaluator_target_update_index = 0;
   std::map<std::string, double> elo_ratings{};
 };
@@ -90,6 +99,7 @@ class LFPOTrainer {
   torch::optim::AdamW evaluator_optimizer_;
   RolloutStorage rollout_;
   std::unique_ptr<OnlineOutcomeReplayBuffer> outcome_buffer_{};
+  std::unique_ptr<OfflineTensorDataset> evaluator_anchor_dataset_{};
   torch::Device device_{torch::kCPU};
   std::filesystem::path run_output_root_{};
   bool log_initialization_ = true;

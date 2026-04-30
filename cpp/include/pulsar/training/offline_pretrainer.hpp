@@ -17,11 +17,15 @@ namespace pulsar {
 
 struct OfflineEpochMetrics {
   double evaluator_loss = 0.0;
+  double evaluator_outcome_loss = 0.0;
+  double evaluator_delta_loss = 0.0;
   double evaluator_accuracy = 0.0;
   double behavior_loss = 0.0;
   double behavior_accuracy = 0.0;
   double latent_loss = 0.0;
   std::int64_t evaluator_samples = 0;
+  std::int64_t evaluator_outcome_samples = 0;
+  std::int64_t evaluator_delta_samples = 0;
   std::int64_t behavior_samples = 0;
   std::int64_t latent_samples = 0;
   std::int64_t samples = 0;

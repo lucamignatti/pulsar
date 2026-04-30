@@ -37,7 +37,8 @@ class OnlineOutcomeReplayBuffer {
   void record_step(
       const torch::Tensor& raw_obs_cpu,
       const torch::Tensor& dones_cpu,
-      const torch::Tensor& terminal_outcome_labels_cpu);
+      const torch::Tensor& terminal_outcome_labels_cpu,
+      const torch::Tensor& terminal_obs_cpu);
   void clear();
 
   [[nodiscard]] std::vector<OutcomeTrajectory> trajectories() const;

@@ -36,6 +36,7 @@ RolloutStorage::RolloutStorage(
       {rollout_length, num_agents},
       2,
       torch::TensorOptions().dtype(torch::kLong).device(device));
+  terminal_raw_obs = torch::zeros({rollout_length, num_agents, obs_dim}, device);
 }
 
 void RolloutStorage::append(
@@ -50,7 +51,8 @@ void RolloutStorage::append(
     const torch::Tensor& candidate_log_probs_in,
     const torch::Tensor& trajectory_ids_in,
     const torch::Tensor& dones_in,
-    const torch::Tensor& terminal_outcomes_in) {
+    const torch::Tensor& terminal_outcomes_in,
+    const torch::Tensor& terminal_raw_obs_in) {
   raw_obs[step].copy_(raw_obs_in.detach());
   obs[step].copy_(obs_in.detach());
   episode_starts[step].copy_(episode_starts_in.detach());
@@ -62,6 +64,7 @@ void RolloutStorage::append(
   trajectory_ids[step].copy_(trajectory_ids_in.detach());
   dones[step].copy_(dones_in.detach());
   terminal_outcomes[step].copy_(terminal_outcomes_in.detach());
+  terminal_raw_obs[step].copy_(terminal_raw_obs_in.detach());
 }
 
 void RolloutStorage::set_final_observation(const torch::Tensor& raw_obs_in) {

@@ -120,6 +120,8 @@ void BatchedRocketSimCollector::initialize(
   host_terminated_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   host_truncated_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   host_terminal_outcome_labels_ = torch::full({static_cast<long>(total_agents_)}, 2, i64);
+  host_terminal_observations_ =
+      torch::zeros({static_cast<long>(total_agents_), obs_dim_}, f32);
 
   for (std::size_t env_idx = 0; env_idx < envs_.size(); ++env_idx) {
     assign_env(env_idx, envs_[env_idx].reset_seed);
@@ -246,10 +248,13 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
   float* terminated_ptr = host_terminated_.data_ptr<float>();
   float* truncated_ptr = host_truncated_.data_ptr<float>();
   std::int64_t* labels_ptr = host_terminal_outcome_labels_.data_ptr<std::int64_t>();
+  float* terminal_obs_ptr = host_terminal_observations_.data_ptr<float>();
+  const std::size_t obs_stride = static_cast<std::size_t>(obs_dim_);
   host_dones_.zero_();
   host_terminated_.zero_();
   host_truncated_.zero_();
   host_terminal_outcome_labels_.fill_(2);
+  host_terminal_observations_.zero_();
 
   executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
     for (std::size_t env_idx = begin; env_idx < end; ++env_idx) {
@@ -283,6 +288,11 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
       }
 
       if (reset_needed) {
+        obs_builder_->build_obs_batch(
+            current_state,
+            std::span<float>(
+                terminal_obs_ptr + static_cast<std::ptrdiff_t>(agent_begin * obs_stride),
+                count * obs_stride));
         envs_[env_idx].reset_seed += static_cast<std::uint64_t>(envs_.size());
         envs_[env_idx].engine->reset(envs_[env_idx].reset_seed);
         assign_env(env_idx, envs_[env_idx].reset_seed);
@@ -383,6 +393,10 @@ const torch::Tensor& BatchedRocketSimCollector::host_truncated() const {
 
 const torch::Tensor& BatchedRocketSimCollector::host_terminal_outcome_labels() const {
   return host_terminal_outcome_labels_;
+}
+
+const torch::Tensor& BatchedRocketSimCollector::host_terminal_observations() const {
+  return host_terminal_observations_;
 }
 
 }  // namespace pulsar

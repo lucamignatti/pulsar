@@ -91,6 +91,11 @@ class OfflineTensorDataset {
       bool shuffle,
       std::uint64_t seed,
       const std::function<void(const OfflineTensorPackedBatch&)>& fn) const;
+  void for_each_packed_trajectory_batch_until(
+      int max_tokens,
+      bool shuffle,
+      std::uint64_t seed,
+      const std::function<bool(const OfflineTensorPackedBatch&)>& fn) const;
 
  private:
   OfflineTensorManifest manifest_{};

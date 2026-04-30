@@ -76,13 +76,49 @@ int main() {
     if (evaluated.embeddings.sizes() != torch::IntArrayRef({2, 3, evaluator_config.latent_dim})) {
       throw std::runtime_error("future evaluator embedding shape mismatch");
     }
-    if (evaluated.outcome_logits.sizes() != torch::IntArrayRef({2, 3, evaluator_config.outcome_classes})) {
-      throw std::runtime_error("future evaluator outcome shape mismatch");
-    }
-    if (evaluator->classify_embeddings(torch::randn({2, 5, 3, evaluator_config.latent_dim})).sizes() !=
-        torch::IntArrayRef({2, 5, 3, evaluator_config.outcome_classes})) {
-      throw std::runtime_error("future evaluator candidate classify shape mismatch");
-    }
+      if (evaluated.outcome_logits.sizes() != torch::IntArrayRef({2, 3, evaluator_config.outcome_classes})) {
+        throw std::runtime_error("future evaluator outcome shape mismatch");
+      }
+      if (evaluated.delta_predictions.sizes() != torch::IntArrayRef({2, 3, model_config.observation_dim})) {
+        throw std::runtime_error("future evaluator delta shape mismatch");
+      }
+      if (evaluator->classify_embeddings(torch::randn({2, 5, 3, evaluator_config.latent_dim})).sizes() !=
+          torch::IntArrayRef({2, 5, 3, evaluator_config.outcome_classes})) {
+        throw std::runtime_error("future evaluator candidate classify shape mismatch");
+      }
+      evaluator->eval();
+      torch::Tensor prefix_windows = torch::zeros({2, 4, model_config.observation_dim});
+      prefix_windows[1][2].fill_(25.0F);
+      prefix_windows[1][3].fill_(-25.0F);
+      const pulsar::FutureEvaluationOutput prefix_eval = evaluator->forward_windows(prefix_windows);
+      if (!torch::allclose(prefix_eval.embeddings[0][0], prefix_eval.embeddings[1][0], 1.0e-6, 1.0e-6)) {
+        throw std::runtime_error("short horizon embedding leaked later future states");
+      }
+      if (torch::allclose(prefix_eval.embeddings[0][2], prefix_eval.embeddings[1][2], 1.0e-6, 1.0e-6)) {
+        throw std::runtime_error("long horizon embedding ignored available future states");
+      }
+
+      pulsar::FutureEvaluator online(evaluator_config, model_config.observation_dim);
+      pulsar::FutureEvaluator target(evaluator_config, model_config.observation_dim);
+      {
+        torch::NoGradGuard no_grad;
+        for (auto& parameter : online->parameters()) {
+          parameter.fill_(2.0F);
+        }
+        for (auto& parameter : target->parameters()) {
+          parameter.zero_();
+          parameter.set_requires_grad(false);
+        }
+      }
+      pulsar::ema_update_future_evaluator(target, online, 0.25F);
+      for (const auto& parameter : target->parameters()) {
+        if (!torch::allclose(parameter, torch::full_like(parameter, 0.5F), 1.0e-6, 1.0e-6)) {
+          throw std::runtime_error("future evaluator EMA parameter mismatch");
+        }
+        if (parameter.requires_grad()) {
+          throw std::runtime_error("future evaluator EMA should preserve frozen target parameters");
+        }
+      }
 
     pulsar::ObservationNormalizer normalizer(model_config.observation_dim);
     normalizer.update(torch::randn({8, model_config.observation_dim}));

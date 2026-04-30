@@ -64,10 +64,11 @@ void test_entropy_and_rollout_storage() {
       torch::tensor({1.0F, 0.0F}),
       torch::tensor({2, 1}, torch::kLong),
       torch::tensor({{2, 0}, {1, 0}}, torch::kLong),
-      torch::tensor({{-0.2F, -0.4F}, {-0.1F, -0.7F}}),
-      torch::tensor({10, 20}, torch::kLong),
-      torch::zeros({2}),
-      torch::tensor({2, 2}, torch::kLong));
+        torch::tensor({{-0.2F, -0.4F}, {-0.1F, -0.7F}}),
+        torch::tensor({10, 20}, torch::kLong),
+        torch::zeros({2}),
+        torch::tensor({2, 2}, torch::kLong),
+        torch::zeros({2, 3}));
   storage.append(
       1,
       torch::zeros({2, 3}),
@@ -77,15 +78,17 @@ void test_entropy_and_rollout_storage() {
       torch::tensor({1.0F, 0.0F}),
       torch::tensor({1, 3}, torch::kLong),
       torch::tensor({{1, 0}, {3, 0}}, torch::kLong),
-      torch::tensor({{-0.3F, -0.5F}, {-0.4F, -0.8F}}),
-      torch::tensor({10, 21}, torch::kLong),
-      torch::ones({2}),
-      torch::tensor({0, 1}, torch::kLong));
+        torch::tensor({{-0.3F, -0.5F}, {-0.4F, -0.8F}}),
+        torch::tensor({10, 21}, torch::kLong),
+        torch::ones({2}),
+        torch::tensor({0, 1}, torch::kLong),
+        torch::ones({2, 3}));
   pulsar::test::require(storage.action_masks[0][0][1].item<std::uint8_t>() == 0, "action mask should round-trip");
   pulsar::test::require(storage.candidate_actions[1][0][0].item<std::int64_t>() == 1, "candidate action should round-trip");
   pulsar::test::require(storage.trajectory_ids[1][1].item<std::int64_t>() == 21, "trajectory id should round-trip");
-  pulsar::test::require(storage.terminal_outcomes[1][1].item<std::int64_t>() == 1, "terminal outcome should round-trip");
-}
+    pulsar::test::require(storage.terminal_outcomes[1][1].item<std::int64_t>() == 1, "terminal outcome should round-trip");
+    pulsar::test::require(storage.terminal_raw_obs[1][0][0].item<float>() == 1.0F, "terminal obs should round-trip");
+  }
 
 }  // namespace
 

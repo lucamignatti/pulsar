@@ -30,7 +30,8 @@ class RolloutStorage {
       const torch::Tensor& candidate_log_probs,
       const torch::Tensor& trajectory_ids,
       const torch::Tensor& dones,
-      const torch::Tensor& terminal_outcomes);
+      const torch::Tensor& terminal_outcomes,
+      const torch::Tensor& terminal_raw_obs);
 
   void set_final_observation(const torch::Tensor& raw_obs);
   void set_initial_state(const ContinuumState& state);
@@ -53,6 +54,7 @@ class RolloutStorage {
   torch::Tensor trajectory_ids;
   torch::Tensor dones;
   torch::Tensor terminal_outcomes;
+  torch::Tensor terminal_raw_obs;
 
  private:
   int rollout_length_ = 0;

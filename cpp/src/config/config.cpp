@@ -167,6 +167,7 @@ void to_json(json& j, const LFPOConfig& value) {
       {"evaluator_target_update_interval", value.evaluator_target_update_interval},
       {"evaluator_target_ema_tau", value.evaluator_target_ema_tau},
       {"online_window_capacity", value.online_window_capacity},
+      {"evaluator_anchor_ratio", value.evaluator_anchor_ratio},
   };
 }
 
@@ -191,9 +192,10 @@ void from_json(const json& j, LFPOConfig& value) {
   value.burn_in = j.value("burn_in", 0);
   value.candidate_count = j.value("candidate_count", 8);
   value.evaluator_update_interval = j.value("evaluator_update_interval", 4);
-  value.evaluator_target_update_interval = j.value("evaluator_target_update_interval", 500);
+  value.evaluator_target_update_interval = j.value("evaluator_target_update_interval", 1);
   value.evaluator_target_ema_tau = j.value("evaluator_target_ema_tau", 0.01F);
   value.online_window_capacity = j.value("online_window_capacity", 64);
+  value.evaluator_anchor_ratio = j.value("evaluator_anchor_ratio", 0.25F);
 }
 
 void to_json(json& j, const FutureEvaluatorConfig& value) {
@@ -210,6 +212,7 @@ void to_json(json& j, const FutureEvaluatorConfig& value) {
       {"weight_decay", value.weight_decay},
       {"max_grad_norm", value.max_grad_norm},
       {"class_weights", value.class_weights},
+      {"future_delta_loss_coef", value.future_delta_loss_coef},
   };
 }
 
@@ -226,6 +229,7 @@ void from_json(const json& j, FutureEvaluatorConfig& value) {
   value.weight_decay = j.value("weight_decay", 1.0e-6F);
   value.max_grad_norm = j.value("max_grad_norm", 1.0F);
   value.class_weights = j.value("class_weights", std::vector<float>{1.0F, 1.0F, 0.25F});
+  value.future_delta_loss_coef = j.value("future_delta_loss_coef", 0.1F);
 }
 
 void to_json(json& j, const OfflineDatasetConfig& value) {
