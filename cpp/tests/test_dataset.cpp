@@ -146,6 +146,8 @@ void test_dataset_default_episode_starts_and_mismatch() {
 
 int main() {
   try {
+    torch::set_num_threads(1);
+    torch::set_num_interop_threads(1);
     test_dataset_iteration_and_trajectories();
     test_dataset_default_episode_starts_and_mismatch();
     std::cout << "pulsar_dataset_tests passed\n" << std::flush;

@@ -131,6 +131,8 @@ void test_opponent_inference_and_elo_math() {
 
 int main() {
   try {
+    torch::set_num_threads(1);
+    torch::set_num_interop_threads(1);
     test_snapshot_save_load_trim_and_assignment();
     test_opponent_inference_and_elo_math();
     std::cout << "pulsar_self_play_tests passed\n" << std::flush;
