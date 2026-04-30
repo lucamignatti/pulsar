@@ -100,8 +100,8 @@ class TrajectoryBuffer:
     obs: list[np.ndarray] = field(default_factory=list)
     actions: list[int] = field(default_factory=list)
     action_probs: list[np.ndarray] = field(default_factory=list)
-    next_goal: list[int] = field(default_factory=list)
     weights: list[float] = field(default_factory=list)
+    team_num: int | None = None
     terminated: bool = False
     truncated: bool = False
 
@@ -109,8 +109,8 @@ class TrajectoryBuffer:
         self.obs.clear()
         self.actions.clear()
         self.action_probs.clear()
-        self.next_goal.clear()
         self.weights.clear()
+        self.team_num = None
         self.terminated = False
         self.truncated = False
 
@@ -139,19 +139,19 @@ def _find_replays(dataset_root: Path, split_subdir: str) -> list[Path]:
 
 def _write_manifest(path: Path, obs_dim: int, action_dim: int, shards: list[dict[str, Any]]) -> None:
     payload = {
-        "schema_version": 3,
+        "schema_version": 4,
         "observation_dim": obs_dim,
         "action_dim": action_dim,
-        "next_goal_classes": 3,
+        "outcome_classes": 3,
         "shards": shards,
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def _next_goal_label(team_num: int, next_scoring_team: int | None) -> int:
-    if next_scoring_team is None:
+def _outcome_label(team_num: int | None, scoring_team: int | None) -> int:
+    if team_num is None or scoring_team is None:
         return 2
-    return 0 if next_scoring_team == team_num else 1
+    return 0 if scoring_team == team_num else 1
 
 
 def _sample_weight(action_probs: np.ndarray) -> float:
@@ -236,7 +236,8 @@ def _process_replay_subset(
     train_obs: list[np.ndarray] = []
     train_actions: list[int] = []
     train_action_probs: list[np.ndarray] = []
-    train_next_goal: list[int] = []
+    train_outcome: list[int] = []
+    train_outcome_known: list[float] = []
     train_weights: list[float] = []
     train_episode_starts: list[float] = []
     train_terminated: list[float] = []
@@ -244,7 +245,8 @@ def _process_replay_subset(
     val_obs: list[np.ndarray] = []
     val_actions: list[int] = []
     val_action_probs: list[np.ndarray] = []
-    val_next_goal: list[int] = []
+    val_outcome: list[int] = []
+    val_outcome_known: list[float] = []
     val_weights: list[float] = []
     val_episode_starts: list[float] = []
     val_terminated: list[float] = []
@@ -260,7 +262,8 @@ def _process_replay_subset(
         obs_rows: list[np.ndarray],
         actions: list[int],
         action_probs: list[np.ndarray],
-        labels: list[int],
+        outcomes: list[int],
+        outcome_known: list[float],
         weights: list[float],
         episode_starts: list[float],
         terminated: list[float],
@@ -277,7 +280,8 @@ def _process_replay_subset(
         action_probs_tensor = torch.from_numpy(
             _stack_rows(action_probs, "action probability", split, shard_name)
         )
-        labels_tensor = torch.tensor(labels, dtype=torch.long)
+        outcomes_tensor = torch.tensor(outcomes, dtype=torch.long)
+        outcome_known_tensor = torch.tensor(outcome_known, dtype=torch.float32)
         weights_tensor = torch.tensor(weights, dtype=torch.float32)
         episode_starts_tensor = torch.tensor(episode_starts, dtype=torch.float32)
         terminated_tensor = torch.tensor(terminated, dtype=torch.float32)
@@ -286,7 +290,8 @@ def _process_replay_subset(
         torch.save(obs_tensor, split_dir / f"{shard_name}_obs.pt")
         torch.save(actions_tensor, split_dir / f"{shard_name}_actions.pt")
         torch.save(action_probs_tensor, split_dir / f"{shard_name}_action_probs.pt")
-        torch.save(labels_tensor, split_dir / f"{shard_name}_next_goal.pt")
+        torch.save(outcomes_tensor, split_dir / f"{shard_name}_outcome.pt")
+        torch.save(outcome_known_tensor, split_dir / f"{shard_name}_outcome_known.pt")
         torch.save(weights_tensor, split_dir / f"{shard_name}_weights.pt")
         torch.save(episode_starts_tensor, split_dir / f"{shard_name}_episode_starts.pt")
         torch.save(terminated_tensor, split_dir / f"{shard_name}_terminated.pt")
@@ -298,7 +303,8 @@ def _process_replay_subset(
                 "obs_path": f"{split}/{shard_name}_obs.pt",
                 "actions_path": f"{split}/{shard_name}_actions.pt",
                 "action_probs_path": f"{split}/{shard_name}_action_probs.pt",
-                "next_goal_path": f"{split}/{shard_name}_next_goal.pt",
+                "outcome_path": f"{split}/{shard_name}_outcome.pt",
+                "outcome_known_path": f"{split}/{shard_name}_outcome_known.pt",
                 "weights_path": f"{split}/{shard_name}_weights.pt",
                 "episode_starts_path": f"{split}/{shard_name}_episode_starts.pt",
                 "terminated_path": f"{split}/{shard_name}_terminated.pt",
@@ -309,13 +315,21 @@ def _process_replay_subset(
         obs_rows.clear()
         actions.clear()
         action_probs.clear()
-        labels.clear()
+        outcomes.clear()
+        outcome_known.clear()
         weights.clear()
         episode_starts.clear()
         terminated.clear()
         truncated.clear()
 
-    def close_trajectory(split: str, trajectory: TrajectoryBuffer, *, terminated_end: bool, truncated_end: bool) -> None:
+    def close_trajectory(
+        split: str,
+        trajectory: TrajectoryBuffer,
+        *,
+        terminated_end: bool,
+        truncated_end: bool,
+        scoring_team: int | None = None,
+    ) -> None:
         nonlocal train_shard_index, val_shard_index
         if not trajectory:
             return
@@ -327,7 +341,8 @@ def _process_replay_subset(
             obs_rows = train_obs
             actions = train_actions
             action_probs = train_action_probs
-            labels = train_next_goal
+            outcomes = train_outcome
+            outcome_known = train_outcome_known
             weights = train_weights
             episode_starts = train_episode_starts
             terminated = train_terminated
@@ -337,7 +352,8 @@ def _process_replay_subset(
             obs_rows = val_obs
             actions = val_actions
             action_probs = val_action_probs
-            labels = val_next_goal
+            outcomes = val_outcome
+            outcome_known = val_outcome_known
             weights = val_weights
             episode_starts = val_episode_starts
             terminated = val_terminated
@@ -351,7 +367,8 @@ def _process_replay_subset(
                 obs_rows,
                 actions,
                 action_probs,
-                labels,
+                outcomes,
+                outcome_known,
                 weights,
                 episode_starts,
                 terminated,
@@ -365,7 +382,10 @@ def _process_replay_subset(
         obs_rows.extend(trajectory.obs)
         actions.extend(trajectory.actions)
         action_probs.extend(trajectory.action_probs)
-        labels.extend(trajectory.next_goal)
+        label = _outcome_label(trajectory.team_num, scoring_team) if terminated_end else 2
+        known = 1.0 if label in (0, 1) else 0.0
+        outcomes.extend([label] * len(trajectory.obs))
+        outcome_known.extend([known] * len(trajectory.obs))
         weights.extend(trajectory.weights)
         episode_starts.extend([1.0] + [0.0] * (len(trajectory.obs) - 1))
         terminated.extend([0.0] * len(trajectory.obs))
@@ -465,13 +485,19 @@ def _process_replay_subset(
                     trajectory.obs.append(obs_rows_by_agent[agent_id])
                     trajectory.action_probs.append(action_probs)
                     trajectory.actions.append(int(np.argmax(action_probs)))
-                    trajectory.next_goal.append(_next_goal_label(car.team_num, frame.next_scoring_team))
+                    trajectory.team_num = car.team_num
                     trajectory.weights.append(_sample_weight(action_probs))
                     result.exact_samples += 1
 
                 if frame.scoreboard.go_to_kickoff or frame.scoreboard.is_over:
                     for agent_id in agent_order:
-                        close_trajectory(split, trajectories[agent_id], terminated_end=True, truncated_end=False)
+                        close_trajectory(
+                            split,
+                            trajectories[agent_id],
+                            terminated_end=True,
+                            truncated_end=False,
+                            scoring_team=frame.next_scoring_team,
+                        )
 
             for trajectory in trajectories.values():
                 close_trajectory(split, trajectory, terminated_end=False, truncated_end=True)
@@ -486,7 +512,8 @@ def _process_replay_subset(
         train_obs,
         train_actions,
         train_action_probs,
-        train_next_goal,
+        train_outcome,
+        train_outcome_known,
         train_weights,
         train_episode_starts,
         train_terminated,
@@ -498,7 +525,8 @@ def _process_replay_subset(
         val_obs,
         val_actions,
         val_action_probs,
-        val_next_goal,
+        val_outcome,
+        val_outcome_known,
         val_weights,
         val_episode_starts,
         val_terminated,

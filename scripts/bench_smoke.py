@@ -26,15 +26,12 @@ def main() -> int:
 
     required = {
         "collection_agent_steps_per_second",
-        "trainer_like_agent_steps_per_second",
-        "offline_train_samples_per_second",
-        "offline_train_epoch_seconds",
-        "obs_build_seconds",
-        "mask_build_seconds",
-        "env_step_seconds",
-        "done_reset_seconds",
-        "trainer_like_policy_forward_seconds",
-        "trainer_like_reward_model_seconds",
+        "lfpo_update_agent_steps_per_second",
+        "offline_pretrain_samples_per_second",
+        "offline_pretrain_epoch_seconds",
+        "policy_forward_seconds",
+        "future_evaluator_seconds",
+        "lfpo_forward_backward_seconds",
     }
     missing = sorted(required - metrics.keys())
     if missing:

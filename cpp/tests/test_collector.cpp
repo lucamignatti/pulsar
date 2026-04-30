@@ -75,12 +75,9 @@ class FakeTransitionEngine final : public pulsar::TransitionEngine {
 
 void test_collector_shapes_self_play_and_reset() {
   pulsar::ExperimentConfig config = pulsar::test::make_test_config();
-  config.ppo.num_envs = 2;
-  config.ppo.collection_workers = 0;
+  config.lfpo.num_envs = 2;
+  config.lfpo.collection_workers = 0;
   config.env.max_episode_ticks = config.env.tick_skip;
-  config.reward.touch_reward = 0.25F;
-  config.reward.goal_reward = 2.0F;
-  config.reward.concede_penalty = 1.5F;
 
   std::vector<pulsar::TransitionEnginePtr> engines;
   engines.push_back(std::make_shared<FakeTransitionEngine>(config.env));
@@ -135,22 +132,19 @@ void test_collector_shapes_self_play_and_reset() {
       collector.host_dones().sum().item<float>() == 8.0F,
       "collector should report done after timeout/reset");
   pulsar::test::require(
-      collector.host_event_rewards().sum().item<float>() == 0.5F,
-      "collector should reward one touch per env");
-  pulsar::test::require(
       collector.host_episode_starts().sum().item<float>() == 8.0F,
       "episode_starts should mirror previous dones");
+  pulsar::test::require(
+      (collector.host_terminal_outcome_labels() == 2).all().item<bool>(),
+      "timeout reset should produce neutral outcome labels");
   pulsar::test::require(assignment_calls >= 4, "assignments should be refreshed after reset");
 }
 
-void test_collector_goal_event_rewards() {
+void test_collector_goal_outcomes() {
   pulsar::ExperimentConfig config = pulsar::test::make_test_config();
-  config.ppo.num_envs = 1;
-  config.ppo.collection_workers = 0;
+  config.lfpo.num_envs = 1;
+  config.lfpo.collection_workers = 0;
   config.env.max_episode_ticks = config.env.tick_skip * 4;
-  config.reward.touch_reward = 0.25F;
-  config.reward.goal_reward = 2.0F;
-  config.reward.concede_penalty = 1.5F;
 
   std::vector<pulsar::TransitionEnginePtr> engines;
   engines.push_back(std::make_shared<FakeTransitionEngine>(config.env));
@@ -170,25 +164,21 @@ void test_collector_goal_event_rewards() {
   std::vector<pulsar::ControllerState> actions(collector.total_agents(), {.throttle = 1.0F});
   collector.step(actions);
   pulsar::test::require(
-      collector.host_event_rewards().sum().item<float>() == 0.25F,
-      "collector should expose touch rewards before goal");
+      (collector.host_terminal_outcome_labels() == 2).all().item<bool>(),
+      "non-terminal transition should carry neutral outcome labels");
   collector.step(actions);
-  const float expected = 0.25F + 2.0F + 2.0F - 1.5F - 1.5F;
   pulsar::test::require(
-      std::abs(collector.host_event_rewards().sum().item<float>() - expected) < 1.0e-5F,
-      "collector should expose team goal and concede rewards");
+      collector.host_terminal_outcome_labels().slice(0, 0, 2).sum().item<std::int64_t>() == 0,
+      "blue scorers should receive score labels");
   pulsar::test::require(
-      collector.host_terminal_next_goal_labels().slice(0, 0, 2).sum().item<std::int64_t>() == 0,
-      "blue scorers should receive positive next-goal labels");
-  pulsar::test::require(
-      collector.host_terminal_next_goal_labels().slice(0, 2, 4).sum().item<std::int64_t>() == 2,
-      "orange conceders should receive negative next-goal labels");
+      collector.host_terminal_outcome_labels().slice(0, 2, 4).sum().item<std::int64_t>() == 2,
+      "orange conceders should receive concede labels");
 }
 
 void test_collector_parity_with_legacy_engine() {
   pulsar::ExperimentConfig config = pulsar::test::make_test_config();
-  config.ppo.num_envs = 1;
-  config.ppo.collection_workers = 0;
+  config.lfpo.num_envs = 1;
+  config.lfpo.collection_workers = 0;
   config.env.collision_meshes_path = pulsar::test::find_repo_collision_meshes().string();
 
   auto reset_mutator = std::make_shared<pulsar::MutatorSequence>(
@@ -234,7 +224,7 @@ void test_collector_parity_with_legacy_engine() {
 int main() {
   try {
     test_collector_shapes_self_play_and_reset();
-    test_collector_goal_event_rewards();
+    test_collector_goal_outcomes();
     test_collector_parity_with_legacy_engine();
     std::cout << "pulsar_collector_tests passed\n";
     return EXIT_SUCCESS;

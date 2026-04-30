@@ -35,14 +35,14 @@ def rocm_arch_name() -> str:
 def main() -> int:
     if len(sys.argv) != 6:
         raise SystemExit(
-            "usage: rocm_smoke.py <repo_root> <pulsar_train> <pulsar_offline_train> "
-            "<ppo_base_config> <offline_base_config>"
+            "usage: rocm_smoke.py <repo_root> <pulsar_lfpo_train> <pulsar_lfpo_pretrain> "
+            "<lfpo_base_config> <offline_base_config>"
         )
 
     repo_root = Path(sys.argv[1]).resolve()
     train_binary = Path(sys.argv[2]).resolve()
-    offline_binary = Path(sys.argv[3]).resolve()
-    ppo_base_config_path = Path(sys.argv[4]).resolve()
+    pretrain_binary = Path(sys.argv[3]).resolve()
+    lfpo_base_config_path = Path(sys.argv[4]).resolve()
     offline_base_config_path = Path(sys.argv[5]).resolve()
 
     if not torch.cuda.is_available():
@@ -65,10 +65,11 @@ def main() -> int:
             "ltm_slots": 8,
             "ltm_dim": 16,
             "controller_dim": 64,
+            "action_embedding_dim": 16,
         }
         offline_output_dir = run_offline_pretrain(
             repo_root=repo_root,
-            offline_binary=offline_binary,
+            offline_binary=pretrain_binary,
             offline_base_config_path=offline_base_config_path,
             work_dir=tmp_dir,
             device="cuda:0",
@@ -77,21 +78,32 @@ def main() -> int:
         checkpoint_dir = tmp_dir / "checkpoints"
         config_path = tmp_dir / "config.json"
 
-        config = json.loads(ppo_base_config_path.read_text(encoding="utf-8"))
+        config = json.loads(lfpo_base_config_path.read_text(encoding="utf-8"))
         config["env"]["collision_meshes_path"] = str((repo_root / "collision_meshes").resolve())
         config["model"].update(model_overrides)
-        config["ppo"]["num_envs"] = 2
-        config["ppo"]["rollout_length"] = 4
-        config["ppo"]["minibatch_size"] = 8
-        config["ppo"]["epochs"] = 1
-        config["ppo"]["checkpoint_interval"] = 1
-        config["ppo"]["sequence_length"] = 2
-        config["ppo"]["burn_in"] = 1
-        config["ppo"]["collection_workers"] = 0
-        config["ppo"]["device"] = "cuda:0"
-        config["ppo"]["init_checkpoint"] = str(offline_output_dir.resolve())
-        config["reward"]["ngp_checkpoint"] = str(offline_output_dir.resolve())
-        config["reward"]["ngp_scale"] = 1.0
+        config["future_evaluator"].update(
+            {
+                "horizons": [1, 2, 3],
+                "latent_dim": 8,
+                "model_dim": 16,
+                "layers": 1,
+                "heads": 4,
+                "feedforward_dim": 32,
+            }
+        )
+        config["lfpo"]["num_envs"] = 2
+        config["lfpo"]["rollout_length"] = 4
+        config["lfpo"]["minibatch_size"] = 8
+        config["lfpo"]["update_epochs"] = 1
+        config["lfpo"]["checkpoint_interval"] = 1
+        config["lfpo"]["sequence_length"] = 2
+        config["lfpo"]["burn_in"] = 0
+        config["lfpo"]["collection_workers"] = 0
+        config["lfpo"]["device"] = "cuda:0"
+        config["lfpo"]["init_checkpoint"] = str(offline_output_dir.resolve())
+        config["lfpo"]["candidate_count"] = 4
+        config["lfpo"]["evaluator_update_interval"] = 1
+        config["lfpo"]["evaluator_target_update_interval"] = 1
         config["wandb"]["enabled"] = False
         config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
@@ -115,7 +127,7 @@ def main() -> int:
         ]
         if not metrics_lines:
             raise RuntimeError("ROCm smoke did not emit metrics")
-        for field in ["policy_loss", "value_loss", "entropy"]:
+        for field in ["policy_loss", "latent_loss", "entropy"]:
             value = float(metrics_lines[-1][field])
             if not math.isfinite(value):
                 raise RuntimeError(f"non-finite metric in ROCm smoke: {field}={value}")

@@ -64,7 +64,7 @@ ctest --test-dir build/release -L rocm --output-on-failure
 
 If the Torch targets are enabled, also validate:
 
-- The intended two-stage path works on ROCm: `pulsar_offline_train` writes `policy/` and `next_goal/`, then `pulsar_train` loads both via `ppo.init_checkpoint` and `reward.ngp_checkpoint`.
+- The intended two-stage path works on ROCm: `pulsar_lfpo_pretrain` writes the Continuum actor plus `future_evaluator/`, then `pulsar_lfpo_train` loads that checkpoint via `lfpo.init_checkpoint`.
 - The trainer runs in FP32 on ROCm. Mixed precision is not part of the current runtime.
 - ROCm-only tests are compiled automatically when ROCm is found at configure time.
 - Python bindings are optional. If `Python3 Development.Module` is unavailable, CMake skips `pulsar_native` without blocking the C++ trainer build.

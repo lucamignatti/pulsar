@@ -10,21 +10,21 @@
 
 #include "pulsar/checkpoint/checkpoint.hpp"
 #include "pulsar/config/config.hpp"
-#include "pulsar/model/actor_critic.hpp"
+#include "pulsar/model/latent_future_actor.hpp"
 #include "pulsar/model/normalizer.hpp"
 
 namespace py = pybind11;
 
 namespace pulsar {
 
-class PySharedModel {
+class PyLatentFutureActor {
  public:
-  PySharedModel(std::string checkpoint_dir, std::string device)
+  PyLatentFutureActor(std::string checkpoint_dir, std::string device)
       : checkpoint_dir_(std::move(checkpoint_dir)),
         device_(std::move(device)),
         config_(load_experiment_config(checkpoint_dir_ + "/config.json")),
         metadata_(load_checkpoint_metadata(checkpoint_dir_ + "/metadata.json")),
-        model_(load_shared_model(checkpoint_dir_, device_)),
+        model_(load_latent_future_actor(checkpoint_dir_, device_)),
         normalizer_(config_.model.observation_dim),
         torch_device_(device_) {
     validate_inference_checkpoint_metadata(metadata_, config_);
@@ -85,7 +85,7 @@ class PySharedModel {
 
     torch::NoGradGuard no_grad;
     const torch::Tensor normalized = normalizer_.normalize(input);
-    PolicyOutput output = model_->forward_step(normalized, std::move(state_), starts);
+    ActorStepOutput output = model_->forward_step(normalized, std::move(state_), starts);
     state_ = std::move(output.state);
 
     const torch::Tensor logits = output.policy_logits.to(torch::kCPU).contiguous();
@@ -104,7 +104,7 @@ class PySharedModel {
   std::string device_{};
   ExperimentConfig config_{};
   CheckpointMetadata metadata_{};
-  SharedActorCritic model_{nullptr};
+  LatentFutureActor model_{nullptr};
   ObservationNormalizer normalizer_;
   torch::Device torch_device_;
   ContinuumState state_{};
@@ -113,15 +113,19 @@ class PySharedModel {
 }  // namespace pulsar
 
 PYBIND11_MODULE(pulsar_native, m) {
-  py::class_<pulsar::PySharedModel>(m, "SharedModel")
-      .def("reset", &pulsar::PySharedModel::reset, py::arg("batch_size"))
-      .def("forward", &pulsar::PySharedModel::forward, py::arg("obs"))
-      .def("forward_batch", &pulsar::PySharedModel::forward_batch, py::arg("obs_batch"), py::arg("episode_starts") = std::vector<float>{});
+  py::class_<pulsar::PyLatentFutureActor>(m, "LatentFutureActor")
+      .def("reset", &pulsar::PyLatentFutureActor::reset, py::arg("batch_size"))
+      .def("forward", &pulsar::PyLatentFutureActor::forward, py::arg("obs"))
+      .def(
+          "forward_batch",
+          &pulsar::PyLatentFutureActor::forward_batch,
+          py::arg("obs_batch"),
+          py::arg("episode_starts") = std::vector<float>{});
 
   m.def(
-      "load_shared_model",
+      "load_latent_future_actor",
       [](const std::string& checkpoint_dir, const std::string& device) {
-        return pulsar::PySharedModel(checkpoint_dir, device);
+        return pulsar::PyLatentFutureActor(checkpoint_dir, device);
       },
       py::arg("checkpoint_dir"),
       py::arg("device") = "cpu");
@@ -139,13 +143,11 @@ PYBIND11_MODULE(pulsar_native, m) {
         result["device"] = metadata.device;
         result["global_step"] = metadata.global_step;
         result["update_index"] = metadata.update_index;
-        result["reward_ngp_label"] = metadata.reward_ngp_label;
-        result["reward_ngp_checkpoint"] = metadata.reward_ngp_checkpoint;
-        result["reward_ngp_config_hash"] = metadata.reward_ngp_config_hash;
-        result["reward_ngp_global_step"] = metadata.reward_ngp_global_step;
-        result["reward_ngp_update_index"] = metadata.reward_ngp_update_index;
-        result["reward_ngp_promotion_index"] = metadata.reward_ngp_promotion_index;
-        result["reward_ngp_promoted_global_step"] = metadata.reward_ngp_promoted_global_step;
+        result["future_evaluator_checkpoint"] = metadata.future_evaluator_checkpoint;
+        result["future_evaluator_config_hash"] = metadata.future_evaluator_config_hash;
+        result["future_evaluator_global_step"] = metadata.future_evaluator_global_step;
+        result["future_evaluator_update_index"] = metadata.future_evaluator_update_index;
+        result["future_evaluator_target_update_index"] = metadata.future_evaluator_target_update_index;
         return result;
       });
 }

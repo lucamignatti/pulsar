@@ -23,8 +23,8 @@ std::shared_ptr<MutatorSequence> make_default_reset_mutator(const EnvConfig& con
 std::vector<TransitionEnginePtr> make_default_engines(const ExperimentConfig& config) {
   std::vector<TransitionEnginePtr> engines;
   const auto reset_mutator = make_default_reset_mutator(config.env);
-  engines.reserve(static_cast<std::size_t>(config.ppo.num_envs));
-  for (int env_idx = 0; env_idx < config.ppo.num_envs; ++env_idx) {
+  engines.reserve(static_cast<std::size_t>(config.lfpo.num_envs));
+  for (int env_idx = 0; env_idx < config.lfpo.num_envs; ++env_idx) {
     EnvConfig env_config = config.env;
     env_config.seed += static_cast<std::uint64_t>(env_idx);
     engines.push_back(std::make_shared<RocketSimTransitionEngine>(env_config, reset_mutator));
@@ -44,7 +44,7 @@ BatchedRocketSimCollector::BatchedRocketSimCollector(
       obs_builder_(std::move(obs_builder)),
       action_parser_(std::move(action_parser)),
       done_condition_(std::move(done_condition)),
-      executor_(static_cast<std::size_t>(config_.ppo.collection_workers)) {
+      executor_(static_cast<std::size_t>(config_.lfpo.collection_workers)) {
   initialize(make_default_engines(config_), pin_host_memory);
 }
 
@@ -59,7 +59,7 @@ BatchedRocketSimCollector::BatchedRocketSimCollector(
       obs_builder_(std::move(obs_builder)),
       action_parser_(std::move(action_parser)),
       done_condition_(std::move(done_condition)),
-      executor_(static_cast<std::size_t>(config_.ppo.collection_workers)) {
+      executor_(static_cast<std::size_t>(config_.lfpo.collection_workers)) {
   initialize(std::move(engines), pin_host_memory);
 }
 
@@ -119,8 +119,7 @@ void BatchedRocketSimCollector::initialize(
   host_dones_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   host_terminated_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   host_truncated_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
-  host_event_rewards_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
-  host_terminal_next_goal_labels_ = torch::full({static_cast<long>(total_agents_)}, 2, i64);
+  host_terminal_outcome_labels_ = torch::full({static_cast<long>(total_agents_)}, 2, i64);
 
   for (std::size_t env_idx = 0; env_idx < envs_.size(); ++env_idx) {
     assign_env(env_idx, envs_[env_idx].reset_seed);
@@ -246,13 +245,11 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
   float* dones_ptr = host_dones_.data_ptr<float>();
   float* terminated_ptr = host_terminated_.data_ptr<float>();
   float* truncated_ptr = host_truncated_.data_ptr<float>();
-  float* rewards_ptr = host_event_rewards_.data_ptr<float>();
-  std::int64_t* labels_ptr = host_terminal_next_goal_labels_.data_ptr<std::int64_t>();
+  std::int64_t* labels_ptr = host_terminal_outcome_labels_.data_ptr<std::int64_t>();
   host_dones_.zero_();
   host_terminated_.zero_();
   host_truncated_.zero_();
-  host_event_rewards_.zero_();
-  host_terminal_next_goal_labels_.fill_(2);
+  host_terminal_outcome_labels_.fill_(2);
 
   executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
     for (std::size_t env_idx = begin; env_idx < end; ++env_idx) {
@@ -272,12 +269,6 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
       const Team scoring_team = current_state.last_scoring_team;
       for (std::size_t idx = 0; idx < count; ++idx) {
         const CarState& car = current_state.cars[idx];
-        float event_reward = car.ball_touched ? config_.reward.touch_reward : 0.0F;
-        if (goal_scored) {
-          event_reward +=
-              car.team == scoring_team ? config_.reward.goal_reward : -config_.reward.concede_penalty;
-        }
-        rewards_ptr[agent_begin + idx] = event_reward;
         const bool is_terminated = envs_[env_idx].terminated_scratch[idx] != 0;
         const bool is_truncated = envs_[env_idx].truncated_scratch[idx] != 0;
         const bool done = is_terminated || is_truncated;
@@ -390,12 +381,8 @@ const torch::Tensor& BatchedRocketSimCollector::host_truncated() const {
   return host_truncated_;
 }
 
-const torch::Tensor& BatchedRocketSimCollector::host_event_rewards() const {
-  return host_event_rewards_;
-}
-
-const torch::Tensor& BatchedRocketSimCollector::host_terminal_next_goal_labels() const {
-  return host_terminal_next_goal_labels_;
+const torch::Tensor& BatchedRocketSimCollector::host_terminal_outcome_labels() const {
+  return host_terminal_outcome_labels_;
 }
 
 }  // namespace pulsar

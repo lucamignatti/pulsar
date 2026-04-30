@@ -1,0 +1,175 @@
+{
+  "action_table": {
+    "actions": [],
+    "builtin": "rlgym_lookup_v1"
+  },
+  "behavior_cloning": {
+    "enabled": true,
+    "epochs": 10,
+    "label_smoothing": 0.009999999776482582,
+    "learning_rate": 0.0003000000142492354,
+    "max_grad_norm": 1.0,
+    "sequence_length": 32,
+    "weight_decay": 9.999999974752427e-07
+  },
+  "env": {
+    "collision_meshes_path": "collision_meshes",
+    "max_episode_ticks": 2250,
+    "mode": "soccar",
+    "no_touch_timeout_seconds": 10.0,
+    "randomize_kickoffs": true,
+    "seed": 0,
+    "spawn_opponents": true,
+    "team_size": 2,
+    "tick_rate": 120,
+    "tick_skip": 8
+  },
+  "model": {
+    "action_dim": 90,
+    "consolidation_stride": 8,
+    "controller_dim": 512,
+    "encoder_dim": 512,
+    "ltm_dim": 128,
+    "ltm_slots": 32,
+    "observation_dim": 132,
+    "retired_decay": 0.9599999785423279,
+    "stm_key_dim": 128,
+    "stm_slots": 48,
+    "stm_value_dim": 128,
+    "use_layer_norm": true,
+    "workspace_dim": 512
+  },
+  "next_goal_predictor": {
+    "class_weights": [
+      1.0,
+      1.0,
+      0.25
+    ],
+    "enabled": true,
+    "epochs": 10,
+    "init_checkpoint": "",
+    "label_smoothing": 0.009999999776482582,
+    "learning_rate": 0.0003000000142492354,
+    "max_grad_norm": 1.0,
+    "reuse_normalizer": true,
+    "weight_decay": 9.999999974752427e-07
+  },
+  "obs_schema_version": 1,
+  "offline_dataset": {
+    "batch_size": 8192,
+    "seed": 7,
+    "shuffle": true,
+    "train_manifest": "/var/run/media/luca/biggestbox/pulsar_offline_2v2_current/train_manifest.json",
+    "val_manifest": "/var/run/media/luca/biggestbox/pulsar_offline_2v2_current/val_manifest.json"
+  },
+  "offline_optimization": {
+    "trunk_learning_rate": 0.0003000000142492354,
+    "trunk_max_grad_norm": 1.0,
+    "trunk_weight_decay": 9.999999974752427e-07
+  },
+  "ppo": {
+    "adaptive_epsilon_beta": 1.0,
+    "burn_in": 4,
+    "checkpoint_interval": 10,
+    "clip_range": 0.20000000298023224,
+    "collection_workers": 16,
+    "confidence_weight_delta": 9.999999974752427e-07,
+    "confidence_weight_type": "entropy",
+    "device": "cuda",
+    "entropy_coef": 0.009999999776482582,
+    "epochs": 3,
+    "epsilon_max": 0.30000001192092896,
+    "epsilon_min": 0.05000000074505806,
+    "gae_lambda": 0.949999988079071,
+    "gamma": 0.9900000095367432,
+    "init_checkpoint": "",
+    "learning_rate": 0.00019999999494757503,
+    "max_grad_norm": 1.0,
+    "minibatch_size": 32768,
+    "normalize_confidence_weights": false,
+    "num_envs": 128,
+    "rollout_length": 256,
+    "self_play": {
+      "elo_initial": 1000.0,
+      "elo_k": 32.0,
+      "enabled": false,
+      "eval_interval_updates": 10,
+      "eval_matches_per_snapshot": 4,
+      "eval_num_envs": 8,
+      "eval_policy": "deterministic",
+      "max_snapshots": 8,
+      "opponent_probability": 0.0,
+      "snapshot_interval_updates": 10,
+      "training_opponent_policy": "stochastic"
+    },
+    "sequence_length": 16,
+    "use_adaptive_epsilon": true,
+    "use_confidence_weighting": true,
+    "value_coef": 1.0,
+    "value_num_atoms": 51,
+    "value_v_max": 10.0,
+    "value_v_min": -10.0
+  },
+  "reward": {
+    "ngp_checkpoint": "",
+    "ngp_label": "",
+    "ngp_scale": 1.0,
+    "online_dataset": {
+      "enabled": false,
+      "output_dir": "",
+      "seed": 0,
+      "shard_size": 65536,
+      "train_fraction": 0.949999988079071
+    },
+    "refresh": {
+      "anchor_train_manifest": "",
+      "anchor_val_manifest": "",
+      "async_candidate_updates": true,
+      "candidate_checkpoint": "",
+      "candidate_epochs": 1,
+      "check_interval_updates": 1,
+      "enabled": false,
+      "max_anchor_loss_regression": 0.009999999776482582,
+      "max_online_samples": 0,
+      "max_online_windows": 4,
+      "min_online_train_samples": 32768,
+      "min_recent_loss_improvement": 0.019999999552965164,
+      "old_data_fraction": 0.30000001192092896,
+      "online_train_fraction": 0.699999988079071,
+      "promotion_cooldown_updates": 1,
+      "train_candidate_in_process": false,
+      "train_trunk": false
+    }
+  },
+  "schema_version": 1,
+  "value_pretraining": {
+    "bootstrap_truncated": true,
+    "enabled": true,
+    "epochs": 10,
+    "learning_rate": 0.0003000000142492354,
+    "loss_coef": 1.0,
+    "max_grad_norm": 1.0,
+    "target_sync_interval_epochs": 1,
+    "weight_decay": 9.999999974752427e-07
+  },
+  "wandb": {
+    "dir": "",
+    "enabled": true,
+    "entity": "",
+    "group": "offline-prod",
+    "job_type": "offline_pretrain",
+    "log_interval_seconds": 30.0,
+    "mode": "online",
+    "project": "pulsar",
+    "python_executable": "/home/luca/Projects/pulsar/.venv/bin/python",
+    "run_name": "2v2_prod_20260414_010204_offline",
+    "script_path": "/home/luca/Projects/pulsar/scripts/wandb_stream.py",
+    "tags": [
+      "offline",
+      "bc",
+      "critic",
+      "ngp",
+      "continuum"
+    ]
+  }
+}

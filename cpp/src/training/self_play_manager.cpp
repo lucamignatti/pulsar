@@ -15,7 +15,7 @@
 #include "pulsar/env/rocketsim_engine.hpp"
 #include "pulsar/rl/action_table.hpp"
 #include "pulsar/tracing/tracing.hpp"
-#include "pulsar/training/ppo_math.hpp"
+#include "pulsar/training/lfpo_math.hpp"
 
 namespace pulsar {
 namespace {
@@ -61,7 +61,7 @@ SelfPlayManager::SelfPlayManager(
       action_parser_(std::move(action_parser)),
       device_(std::move(device)),
       rng_(static_cast<std::mt19937::result_type>(config_.env.seed)) {
-  current_ratings_[mode_name()] = config_.ppo.self_play.elo_initial;
+  current_ratings_[mode_name()] = config_.self_play_league.elo_initial;
   if (!snapshot_root_.empty()) {
     std::filesystem::create_directories(snapshot_root_);
     load_existing_snapshots();
@@ -69,7 +69,7 @@ SelfPlayManager::SelfPlayManager(
 }
 
 bool SelfPlayManager::enabled() const {
-  return config_.ppo.self_play.enabled;
+  return config_.self_play_league.enabled;
 }
 
 SelfPlayAssignment SelfPlayManager::sample_assignment(std::size_t, std::uint64_t) {
@@ -79,7 +79,7 @@ SelfPlayAssignment SelfPlayManager::sample_assignment(std::size_t, std::uint64_t
   }
 
   std::uniform_real_distribution<float> probability(0.0F, 1.0F);
-  if (probability(rng_) > config_.ppo.self_play.opponent_probability) {
+  if (probability(rng_) > config_.self_play_league.opponent_probability) {
     return assignment;
   }
 
@@ -96,7 +96,7 @@ bool SelfPlayManager::has_snapshots() const {
 }
 
 void SelfPlayManager::infer_opponent_actions(
-    SharedActorCritic&,
+    LatentFutureActor&,
     const torch::Tensor& raw_obs,
     const torch::Tensor& action_masks,
     const torch::Tensor& episode_starts,
@@ -125,7 +125,7 @@ void SelfPlayManager::infer_opponent_actions(
   }
 
   torch::NoGradGuard no_grad;
-  const bool deterministic = config_.ppo.self_play.training_opponent_policy != "stochastic";
+  const bool deterministic = config_.self_play_league.training_opponent_policy != "stochastic";
   for (std::size_t snapshot_index = 0; snapshot_index < grouped.size(); ++snapshot_index) {
     if (grouped[snapshot_index].empty()) {
       continue;
@@ -139,7 +139,7 @@ void SelfPlayManager::infer_opponent_actions(
     const torch::Tensor starts = episode_starts.index_select(0, indices);
     const torch::Tensor normalized_obs = snapshot.normalizer.normalize(obs);
     ContinuumState state = gather_state(opponent_state, indices);
-    const PolicyOutput output = snapshot.model->forward_step(normalized_obs, std::move(state), starts);
+    const ActorStepOutput output = snapshot.model->forward_step(normalized_obs, std::move(state), starts);
     const torch::Tensor sampled_actions =
         deterministic ? masked_argmax(output.policy_logits, masks) : masked_sample(output.policy_logits, masks);
     actions.index_copy_(0, indices, sampled_actions);
@@ -153,7 +153,7 @@ void SelfPlayManager::infer_opponent_actions(
 }
 
 SelfPlayMetrics SelfPlayManager::on_update(
-    SharedActorCritic& current_model,
+    LatentFutureActor& current_model,
     const ObservationNormalizer& current_normalizer,
     std::int64_t global_step,
     int update_index) {
@@ -163,15 +163,15 @@ SelfPlayMetrics SelfPlayManager::on_update(
     return metrics;
   }
 
-  if (config_.ppo.self_play.snapshot_interval_updates > 0 &&
-      update_index % config_.ppo.self_play.snapshot_interval_updates == 0) {
+  if (config_.self_play_league.snapshot_interval_updates > 0 &&
+      update_index % config_.self_play_league.snapshot_interval_updates == 0) {
     add_snapshot(current_model, current_normalizer, global_step, update_index);
   }
   metrics.snapshot_count = static_cast<int>(snapshots_.size());
 
   if (!snapshots_.empty() &&
-      config_.ppo.self_play.eval_interval_updates > 0 &&
-      update_index % config_.ppo.self_play.eval_interval_updates == 0) {
+      config_.self_play_league.eval_interval_updates > 0 &&
+      update_index % config_.self_play_league.eval_interval_updates == 0) {
     metrics = evaluate_current(current_model, current_normalizer);
     metrics.snapshot_count = static_cast<int>(snapshots_.size());
   } else {
@@ -205,7 +205,7 @@ void SelfPlayManager::load_existing_snapshots() {
     Snapshot snapshot{
         .global_step = metadata.global_step,
         .update_index = static_cast<int>(metadata.update_index),
-        .model = SharedActorCritic(snapshot_config.model, snapshot_config.ppo),
+        .model = LatentFutureActor(snapshot_config.model),
         .normalizer = ObservationNormalizer(snapshot_config.model.observation_dim),
         .ratings = {},
     };
@@ -255,7 +255,7 @@ void SelfPlayManager::save_snapshot(const Snapshot& snapshot) const {
 }
 
 void SelfPlayManager::trim_snapshots() {
-  while (static_cast<int>(snapshots_.size()) > config_.ppo.self_play.max_snapshots) {
+  while (static_cast<int>(snapshots_.size()) > config_.self_play_league.max_snapshots) {
     const auto global_step = snapshots_.front().global_step;
     snapshots_.erase(snapshots_.begin());
     std::filesystem::remove_all(snapshot_root_ / std::to_string(global_step));
@@ -263,7 +263,7 @@ void SelfPlayManager::trim_snapshots() {
 }
 
 void SelfPlayManager::add_snapshot(
-    SharedActorCritic& current_model,
+    LatentFutureActor& current_model,
     const ObservationNormalizer& current_normalizer,
     std::int64_t global_step,
     int update_index) {
@@ -271,7 +271,7 @@ void SelfPlayManager::add_snapshot(
   Snapshot snapshot{
       .global_step = global_step,
       .update_index = update_index,
-      .model = clone_shared_model(current_model, device_),
+      .model = clone_latent_future_actor(current_model, device_),
       .normalizer = current_normalizer.clone(),
       .ratings = current_ratings_,
   };
@@ -283,7 +283,7 @@ void SelfPlayManager::add_snapshot(
 }
 
 SelfPlayMetrics SelfPlayManager::evaluate_current(
-    SharedActorCritic& current_model,
+    LatentFutureActor& current_model,
     const ObservationNormalizer& current_normalizer) {
   PULSAR_TRACE_SCOPE_CAT("self_play", "evaluate_current");
   SelfPlayMetrics metrics{};
@@ -296,7 +296,7 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
   const auto reset_mutator = make_eval_reset_mutator(config_.env);
   const std::string mode = mode_name();
   const auto* discrete = dynamic_cast<const DiscreteActionParser*>(action_parser_.get());
-  const bool deterministic = config_.ppo.self_play.eval_policy == "deterministic";
+  const bool deterministic = config_.self_play_league.eval_policy == "deterministic";
   if (discrete == nullptr) {
     throw std::invalid_argument("SelfPlayManager evaluation requires DiscreteActionParser.");
   }
@@ -304,10 +304,10 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
   torch::NoGradGuard no_grad;
   for (std::size_t snapshot_index = 0; snapshot_index < snapshots_.size(); ++snapshot_index) {
     Snapshot& snapshot = snapshots_[snapshot_index];
-    for (int match = 0; match < config_.ppo.self_play.eval_matches_per_snapshot; ++match) {
+    for (int match = 0; match < config_.self_play_league.eval_matches_per_snapshot; ++match) {
       std::vector<std::shared_ptr<RocketSimTransitionEngine>> engines;
-      engines.reserve(static_cast<std::size_t>(config_.ppo.self_play.eval_num_envs));
-      for (int env_idx = 0; env_idx < config_.ppo.self_play.eval_num_envs; ++env_idx) {
+      engines.reserve(static_cast<std::size_t>(config_.self_play_league.eval_num_envs));
+      for (int env_idx = 0; env_idx < config_.self_play_league.eval_num_envs; ++env_idx) {
         EnvConfig env_config = config_.env;
         env_config.seed += static_cast<std::uint64_t>(snapshot_index * 997 + match * 131 + env_idx);
         engines.push_back(std::make_shared<RocketSimTransitionEngine>(env_config, reset_mutator));
@@ -346,9 +346,9 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
         obs.copy_(torch::from_blob(host_obs.data(), {static_cast<long>(total_agents), static_cast<long>(obs_builder_->obs_dim())}, torch::kFloat32).clone().to(device_));
         masks.copy_(torch::from_blob(host_masks.data(), {static_cast<long>(total_agents), static_cast<long>(discrete->action_table().size())}, torch::kUInt8).clone().to(device_));
 
-        const PolicyOutput current_out =
+        const ActorStepOutput current_out =
             current_model->forward_step(current_normalizer.normalize(obs), std::move(current_state), episode_starts);
-        const PolicyOutput snapshot_out =
+        const ActorStepOutput snapshot_out =
             snapshot.model->forward_step(snapshot.normalizer.normalize(obs), std::move(snapshot_state), episode_starts);
         current_state = std::move(current_out.state);
         snapshot_state = std::move(snapshot_out.state);
@@ -389,16 +389,16 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
                 (state.orange_score > state.blue_score && current_team == Team::Orange);
             double& current_rating = current_ratings_[mode];
             if (current_rating == 0.0) {
-              current_rating = config_.ppo.self_play.elo_initial;
+              current_rating = config_.self_play_league.elo_initial;
             }
             double& snapshot_rating = snapshot.ratings[mode];
             if (snapshot_rating == 0.0) {
-              snapshot_rating = config_.ppo.self_play.elo_initial;
+              snapshot_rating = config_.self_play_league.elo_initial;
             }
             if (current_won) {
-              update_elo_ratings(current_rating, snapshot_rating, config_.ppo.self_play.elo_k);
+              update_elo_ratings(current_rating, snapshot_rating, config_.self_play_league.elo_k);
             } else {
-              update_elo_ratings(snapshot_rating, current_rating, config_.ppo.self_play.elo_k);
+              update_elo_ratings(snapshot_rating, current_rating, config_.self_play_league.elo_k);
             }
             winner_recorded = true;
           }

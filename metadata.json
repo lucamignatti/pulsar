@@ -1,0 +1,17 @@
+{
+  "action_table_hash": "d95f924460db0389",
+  "architecture_name": "continuum_dppo",
+  "config_hash": "b9dbcfc3f23da10",
+  "device": "cuda",
+  "global_step": 768355423,
+  "obs_schema_version": 1,
+  "reward_ngp_checkpoint": "",
+  "reward_ngp_config_hash": "",
+  "reward_ngp_global_step": 0,
+  "reward_ngp_label": "",
+  "reward_ngp_promoted_global_step": 0,
+  "reward_ngp_promotion_index": 0,
+  "reward_ngp_update_index": 0,
+  "schema_version": 1,
+  "update_index": 9
+}

@@ -114,7 +114,7 @@ int main() {
         .obs_schema_version = config.obs_schema_version,
         .config_hash = pulsar::config_hash(config),
         .action_table_hash = pulsar::action_table_hash(config.action_table),
-        .architecture_name = "shared_actor_critic",
+        .architecture_name = "lfpo_continuum",
         .device = "cpu",
         .global_step = 12,
         .update_index = 3,
@@ -124,12 +124,12 @@ int main() {
     pulsar::validate_checkpoint_metadata(loaded, config);
     std::filesystem::remove(tmp_dir);
 
-    config.ppo.self_play.enabled = true;
-    config.ppo.self_play.opponent_probability = 0.5F;
+    config.self_play_league.enabled = true;
+    config.self_play_league.opponent_probability = 0.5F;
     const auto config_path = std::filesystem::temp_directory_path() / "pulsar_test_config.json";
     pulsar::save_experiment_config(config, config_path.string());
     const auto roundtripped = pulsar::load_experiment_config(config_path.string());
-    require(roundtripped.ppo.self_play.enabled, "self-play config should round-trip");
+    require(roundtripped.self_play_league.enabled, "self-play config should round-trip");
     std::filesystem::remove(config_path);
 
     std::cout << "pulsar_core_tests passed\n";

@@ -12,7 +12,7 @@ import tempfile
 from .api import (
     ensure_checkpoint_config_matches,
     load_config,
-    load_shared_model,
+    load_latent_future_actor,
     make_eval_env,
     run_viz_episode,
 )
@@ -75,7 +75,7 @@ def _ignore_sigint_during_cleanup() -> object:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a Pulsar visualization episode")
-    parser.add_argument("--config", required=True, help="Path to the shared experiment JSON")
+    parser.add_argument("--config", required=True, help="Path to the LFPO experiment JSON")
     parser.add_argument("--checkpoint", required=True, help="Path to a checkpoint directory")
     parser.add_argument("--device", default="cpu", help="Torch device string")
     parser.add_argument("--seed", type=int, default=0, help="Episode seed")
@@ -88,7 +88,7 @@ def main() -> None:
     parser.add_argument(
         "--policy",
         choices=("deterministic", "stochastic"),
-        help="Policy sampling mode. Defaults to ppo.self_play.eval_policy when present.",
+        help="Policy sampling mode. Defaults to self_play_league.eval_policy when present.",
     )
     parser.add_argument("--udp-ip", default="127.0.0.1", help="RocketSimVis host")
     parser.add_argument("--udp-port", type=int, default=9273, help="RocketSimVis UDP port")
@@ -106,12 +106,12 @@ def main() -> None:
     if args.video_out and args.renderer != "rlviser":
         parser.error("--video-out currently requires --renderer rlviser")
 
-    policy_mode = args.policy or config.get("ppo", {}).get("self_play", {}).get("eval_policy", "deterministic")
+    policy_mode = args.policy or config.get("self_play_league", {}).get("eval_policy", "deterministic")
     if policy_mode not in {"deterministic", "stochastic"}:
         parser.error(f"Unsupported policy mode: {policy_mode}")
 
     _resolve_collision_meshes(config, original_cwd)
-    model = load_shared_model(checkpoint_path, args.device)
+    model = load_latent_future_actor(checkpoint_path, args.device)
     if args.renderer == "rocketsimvis":
         print(
             "RocketSimVis backend selected. Start the external RocketSimVis viewer separately; "

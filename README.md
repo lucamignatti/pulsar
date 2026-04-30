@@ -1,26 +1,27 @@
 # Pulsar
 
-`Pulsar` is a modular Rocket League bot training stack built around a high-throughput C++ runtime and a thin Python visualization/evaluation layer.
+`Pulsar` is an LFPO-native Rocket League bot training stack built around a high-throughput C++ runtime and a thin Python visualization layer.
 
-The current training path has two stages:
+The training workflow has two stages:
 
-1. Offline pretrain a shared policy with behavior cloning, value pretraining, and a next-goal predictor on replay-derived tensor manifests.
-2. Run synchronous PPO self-play online, using the pretrained next-goal checkpoint as dense shaping plus sparse touch/goal rewards, and optionally exporting fresh online NGP data for refresh.
+1. `pulsar_lfpo_pretrain` trains a separate transformer future evaluator on replay trajectory windows and sparse terminal outcome labels, then behavior-clones the Continuum actor while training its unconditional action-conditioned latent future predictor.
+2. `pulsar_lfpo_train` runs self-play only. It samples candidate actions, predicts each candidate's future embedding, scores those embeddings with the frozen/target evaluator, computes relative latent advantages, and applies the clipped LFPO policy update.
 
-The codebase is centered on a shared model stack, hard action masking, GPU execution, and a lightweight Python surface for inspection and playback.
+The actor remains the Continuum recurrent memory architecture, but its heads are only `pi(a|s)` and `F(s,a)`. The transformer future evaluator is a separate model and is refreshed online from completed self-play windows only.
 
 ## Design Goals
 
-- Fast vectorized C++ trainer
-- Shared C++ backbone for model architecture
-- Minimal event rewards with NGP dense shaping
+- LFPO as the only training path
+- Sparse terminal outcomes as the only ground-truth reward signal
+- Separate transformer future evaluator with fixed horizons `[8, 32, 96]`
+- Continuum actor with policy and latent future prediction heads
 - ROCm-friendly Linux build path
 
 ## Repository Layout
 
-- `cpp/`: runtime, model, training code, tests, and benchmarks
+- `cpp/`: runtime, LFPO models, training code, tests, and benchmarks
 - `python/pulsar_viz/`: visualization and evaluation package
-- `configs/`: shared experiment configs
+- `configs/`: LFPO experiment configs
 - `scripts/`: setup, preprocessing, smoke tests, and utility scripts
 - `docs/`: platform-specific notes such as ROCm setup
 - `external/RocketSim/`: vendored RocketSim submodule
@@ -31,13 +32,11 @@ The codebase is centered on a shared model stack, hard action masking, GPU execu
 - A C++20 compiler
 - Python 3.10-3.13
 - The `RocketSim` submodule
-- `torch` and `pybind11` for the full trainer and Python bindings
+- `torch` and `pybind11` for the trainer and Python bindings
 - `.[viz]` extras for visualization
 - `.[offline]` extras for replay preprocessing and offline pretraining
 
 ## Setup
-
-Initialize dependencies:
 
 ```bash
 git submodule update --init --recursive
@@ -49,9 +48,7 @@ pip install -e '.[viz,offline]'
 python3 scripts/collision_mesh_downloader.py
 ```
 
-If you only need the Python visualization environment, `scripts/setup_python_dev.sh` is a shorter shortcut. It bootstraps a Python 3.12 virtualenv and installs the viz extras.
-
-Build the project:
+Build:
 
 ```bash
 cmake -S . -B build/release \
@@ -61,45 +58,27 @@ cmake -S . -B build/release \
 cmake --build build/release --parallel
 ```
 
-Notes:
-
-- If `torch` or Python binding dependencies are missing, CMake still builds the core-only targets and skips trainer or binding targets.
-- ROCm is enabled automatically when detected. Use `-DPULSAR_DISABLE_ROCM=ON` to force a CPU-only build on ROCm hosts.
-- For the intended deployment target, see [docs/rocm_linux.md](docs/rocm_linux.md).
-
 ## Validation
-
-Run the default test suite after building:
 
 ```bash
 ctest --test-dir build/release --output-on-failure
-```
-
-Useful focused commands:
-
-```bash
-ctest --test-dir build/release -L reference --output-on-failure
 ctest --test-dir build/release -L smoke --output-on-failure
-ctest --test-dir build/release -L benchmark --output-on-failure
-ctest --test-dir build/release -L rocm --output-on-failure
 ./build/release/pulsar_bench
 ```
 
-`pulsar_bench` reports both collector-only throughput and a trainer-like collection loop that uses randomly initialized learner and NGP models, so the benchmark includes model inference overhead in addition to RocketSim stepping.
-
 ## Core Binaries
 
-- `pulsar_offline_train`: offline pretraining
-- `pulsar_train`: online PPO training
-- `pulsar_bench`: runtime throughput benchmark
-- `pulsar_native`: Python extension used by the visualization layer
+- `pulsar_lfpo_pretrain`: offline LFPO pretraining
+- `pulsar_lfpo_train`: online LFPO self-play training
+- `pulsar_bench`: LFPO model throughput benchmark
+- `pulsar_native`: Python extension used by visualization
 - `pulsar-viz`: Python CLI for checkpoint playback
 
 ## Typical Workflow
 
-### 1. Build an Offline Dataset
+### 1. Build An Offline Dataset
 
-The offline trainer consumes tensor manifests, not raw replay files. For the Kaggle high-level replay dataset, the normal path is:
+The offline pretrainer consumes schema v4 tensor manifests. Shards contain observations, optional behavior actions or action probabilities, terminal outcome labels, outcome-known masks, trajectory starts, and end flags. Future windows are built on the fly during training.
 
 ```bash
 .venv/bin/python scripts/download_kaggle_dataset.py \
@@ -110,63 +89,39 @@ The offline trainer consumes tensor manifests, not raw replay files. For the Kag
   /path/to/pulsar_offline_2v2
 ```
 
-Update `configs/2v2_offline.json` so `offline_dataset.train_manifest` and `offline_dataset.val_manifest` point at the generated manifests.
+Set `offline_dataset.train_manifest` and `offline_dataset.val_manifest` in `configs/2v2_offline.json`.
 
-### 2. Run Offline Pretraining
-
-```bash
-./build/release/pulsar_offline_train configs/2v2_offline.json /path/to/offline_outputs
-```
-
-This writes `config.json`, `metadata.json`, `model.pt`, optimizer snapshots, and `offline_metrics.jsonl` into the output directory.
-
-### 3. Run Online PPO
-
-Set `reward.ngp_checkpoint` in `configs/2v2_ppo.json` to the offline checkpoint you want to use for reward inference, then launch training:
+### 2. Run Offline LFPO Pretraining
 
 ```bash
-./build/release/pulsar_train configs/2v2_ppo.json /path/to/run_outputs
+./build/release/pulsar_lfpo_pretrain configs/2v2_offline.json /path/to/offline_outputs
 ```
 
-By default this runs until stopped. You can optionally pass a positive third argument to limit the number of PPO updates:
+This writes the actor checkpoint at the output root and the target future evaluator under `future_evaluator/`.
+
+### 3. Run Online LFPO
+
+Set `lfpo.init_checkpoint` in `configs/2v2_lfpo.json` to the offline output directory, then launch:
 
 ```bash
-./build/release/pulsar_train configs/2v2_ppo.json /path/to/run_outputs 100
+./build/release/pulsar_lfpo_train configs/2v2_lfpo.json /path/to/run_outputs
 ```
 
-The shipped `configs/2v2_ppo.json` enables online NGP dataset export and in-process NGP refresh by default. When `reward.online_dataset.output_dir` is left empty, `pulsar_train` writes the online NGP shards under `online_ngp/` inside the run directory.
+To run a bounded smoke or evaluation training slice:
 
-If `ppo.self_play.enabled` is true, self-play policy snapshots are written under `policy_versions/` inside the run directory.
+```bash
+./build/release/pulsar_lfpo_train configs/2v2_lfpo.json /path/to/run_outputs 100
+```
 
-### 4. Visualize a Checkpoint
+Self-play policy snapshots are written under `policy_versions/` when `self_play_league.enabled` is true.
+
+### 4. Visualize A Checkpoint
 
 ```bash
 pulsar-viz \
-  --config configs/2v2_ppo.json \
+  --config /path/to/checkpoint/config.json \
   --checkpoint /path/to/checkpoint \
   --device cpu
 ```
 
-You can also target `RocketSimVis` instead of `RLViser`:
-
-```bash
-pulsar-viz \
-  --config configs/2v2_ppo.json \
-  --checkpoint /path/to/checkpoint \
-  --device cpu \
-  --renderer rocketsimvis
-```
-
-To write a video file from the actual `RLViser` window on macOS, add `--video-out`:
-
-```bash
-pulsar-viz \
-  --config configs/2v2_ppo.json \
-  --checkpoint /path/to/checkpoint \
-  --device cpu \
-  --video-out /path/to/eval.mp4
-```
-
-`--video-out` currently requires `--renderer rlviser`. The recorder captures the real RLViser window via macOS screen capture, so the terminal or Python process needs Screen Recording permission, and window inspection also requires Accessibility permission.
-
-The Python side stays intentionally thin: it loads the shared config, loads the native model, builds an evaluation environment, and runs a visualization episode through `RLViser` or `RocketSimVis`.
+The Python side loads the LFPO config, loads the native Continuum actor, builds an evaluation environment, and runs a visualization episode through `RLViser` or `RocketSimVis`.

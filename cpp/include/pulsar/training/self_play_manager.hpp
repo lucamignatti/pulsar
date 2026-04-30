@@ -11,7 +11,7 @@
 #include <torch/torch.h>
 
 #include "pulsar/config/config.hpp"
-#include "pulsar/model/actor_critic.hpp"
+#include "pulsar/model/latent_future_actor.hpp"
 #include "pulsar/model/normalizer.hpp"
 #include "pulsar/training/batched_rocketsim_collector.hpp"
 
@@ -39,7 +39,7 @@ class SelfPlayManager {
   [[nodiscard]] bool has_snapshots() const;
 
   void infer_opponent_actions(
-      SharedActorCritic& current_model,
+      LatentFutureActor& current_model,
       const torch::Tensor& raw_obs,
       const torch::Tensor& action_masks,
       const torch::Tensor& episode_starts,
@@ -49,7 +49,7 @@ class SelfPlayManager {
       double* inference_seconds);
 
   SelfPlayMetrics on_update(
-      SharedActorCritic& current_model,
+      LatentFutureActor& current_model,
       const ObservationNormalizer& current_normalizer,
       std::int64_t global_step,
       int update_index);
@@ -58,7 +58,7 @@ class SelfPlayManager {
   struct Snapshot {
     std::int64_t global_step = 0;
     int update_index = 0;
-    SharedActorCritic model{nullptr};
+    LatentFutureActor model{nullptr};
     ObservationNormalizer normalizer{0};
     std::map<std::string, double> ratings{};
   };
@@ -67,11 +67,11 @@ class SelfPlayManager {
   void save_snapshot(const Snapshot& snapshot) const;
   void trim_snapshots();
   void add_snapshot(
-      SharedActorCritic& current_model,
+      LatentFutureActor& current_model,
       const ObservationNormalizer& current_normalizer,
       std::int64_t global_step,
       int update_index);
-  SelfPlayMetrics evaluate_current(SharedActorCritic& current_model, const ObservationNormalizer& current_normalizer);
+  SelfPlayMetrics evaluate_current(LatentFutureActor& current_model, const ObservationNormalizer& current_normalizer);
   [[nodiscard]] std::string mode_name() const;
 
   ExperimentConfig config_{};

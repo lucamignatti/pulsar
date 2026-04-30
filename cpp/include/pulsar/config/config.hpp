@@ -10,46 +10,10 @@
 
 namespace pulsar {
 
-struct RewardConfig {
-  struct OnlineDatasetExportConfig {
-    bool enabled = false;
-    std::string output_dir{};
-    int shard_size = 65536;
-    float train_fraction = 0.95F;
-    std::uint64_t seed = 0;
-    int max_shards = 0;  // 0 = unlimited (default); >0 prunes oldest shards when exceeded
-  };
-
-  struct RefreshConfig {
-    bool enabled = false;
-    std::string candidate_checkpoint{};
-    int check_interval_updates = 1;
-    bool train_candidate_in_process = false;
-    float online_train_fraction = 0.70F;
-    std::string anchor_train_manifest{};
-    std::string anchor_val_manifest{};
-    int candidate_epochs = 1;
-    float old_data_fraction = 0.30F;
-    int min_online_train_samples = 32768;
-    float min_recent_loss_improvement = 0.02F;
-    float max_anchor_loss_regression = 0.01F;
-    int promotion_cooldown_updates = 1;
-    bool train_trunk = false;
-    int max_online_windows = 4;
-    int max_online_samples = 0;
-    bool async_candidate_updates = true;
-    int max_ngp_versions = 10;  // maximum promoted NGP checkpoints to retain on disk
-    int max_ngp_runtime_summaries = 100;  // maximum ngp_runtime/update_* summary dirs to retain
-  };
-
-  std::string ngp_checkpoint{};
-  std::string ngp_label{};
-  float ngp_scale = 1.0F;
-  float touch_reward = 0.02F;
-  float goal_reward = 1.0F;
-  float concede_penalty = 1.0F;
-  OnlineDatasetExportConfig online_dataset{};
-  RefreshConfig refresh{};
+struct OutcomeConfig {
+  float score = 1.0F;
+  float concede = -1.0F;
+  float neutral = 0.0F;
 };
 
 struct ActionTableConfig {
@@ -84,53 +48,50 @@ struct ModelConfig {
   int controller_dim = 512;
   int consolidation_stride = 8;
   float retired_decay = 0.96F;
+  int action_embedding_dim = 64;
+  int future_latent_dim = 128;
+  int future_horizon_count = 3;
 };
 
-struct PPOConfig {
-  struct SelfPlayConfig {
-    bool enabled = false;
-    float opponent_probability = 0.0F;
-    int snapshot_interval_updates = 10;
-    int max_snapshots = 8;
-    std::string training_opponent_policy = "stochastic";
-    int eval_interval_updates = 10;
-    int eval_num_envs = 8;
-    int eval_matches_per_snapshot = 4;
-    std::string eval_policy = "deterministic";
-    float elo_initial = 1000.0F;
-    float elo_k = 32.0F;
-  };
-
+struct LFPOConfig {
   int num_envs = 64;
   int collection_workers = 0;
   std::string init_checkpoint{};
   int rollout_length = 256;
   int minibatch_size = 32768;
-  int epochs = 3;
-  float gamma = 0.99F;
-  float gae_lambda = 0.95F;
+  int update_epochs = 3;
   float clip_range = 0.2F;
   float entropy_coef = 0.01F;
-  float value_coef = 1.0F;
+  float latent_loss_coef = 1.0F;
+  float behavior_prior_coef = 0.0F;
+  int behavior_prior_decay_updates = 0;
   float learning_rate = 3.0e-4F;
   float max_grad_norm = 1.0F;
   std::string device = "cpu";
   int checkpoint_interval = 10;
-  int max_rolling_checkpoints = 5;  // maximum rolling (update_N) checkpoints to retain on disk
+  int max_rolling_checkpoints = 5;
   int sequence_length = 16;
   int burn_in = 0;
-  float value_v_min = -10.0F;
-  float value_v_max = 10.0F;
-  int value_num_atoms = 51;
-  bool use_adaptive_epsilon = true;
-  float adaptive_epsilon_beta = 1.0F;
-  float epsilon_min = 0.05F;
-  float epsilon_max = 0.3F;
-  bool use_confidence_weighting = true;
-  std::string confidence_weight_type = "entropy";
-  float confidence_weight_delta = 1.0e-6F;
-  bool normalize_confidence_weights = false;
-  SelfPlayConfig self_play{};
+  int candidate_count = 8;
+  int evaluator_update_interval = 4;
+  int evaluator_target_update_interval = 500;
+  float evaluator_target_ema_tau = 0.01F;
+  int online_window_capacity = 64;
+};
+
+struct FutureEvaluatorConfig {
+  std::vector<int> horizons{8, 32, 96};
+  int latent_dim = 128;
+  int model_dim = 256;
+  int layers = 4;
+  int heads = 8;
+  int feedforward_dim = 1024;
+  float dropout = 0.0F;
+  int outcome_classes = 3;
+  float learning_rate = 3.0e-4F;
+  float weight_decay = 1.0e-6F;
+  float max_grad_norm = 1.0F;
+  std::vector<float> class_weights{1.0F, 1.0F, 0.25F};
 };
 
 struct OfflineDatasetConfig {
@@ -141,43 +102,32 @@ struct OfflineDatasetConfig {
   std::uint64_t seed = 0;
 };
 
-struct BehaviorCloningConfig {
-  bool enabled = true;
-  int epochs = 10;
-  float learning_rate = 3.0e-4F;
-  float weight_decay = 1.0e-6F;
-  float label_smoothing = 0.0F;
-  float max_grad_norm = 1.0F;
+struct OfflinePretrainingConfig {
+  int evaluator_epochs = 2;
+  int actor_epochs = 2;
   int sequence_length = 32;
-};
-
-struct NextGoalPredictorConfig {
-  bool enabled = true;
-  std::string init_checkpoint{};
-  int epochs = 10;
-  float learning_rate = 3.0e-4F;
+  float behavior_cloning_learning_rate = 3.0e-4F;
+  float actor_learning_rate = 3.0e-4F;
+  float evaluator_learning_rate = 3.0e-4F;
   float weight_decay = 1.0e-6F;
   float label_smoothing = 0.0F;
+  float behavior_cloning_loss_coef = 1.0F;
+  float latent_loss_coef = 1.0F;
   float max_grad_norm = 1.0F;
-  std::vector<float> class_weights{1.0F, 1.0F, 0.25F};
-  bool reuse_normalizer = true;
 };
 
-struct ValuePretrainingConfig {
-  bool enabled = true;
-  int epochs = 10;
-  float learning_rate = 3.0e-4F;
-  float weight_decay = 1.0e-6F;
-  float max_grad_norm = 1.0F;
-  float loss_coef = 1.0F;
-  int target_sync_interval_epochs = 1;
-  bool bootstrap_truncated = true;
-};
-
-struct OfflineOptimizationConfig {
-  float trunk_learning_rate = 3.0e-4F;
-  float trunk_weight_decay = 1.0e-6F;
-  float trunk_max_grad_norm = 1.0F;
+struct SelfPlayLeagueConfig {
+  bool enabled = false;
+  float opponent_probability = 0.0F;
+  int snapshot_interval_updates = 10;
+  int max_snapshots = 8;
+  std::string training_opponent_policy = "stochastic";
+  int eval_interval_updates = 10;
+  int eval_num_envs = 8;
+  int eval_matches_per_snapshot = 4;
+  std::string eval_policy = "deterministic";
+  float elo_initial = 1000.0F;
+  float elo_k = 32.0F;
 };
 
 struct WandbConfig {
@@ -196,68 +146,57 @@ struct WandbConfig {
 };
 
 struct ExperimentConfig {
-  int schema_version = 1;
+  int schema_version = 4;
   int obs_schema_version = 1;
   EnvConfig env{};
-  RewardConfig reward{};
+  OutcomeConfig outcome{};
   ActionTableConfig action_table{};
   ModelConfig model{};
-  PPOConfig ppo{};
+  LFPOConfig lfpo{};
+  FutureEvaluatorConfig future_evaluator{};
   OfflineDatasetConfig offline_dataset{};
-  BehaviorCloningConfig behavior_cloning{};
-  NextGoalPredictorConfig next_goal_predictor{};
-  ValuePretrainingConfig value_pretraining{};
-  OfflineOptimizationConfig offline_optimization{};
+  OfflinePretrainingConfig offline_pretraining{};
+  SelfPlayLeagueConfig self_play_league{};
   WandbConfig wandb{};
 };
 
 struct CheckpointMetadata {
-  int schema_version = 1;
+  int schema_version = 4;
   int obs_schema_version = 1;
   std::string config_hash{};
   std::string action_table_hash{};
-  std::string architecture_name = "shared_actor_critic";
+  std::string architecture_name = "lfpo_continuum";
   std::string device = "cpu";
   std::int64_t global_step = 0;
   std::int64_t update_index = 0;
-  std::string reward_ngp_label{};
-  std::string reward_ngp_checkpoint{};
-  std::string reward_ngp_config_hash{};
-  std::int64_t reward_ngp_global_step = 0;
-  std::int64_t reward_ngp_update_index = 0;
-  std::int64_t reward_ngp_promotion_index = 0;
-  std::int64_t reward_ngp_promoted_global_step = 0;
+  std::string future_evaluator_checkpoint{};
+  std::string future_evaluator_config_hash{};
+  std::int64_t future_evaluator_global_step = 0;
+  std::int64_t future_evaluator_update_index = 0;
+  std::int64_t future_evaluator_target_update_index = 0;
 };
 
 void to_json(nlohmann::json& j, const ControllerState& value);
 void from_json(const nlohmann::json& j, ControllerState& value);
 
-void to_json(nlohmann::json& j, const RewardConfig::OnlineDatasetExportConfig& value);
-void from_json(const nlohmann::json& j, RewardConfig::OnlineDatasetExportConfig& value);
-void to_json(nlohmann::json& j, const RewardConfig::RefreshConfig& value);
-void from_json(const nlohmann::json& j, RewardConfig::RefreshConfig& value);
-void to_json(nlohmann::json& j, const RewardConfig& value);
-void from_json(const nlohmann::json& j, RewardConfig& value);
+void to_json(nlohmann::json& j, const OutcomeConfig& value);
+void from_json(const nlohmann::json& j, OutcomeConfig& value);
 void to_json(nlohmann::json& j, const ActionTableConfig& value);
 void from_json(const nlohmann::json& j, ActionTableConfig& value);
 void to_json(nlohmann::json& j, const EnvConfig& value);
 void from_json(const nlohmann::json& j, EnvConfig& value);
 void to_json(nlohmann::json& j, const ModelConfig& value);
 void from_json(const nlohmann::json& j, ModelConfig& value);
-void to_json(nlohmann::json& j, const PPOConfig::SelfPlayConfig& value);
-void from_json(const nlohmann::json& j, PPOConfig::SelfPlayConfig& value);
-void to_json(nlohmann::json& j, const PPOConfig& value);
-void from_json(const nlohmann::json& j, PPOConfig& value);
+void to_json(nlohmann::json& j, const LFPOConfig& value);
+void from_json(const nlohmann::json& j, LFPOConfig& value);
+void to_json(nlohmann::json& j, const FutureEvaluatorConfig& value);
+void from_json(const nlohmann::json& j, FutureEvaluatorConfig& value);
 void to_json(nlohmann::json& j, const OfflineDatasetConfig& value);
 void from_json(const nlohmann::json& j, OfflineDatasetConfig& value);
-void to_json(nlohmann::json& j, const BehaviorCloningConfig& value);
-void from_json(const nlohmann::json& j, BehaviorCloningConfig& value);
-void to_json(nlohmann::json& j, const NextGoalPredictorConfig& value);
-void from_json(const nlohmann::json& j, NextGoalPredictorConfig& value);
-void to_json(nlohmann::json& j, const ValuePretrainingConfig& value);
-void from_json(const nlohmann::json& j, ValuePretrainingConfig& value);
-void to_json(nlohmann::json& j, const OfflineOptimizationConfig& value);
-void from_json(const nlohmann::json& j, OfflineOptimizationConfig& value);
+void to_json(nlohmann::json& j, const OfflinePretrainingConfig& value);
+void from_json(const nlohmann::json& j, OfflinePretrainingConfig& value);
+void to_json(nlohmann::json& j, const SelfPlayLeagueConfig& value);
+void from_json(const nlohmann::json& j, SelfPlayLeagueConfig& value);
 void to_json(nlohmann::json& j, const WandbConfig& value);
 void from_json(const nlohmann::json& j, WandbConfig& value);
 void to_json(nlohmann::json& j, const ExperimentConfig& value);

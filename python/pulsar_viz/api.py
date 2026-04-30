@@ -13,7 +13,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
     return _load_config(path)
 
 
-def load_shared_model(checkpoint_path: str | Path, device: str = "cpu") -> Any:
+def load_latent_future_actor(checkpoint_path: str | Path, device: str = "cpu") -> Any:
     try:
         import pulsar_native  # type: ignore
     except ImportError as exc:
@@ -21,7 +21,7 @@ def load_shared_model(checkpoint_path: str | Path, device: str = "cpu") -> Any:
             "The pulsar_native extension is not available. Build the C++ Python bindings first."
         ) from exc
 
-    return pulsar_native.load_shared_model(str(checkpoint_path), device)
+    return pulsar_native.load_latent_future_actor(str(checkpoint_path), device)
 
 
 def make_eval_env(
@@ -61,7 +61,7 @@ def ensure_checkpoint_config_matches(config: dict[str, Any], checkpoint_path: st
 
 __all__ = [
     "load_config",
-    "load_shared_model",
+    "load_latent_future_actor",
     "make_eval_env",
     "run_viz_episode",
     "action_index_to_env_action",

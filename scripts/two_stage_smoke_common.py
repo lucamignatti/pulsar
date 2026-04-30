@@ -19,7 +19,14 @@ def write_synthetic_offline_dataset(
     obs = torch.randn(rows, observation_dim)
     actions = torch.randint(action_dim, (rows,), dtype=torch.long)
     action_probs = torch.nn.functional.one_hot(actions, action_dim).to(torch.float32)
-    next_goal = torch.randint(3, (rows,), dtype=torch.long)
+    half = max(1, rows // 2)
+    outcome = torch.cat(
+        [
+            torch.zeros(half, dtype=torch.long),
+            torch.ones(rows - half, dtype=torch.long),
+        ]
+    )
+    outcome_known = torch.ones(rows)
     weights = torch.ones(rows)
     episode_starts = torch.zeros(rows)
     terminated = torch.zeros(rows)
@@ -33,7 +40,8 @@ def write_synthetic_offline_dataset(
     torch.save(obs, data_dir / "obs.pt")
     torch.save(actions, data_dir / "actions.pt")
     torch.save(action_probs, data_dir / "action_probs.pt")
-    torch.save(next_goal, data_dir / "next_goal.pt")
+    torch.save(outcome, data_dir / "outcome.pt")
+    torch.save(outcome_known, data_dir / "outcome_known.pt")
     torch.save(weights, data_dir / "weights.pt")
     torch.save(episode_starts, data_dir / "episode_starts.pt")
     torch.save(terminated, data_dir / "terminated.pt")
@@ -43,16 +51,17 @@ def write_synthetic_offline_dataset(
     manifest_path.write_text(
         json.dumps(
             {
-                "schema_version": 3,
+                "schema_version": 4,
                 "observation_dim": observation_dim,
                 "action_dim": action_dim,
-                "next_goal_classes": 3,
+                "outcome_classes": 3,
                 "shards": [
                     {
                         "obs_path": "obs.pt",
                         "actions_path": "actions.pt",
                         "action_probs_path": "action_probs.pt",
-                        "next_goal_path": "next_goal.pt",
+                        "outcome_path": "outcome.pt",
+                        "outcome_known_path": "outcome_known.pt",
                         "weights_path": "weights.pt",
                         "episode_starts_path": "episode_starts.pt",
                         "terminated_path": "terminated.pt",
@@ -86,10 +95,20 @@ def run_offline_pretrain(
     config["offline_dataset"]["train_manifest"] = str(manifest_path.resolve())
     config["offline_dataset"]["val_manifest"] = str(manifest_path.resolve())
     config["offline_dataset"]["batch_size"] = 8
-    config["behavior_cloning"]["epochs"] = 1
-    config["next_goal_predictor"]["epochs"] = 1
-    config["value_pretraining"]["epochs"] = 1
-    config["ppo"]["device"] = device
+    config["offline_pretraining"]["evaluator_epochs"] = 1
+    config["offline_pretraining"]["actor_epochs"] = 1
+    config["offline_pretraining"]["sequence_length"] = 4
+    config["future_evaluator"].update(
+        {
+            "horizons": [1, 2, 3],
+            "latent_dim": 8,
+            "model_dim": 16,
+            "layers": 1,
+            "heads": 4,
+            "feedforward_dim": 32,
+        }
+    )
+    config["lfpo"]["device"] = device
     config["wandb"]["enabled"] = False
     if model_overrides:
         config["model"].update(model_overrides)

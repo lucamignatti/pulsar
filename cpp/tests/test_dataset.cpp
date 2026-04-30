@@ -22,7 +22,8 @@ std::filesystem::path make_dataset_fixture(bool include_episode_starts, bool mis
     actions = torch::tensor({0, 1, 2}, torch::TensorOptions().dtype(torch::kLong));
   }
   torch::Tensor action_probs = torch::one_hot(torch::tensor({0, 1, 2, 3}), 90).to(torch::kFloat32);
-  torch::Tensor next_goal = torch::tensor({0, 1, 2, 0}, torch::TensorOptions().dtype(torch::kLong));
+  torch::Tensor outcome = torch::tensor({0, 1, 2, 0}, torch::TensorOptions().dtype(torch::kLong));
+  torch::Tensor outcome_known = torch::ones({4}, torch::TensorOptions().dtype(torch::kFloat32));
   torch::Tensor weights = torch::tensor({1.0F, 2.0F, 1.0F, 1.0F});
   torch::Tensor episode_starts = torch::tensor({1.0F, 0.0F, 1.0F, 0.0F});
   torch::Tensor terminated = torch::tensor({0.0F, 1.0F, 0.0F, 1.0F});
@@ -31,7 +32,8 @@ std::filesystem::path make_dataset_fixture(bool include_episode_starts, bool mis
   torch::save(obs, (root / "obs.pt").string());
   torch::save(actions, (root / "actions.pt").string());
   torch::save(action_probs, (root / "action_probs.pt").string());
-  torch::save(next_goal, (root / "next_goal.pt").string());
+  torch::save(outcome, (root / "outcome.pt").string());
+  torch::save(outcome_known, (root / "outcome_known.pt").string());
   torch::save(weights, (root / "weights.pt").string());
   if (include_episode_starts) {
     torch::save(episode_starts, (root / "episode_starts.pt").string());
@@ -41,16 +43,17 @@ std::filesystem::path make_dataset_fixture(bool include_episode_starts, bool mis
 
   std::ofstream manifest(root / "manifest.json");
   manifest << "{\n"
-              "  \"schema_version\": 3,\n"
+              "  \"schema_version\": 4,\n"
               "  \"observation_dim\": 132,\n"
               "  \"action_dim\": 90,\n"
-              "  \"next_goal_classes\": 3,\n"
+              "  \"outcome_classes\": 3,\n"
               "  \"shards\": [\n"
               "    {\n"
               "      \"obs_path\": \"obs.pt\",\n"
               "      \"actions_path\": \"actions.pt\",\n"
               "      \"action_probs_path\": \"action_probs.pt\",\n"
-              "      \"next_goal_path\": \"next_goal.pt\",\n"
+              "      \"outcome_path\": \"outcome.pt\",\n"
+              "      \"outcome_known_path\": \"outcome_known.pt\",\n"
               "      \"weights_path\": \"weights.pt\",\n";
   if (include_episode_starts) {
     manifest << "      \"episode_starts_path\": \"episode_starts.pt\",\n";

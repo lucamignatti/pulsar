@@ -4,6 +4,7 @@
 #include <iostream>
 
 #include "pulsar/env/obs_builder.hpp"
+#include "pulsar/model/latent_future_actor.hpp"
 #include "pulsar/rl/action_table.hpp"
 #include "pulsar/training/self_play_manager.hpp"
 #include "test_utils.hpp"
@@ -14,12 +15,12 @@ void test_snapshot_save_load_trim_and_assignment() {
   namespace fs = std::filesystem;
   pulsar::ExperimentConfig config = pulsar::test::make_test_config();
   config.env.collision_meshes_path = pulsar::test::find_repo_collision_meshes().string();
-  config.ppo.self_play.enabled = true;
-  config.ppo.self_play.opponent_probability = 1.0F;
-  config.ppo.self_play.snapshot_interval_updates = 1;
-  config.ppo.self_play.max_snapshots = 1;
-  config.ppo.self_play.eval_interval_updates = 0;
-  config.ppo.device = "cpu";
+  config.self_play_league.enabled = true;
+  config.self_play_league.opponent_probability = 1.0F;
+  config.self_play_league.snapshot_interval_updates = 1;
+  config.self_play_league.max_snapshots = 1;
+  config.self_play_league.eval_interval_updates = 0;
+  config.lfpo.device = "cpu";
 
   const fs::path root = fs::temp_directory_path() / "pulsar_self_play_test";
   fs::remove_all(root);
@@ -27,9 +28,7 @@ void test_snapshot_save_load_trim_and_assignment() {
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
   pulsar::SelfPlayManager manager(config, root, obs_builder, action_parser, torch::kCPU);
-  pulsar::ModelConfig model_config = config.model;
-  pulsar::PPOConfig ppo_config = config.ppo;
-  pulsar::SharedActorCritic model(model_config, ppo_config);
+  pulsar::LatentFutureActor model(config.model);
   pulsar::ObservationNormalizer normalizer(config.model.observation_dim);
   normalizer.update(torch::randn({16, config.model.observation_dim}));
 
@@ -48,30 +47,28 @@ void test_snapshot_save_load_trim_and_assignment() {
   const auto assignment = reloaded.sample_assignment(0, 7);
   pulsar::test::require(assignment.enabled, "assignment should be enabled with opponent_probability=1");
 
-  pulsar::ExperimentConfig reward_changed_config = config;
-  reward_changed_config.reward.touch_reward += 1.0F;
-  reward_changed_config.reward.goal_reward += 1.0F;
-  reward_changed_config.reward.concede_penalty += 1.0F;
-  pulsar::SelfPlayManager reward_changed_reloaded(
-      reward_changed_config,
+  pulsar::ExperimentConfig league_changed_config = config;
+  league_changed_config.self_play_league.opponent_probability = 0.75F;
+  pulsar::SelfPlayManager league_changed_reloaded(
+      league_changed_config,
       root,
       obs_builder,
       action_parser,
       torch::kCPU);
   pulsar::test::require(
-      reward_changed_reloaded.has_snapshots(),
-      "self-play snapshot load should tolerate reward-only config changes");
+      league_changed_reloaded.has_snapshots(),
+      "self-play snapshot load should tolerate league sampling config changes");
 }
 
 void test_opponent_inference_and_elo_math() {
   pulsar::ExperimentConfig config = pulsar::test::make_test_config();
-  config.ppo.self_play.enabled = true;
-  config.ppo.self_play.opponent_probability = 1.0F;
-  config.ppo.self_play.snapshot_interval_updates = 1;
-  config.ppo.self_play.max_snapshots = 2;
-  config.ppo.self_play.eval_interval_updates = 0;
-  config.ppo.self_play.training_opponent_policy = "stochastic";
-  config.ppo.device = "cpu";
+  config.self_play_league.enabled = true;
+  config.self_play_league.opponent_probability = 1.0F;
+  config.self_play_league.snapshot_interval_updates = 1;
+  config.self_play_league.max_snapshots = 2;
+  config.self_play_league.eval_interval_updates = 0;
+  config.self_play_league.training_opponent_policy = "stochastic";
+  config.lfpo.device = "cpu";
 
   const auto root = std::filesystem::temp_directory_path() / "pulsar_self_play_infer";
   std::filesystem::remove_all(root);
@@ -79,7 +76,7 @@ void test_opponent_inference_and_elo_math() {
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
   pulsar::SelfPlayManager manager(config, root, obs_builder, action_parser, torch::kCPU);
-  pulsar::SharedActorCritic model(config.model, config.ppo);
+  pulsar::LatentFutureActor model(config.model);
   pulsar::ObservationNormalizer normalizer(config.model.observation_dim);
   normalizer.update(torch::randn({8, config.model.observation_dim}));
   manager.on_update(model, normalizer, 10, 1);

@@ -19,7 +19,8 @@ def _normalize_shard_paths(manifest_path: Path, shard: dict[str, Any]) -> dict[s
         "obs_path",
         "actions_path",
         "action_probs_path",
-        "next_goal_path",
+        "outcome_path",
+        "outcome_known_path",
         "weights_path",
         "episode_starts_path",
         "terminated_path",
@@ -38,34 +39,34 @@ def _merge(paths: list[Path], output_path: Path) -> None:
     merged_shards: list[dict[str, Any]] = []
     observation_dim: int | None = None
     action_dim: int | None = None
-    next_goal_classes: int | None = None
+    outcome_classes: int | None = None
 
     for path in paths:
         manifest = _load_manifest(path)
         current_obs_dim = int(manifest["observation_dim"])
         current_action_dim = int(manifest["action_dim"])
-        current_next_goal_classes = int(manifest.get("next_goal_classes", 3))
+        current_outcome_classes = int(manifest.get("outcome_classes", 3))
 
         if observation_dim is None:
             observation_dim = current_obs_dim
             action_dim = current_action_dim
-            next_goal_classes = current_next_goal_classes
+            outcome_classes = current_outcome_classes
         else:
             if current_obs_dim != observation_dim:
                 raise RuntimeError(f"observation_dim mismatch in {path}")
             if current_action_dim != action_dim:
                 raise RuntimeError(f"action_dim mismatch in {path}")
-            if current_next_goal_classes != next_goal_classes:
-                raise RuntimeError(f"next_goal_classes mismatch in {path}")
+            if current_outcome_classes != outcome_classes:
+                raise RuntimeError(f"outcome_classes mismatch in {path}")
 
         for shard in manifest["shards"]:
             merged_shards.append(_normalize_shard_paths(path, shard))
 
     output = {
-        "schema_version": 3,
+        "schema_version": 4,
         "observation_dim": observation_dim,
         "action_dim": action_dim,
-        "next_goal_classes": next_goal_classes,
+        "outcome_classes": outcome_classes,
         "shards": merged_shards,
     }
     output_path.write_text(json.dumps(output, indent=2) + "\n", encoding="utf-8")
