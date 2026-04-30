@@ -70,49 +70,53 @@ std::filesystem::path make_dataset_fixture(bool include_episode_starts, bool mis
 void test_dataset_iteration_and_trajectories() {
   namespace fs = std::filesystem;
   const fs::path root = make_dataset_fixture(true, false);
-  pulsar::OfflineTensorDataset dataset((root / "manifest.json").string());
-  pulsar::test::require(dataset.sample_count() == 4, "sample count mismatch");
-  pulsar::test::require(dataset.has_episode_starts(), "episode starts should be detected");
-  pulsar::test::require(dataset.has_trajectory_end_flags(), "trajectory end flags should be detected");
+  {
+    pulsar::OfflineTensorDataset dataset((root / "manifest.json").string());
+    pulsar::test::require(dataset.sample_count() == 4, "sample count mismatch");
+    pulsar::test::require(dataset.has_episode_starts(), "episode starts should be detected");
+    pulsar::test::require(dataset.has_trajectory_end_flags(), "trajectory end flags should be detected");
 
-  std::int64_t seen_rows = 0;
-  dataset.for_each_batch(2, false, 7, [&](const pulsar::OfflineTensorBatch& batch) {
-    seen_rows += batch.obs.size(0);
-    pulsar::test::require(batch.obs.size(1) == 132, "batch obs dim mismatch");
-    pulsar::test::require(batch.actions.defined(), "actions should be defined");
-  });
-  pulsar::test::require(seen_rows == 4, "for_each_batch row count mismatch");
+    std::int64_t seen_rows = 0;
+    dataset.for_each_batch(2, false, 7, [&](const pulsar::OfflineTensorBatch& batch) {
+      seen_rows += batch.obs.size(0);
+      pulsar::test::require(batch.obs.size(1) == 132, "batch obs dim mismatch");
+      pulsar::test::require(batch.actions.defined(), "actions should be defined");
+    });
+    pulsar::test::require(seen_rows == 4, "for_each_batch row count mismatch");
 
-  int trajectories = 0;
-  dataset.for_each_trajectory(false, 7, [&](const pulsar::OfflineTensorBatch& batch) {
-    ++trajectories;
-    pulsar::test::require(batch.episode_starts[0].item<float>() > 0.5F, "trajectory should start with episode_starts");
-  });
-  pulsar::test::require(trajectories == 2, "trajectory segmentation mismatch");
+    int trajectories = 0;
+    dataset.for_each_trajectory(false, 7, [&](const pulsar::OfflineTensorBatch& batch) {
+      ++trajectories;
+      pulsar::test::require(batch.episode_starts[0].item<float>() > 0.5F, "trajectory should start with episode_starts");
+    });
+    pulsar::test::require(trajectories == 2, "trajectory segmentation mismatch");
 
-  int packed_batches = 0;
-  dataset.for_each_packed_trajectory_batch(4, false, 7, [&](const pulsar::OfflineTensorPackedBatch& batch) {
-    ++packed_batches;
-    pulsar::test::require(batch.obs.size(0) == 2, "packed batch time dimension mismatch");
-    pulsar::test::require(batch.obs.size(1) == 2, "packed batch count mismatch");
-    pulsar::test::require(batch.obs.size(2) == 132, "packed batch obs dim mismatch");
-    pulsar::test::require(batch.valid_mask.all().item<bool>(), "packed batch should be fully valid in this fixture");
-  });
-  pulsar::test::require(packed_batches == 1, "packed trajectory batching mismatch");
+    int packed_batches = 0;
+    dataset.for_each_packed_trajectory_batch(4, false, 7, [&](const pulsar::OfflineTensorPackedBatch& batch) {
+      ++packed_batches;
+      pulsar::test::require(batch.obs.size(0) == 2, "packed batch time dimension mismatch");
+      pulsar::test::require(batch.obs.size(1) == 2, "packed batch count mismatch");
+      pulsar::test::require(batch.obs.size(2) == 132, "packed batch obs dim mismatch");
+      pulsar::test::require(batch.valid_mask.all().item<bool>(), "packed batch should be fully valid in this fixture");
+    });
+    pulsar::test::require(packed_batches == 1, "packed trajectory batching mismatch");
+  }
   fs::remove_all(root);
 }
 
 void test_dataset_default_episode_starts_and_mismatch() {
   namespace fs = std::filesystem;
   const fs::path no_starts_root = make_dataset_fixture(false, false);
-  pulsar::OfflineTensorDataset no_starts((no_starts_root / "manifest.json").string());
-  pulsar::test::require(!no_starts.has_episode_starts(), "episode starts should be absent");
-  pulsar::test::require(no_starts.has_trajectory_end_flags(), "trajectory end flags should still be present");
-  bool saw_default_start = false;
-  no_starts.for_each_batch(4, false, 7, [&](const pulsar::OfflineTensorBatch& batch) {
-    saw_default_start = batch.episode_starts[0].item<float>() > 0.5F;
-  });
-  pulsar::test::require(saw_default_start, "default episode start should be synthesized");
+  {
+    pulsar::OfflineTensorDataset no_starts((no_starts_root / "manifest.json").string());
+    pulsar::test::require(!no_starts.has_episode_starts(), "episode starts should be absent");
+    pulsar::test::require(no_starts.has_trajectory_end_flags(), "trajectory end flags should still be present");
+    bool saw_default_start = false;
+    no_starts.for_each_batch(4, false, 7, [&](const pulsar::OfflineTensorBatch& batch) {
+      saw_default_start = batch.episode_starts[0].item<float>() > 0.5F;
+    });
+    pulsar::test::require(saw_default_start, "default episode start should be synthesized");
+  }
 
   bool missing_manifest_threw = false;
   try {
@@ -123,14 +127,16 @@ void test_dataset_default_episode_starts_and_mismatch() {
   pulsar::test::require(missing_manifest_threw, "missing manifest should throw an actionable error");
 
   const fs::path mismatch_root = make_dataset_fixture(true, true);
-  pulsar::OfflineTensorDataset mismatch((mismatch_root / "manifest.json").string());
-  bool threw = false;
-  try {
-    mismatch.for_each_batch(4, false, 7, [](const pulsar::OfflineTensorBatch&) {});
-  } catch (const std::runtime_error&) {
-    threw = true;
+  {
+    pulsar::OfflineTensorDataset mismatch((mismatch_root / "manifest.json").string());
+    bool threw = false;
+    try {
+      mismatch.for_each_batch(4, false, 7, [](const pulsar::OfflineTensorBatch&) {});
+    } catch (const std::runtime_error&) {
+      threw = true;
+    }
+    pulsar::test::require(threw, "mismatched leading dimensions should throw");
   }
-  pulsar::test::require(threw, "mismatched leading dimensions should throw");
 
   fs::remove_all(no_starts_root);
   fs::remove_all(mismatch_root);

@@ -201,16 +201,20 @@ int main() {
     write_manifest_fixture(root);
 
     pulsar::ExperimentConfig config = make_lfpo_smoke_config(root / "data" / "manifest.json");
-    pulsar::OfflinePretrainer pretrainer(config);
-    pretrainer.train((root / "pretrain").string());
+    {
+      pulsar::OfflinePretrainer pretrainer(config);
+      pretrainer.train((root / "pretrain").string());
+    }
     if (!fs::exists(root / "pretrain" / "model.pt") ||
         !fs::exists(root / "pretrain" / "future_evaluator" / "model.pt")) {
       throw std::runtime_error("LFPO pretraining checkpoint missing actor or future evaluator");
     }
 
     config.lfpo.init_checkpoint = (root / "pretrain").string();
-    pulsar::LFPOTrainer trainer(config, make_fake_collector(config), nullptr, root / "online");
-    trainer.train(1, (root / "online").string());
+    {
+      pulsar::LFPOTrainer trainer(config, make_fake_collector(config), nullptr, root / "online");
+      trainer.train(1, (root / "online").string());
+    }
     if (!fs::exists(root / "online" / "update_1" / "model.pt") ||
         !fs::exists(root / "online" / "update_1" / "future_evaluator" / "model.pt") ||
         !fs::exists(root / "online" / "final" / "model.pt")) {
@@ -219,8 +223,10 @@ int main() {
 
     pulsar::ExperimentConfig resume_config = config;
     resume_config.lfpo.init_checkpoint = (root / "online" / "update_1").string();
-    pulsar::LFPOTrainer resumed(resume_config, make_fake_collector(resume_config), nullptr, root / "resume", false);
-    resumed.train(1, (root / "resume").string());
+    {
+      pulsar::LFPOTrainer resumed(resume_config, make_fake_collector(resume_config), nullptr, root / "resume", false);
+      resumed.train(1, (root / "resume").string());
+    }
     if (!fs::exists(root / "resume" / "update_2" / "model.pt")) {
       throw std::runtime_error("LFPO resume checkpoint did not continue update numbering");
     }

@@ -203,6 +203,7 @@ if(PULSAR_ENABLE_TESTS)
     target_link_libraries(pulsar_offline_tests PRIVATE pulsar_torch)
     pulsar_force_target_cxx20(pulsar_offline_tests)
     add_test(NAME pulsar_offline_tests COMMAND pulsar_offline_tests)
+    set_tests_properties(pulsar_offline_tests PROPERTIES ENVIRONMENT "CUDA_VISIBLE_DEVICES=")
 
     add_executable(
       pulsar_dataset_tests
@@ -212,6 +213,7 @@ if(PULSAR_ENABLE_TESTS)
     target_link_libraries(pulsar_dataset_tests PRIVATE pulsar_torch)
     pulsar_force_target_cxx20(pulsar_dataset_tests)
     add_test(NAME pulsar_dataset_tests COMMAND pulsar_dataset_tests)
+    set_tests_properties(pulsar_dataset_tests PROPERTIES ENVIRONMENT "CUDA_VISIBLE_DEVICES=")
 
     add_executable(
       pulsar_lfpo_math_tests
@@ -241,6 +243,7 @@ if(PULSAR_ENABLE_TESTS)
     target_link_libraries(pulsar_self_play_tests PRIVATE pulsar_torch)
     pulsar_force_target_cxx20(pulsar_self_play_tests)
     add_test(NAME pulsar_self_play_tests COMMAND pulsar_self_play_tests)
+    set_tests_properties(pulsar_self_play_tests PROPERTIES ENVIRONMENT "CUDA_VISIBLE_DEVICES=")
 
     if(TARGET pulsar_lfpo_train AND TARGET pulsar_lfpo_pretrain AND TARGET pulsar_native AND Python3_EXECUTABLE)
       add_test(
