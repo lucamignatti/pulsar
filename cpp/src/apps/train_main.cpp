@@ -9,8 +9,8 @@
 #include "pulsar/env/obs_builder.hpp"
 #include "pulsar/rl/action_table.hpp"
 #include "pulsar/tracing/tracing.hpp"
+#include "pulsar/training/appo_trainer.hpp"
 #include "pulsar/training/batched_rocketsim_collector.hpp"
-#include "pulsar/training/lfpo_trainer.hpp"
 #include "pulsar/training/self_play_manager.hpp"
 
 namespace {
@@ -23,13 +23,13 @@ bool should_pin_host_memory(const std::string& device) {
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::cerr << "usage: pulsar_lfpo_train <config.json> <checkpoint_dir> [updates]\n"
+    std::cerr << "usage: pulsar_appo_train <config.json> <checkpoint_dir> [updates]\n"
               << "       omit updates, or pass <=0, to train indefinitely\n";
     return 1;
   }
 
   try {
-    pulsar::tracing::Session trace_session(std::filesystem::path(argv[2]) / "trace.perfetto.json", "pulsar_lfpo_train");
+    pulsar::tracing::Session trace_session(std::filesystem::path(argv[2]) / "trace.perfetto.json", "pulsar_appo_train");
     PULSAR_TRACE_SET_THREAD_NAME("main");
     const pulsar::ExperimentConfig config = pulsar::load_experiment_config(argv[1]);
 
@@ -41,7 +41,7 @@ int main(int argc, char** argv) {
         obs_builder,
         action_parser,
         done_condition,
-        should_pin_host_memory(config.lfpo.device));
+        should_pin_host_memory(config.ppo.device));
 
     std::unique_ptr<pulsar::SelfPlayManager> self_play_manager;
     if (config.self_play_league.enabled) {
@@ -50,11 +50,11 @@ int main(int argc, char** argv) {
           std::filesystem::path(argv[2]) / "policy_versions",
           obs_builder,
           action_parser,
-          torch::Device(config.lfpo.device));
+          torch::Device(config.ppo.device));
     }
 
     const int updates = argc > 3 ? std::stoi(argv[3]) : 0;
-    pulsar::LFPOTrainer trainer(
+    pulsar::APPOTrainer trainer(
         config,
         std::move(collector),
         std::move(self_play_manager),
@@ -62,7 +62,7 @@ int main(int argc, char** argv) {
     trainer.train(updates, argv[2], argv[1]);
     return 0;
   } catch (const std::exception& exc) {
-    std::cerr << "pulsar_lfpo_train failed: " << exc.what() << '\n';
+    std::cerr << "pulsar_appo_train failed: " << exc.what() << '\n';
     return 1;
   }
 }

@@ -1,0 +1,544 @@
+#include "pulsar/training/appo_trainer.hpp"
+
+#ifdef PULSAR_HAS_TORCH
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <stdexcept>
+
+#include <nlohmann/json.hpp>
+#include <ATen/Context.h>
+
+#include "pulsar/tracing/tracing.hpp"
+#include "pulsar/training/ppo_math.hpp"
+
+namespace pulsar {
+namespace {
+
+torch::Device resolve_runtime_device(const std::string& device_name) {
+  torch::Device device(device_name);
+  if (device.is_cuda() && !device.has_index()) {
+    return torch::Device(torch::kCUDA, 0);
+  }
+  return device;
+}
+
+RolloutStorage make_rollout_storage(
+    const ExperimentConfig& config,
+    int num_agents,
+    int action_dim) {
+  return RolloutStorage(
+      config.ppo.rollout_length,
+      num_agents,
+      config.model.observation_dim,
+      action_dim,
+      torch::Device(torch::kCPU));
+}
+
+void configure_cuda_runtime(const torch::Device& device) {
+  if (!device.is_cuda()) {
+    return;
+  }
+  at::globalContext().setAllowTF32CuBLAS(true);
+  at::globalContext().setAllowTF32CuDNN(true);
+}
+
+void append_metrics_line(
+    const std::filesystem::path& checkpoint_dir,
+    int update_index,
+    std::int64_t global_step,
+    const TrainerMetrics& metrics) {
+  nlohmann::json line = {
+      {"update", update_index},
+      {"global_step", global_step},
+      {"collection_agent_steps_per_second", metrics.collection_agent_steps_per_second},
+      {"update_agent_steps_per_second", metrics.update_agent_steps_per_second},
+      {"overall_agent_steps_per_second", metrics.overall_agent_steps_per_second},
+      {"update_seconds", metrics.update_seconds},
+      {"policy_loss", metrics.policy_loss},
+      {"value_loss", metrics.value_loss},
+      {"entropy", metrics.entropy},
+      {"adaptive_epsilon", metrics.adaptive_epsilon},
+      {"critic_variance", metrics.critic_variance},
+      {"mean_confidence_weight", metrics.mean_confidence_weight},
+      {"obs_build_seconds", metrics.obs_build_seconds},
+      {"mask_build_seconds", metrics.mask_build_seconds},
+      {"policy_forward_seconds", metrics.policy_forward_seconds},
+      {"action_decode_seconds", metrics.action_decode_seconds},
+      {"env_step_seconds", metrics.env_step_seconds},
+      {"done_reset_seconds", metrics.done_reset_seconds},
+      {"forward_backward_seconds", metrics.forward_backward_seconds},
+      {"optimizer_step_seconds", metrics.optimizer_step_seconds},
+      {"self_play_eval_seconds", metrics.self_play_eval_seconds},
+  };
+  for (const auto& [mode, rating] : metrics.elo_ratings) {
+    line["elo_" + mode] = rating;
+  }
+  std::filesystem::create_directories(checkpoint_dir);
+  std::ofstream output(checkpoint_dir / "metrics.jsonl", std::ios::app);
+  output << line.dump() << '\n';
+}
+
+}  // namespace
+
+APPOTrainer::APPOTrainer(
+    ExperimentConfig config,
+    std::unique_ptr<BatchedRocketSimCollector> collector,
+    std::unique_ptr<SelfPlayManager> self_play_manager,
+    std::filesystem::path run_output_root,
+    bool log_initialization)
+    : config_(std::move(config)),
+      collector_(std::move(collector)),
+      self_play_manager_(std::move(self_play_manager)),
+      action_table_(config_.action_table),
+      actor_(PPOActor(config_.model)),
+      actor_normalizer_(config_.model.observation_dim),
+      actor_optimizer_(actor_->parameters(), torch::optim::AdamOptions(config_.ppo.learning_rate)),
+      rollout_(make_rollout_storage(
+          config_,
+          static_cast<int>(collector_->total_agents()),
+          collector_->action_dim())),
+      device_(resolve_runtime_device(config_.ppo.device)),
+      run_output_root_(std::move(run_output_root)),
+      log_initialization_(log_initialization) {
+  if (!collector_) {
+    throw std::invalid_argument("APPOTrainer requires a collector.");
+  }
+  total_agents_ = collector_->total_agents();
+  collection_state_ = actor_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
+  opponent_collection_state_ = actor_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
+  configure_cuda_runtime(device_);
+  use_pinned_host_buffers_ = device_.is_cuda();
+  actor_->to(device_);
+  actor_normalizer_.to(device_);
+  maybe_initialize_from_checkpoint();
+
+  if (self_play_manager_ && self_play_manager_->enabled()) {
+    collector_->set_self_play_assignment_fn(
+        [this](std::size_t env_idx, std::uint64_t seed) {
+          return self_play_manager_->sample_assignment(env_idx, seed);
+        });
+  }
+}
+
+torch::Tensor APPOTrainer::map_outcome_labels_to_rewards(const torch::Tensor& labels) const {
+  torch::Tensor rewards = torch::zeros_like(labels, torch::TensorOptions().dtype(torch::kFloat32));
+  rewards.masked_fill_(labels == 0, config_.outcome.score);
+  rewards.masked_fill_(labels == 1, config_.outcome.concede);
+  return rewards;
+}
+
+void APPOTrainer::maybe_initialize_from_checkpoint() {
+  if (config_.ppo.init_checkpoint.empty()) {
+    return;
+  }
+  const std::filesystem::path base(config_.ppo.init_checkpoint);
+  const ExperimentConfig checkpoint_config = load_experiment_config((base / "config.json").string());
+  const CheckpointMetadata metadata = load_checkpoint_metadata((base / "metadata.json").string());
+  validate_inference_checkpoint_metadata(metadata, checkpoint_config);
+  torch::serialize::InputArchive actor_archive;
+  actor_archive.load_from((base / "model.pt").string(), device_);
+  actor_->load(actor_archive);
+  actor_normalizer_.load(actor_archive);
+  actor_->to(device_);
+  actor_normalizer_.to(device_);
+  if (std::filesystem::exists(base / "actor_optimizer.pt")) {
+    torch::serialize::InputArchive optimizer_archive;
+    optimizer_archive.load_from((base / "actor_optimizer.pt").string(), device_);
+    actor_optimizer_.load(optimizer_archive);
+    resumed_global_step_ = metadata.global_step;
+    resumed_update_index_ = metadata.update_index;
+  }
+  if (log_initialization_) {
+    std::cout << "initialized_dappo_from_checkpoint=" << base.string() << '\n';
+  }
+}
+
+TrainerMetrics APPOTrainer::update_actor() {
+  const auto update_start = std::chrono::steady_clock::now();
+  TrainerMetrics metrics{};
+  const int seq_len = std::max(1, config_.ppo.sequence_length);
+  const int agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
+  const int total_agents = rollout_.num_agents();
+  std::int64_t metric_steps = 0;
+  double accumulated_variance = 0.0;
+  double accumulated_epsilon = 0.0;
+  double accumulated_confidence = 0.0;
+
+  const torch::Tensor value_scalars = rollout_.values;
+  const torch::Tensor advantages = compute_gae(
+      value_scalars, rollout_.rewards, rollout_.dones,
+      config_.ppo.gamma, config_.ppo.gae_lambda);
+  const torch::Tensor returns = advantages + value_scalars.detach();
+
+  torch::Tensor advantages_normalized = advantages;
+  const int64_t active_count = rollout_.learner_active.sum().item<int64_t>();
+  if (active_count > 0) {
+    const torch::Tensor active_adv = advantages.masked_select(rollout_.learner_active > 0.5F);
+    const float adv_mean = active_adv.mean().item<float>();
+    const float adv_std = active_adv.std().item<float>();
+    advantages_normalized = (advantages - adv_mean) / (adv_std + 1.0e-8F);
+  }
+
+  const torch::Tensor atom_support = actor_->value_support().to(device_);
+
+  for (int epoch = 0; epoch < config_.ppo.update_epochs; ++epoch) {
+    const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
+    for (int agent_offset = 0; agent_offset < total_agents; agent_offset += agents_per_batch) {
+      const int count = std::min(agents_per_batch, total_agents - agent_offset);
+      const torch::Tensor agent_indices = perm.narrow(0, agent_offset, count);
+      const torch::Tensor agent_indices_device = agent_indices.to(device_);
+      ContinuumState state = state_to_device(rollout_.initial_state_for_agents(agent_indices), device_);
+
+      for (int seq_start = 0; seq_start < rollout_.rollout_length(); seq_start += seq_len) {
+        const int chunk_start = seq_start;
+        const int chunk_end = std::min(rollout_.rollout_length(), chunk_start + seq_len);
+        const int chunk_steps = chunk_end - chunk_start;
+        const int burn = seq_start == 0 ? std::min(std::max(0, config_.ppo.burn_in), chunk_steps) : 0;
+        const int loss_start = chunk_start + burn;
+        const int loss_steps = chunk_steps - burn;
+
+        const torch::Tensor obs =
+            rollout_.obs.narrow(0, chunk_start, chunk_steps).index_select(1, agent_indices).to(device_);
+        const torch::Tensor episode_starts =
+            rollout_.episode_starts.narrow(0, chunk_start, chunk_steps).index_select(1, agent_indices).to(device_);
+
+        const auto forward_start = std::chrono::steady_clock::now();
+        ActorSequenceOutput output = actor_->forward_sequence(obs, std::move(state), episode_starts);
+        state = detach_state(std::move(output.final_state));
+
+        if (loss_steps <= 0) {
+          continue;
+        }
+
+        torch::Tensor policy_logits = output.policy_logits.narrow(0, burn, loss_steps);
+        torch::Tensor new_value_logits = output.value_logits.narrow(0, burn, loss_steps);
+
+        const torch::Tensor action_masks =
+            rollout_.action_masks.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_).to(torch::kBool);
+        const torch::Tensor learner_active =
+            rollout_.learner_active.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
+        const torch::Tensor old_actions =
+            rollout_.actions.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
+        const torch::Tensor old_log_probs =
+            rollout_.action_log_probs.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
+        const torch::Tensor chunk_returns =
+            returns.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
+        const torch::Tensor chunk_advantages =
+            advantages_normalized.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
+
+        const auto samples = loss_steps * count;
+        const torch::Tensor flat_active = learner_active.reshape({samples}) > 0.5F;
+        if (flat_active.sum().item<std::int64_t>() == 0) {
+          continue;
+        }
+
+        torch::Tensor flat_logits = policy_logits.reshape({samples, config_.model.action_dim});
+        torch::Tensor flat_masks = action_masks.reshape({samples, config_.model.action_dim});
+        torch::Tensor flat_actions = old_actions.reshape({samples});
+        torch::Tensor flat_old_log_probs = old_log_probs.reshape({samples});
+        torch::Tensor flat_returns = chunk_returns.reshape({samples});
+        torch::Tensor flat_advantages = chunk_advantages.reshape({samples});
+        torch::Tensor flat_value_logits = new_value_logits.reshape({samples, config_.model.value_num_atoms});
+
+        const torch::Tensor active_logits = flat_logits.index({flat_active});
+        const torch::Tensor active_masks = flat_masks.index({flat_active});
+        const torch::Tensor active_actions = flat_actions.index({flat_active});
+        const torch::Tensor active_old_log_probs = flat_old_log_probs.index({flat_active});
+        const torch::Tensor active_returns = flat_returns.index({flat_active});
+        const torch::Tensor active_advantages = flat_advantages.index({flat_active});
+        const torch::Tensor active_value_logits = flat_value_logits.index({flat_active});
+
+        const torch::Tensor log_probs =
+            torch::log_softmax(apply_action_mask_to_logits(active_logits, active_masks), -1);
+        const torch::Tensor current_log_probs = log_probs.gather(1, active_actions.unsqueeze(1)).squeeze(1);
+
+        float epsilon = config_.ppo.clip_range;
+        torch::Tensor confidence_weights = torch::ones({active_advantages.size(0)}, active_advantages.options());
+        if (config_.ppo.use_adaptive_epsilon || config_.ppo.use_confidence_weighting) {
+          const torch::Tensor critic_variance = compute_distribution_variance(active_value_logits, atom_support);
+          if (config_.ppo.use_adaptive_epsilon) {
+            epsilon = compute_adaptive_epsilon(
+                critic_variance,
+                config_.ppo.clip_range,
+                config_.ppo.adaptive_epsilon_beta,
+                config_.ppo.epsilon_min,
+                config_.ppo.epsilon_max);
+          }
+          if (config_.ppo.use_confidence_weighting) {
+            confidence_weights = compute_confidence_weights(
+                active_value_logits,
+                atom_support,
+                config_.ppo.confidence_weight_type,
+                config_.ppo.confidence_weight_delta,
+                config_.ppo.normalize_confidence_weights);
+          }
+          accumulated_variance += critic_variance.mean().item<double>() * static_cast<double>(active_logits.size(0));
+          accumulated_confidence += confidence_weights.mean().item<double>() * static_cast<double>(active_logits.size(0));
+        }
+        accumulated_epsilon += static_cast<double>(epsilon) * static_cast<double>(active_logits.size(0));
+
+        torch::Tensor policy_loss =
+            clipped_ppo_policy_loss(current_log_probs, active_old_log_probs, active_advantages, epsilon);
+        policy_loss = (policy_loss * confidence_weights).mean();
+
+        const torch::Tensor entropy = masked_action_entropy(active_logits, active_masks).mean();
+        const torch::Tensor value_loss = distributional_value_loss(
+            active_value_logits,
+            active_returns,
+            atom_support,
+            config_.model.value_v_min,
+            config_.model.value_v_max,
+            config_.model.value_num_atoms);
+
+        const torch::Tensor loss =
+            policy_loss + config_.ppo.value_coef * value_loss - config_.ppo.entropy_coef * entropy;
+
+        metrics.forward_backward_seconds +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - forward_start).count();
+        const auto optim_start = std::chrono::steady_clock::now();
+        actor_optimizer_.zero_grad();
+        loss.backward();
+        torch::nn::utils::clip_grad_norm_(actor_->parameters(), config_.ppo.max_grad_norm);
+        actor_optimizer_.step();
+        metrics.optimizer_step_seconds +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - optim_start).count();
+
+        const auto active_samples = active_logits.size(0);
+        metrics.policy_loss += policy_loss.item<double>() * static_cast<double>(active_samples);
+        metrics.value_loss += value_loss.item<double>() * static_cast<double>(active_samples);
+        metrics.entropy += entropy.item<double>() * static_cast<double>(active_samples);
+        metric_steps += active_samples;
+      }
+    }
+  }
+
+  if (metric_steps > 0) {
+    metrics.policy_loss /= static_cast<double>(metric_steps);
+    metrics.value_loss /= static_cast<double>(metric_steps);
+    metrics.entropy /= static_cast<double>(metric_steps);
+    metrics.adaptive_epsilon = accumulated_epsilon / static_cast<double>(metric_steps);
+    metrics.critic_variance = accumulated_variance / static_cast<double>(metric_steps);
+    metrics.mean_confidence_weight = accumulated_confidence / static_cast<double>(metric_steps);
+  }
+  metrics.update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count();
+  return metrics;
+}
+
+TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_index) {
+  const auto update_start = std::chrono::steady_clock::now();
+  TrainerMetrics metrics{};
+  CollectorTimings collector_timings{};
+  std::int64_t collected_agent_steps = 0;
+
+  const auto collection_start = std::chrono::steady_clock::now();
+  rollout_.set_initial_state(collection_state_);
+  const torch::Tensor atom_support = actor_->value_support().to(device_);
+
+  for (int step = 0; step < config_.ppo.rollout_length; ++step) {
+    torch::Tensor raw_obs_host = collector_->host_observations();
+    torch::Tensor raw_obs = raw_obs_host.to(device_, use_pinned_host_buffers_);
+    torch::Tensor episode_starts = collector_->host_episode_starts().to(device_, use_pinned_host_buffers_);
+    torch::Tensor action_masks = collector_->host_action_masks().to(device_, use_pinned_host_buffers_).to(torch::kBool);
+    torch::Tensor learner_active = collector_->host_learner_active().to(device_, use_pinned_host_buffers_);
+    torch::Tensor snapshot_ids = collector_->host_snapshot_ids().to(device_, use_pinned_host_buffers_);
+
+    torch::Tensor normalized_obs;
+    torch::Tensor actions;
+    torch::Tensor action_log_probs;
+    torch::Tensor sampled_values;
+    const auto policy_start = std::chrono::steady_clock::now();
+    {
+      torch::NoGradGuard no_grad;
+      actor_normalizer_.update(raw_obs);
+      normalized_obs = actor_normalizer_.normalize(raw_obs);
+      ActorStepOutput output = actor_->forward_step(normalized_obs, std::move(collection_state_), episode_starts);
+      collection_state_ = std::move(output.state);
+      actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
+      sampled_values = sample_quantile_value(output.value_logits, atom_support);
+    }
+    metrics.policy_forward_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - policy_start).count();
+
+    if (self_play_manager_ && self_play_manager_->has_snapshots()) {
+      torch::Tensor opponent_actions;
+      self_play_manager_->infer_opponent_actions(
+          actor_,
+          raw_obs,
+          action_masks,
+          episode_starts,
+          snapshot_ids,
+          opponent_collection_state_,
+          &opponent_actions,
+          &metrics.policy_forward_seconds);
+      actions = torch::where(snapshot_ids >= 0, opponent_actions, actions);
+    }
+
+    const auto decode_start = std::chrono::steady_clock::now();
+    const torch::Tensor action_indices_cpu = actions.contiguous().to(torch::kCPU);
+    collector_->step(
+        std::span<const std::int64_t>(
+            action_indices_cpu.data_ptr<std::int64_t>(),
+            static_cast<std::size_t>(action_indices_cpu.numel())),
+        &collector_timings);
+    metrics.action_decode_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
+
+    torch::Tensor dones = collector_->host_dones().to(device_, use_pinned_host_buffers_);
+    torch::Tensor terminal_labels = collector_->host_terminal_outcome_labels();
+    torch::Tensor step_rewards = map_outcome_labels_to_rewards(terminal_labels);
+    step_rewards = step_rewards.to(device_, use_pinned_host_buffers_) * dones;
+
+    rollout_.append(
+        step,
+        raw_obs_host,
+        normalized_obs.to(torch::kCPU),
+        episode_starts.to(torch::kCPU),
+        action_masks.to(torch::kUInt8).to(torch::kCPU),
+        learner_active.to(torch::kCPU),
+        actions.to(torch::kCPU),
+        action_log_probs.to(torch::kCPU),
+        sampled_values.to(torch::kCPU),
+        step_rewards.to(torch::kCPU),
+        dones.to(torch::kCPU));
+
+    collected_agent_steps += learner_active.sum().item<std::int64_t>();
+  }
+  rollout_.set_final_observation(collector_->host_observations());
+  const double collection_seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - collection_start).count();
+
+  TrainerMetrics update_metrics = update_actor();
+  metrics.policy_loss = update_metrics.policy_loss;
+  metrics.value_loss = update_metrics.value_loss;
+  metrics.entropy = update_metrics.entropy;
+  metrics.update_seconds = update_metrics.update_seconds;
+  metrics.forward_backward_seconds = update_metrics.forward_backward_seconds;
+  metrics.optimizer_step_seconds = update_metrics.optimizer_step_seconds;
+  metrics.adaptive_epsilon = update_metrics.adaptive_epsilon;
+  metrics.critic_variance = update_metrics.critic_variance;
+  metrics.mean_confidence_weight = update_metrics.mean_confidence_weight;
+
+  metrics.obs_build_seconds = collector_timings.obs_build_seconds;
+  metrics.mask_build_seconds = collector_timings.mask_build_seconds;
+  metrics.env_step_seconds = collector_timings.env_step_seconds;
+  metrics.done_reset_seconds = collector_timings.done_reset_seconds;
+  metrics.collection_agent_steps_per_second =
+      collected_agent_steps > 0 ? static_cast<double>(collected_agent_steps) / collection_seconds : 0.0;
+  metrics.update_agent_steps_per_second =
+      collected_agent_steps > 0 ? static_cast<double>(collected_agent_steps) / std::max(metrics.update_seconds, 1.0e-9) : 0.0;
+  if (global_step != nullptr) {
+    *global_step += collected_agent_steps;
+  }
+  const std::int64_t effective_global_step = global_step != nullptr ? *global_step : collected_agent_steps;
+  if (self_play_manager_) {
+    const SelfPlayMetrics self_play_metrics =
+        self_play_manager_->on_update(actor_, actor_normalizer_, effective_global_step, update_index);
+    metrics.self_play_eval_seconds = self_play_metrics.eval_seconds;
+    metrics.elo_ratings = self_play_metrics.ratings;
+  }
+  metrics.overall_agent_steps_per_second =
+      collected_agent_steps > 0
+          ? static_cast<double>(collected_agent_steps) /
+                std::max(std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count(), 1.0e-9)
+          : 0.0;
+  return metrics;
+}
+
+CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_step, int update_index) const {
+  return CheckpointMetadata{
+      .schema_version = config_.schema_version,
+      .obs_schema_version = config_.obs_schema_version,
+      .config_hash = config_hash(config_),
+      .action_table_hash = action_table_hash(config_.action_table),
+      .architecture_name = "dappo_continuum",
+      .device = config_.ppo.device,
+      .global_step = global_step,
+      .update_index = update_index,
+  };
+}
+
+void APPOTrainer::save_checkpoint(const std::filesystem::path& directory, std::int64_t global_step, int update_index) const {
+  std::filesystem::create_directories(directory);
+  save_experiment_config(config_, (directory / "config.json").string());
+  save_checkpoint_metadata(make_checkpoint_metadata(global_step, update_index), (directory / "metadata.json").string());
+  torch::serialize::OutputArchive actor_archive;
+  actor_->save(actor_archive);
+  actor_normalizer_.save(actor_archive);
+  actor_archive.save_to((directory / "model.pt").string());
+  torch::serialize::OutputArchive actor_optimizer_archive;
+  actor_optimizer_.save(actor_optimizer_archive);
+  actor_optimizer_archive.save_to((directory / "actor_optimizer.pt").string());
+}
+
+void APPOTrainer::prune_old_checkpoints(const std::filesystem::path& checkpoint_dir) const {
+  const int max_checkpoints = config_.ppo.max_rolling_checkpoints;
+  if (max_checkpoints <= 0 || !std::filesystem::exists(checkpoint_dir)) {
+    return;
+  }
+  std::vector<std::pair<int, std::filesystem::path>> updates;
+  for (const auto& entry : std::filesystem::directory_iterator(checkpoint_dir)) {
+    if (!entry.is_directory()) {
+      continue;
+    }
+    const std::string name = entry.path().filename().string();
+    if (name.rfind("update_", 0) != 0) {
+      continue;
+    }
+    try {
+      updates.emplace_back(std::stoi(name.substr(7)), entry.path());
+    } catch (...) {
+    }
+  }
+  std::sort(updates.begin(), updates.end(), [](const auto& lhs, const auto& rhs) { return lhs.first > rhs.first; });
+  for (std::size_t i = static_cast<std::size_t>(max_checkpoints); i < updates.size(); ++i) {
+    std::filesystem::remove_all(updates[i].second);
+  }
+}
+
+void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const std::string& config_path) {
+  WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "dappo_train");
+  std::int64_t global_step = resumed_global_step_;
+  const int max_updates = updates <= 0 ? std::numeric_limits<int>::max() : updates;
+  for (int index = 0; index < max_updates; ++index) {
+    const int update_index = static_cast<int>(resumed_update_index_) + index + 1;
+    TrainerMetrics metrics = run_update(&global_step, update_index);
+    append_metrics_line(checkpoint_dir, update_index, global_step, metrics);
+    std::cout << "update=" << update_index
+              << " global_step=" << global_step
+              << " policy_loss=" << metrics.policy_loss
+              << " value_loss=" << metrics.value_loss
+              << " entropy=" << metrics.entropy
+              << " epsilon=" << metrics.adaptive_epsilon
+              << " critic_var=" << metrics.critic_variance
+              << " conf_weight=" << metrics.mean_confidence_weight
+              << '\n';
+    if (wandb.enabled()) {
+      wandb.log(nlohmann::json{
+          {"update", update_index},
+          {"global_step", global_step},
+          {"policy_loss", metrics.policy_loss},
+          {"value_loss", metrics.value_loss},
+          {"entropy", metrics.entropy},
+          {"adaptive_epsilon", metrics.adaptive_epsilon},
+          {"critic_variance", metrics.critic_variance},
+          {"mean_confidence_weight", metrics.mean_confidence_weight},
+      });
+    }
+    if (config_.ppo.checkpoint_interval > 0 && update_index % config_.ppo.checkpoint_interval == 0) {
+      save_checkpoint(std::filesystem::path(checkpoint_dir) / ("update_" + std::to_string(update_index)), global_step, update_index);
+      prune_old_checkpoints(checkpoint_dir);
+    }
+  }
+  save_checkpoint(std::filesystem::path(checkpoint_dir) / "final", global_step, static_cast<int>(resumed_update_index_) + max_updates);
+  wandb.finish();
+}
+
+}  // namespace pulsar
+
+#endif

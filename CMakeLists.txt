@@ -123,18 +123,14 @@ if(PULSAR_ENABLE_TORCH)
   if(Torch_FOUND)
     add_library(
       pulsar_torch
-      cpp/src/model/latent_future_actor.cpp
-      cpp/src/model/future_evaluator.cpp
+      cpp/src/model/ppo_actor.cpp
       cpp/src/model/normalizer.cpp
       cpp/src/training/offline_dataset.cpp
-      cpp/src/training/offline_pretrainer.cpp
-      cpp/src/training/online_outcome_dataset_writer.cpp
-      cpp/src/training/online_outcome_replay_buffer.cpp
+      cpp/src/training/bc_pretrainer.cpp
       cpp/src/training/rollout_storage.cpp
-      cpp/src/training/future_window_builder.cpp
+      cpp/src/training/ppo_math.cpp
       cpp/src/training/batched_rocketsim_collector.cpp
-      cpp/src/training/lfpo_math.cpp
-      cpp/src/training/lfpo_trainer.cpp
+      cpp/src/training/appo_trainer.cpp
       cpp/src/training/self_play_manager.cpp
     )
 
@@ -143,15 +139,15 @@ if(PULSAR_ENABLE_TORCH)
     target_compile_definitions(pulsar_torch PUBLIC PULSAR_HAS_TORCH=1)
     pulsar_force_target_cxx20(pulsar_torch)
 
-    add_executable(pulsar_lfpo_train cpp/src/apps/train_main.cpp)
-    target_link_libraries(pulsar_lfpo_train PRIVATE pulsar_torch)
-    pulsar_force_target_cxx20(pulsar_lfpo_train)
+    add_executable(pulsar_appo_train cpp/src/apps/train_main.cpp)
+    target_link_libraries(pulsar_appo_train PRIVATE pulsar_torch)
+    pulsar_force_target_cxx20(pulsar_appo_train)
 
-    add_executable(pulsar_lfpo_pretrain cpp/src/apps/offline_train_main.cpp)
-    target_link_libraries(pulsar_lfpo_pretrain PRIVATE pulsar_torch)
-    pulsar_force_target_cxx20(pulsar_lfpo_pretrain)
+    add_executable(pulsar_bc_pretrain cpp/src/apps/offline_train_main.cpp)
+    target_link_libraries(pulsar_bc_pretrain PRIVATE pulsar_torch)
+    pulsar_force_target_cxx20(pulsar_bc_pretrain)
   else()
-    message(WARNING "Torch not found; skipping pulsar_torch and LFPO training targets.")
+    message(WARNING "Torch not found; skipping pulsar_torch and APPO training targets.")
   endif()
 endif()
 
@@ -203,6 +199,26 @@ if(PULSAR_ENABLE_TESTS)
 
     if(PULSAR_ENABLE_CXX_TORCH_IO_TESTS)
       add_executable(
+        pulsar_ppo_math_tests
+        cpp/tests/test_ppo_math.cpp
+      )
+      target_include_directories(pulsar_ppo_math_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
+      target_link_libraries(pulsar_ppo_math_tests PRIVATE pulsar_torch)
+      pulsar_force_target_cxx20(pulsar_ppo_math_tests)
+      add_test(NAME pulsar_ppo_math_tests COMMAND pulsar_ppo_math_tests)
+      set_tests_properties(pulsar_ppo_math_tests PROPERTIES LABELS "reference")
+
+      add_executable(
+        pulsar_collector_tests
+        cpp/tests/test_collector.cpp
+      )
+      target_include_directories(pulsar_collector_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
+      target_link_libraries(pulsar_collector_tests PRIVATE pulsar_torch)
+      pulsar_force_target_cxx20(pulsar_collector_tests)
+      add_test(NAME pulsar_collector_tests COMMAND pulsar_collector_tests)
+      set_tests_properties(pulsar_collector_tests PROPERTIES LABELS "reference")
+
+      add_executable(
         pulsar_offline_tests
         cpp/tests/test_offline.cpp
       )
@@ -231,39 +247,7 @@ if(PULSAR_ENABLE_TESTS)
           ENVIRONMENT "CUDA_VISIBLE_DEVICES=;OMP_NUM_THREADS=1;MKL_NUM_THREADS=1;OPENBLAS_NUM_THREADS=1"
           TIMEOUT 30
       )
-    endif()
 
-    add_executable(
-      pulsar_lfpo_math_tests
-      cpp/tests/test_lfpo_math.cpp
-    )
-    target_include_directories(pulsar_lfpo_math_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
-    target_link_libraries(pulsar_lfpo_math_tests PRIVATE pulsar_torch)
-    pulsar_force_target_cxx20(pulsar_lfpo_math_tests)
-    add_test(NAME pulsar_lfpo_math_tests COMMAND pulsar_lfpo_math_tests)
-    set_tests_properties(pulsar_lfpo_math_tests PROPERTIES LABELS "reference")
-
-    add_executable(
-      pulsar_future_window_tests
-      cpp/tests/test_future_windows.cpp
-    )
-    target_include_directories(pulsar_future_window_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
-    target_link_libraries(pulsar_future_window_tests PRIVATE pulsar_torch)
-    pulsar_force_target_cxx20(pulsar_future_window_tests)
-    add_test(NAME pulsar_future_window_tests COMMAND pulsar_future_window_tests)
-    set_tests_properties(pulsar_future_window_tests PROPERTIES LABELS "reference")
-
-    add_executable(
-      pulsar_collector_tests
-      cpp/tests/test_collector.cpp
-    )
-    target_include_directories(pulsar_collector_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
-    target_link_libraries(pulsar_collector_tests PRIVATE pulsar_torch)
-    pulsar_force_target_cxx20(pulsar_collector_tests)
-    add_test(NAME pulsar_collector_tests COMMAND pulsar_collector_tests)
-    set_tests_properties(pulsar_collector_tests PROPERTIES LABELS "reference")
-
-    if(PULSAR_ENABLE_CXX_TORCH_IO_TESTS)
       add_executable(
         pulsar_self_play_tests
         cpp/tests/test_self_play.cpp
@@ -280,45 +264,45 @@ if(PULSAR_ENABLE_TESTS)
       )
     endif()
 
-    if(TARGET pulsar_lfpo_train AND TARGET pulsar_lfpo_pretrain AND TARGET pulsar_native AND Python3_EXECUTABLE)
+    if(TARGET pulsar_appo_train AND TARGET pulsar_bc_pretrain AND TARGET pulsar_native AND Python3_EXECUTABLE)
       add_test(
         NAME pulsar_e2e_smoke
         COMMAND
           ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_smoke.py
           ${CMAKE_CURRENT_SOURCE_DIR}
-          $<TARGET_FILE:pulsar_lfpo_train>
-          $<TARGET_FILE:pulsar_lfpo_pretrain>
-          ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_lfpo.json
-          ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_offline.json
+          $<TARGET_FILE:pulsar_appo_train>
+          $<TARGET_FILE:pulsar_bc_pretrain>
+          ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_appo.json
+          ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_bc.json
       )
     endif()
 
-    if(TARGET pulsar_lfpo_train AND TARGET pulsar_lfpo_pretrain AND Python3_EXECUTABLE)
+    if(TARGET pulsar_appo_train AND TARGET pulsar_bc_pretrain AND Python3_EXECUTABLE)
       add_test(
-        NAME pulsar_lfpo_train_binary_smoke
+        NAME pulsar_appo_train_binary_smoke
         COMMAND
           ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_SOURCE_DIR}/scripts/train_binary_smoke.py
           ${CMAKE_CURRENT_SOURCE_DIR}
-          $<TARGET_FILE:pulsar_lfpo_train>
-          $<TARGET_FILE:pulsar_lfpo_pretrain>
-          ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_lfpo.json
-          ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_offline.json
+          $<TARGET_FILE:pulsar_appo_train>
+          $<TARGET_FILE:pulsar_bc_pretrain>
+          ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_appo.json
+          ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_bc.json
       )
-      set_tests_properties(pulsar_lfpo_train_binary_smoke PROPERTIES LABELS "smoke")
+      set_tests_properties(pulsar_appo_train_binary_smoke PROPERTIES LABELS "smoke")
     endif()
 
-    if(TARGET pulsar_lfpo_pretrain AND Python3_EXECUTABLE)
+    if(TARGET pulsar_bc_pretrain AND Python3_EXECUTABLE)
       add_test(
-        NAME pulsar_offline_binary_smoke
+        NAME pulsar_bc_binary_smoke
         COMMAND
           ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_SOURCE_DIR}/scripts/offline_binary_smoke.py
           ${CMAKE_CURRENT_SOURCE_DIR}
-          $<TARGET_FILE:pulsar_lfpo_pretrain>
+          $<TARGET_FILE:pulsar_bc_pretrain>
       )
-      set_tests_properties(pulsar_offline_binary_smoke PROPERTIES LABELS "smoke")
+      set_tests_properties(pulsar_bc_binary_smoke PROPERTIES LABELS "smoke")
     endif()
   endif()
 endif()
@@ -355,17 +339,17 @@ if(PULSAR_ENABLE_TESTS AND Python3_EXECUTABLE)
   set_tests_properties(pulsar_preprocess_smoke PROPERTIES LABELS "smoke;dataset")
 endif()
 
-if(PULSAR_ENABLE_TESTS AND PULSAR_ENABLE_CUDA_SMOKE AND TARGET pulsar_lfpo_train AND TARGET pulsar_lfpo_pretrain AND Python3_EXECUTABLE)
+if(PULSAR_ENABLE_TESTS AND PULSAR_ENABLE_CUDA_SMOKE AND TARGET pulsar_appo_train AND TARGET pulsar_bc_pretrain AND Python3_EXECUTABLE)
   add_test(
     NAME pulsar_cuda_smoke
     COMMAND
       ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/scripts/cuda_smoke.py
       ${CMAKE_CURRENT_SOURCE_DIR}
-      $<TARGET_FILE:pulsar_lfpo_train>
-      $<TARGET_FILE:pulsar_lfpo_pretrain>
-      ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_lfpo.json
-      ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_offline.json
+      $<TARGET_FILE:pulsar_appo_train>
+      $<TARGET_FILE:pulsar_bc_pretrain>
+      ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_appo.json
+      ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_bc.json
   )
   set_tests_properties(pulsar_cuda_smoke PROPERTIES LABELS "cuda;smoke" SKIP_RETURN_CODE 77)
 endif()

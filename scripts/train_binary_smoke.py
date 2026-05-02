@@ -7,7 +7,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from two_stage_smoke_common import run_offline_pretrain
+from two_stage_smoke_common import run_bc_pretrain
 
 
 def _small_model() -> dict[str, int | bool]:
@@ -21,41 +21,29 @@ def _small_model() -> dict[str, int | bool]:
         "ltm_slots": 4,
         "ltm_dim": 8,
         "controller_dim": 32,
-        "action_embedding_dim": 8,
-    }
-
-
-def _small_evaluator() -> dict[str, int | list[int]]:
-    return {
-        "horizons": [1, 2, 3],
-        "latent_dim": 8,
-        "model_dim": 16,
-        "layers": 1,
-        "heads": 4,
-        "feedforward_dim": 32,
     }
 
 
 def main() -> int:
     if len(sys.argv) != 6:
         raise SystemExit(
-            "usage: train_binary_smoke.py <repo_root> <pulsar_lfpo_train> <pulsar_lfpo_pretrain> "
-            "<lfpo_base_config> <offline_base_config>"
+            "usage: train_binary_smoke.py <repo_root> <pulsar_appo_train> <pulsar_bc_pretrain> "
+            "<appo_base_config> <bc_base_config>"
         )
 
     repo_root = Path(sys.argv[1]).resolve()
     train_binary = Path(sys.argv[2]).resolve()
     pretrain_binary = Path(sys.argv[3]).resolve()
-    lfpo_base_config_path = Path(sys.argv[4]).resolve()
-    offline_base_config_path = Path(sys.argv[5]).resolve()
+    appo_base_config_path = Path(sys.argv[4]).resolve()
+    bc_base_config_path = Path(sys.argv[5]).resolve()
 
-    with tempfile.TemporaryDirectory(prefix="pulsar_lfpo_train_") as tmp_dir_str:
+    with tempfile.TemporaryDirectory(prefix="pulsar_appo_train_") as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
         model_overrides = _small_model()
-        offline_output_dir = run_offline_pretrain(
+        bc_output_dir = run_bc_pretrain(
             repo_root=repo_root,
-            offline_binary=pretrain_binary,
-            offline_base_config_path=offline_base_config_path,
+            pretrain_binary=pretrain_binary,
+            bc_base_config_path=bc_base_config_path,
             work_dir=tmp_dir,
             device="cpu",
             model_overrides=model_overrides,
@@ -63,25 +51,24 @@ def main() -> int:
 
         checkpoint_dir = tmp_dir / "checkpoints"
         config_path = tmp_dir / "config.json"
-        config = json.loads(lfpo_base_config_path.read_text(encoding="utf-8"))
+        config = json.loads(appo_base_config_path.read_text(encoding="utf-8"))
         config["env"]["collision_meshes_path"] = str((repo_root / "collision_meshes").resolve())
         config["env"]["max_episode_ticks"] = 24
         config["model"].update(model_overrides)
-        config["future_evaluator"].update(_small_evaluator())
-        config["lfpo"]["num_envs"] = 2
-        config["lfpo"]["rollout_length"] = 4
-        config["lfpo"]["minibatch_size"] = 8
-        config["lfpo"]["update_epochs"] = 1
-        config["lfpo"]["checkpoint_interval"] = 1
-        config["lfpo"]["sequence_length"] = 2
-        config["lfpo"]["burn_in"] = 0
-        config["lfpo"]["collection_workers"] = 0
-        config["lfpo"]["device"] = "cpu"
-        config["lfpo"]["init_checkpoint"] = str(offline_output_dir.resolve())
-        config["lfpo"]["candidate_count"] = 4
-        config["lfpo"]["evaluator_update_interval"] = 1
-        config["lfpo"]["evaluator_target_update_interval"] = 1
-        config["lfpo"]["online_window_capacity"] = 8
+        config["model"]["value_hidden_dim"] = 64
+        config["model"]["value_num_atoms"] = 51
+        config["model"]["value_v_min"] = -10.0
+        config["model"]["value_v_max"] = 10.0
+        config["ppo"]["num_envs"] = 2
+        config["ppo"]["rollout_length"] = 4
+        config["ppo"]["minibatch_size"] = 8
+        config["ppo"]["update_epochs"] = 1
+        config["ppo"]["checkpoint_interval"] = 1
+        config["ppo"]["sequence_length"] = 2
+        config["ppo"]["burn_in"] = 0
+        config["ppo"]["collection_workers"] = 0
+        config["ppo"]["device"] = "cpu"
+        config["ppo"]["init_checkpoint"] = str(bc_output_dir.resolve())
         config["wandb"]["enabled"] = False
         config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
@@ -102,19 +89,15 @@ def main() -> int:
             "obs_build_seconds",
             "mask_build_seconds",
             "policy_forward_seconds",
-            "lfpo_forward_backward_seconds",
+            "forward_backward_seconds",
             "optimizer_step_seconds",
-            "online_outcome_samples",
-            "online_outcome_trajectories",
-            "evaluator_target_update_index",
         }
         if missing := sorted(required_fields - metrics_lines[-1].keys()):
-            raise RuntimeError(f"missing LFPO trainer metrics: {missing}")
+            raise RuntimeError(f"missing APPO trainer metrics: {missing}")
 
         for rel in [
             "update_1/model.pt",
-            "update_1/future_evaluator/model.pt",
-            "update_1/future_evaluator/online_model.pt",
+            "update_1/config.json",
             "final/model.pt",
         ]:
             if not (checkpoint_dir / rel).exists():
@@ -122,7 +105,7 @@ def main() -> int:
 
         resume_dir = tmp_dir / "resume_checkpoints"
         resume_config = json.loads(json.dumps(config))
-        resume_config["lfpo"]["init_checkpoint"] = str((checkpoint_dir / "update_1").resolve())
+        resume_config["ppo"]["init_checkpoint"] = str((checkpoint_dir / "update_1").resolve())
         resume_config_path = tmp_dir / "resume_config.json"
         resume_config_path.write_text(json.dumps(resume_config, indent=2) + "\n", encoding="utf-8")
         subprocess.run(
@@ -131,7 +114,7 @@ def main() -> int:
             cwd=repo_root,
         )
         if not (resume_dir / "update_2" / "model.pt").exists():
-            raise RuntimeError("resume run did not continue LFPO update numbering")
+            raise RuntimeError("resume run did not continue APPO update numbering")
 
     return 0
 

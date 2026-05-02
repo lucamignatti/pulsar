@@ -48,12 +48,13 @@ struct ModelConfig {
   int controller_dim = 512;
   int consolidation_stride = 8;
   float retired_decay = 0.96F;
-  int action_embedding_dim = 64;
-  int future_latent_dim = 128;
-  int future_horizon_count = 3;
+  int value_hidden_dim = 256;
+  int value_num_atoms = 51;
+  float value_v_min = -10.0F;
+  float value_v_max = 10.0F;
 };
 
-struct LFPOConfig {
+struct PPOConfig {
   int num_envs = 64;
   int collection_workers = 0;
   std::string init_checkpoint{};
@@ -62,9 +63,9 @@ struct LFPOConfig {
   int update_epochs = 3;
   float clip_range = 0.2F;
   float entropy_coef = 0.01F;
-  float latent_loss_coef = 1.0F;
-  float behavior_prior_coef = 0.0F;
-  int behavior_prior_decay_updates = 0;
+  float value_coef = 1.0F;
+  float gamma = 0.99F;
+  float gae_lambda = 0.95F;
   float learning_rate = 3.0e-4F;
   float max_grad_norm = 1.0F;
   std::string device = "cpu";
@@ -72,28 +73,14 @@ struct LFPOConfig {
   int max_rolling_checkpoints = 5;
   int sequence_length = 16;
   int burn_in = 0;
-  int candidate_count = 8;
-  int evaluator_update_interval = 4;
-  int evaluator_target_update_interval = 1;
-  float evaluator_target_ema_tau = 0.01F;
-  int online_window_capacity = 64;
-  float evaluator_anchor_ratio = 0.25F;
-};
-
-struct FutureEvaluatorConfig {
-  std::vector<int> horizons{8, 32, 96};
-  int latent_dim = 128;
-  int model_dim = 256;
-  int layers = 4;
-  int heads = 8;
-  int feedforward_dim = 1024;
-  float dropout = 0.0F;
-  int outcome_classes = 3;
-  float learning_rate = 3.0e-4F;
-  float weight_decay = 1.0e-6F;
-  float max_grad_norm = 1.0F;
-  std::vector<float> class_weights{1.0F, 1.0F, 0.25F};
-  float future_delta_loss_coef = 0.1F;
+  bool use_adaptive_epsilon = true;
+  float adaptive_epsilon_beta = 1.0F;
+  float epsilon_min = 0.05F;
+  float epsilon_max = 0.3F;
+  bool use_confidence_weighting = true;
+  std::string confidence_weight_type = "entropy";
+  float confidence_weight_delta = 1.0e-6F;
+  bool normalize_confidence_weights = false;
 };
 
 struct OfflineDatasetConfig {
@@ -104,17 +91,13 @@ struct OfflineDatasetConfig {
   std::uint64_t seed = 0;
 };
 
-struct OfflinePretrainingConfig {
-  int evaluator_epochs = 2;
-  int actor_epochs = 2;
+struct BehaviorCloningConfig {
+  bool enabled = true;
+  int epochs = 10;
   int sequence_length = 32;
-  float behavior_cloning_learning_rate = 3.0e-4F;
-  float actor_learning_rate = 3.0e-4F;
-  float evaluator_learning_rate = 3.0e-4F;
+  float learning_rate = 3.0e-4F;
   float weight_decay = 1.0e-6F;
   float label_smoothing = 0.0F;
-  float behavior_cloning_loss_coef = 1.0F;
-  float latent_loss_coef = 1.0F;
   float max_grad_norm = 1.0F;
 };
 
@@ -154,10 +137,9 @@ struct ExperimentConfig {
   OutcomeConfig outcome{};
   ActionTableConfig action_table{};
   ModelConfig model{};
-  LFPOConfig lfpo{};
-  FutureEvaluatorConfig future_evaluator{};
+  PPOConfig ppo{};
   OfflineDatasetConfig offline_dataset{};
-  OfflinePretrainingConfig offline_pretraining{};
+  BehaviorCloningConfig behavior_cloning{};
   SelfPlayLeagueConfig self_play_league{};
   WandbConfig wandb{};
 };
@@ -167,15 +149,10 @@ struct CheckpointMetadata {
   int obs_schema_version = 1;
   std::string config_hash{};
   std::string action_table_hash{};
-  std::string architecture_name = "lfpo_continuum";
+  std::string architecture_name = "ppo_continuum";
   std::string device = "cpu";
   std::int64_t global_step = 0;
   std::int64_t update_index = 0;
-  std::string future_evaluator_checkpoint{};
-  std::string future_evaluator_config_hash{};
-  std::int64_t future_evaluator_global_step = 0;
-  std::int64_t future_evaluator_update_index = 0;
-  std::int64_t future_evaluator_target_update_index = 0;
 };
 
 void to_json(nlohmann::json& j, const ControllerState& value);
@@ -189,14 +166,12 @@ void to_json(nlohmann::json& j, const EnvConfig& value);
 void from_json(const nlohmann::json& j, EnvConfig& value);
 void to_json(nlohmann::json& j, const ModelConfig& value);
 void from_json(const nlohmann::json& j, ModelConfig& value);
-void to_json(nlohmann::json& j, const LFPOConfig& value);
-void from_json(const nlohmann::json& j, LFPOConfig& value);
-void to_json(nlohmann::json& j, const FutureEvaluatorConfig& value);
-void from_json(const nlohmann::json& j, FutureEvaluatorConfig& value);
+void to_json(nlohmann::json& j, const PPOConfig& value);
+void from_json(const nlohmann::json& j, PPOConfig& value);
 void to_json(nlohmann::json& j, const OfflineDatasetConfig& value);
 void from_json(const nlohmann::json& j, OfflineDatasetConfig& value);
-void to_json(nlohmann::json& j, const OfflinePretrainingConfig& value);
-void from_json(const nlohmann::json& j, OfflinePretrainingConfig& value);
+void to_json(nlohmann::json& j, const BehaviorCloningConfig& value);
+void from_json(const nlohmann::json& j, BehaviorCloningConfig& value);
 void to_json(nlohmann::json& j, const SelfPlayLeagueConfig& value);
 void from_json(const nlohmann::json& j, SelfPlayLeagueConfig& value);
 void to_json(nlohmann::json& j, const WandbConfig& value);

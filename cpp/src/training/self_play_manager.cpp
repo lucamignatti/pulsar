@@ -15,7 +15,7 @@
 #include "pulsar/env/rocketsim_engine.hpp"
 #include "pulsar/rl/action_table.hpp"
 #include "pulsar/tracing/tracing.hpp"
-#include "pulsar/training/lfpo_math.hpp"
+#include "pulsar/training/ppo_math.hpp"
 
 namespace pulsar {
 namespace {
@@ -96,7 +96,7 @@ bool SelfPlayManager::has_snapshots() const {
 }
 
 void SelfPlayManager::infer_opponent_actions(
-    LatentFutureActor&,
+    PPOActor&,
     const torch::Tensor& raw_obs,
     const torch::Tensor& action_masks,
     const torch::Tensor& episode_starts,
@@ -153,7 +153,7 @@ void SelfPlayManager::infer_opponent_actions(
 }
 
 SelfPlayMetrics SelfPlayManager::on_update(
-    LatentFutureActor& current_model,
+    PPOActor& current_model,
     const ObservationNormalizer& current_normalizer,
     std::int64_t global_step,
     int update_index) {
@@ -205,7 +205,7 @@ void SelfPlayManager::load_existing_snapshots() {
     Snapshot snapshot{
         .global_step = metadata.global_step,
         .update_index = static_cast<int>(metadata.update_index),
-        .model = LatentFutureActor(snapshot_config.model),
+        .model = PPOActor(snapshot_config.model),
         .normalizer = ObservationNormalizer(snapshot_config.model.observation_dim),
         .ratings = {},
     };
@@ -263,7 +263,7 @@ void SelfPlayManager::trim_snapshots() {
 }
 
 void SelfPlayManager::add_snapshot(
-    LatentFutureActor& current_model,
+    PPOActor& current_model,
     const ObservationNormalizer& current_normalizer,
     std::int64_t global_step,
     int update_index) {
@@ -271,7 +271,7 @@ void SelfPlayManager::add_snapshot(
   Snapshot snapshot{
       .global_step = global_step,
       .update_index = update_index,
-      .model = clone_latent_future_actor(current_model, device_),
+      .model = clone_ppo_actor(current_model, device_),
       .normalizer = current_normalizer.clone(),
       .ratings = current_ratings_,
   };
@@ -283,7 +283,7 @@ void SelfPlayManager::add_snapshot(
 }
 
 SelfPlayMetrics SelfPlayManager::evaluate_current(
-    LatentFutureActor& current_model,
+    PPOActor& current_model,
     const ObservationNormalizer& current_normalizer) {
   PULSAR_TRACE_SCOPE_CAT("self_play", "evaluate_current");
   SelfPlayMetrics metrics{};

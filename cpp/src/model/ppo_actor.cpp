@@ -1,4 +1,4 @@
-#include "pulsar/model/latent_future_actor.hpp"
+#include "pulsar/model/ppo_actor.hpp"
 
 #ifdef PULSAR_HAS_TORCH
 
@@ -60,14 +60,13 @@ void validate_model_config(const ModelConfig& config) {
   require_positive(config.ltm_dim, "ltm_dim");
   require_positive(config.controller_dim, "controller_dim");
   require_positive(config.consolidation_stride, "consolidation_stride");
-  require_positive(config.action_embedding_dim, "action_embedding_dim");
-  require_positive(config.future_latent_dim, "future_latent_dim");
-  require_positive(config.future_horizon_count, "future_horizon_count");
+  require_positive(config.value_hidden_dim, "value_hidden_dim");
+  require_positive(config.value_num_atoms, "value_num_atoms");
 }
 
 }  // namespace
 
-LatentFutureActorImpl::LatentFutureActorImpl(ModelConfig config)
+PPOActorImpl::PPOActorImpl(ModelConfig config)
     : config_(std::move(config)) {
   validate_model_config(config_);
   append_encoder_block(encoder_, config_.observation_dim, config_.encoder_dim, config_.use_layer_norm);
@@ -103,14 +102,25 @@ LatentFutureActorImpl::LatentFutureActorImpl(ModelConfig config)
 
   feature_dim_ = config_.workspace_dim + config_.controller_dim + config_.encoder_dim;
   policy_head_ = register_module("policy_head", torch::nn::Linear(feature_dim_, config_.action_dim));
-  action_embedding_ = register_module(
-      "action_embedding",
-      torch::nn::Embedding(config_.action_dim, config_.action_embedding_dim));
-  future_head_ = register_module(
-      "future_head",
-      torch::nn::Linear(
-          feature_dim_ + config_.action_embedding_dim,
-          config_.future_horizon_count * config_.future_latent_dim));
+
+  const int value_input_dim = feature_dim_;
+  const int value_atom_dim = config_.value_num_atoms;
+  value_head_ = register_module(
+      "value_head",
+      torch::nn::Sequential(
+          torch::nn::Linear(value_input_dim, config_.value_hidden_dim),
+          torch::nn::Functional(torch::relu),
+          torch::nn::Linear(config_.value_hidden_dim, value_atom_dim)));
+
+  const float atom_delta = (config_.value_v_max - config_.value_v_min) /
+                           static_cast<float>(config_.value_num_atoms - 1);
+  atom_support_ = register_buffer(
+      "atom_support",
+      torch::arange(
+          static_cast<float>(config_.value_num_atoms),
+          torch::TensorOptions().dtype(torch::kFloat32))
+          .mul_(atom_delta)
+          .add_(config_.value_v_min));
 
   ltm_basis_keys_ = register_parameter(
       "ltm_basis_keys",
@@ -120,7 +130,7 @@ LatentFutureActorImpl::LatentFutureActorImpl(ModelConfig config)
       torch::randn({config_.ltm_slots, config_.ltm_dim}) * 0.02);
 }
 
-ContinuumState LatentFutureActorImpl::initial_state(std::int64_t batch_size, const torch::Device& device) const {
+ContinuumState PPOActorImpl::initial_state(std::int64_t batch_size, const torch::Device& device) const {
   auto f32 = torch::TensorOptions().dtype(torch::kFloat32).device(device);
   auto i64 = torch::TensorOptions().dtype(torch::kLong).device(device);
   return {
@@ -134,7 +144,7 @@ ContinuumState LatentFutureActorImpl::initial_state(std::int64_t batch_size, con
   };
 }
 
-ContinuumState LatentFutureActorImpl::apply_episode_starts(ContinuumState state, torch::Tensor episode_starts) const {
+ContinuumState PPOActorImpl::apply_episode_starts(ContinuumState state, torch::Tensor episode_starts) const {
   if (!episode_starts.defined()) {
     return state;
   }
@@ -149,7 +159,7 @@ ContinuumState LatentFutureActorImpl::apply_episode_starts(ContinuumState state,
   return state;
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> LatentFutureActorImpl::read_memories(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> PPOActorImpl::read_memories(
     const torch::Tensor& encoded,
     const ContinuumState& state) {
   const torch::Tensor query_input = torch::cat({encoded, state.workspace}, -1);
@@ -168,7 +178,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> LatentFutureActorImpl::r
   return {stm_ctx, ltm_ctx, query_input};
 }
 
-ContinuumState LatentFutureActorImpl::write_short_term_memory(
+ContinuumState PPOActorImpl::write_short_term_memory(
     ContinuumState state,
     const torch::Tensor& key,
     const torch::Tensor& value) {
@@ -185,7 +195,7 @@ ContinuumState LatentFutureActorImpl::write_short_term_memory(
   return state;
 }
 
-ContinuumState LatentFutureActorImpl::maybe_consolidate(
+ContinuumState PPOActorImpl::maybe_consolidate(
     ContinuumState state,
     const torch::Tensor& controller_hidden) {
   const torch::Tensor should_consolidate =
@@ -203,7 +213,7 @@ ContinuumState LatentFutureActorImpl::maybe_consolidate(
   return state;
 }
 
-ActorStepOutput LatentFutureActorImpl::forward_encoded_step(
+ActorStepOutput PPOActorImpl::forward_encoded_step(
     torch::Tensor encoded,
     ContinuumState state,
     torch::Tensor episode_starts) {
@@ -226,16 +236,17 @@ ActorStepOutput LatentFutureActorImpl::forward_encoded_step(
   const torch::Tensor features = torch::cat({encoded, fused_ctx, new_workspace}, -1);
   return {
       policy_head_->forward(features),
+      value_head_->forward(features),
       features,
       std::move(state),
   };
 }
 
-ActorStepOutput LatentFutureActorImpl::forward_step(torch::Tensor obs, ContinuumState state, torch::Tensor episode_starts) {
+ActorStepOutput PPOActorImpl::forward_step(torch::Tensor obs, ContinuumState state, torch::Tensor episode_starts) {
   return forward_encoded_step(encoder_->forward(obs), std::move(state), std::move(episode_starts));
 }
 
-ActorSequenceOutput LatentFutureActorImpl::forward_sequence(
+ActorSequenceOutput PPOActorImpl::forward_sequence(
     torch::Tensor obs_seq,
     ContinuumState state,
     torch::Tensor episode_starts) {
@@ -245,8 +256,10 @@ ActorSequenceOutput LatentFutureActorImpl::forward_sequence(
       encoder_->forward(obs_seq.reshape({time * batch, config_.observation_dim}))
           .reshape({time, batch, config_.encoder_dim});
   std::vector<torch::Tensor> policy_logits;
+  std::vector<torch::Tensor> value_logits;
   std::vector<torch::Tensor> features;
   policy_logits.reserve(time);
+  value_logits.reserve(time);
   features.reserve(time);
 
   for (std::int64_t t = 0; t < time; ++t) {
@@ -256,53 +269,43 @@ ActorSequenceOutput LatentFutureActorImpl::forward_sequence(
     }
     ActorStepOutput out = forward_encoded_step(encoded_seq[t], std::move(state), starts);
     policy_logits.push_back(out.policy_logits);
+    value_logits.push_back(out.value_logits);
     features.push_back(out.features);
     state = std::move(out.state);
   }
 
   return {
       torch::stack(policy_logits, 0),
+      torch::stack(value_logits, 0),
       torch::stack(features, 0),
       std::move(state),
   };
 }
 
-torch::Tensor LatentFutureActorImpl::predict_future_latents(torch::Tensor features, torch::Tensor actions) {
-  const auto leading = actions.sizes().vec();
-  const torch::Tensor flat_features = features.reshape({-1, feature_dim_});
-  const torch::Tensor flat_actions = actions.reshape({-1}).to(torch::kLong);
-  const torch::Tensor action_emb = action_embedding_->forward(flat_actions);
-  const torch::Tensor flat_latents = future_head_->forward(torch::cat({flat_features, action_emb}, -1));
-  std::vector<std::int64_t> out_shape;
-  out_shape.reserve(leading.size() + 2);
-  for (const auto dim : leading) {
-    out_shape.push_back(dim);
-  }
-  out_shape.push_back(config_.future_horizon_count);
-  out_shape.push_back(config_.future_latent_dim);
-  return flat_latents.reshape(out_shape);
+torch::Tensor PPOActorImpl::value_support() const {
+  return atom_support_;
 }
 
-int LatentFutureActorImpl::feature_dim() const {
+int PPOActorImpl::feature_dim() const {
   return feature_dim_;
 }
 
-const ModelConfig& LatentFutureActorImpl::config() const {
+const ModelConfig& PPOActorImpl::config() const {
   return config_;
 }
 
-LatentFutureActor load_latent_future_actor(const std::string& checkpoint_path, const std::string& device) {
+PPOActor load_ppo_actor(const std::string& checkpoint_path, const std::string& device) {
   namespace fs = std::filesystem;
   const fs::path base(checkpoint_path);
   const ExperimentConfig config = load_experiment_config((base / "config.json").string());
   const CheckpointMetadata metadata = load_checkpoint_metadata((base / "metadata.json").string());
   validate_inference_checkpoint_metadata(metadata, config);
-  if (metadata.architecture_name != "lfpo_continuum") {
-    throw std::runtime_error("Checkpoint is not an LFPO actor checkpoint.");
+  if (metadata.architecture_name != "ppo_continuum") {
+    throw std::runtime_error("Checkpoint is not a PPO actor checkpoint.");
   }
 
   torch::Device torch_device(device);
-  auto model = LatentFutureActor(config.model);
+  auto model = PPOActor(config.model);
   torch::serialize::InputArchive archive;
   archive.load_from((base / "model.pt").string(), torch_device);
   model->load(archive);
@@ -311,11 +314,11 @@ LatentFutureActor load_latent_future_actor(const std::string& checkpoint_path, c
   return model;
 }
 
-LatentFutureActor clone_latent_future_actor(const LatentFutureActor& source, const torch::Device& device) {
+PPOActor clone_ppo_actor(const PPOActor& source, const torch::Device& device) {
   if (!source) {
     return nullptr;
   }
-  auto clone = LatentFutureActor(source->config());
+  auto clone = PPOActor(source->config());
   torch::serialize::OutputArchive out;
   source->save(out);
   torch::serialize::InputArchive in;

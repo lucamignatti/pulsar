@@ -75,8 +75,8 @@ class FakeTransitionEngine final : public pulsar::TransitionEngine {
 
 void test_collector_shapes_self_play_and_reset() {
   pulsar::ExperimentConfig config = pulsar::test::make_test_config();
-  config.lfpo.num_envs = 2;
-  config.lfpo.collection_workers = 0;
+  config.ppo.num_envs = 2;
+  config.ppo.collection_workers = 0;
   config.env.max_episode_ticks = config.env.tick_skip;
 
   std::vector<pulsar::TransitionEnginePtr> engines;
@@ -142,8 +142,8 @@ void test_collector_shapes_self_play_and_reset() {
 
 void test_collector_goal_outcomes() {
   pulsar::ExperimentConfig config = pulsar::test::make_test_config();
-  config.lfpo.num_envs = 1;
-  config.lfpo.collection_workers = 0;
+  config.ppo.num_envs = 1;
+  config.ppo.collection_workers = 0;
   config.env.max_episode_ticks = config.env.tick_skip * 4;
 
   std::vector<pulsar::TransitionEnginePtr> engines;
@@ -177,8 +177,8 @@ void test_collector_goal_outcomes() {
 
 void test_collector_parity_with_legacy_engine() {
   pulsar::ExperimentConfig config = pulsar::test::make_test_config();
-  config.lfpo.num_envs = 1;
-  config.lfpo.collection_workers = 0;
+  config.ppo.num_envs = 1;
+  config.ppo.collection_workers = 0;
   config.env.collision_meshes_path = pulsar::test::find_repo_collision_meshes().string();
 
   auto reset_mutator = std::make_shared<pulsar::MutatorSequence>(

@@ -10,21 +10,21 @@
 
 #include "pulsar/checkpoint/checkpoint.hpp"
 #include "pulsar/config/config.hpp"
-#include "pulsar/model/latent_future_actor.hpp"
 #include "pulsar/model/normalizer.hpp"
+#include "pulsar/model/ppo_actor.hpp"
 
 namespace py = pybind11;
 
 namespace pulsar {
 
-class PyLatentFutureActor {
+class PyPPOActor {
  public:
-  PyLatentFutureActor(std::string checkpoint_dir, std::string device)
+  PyPPOActor(std::string checkpoint_dir, std::string device)
       : checkpoint_dir_(std::move(checkpoint_dir)),
         device_(std::move(device)),
         config_(load_experiment_config(checkpoint_dir_ + "/config.json")),
         metadata_(load_checkpoint_metadata(checkpoint_dir_ + "/metadata.json")),
-        model_(load_latent_future_actor(checkpoint_dir_, device_)),
+        model_(load_ppo_actor(checkpoint_dir_, device_)),
         normalizer_(config_.model.observation_dim),
         torch_device_(device_) {
     validate_inference_checkpoint_metadata(metadata_, config_);
@@ -104,7 +104,7 @@ class PyLatentFutureActor {
   std::string device_{};
   ExperimentConfig config_{};
   CheckpointMetadata metadata_{};
-  LatentFutureActor model_{nullptr};
+  PPOActor model_{nullptr};
   ObservationNormalizer normalizer_;
   torch::Device torch_device_;
   ContinuumState state_{};
@@ -113,19 +113,19 @@ class PyLatentFutureActor {
 }  // namespace pulsar
 
 PYBIND11_MODULE(pulsar_native, m) {
-  py::class_<pulsar::PyLatentFutureActor>(m, "LatentFutureActor")
-      .def("reset", &pulsar::PyLatentFutureActor::reset, py::arg("batch_size"))
-      .def("forward", &pulsar::PyLatentFutureActor::forward, py::arg("obs"))
+  py::class_<pulsar::PyPPOActor>(m, "PPOActor")
+      .def("reset", &pulsar::PyPPOActor::reset, py::arg("batch_size"))
+      .def("forward", &pulsar::PyPPOActor::forward, py::arg("obs"))
       .def(
           "forward_batch",
-          &pulsar::PyLatentFutureActor::forward_batch,
+          &pulsar::PyPPOActor::forward_batch,
           py::arg("obs_batch"),
           py::arg("episode_starts") = std::vector<float>{});
 
   m.def(
-      "load_latent_future_actor",
+      "load_ppo_actor",
       [](const std::string& checkpoint_dir, const std::string& device) {
-        return pulsar::PyLatentFutureActor(checkpoint_dir, device);
+        return pulsar::PyPPOActor(checkpoint_dir, device);
       },
       py::arg("checkpoint_dir"),
       py::arg("device") = "cpu");
@@ -143,11 +143,6 @@ PYBIND11_MODULE(pulsar_native, m) {
         result["device"] = metadata.device;
         result["global_step"] = metadata.global_step;
         result["update_index"] = metadata.update_index;
-        result["future_evaluator_checkpoint"] = metadata.future_evaluator_checkpoint;
-        result["future_evaluator_config_hash"] = metadata.future_evaluator_config_hash;
-        result["future_evaluator_global_step"] = metadata.future_evaluator_global_step;
-        result["future_evaluator_update_index"] = metadata.future_evaluator_update_index;
-        result["future_evaluator_target_update_index"] = metadata.future_evaluator_target_update_index;
         return result;
       });
 }

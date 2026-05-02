@@ -11,7 +11,7 @@ from pathlib import Path
 
 import torch
 
-from two_stage_smoke_common import run_offline_pretrain
+from two_stage_smoke_common import run_bc_pretrain
 
 
 def skip(message: str) -> int:
@@ -27,15 +27,15 @@ def cuda_device_name() -> str:
 def main() -> int:
     if len(sys.argv) != 6:
         raise SystemExit(
-            "usage: cuda_smoke.py <repo_root> <pulsar_lfpo_train> <pulsar_lfpo_pretrain> "
-            "<lfpo_base_config> <offline_base_config>"
+            "usage: cuda_smoke.py <repo_root> <pulsar_appo_train> <pulsar_bc_pretrain> "
+            "<appo_base_config> <bc_base_config>"
         )
 
     repo_root = Path(sys.argv[1]).resolve()
     train_binary = Path(sys.argv[2]).resolve()
     pretrain_binary = Path(sys.argv[3]).resolve()
-    lfpo_base_config_path = Path(sys.argv[4]).resolve()
-    offline_base_config_path = Path(sys.argv[5]).resolve()
+    appo_base_config_path = Path(sys.argv[4]).resolve()
+    bc_base_config_path = Path(sys.argv[5]).resolve()
 
     if not torch.cuda.is_available():
         return skip("CUDA smoke requires an available CUDA device")
@@ -57,12 +57,15 @@ def main() -> int:
             "ltm_slots": 8,
             "ltm_dim": 16,
             "controller_dim": 64,
-            "action_embedding_dim": 16,
+            "value_hidden_dim": 64,
+            "value_num_atoms": 51,
+            "value_v_min": -10.0,
+            "value_v_max": 10.0,
         }
-        offline_output_dir = run_offline_pretrain(
+        bc_output_dir = run_bc_pretrain(
             repo_root=repo_root,
-            offline_binary=pretrain_binary,
-            offline_base_config_path=offline_base_config_path,
+            pretrain_binary=pretrain_binary,
+            bc_base_config_path=bc_base_config_path,
             work_dir=tmp_dir,
             device="cuda:0",
             model_overrides=model_overrides,
@@ -70,32 +73,19 @@ def main() -> int:
         checkpoint_dir = tmp_dir / "checkpoints"
         config_path = tmp_dir / "config.json"
 
-        config = json.loads(lfpo_base_config_path.read_text(encoding="utf-8"))
+        config = json.loads(appo_base_config_path.read_text(encoding="utf-8"))
         config["env"]["collision_meshes_path"] = str((repo_root / "collision_meshes").resolve())
         config["model"].update(model_overrides)
-        config["future_evaluator"].update(
-            {
-                "horizons": [1, 2, 3],
-                "latent_dim": 8,
-                "model_dim": 16,
-                "layers": 1,
-                "heads": 4,
-                "feedforward_dim": 32,
-            }
-        )
-        config["lfpo"]["num_envs"] = 2
-        config["lfpo"]["rollout_length"] = 4
-        config["lfpo"]["minibatch_size"] = 8
-        config["lfpo"]["update_epochs"] = 1
-        config["lfpo"]["checkpoint_interval"] = 1
-        config["lfpo"]["sequence_length"] = 2
-        config["lfpo"]["burn_in"] = 0
-        config["lfpo"]["collection_workers"] = 0
-        config["lfpo"]["device"] = "cuda:0"
-        config["lfpo"]["init_checkpoint"] = str(offline_output_dir.resolve())
-        config["lfpo"]["candidate_count"] = 4
-        config["lfpo"]["evaluator_update_interval"] = 1
-        config["lfpo"]["evaluator_target_update_interval"] = 1
+        config["ppo"]["num_envs"] = 2
+        config["ppo"]["rollout_length"] = 4
+        config["ppo"]["minibatch_size"] = 8
+        config["ppo"]["update_epochs"] = 1
+        config["ppo"]["checkpoint_interval"] = 1
+        config["ppo"]["sequence_length"] = 2
+        config["ppo"]["burn_in"] = 0
+        config["ppo"]["collection_workers"] = 0
+        config["ppo"]["device"] = "cuda:0"
+        config["ppo"]["init_checkpoint"] = str(bc_output_dir.resolve())
         config["wandb"]["enabled"] = False
         config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
@@ -120,7 +110,7 @@ def main() -> int:
         ]
         if not metrics_lines:
             raise RuntimeError("CUDA smoke did not emit metrics")
-        for field in ["policy_loss", "latent_loss", "entropy"]:
+        for field in ["policy_loss", "value_loss", "entropy"]:
             value = float(metrics_lines[-1][field])
             if not math.isfinite(value):
                 raise RuntimeError(f"non-finite metric in CUDA smoke: {field}={value}")

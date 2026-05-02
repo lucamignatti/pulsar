@@ -4,11 +4,11 @@
 #include <iostream>
 #include <stdexcept>
 
-#include "pulsar/training/offline_pretrainer.hpp"
+#include "pulsar/training/bc_pretrainer.hpp"
 
 namespace {
 
-pulsar::ExperimentConfig make_lfpo_smoke_config(const std::filesystem::path& manifest_path) {
+pulsar::ExperimentConfig make_bc_smoke_config(const std::filesystem::path& manifest_path) {
   pulsar::ExperimentConfig config;
   config.action_table.builtin = "rlgym_lookup_v1";
   config.model.observation_dim = 132;
@@ -21,36 +21,26 @@ pulsar::ExperimentConfig make_lfpo_smoke_config(const std::filesystem::path& man
   config.model.ltm_slots = 4;
   config.model.ltm_dim = 8;
   config.model.controller_dim = 16;
-  config.model.action_embedding_dim = 8;
-  config.future_evaluator.horizons = {1, 2, 3};
-  config.future_evaluator.latent_dim = 8;
-  config.future_evaluator.model_dim = 16;
-  config.future_evaluator.layers = 1;
-  config.future_evaluator.heads = 4;
-  config.future_evaluator.feedforward_dim = 32;
-  config.future_evaluator.class_weights = {1.0F, 1.0F, 0.25F};
-  config.lfpo.device = "cpu";
-  config.lfpo.num_envs = 2;
-  config.lfpo.collection_workers = 0;
-  config.lfpo.rollout_length = 4;
-  config.lfpo.minibatch_size = 8;
-  config.lfpo.update_epochs = 1;
-  config.lfpo.checkpoint_interval = 1;
-  config.lfpo.sequence_length = 2;
-  config.lfpo.burn_in = 0;
-  config.lfpo.candidate_count = 4;
-  config.lfpo.evaluator_update_interval = 1;
-  config.lfpo.evaluator_target_update_interval = 1;
-  config.lfpo.online_window_capacity = 8;
+  config.model.value_hidden_dim = 32;
+  config.model.value_num_atoms = 51;
+  config.model.value_v_min = -10.0F;
+  config.model.value_v_max = 10.0F;
+  config.ppo.device = "cpu";
+  config.ppo.num_envs = 2;
+  config.ppo.collection_workers = 0;
+  config.ppo.rollout_length = 4;
+  config.ppo.minibatch_size = 8;
+  config.ppo.update_epochs = 1;
+  config.ppo.checkpoint_interval = 1;
+  config.ppo.sequence_length = 2;
+  config.ppo.burn_in = 0;
   config.offline_dataset.train_manifest = manifest_path.string();
   config.offline_dataset.val_manifest = manifest_path.string();
   config.offline_dataset.batch_size = 16;
-  config.offline_pretraining.evaluator_epochs = 1;
-  config.offline_pretraining.actor_epochs = 1;
-  config.offline_pretraining.sequence_length = 8;
+  config.behavior_cloning.enabled = true;
+  config.behavior_cloning.epochs = 1;
+  config.behavior_cloning.sequence_length = 8;
   config.env.seed = 5;
-  config.model.future_latent_dim = config.future_evaluator.latent_dim;
-  config.model.future_horizon_count = static_cast<int>(config.future_evaluator.horizons.size());
   return config;
 }
 
@@ -116,13 +106,13 @@ int main() {
     torch::set_num_threads(1);
     torch::set_num_interop_threads(1);
     namespace fs = std::filesystem;
-    const fs::path root = fs::temp_directory_path() / "pulsar_lfpo_offline_test";
+    const fs::path root = fs::temp_directory_path() / "pulsar_bc_offline_test";
     fs::remove_all(root);
     write_manifest_fixture(root);
 
-    pulsar::ExperimentConfig config = make_lfpo_smoke_config(root / "data" / "manifest.json");
+    pulsar::ExperimentConfig config = make_bc_smoke_config(root / "data" / "manifest.json");
     {
-      pulsar::OfflinePretrainer pretrainer(config);
+      pulsar::BCPretrainer pretrainer(config);
       (void)pretrainer;
     }
 

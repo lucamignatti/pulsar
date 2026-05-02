@@ -117,9 +117,10 @@ void to_json(json& j, const ModelConfig& value) {
       {"controller_dim", value.controller_dim},
       {"consolidation_stride", value.consolidation_stride},
       {"retired_decay", value.retired_decay},
-      {"action_embedding_dim", value.action_embedding_dim},
-      {"future_latent_dim", value.future_latent_dim},
-      {"future_horizon_count", value.future_horizon_count},
+      {"value_hidden_dim", value.value_hidden_dim},
+      {"value_num_atoms", value.value_num_atoms},
+      {"value_v_min", value.value_v_min},
+      {"value_v_max", value.value_v_max},
   };
 }
 
@@ -137,12 +138,13 @@ void from_json(const json& j, ModelConfig& value) {
   value.controller_dim = j.value("controller_dim", 512);
   value.consolidation_stride = j.value("consolidation_stride", 8);
   value.retired_decay = j.value("retired_decay", 0.96F);
-  value.action_embedding_dim = j.value("action_embedding_dim", 64);
-  value.future_latent_dim = j.value("future_latent_dim", 128);
-  value.future_horizon_count = j.value("future_horizon_count", 3);
+  value.value_hidden_dim = j.value("value_hidden_dim", 256);
+  value.value_num_atoms = j.value("value_num_atoms", 51);
+  value.value_v_min = j.value("value_v_min", -10.0F);
+  value.value_v_max = j.value("value_v_max", 10.0F);
 }
 
-void to_json(json& j, const LFPOConfig& value) {
+void to_json(json& j, const PPOConfig& value) {
   j = json{
       {"num_envs", value.num_envs},
       {"collection_workers", value.collection_workers},
@@ -152,9 +154,9 @@ void to_json(json& j, const LFPOConfig& value) {
       {"update_epochs", value.update_epochs},
       {"clip_range", value.clip_range},
       {"entropy_coef", value.entropy_coef},
-      {"latent_loss_coef", value.latent_loss_coef},
-      {"behavior_prior_coef", value.behavior_prior_coef},
-      {"behavior_prior_decay_updates", value.behavior_prior_decay_updates},
+      {"value_coef", value.value_coef},
+      {"gamma", value.gamma},
+      {"gae_lambda", value.gae_lambda},
       {"learning_rate", value.learning_rate},
       {"max_grad_norm", value.max_grad_norm},
       {"device", value.device},
@@ -162,16 +164,18 @@ void to_json(json& j, const LFPOConfig& value) {
       {"max_rolling_checkpoints", value.max_rolling_checkpoints},
       {"sequence_length", value.sequence_length},
       {"burn_in", value.burn_in},
-      {"candidate_count", value.candidate_count},
-      {"evaluator_update_interval", value.evaluator_update_interval},
-      {"evaluator_target_update_interval", value.evaluator_target_update_interval},
-      {"evaluator_target_ema_tau", value.evaluator_target_ema_tau},
-      {"online_window_capacity", value.online_window_capacity},
-      {"evaluator_anchor_ratio", value.evaluator_anchor_ratio},
+      {"use_adaptive_epsilon", value.use_adaptive_epsilon},
+      {"adaptive_epsilon_beta", value.adaptive_epsilon_beta},
+      {"epsilon_min", value.epsilon_min},
+      {"epsilon_max", value.epsilon_max},
+      {"use_confidence_weighting", value.use_confidence_weighting},
+      {"confidence_weight_type", value.confidence_weight_type},
+      {"confidence_weight_delta", value.confidence_weight_delta},
+      {"normalize_confidence_weights", value.normalize_confidence_weights},
   };
 }
 
-void from_json(const json& j, LFPOConfig& value) {
+void from_json(const json& j, PPOConfig& value) {
   value.num_envs = j.value("num_envs", 64);
   value.collection_workers = j.value("collection_workers", 0);
   value.init_checkpoint = j.value("init_checkpoint", std::string{});
@@ -180,9 +184,9 @@ void from_json(const json& j, LFPOConfig& value) {
   value.update_epochs = j.value("update_epochs", 3);
   value.clip_range = j.value("clip_range", 0.2F);
   value.entropy_coef = j.value("entropy_coef", 0.01F);
-  value.latent_loss_coef = j.value("latent_loss_coef", 1.0F);
-  value.behavior_prior_coef = j.value("behavior_prior_coef", 0.0F);
-  value.behavior_prior_decay_updates = j.value("behavior_prior_decay_updates", 0);
+  value.value_coef = j.value("value_coef", 1.0F);
+  value.gamma = j.value("gamma", 0.99F);
+  value.gae_lambda = j.value("gae_lambda", 0.95F);
   value.learning_rate = j.value("learning_rate", 3.0e-4F);
   value.max_grad_norm = j.value("max_grad_norm", 1.0F);
   value.device = j.value("device", std::string{"cpu"});
@@ -190,46 +194,14 @@ void from_json(const json& j, LFPOConfig& value) {
   value.max_rolling_checkpoints = j.value("max_rolling_checkpoints", 5);
   value.sequence_length = j.value("sequence_length", 16);
   value.burn_in = j.value("burn_in", 0);
-  value.candidate_count = j.value("candidate_count", 8);
-  value.evaluator_update_interval = j.value("evaluator_update_interval", 4);
-  value.evaluator_target_update_interval = j.value("evaluator_target_update_interval", 1);
-  value.evaluator_target_ema_tau = j.value("evaluator_target_ema_tau", 0.01F);
-  value.online_window_capacity = j.value("online_window_capacity", 64);
-  value.evaluator_anchor_ratio = j.value("evaluator_anchor_ratio", 0.25F);
-}
-
-void to_json(json& j, const FutureEvaluatorConfig& value) {
-  j = json{
-      {"horizons", value.horizons},
-      {"latent_dim", value.latent_dim},
-      {"model_dim", value.model_dim},
-      {"layers", value.layers},
-      {"heads", value.heads},
-      {"feedforward_dim", value.feedforward_dim},
-      {"dropout", value.dropout},
-      {"outcome_classes", value.outcome_classes},
-      {"learning_rate", value.learning_rate},
-      {"weight_decay", value.weight_decay},
-      {"max_grad_norm", value.max_grad_norm},
-      {"class_weights", value.class_weights},
-      {"future_delta_loss_coef", value.future_delta_loss_coef},
-  };
-}
-
-void from_json(const json& j, FutureEvaluatorConfig& value) {
-  value.horizons = j.value("horizons", std::vector<int>{8, 32, 96});
-  value.latent_dim = j.value("latent_dim", 128);
-  value.model_dim = j.value("model_dim", 256);
-  value.layers = j.value("layers", 4);
-  value.heads = j.value("heads", 8);
-  value.feedforward_dim = j.value("feedforward_dim", 1024);
-  value.dropout = j.value("dropout", 0.0F);
-  value.outcome_classes = j.value("outcome_classes", 3);
-  value.learning_rate = j.value("learning_rate", 3.0e-4F);
-  value.weight_decay = j.value("weight_decay", 1.0e-6F);
-  value.max_grad_norm = j.value("max_grad_norm", 1.0F);
-  value.class_weights = j.value("class_weights", std::vector<float>{1.0F, 1.0F, 0.25F});
-  value.future_delta_loss_coef = j.value("future_delta_loss_coef", 0.1F);
+  value.use_adaptive_epsilon = j.value("use_adaptive_epsilon", true);
+  value.adaptive_epsilon_beta = j.value("adaptive_epsilon_beta", 1.0F);
+  value.epsilon_min = j.value("epsilon_min", 0.05F);
+  value.epsilon_max = j.value("epsilon_max", 0.3F);
+  value.use_confidence_weighting = j.value("use_confidence_weighting", true);
+  value.confidence_weight_type = j.value("confidence_weight_type", std::string{"entropy"});
+  value.confidence_weight_delta = j.value("confidence_weight_delta", 1.0e-6F);
+  value.normalize_confidence_weights = j.value("normalize_confidence_weights", false);
 }
 
 void to_json(json& j, const OfflineDatasetConfig& value) {
@@ -250,33 +222,25 @@ void from_json(const json& j, OfflineDatasetConfig& value) {
   value.seed = j.value("seed", static_cast<std::uint64_t>(0));
 }
 
-void to_json(json& j, const OfflinePretrainingConfig& value) {
+void to_json(json& j, const BehaviorCloningConfig& value) {
   j = json{
-      {"evaluator_epochs", value.evaluator_epochs},
-      {"actor_epochs", value.actor_epochs},
+      {"enabled", value.enabled},
+      {"epochs", value.epochs},
       {"sequence_length", value.sequence_length},
-      {"behavior_cloning_learning_rate", value.behavior_cloning_learning_rate},
-      {"actor_learning_rate", value.actor_learning_rate},
-      {"evaluator_learning_rate", value.evaluator_learning_rate},
+      {"learning_rate", value.learning_rate},
       {"weight_decay", value.weight_decay},
       {"label_smoothing", value.label_smoothing},
-      {"behavior_cloning_loss_coef", value.behavior_cloning_loss_coef},
-      {"latent_loss_coef", value.latent_loss_coef},
       {"max_grad_norm", value.max_grad_norm},
   };
 }
 
-void from_json(const json& j, OfflinePretrainingConfig& value) {
-  value.evaluator_epochs = j.value("evaluator_epochs", 2);
-  value.actor_epochs = j.value("actor_epochs", 2);
+void from_json(const json& j, BehaviorCloningConfig& value) {
+  value.enabled = j.value("enabled", true);
+  value.epochs = j.value("epochs", 10);
   value.sequence_length = j.value("sequence_length", 32);
-  value.behavior_cloning_learning_rate = j.value("behavior_cloning_learning_rate", 3.0e-4F);
-  value.actor_learning_rate = j.value("actor_learning_rate", 3.0e-4F);
-  value.evaluator_learning_rate = j.value("evaluator_learning_rate", 3.0e-4F);
+  value.learning_rate = j.value("learning_rate", 3.0e-4F);
   value.weight_decay = j.value("weight_decay", 1.0e-6F);
   value.label_smoothing = j.value("label_smoothing", 0.0F);
-  value.behavior_cloning_loss_coef = j.value("behavior_cloning_loss_coef", 1.0F);
-  value.latent_loss_coef = j.value("latent_loss_coef", 1.0F);
   value.max_grad_norm = j.value("max_grad_norm", 1.0F);
 }
 
@@ -350,34 +314,29 @@ void to_json(json& j, const ExperimentConfig& value) {
       {"outcome", value.outcome},
       {"action_table", value.action_table},
       {"model", value.model},
-      {"lfpo", value.lfpo},
-      {"future_evaluator", value.future_evaluator},
+      {"ppo", value.ppo},
       {"offline_dataset", value.offline_dataset},
-      {"offline_pretraining", value.offline_pretraining},
+      {"behavior_cloning", value.behavior_cloning},
       {"self_play_league", value.self_play_league},
       {"wandb", value.wandb},
   };
 }
 
 void from_json(const json& j, ExperimentConfig& value) {
-  reject_removed_section(j, "reward");
-  reject_removed_section(j, std::string{"p"} + "po");
-  reject_removed_section(j, std::string{"next_"} + "goal_predictor");
-  reject_removed_section(j, std::string{"value_"} + "pretraining");
+  reject_removed_section(j, "lfpo");
+  reject_removed_section(j, "future_evaluator");
+  reject_removed_section(j, "offline_pretraining");
   value.schema_version = j.value("schema_version", 4);
   value.obs_schema_version = j.value("obs_schema_version", 1);
   value.env = j.value("env", EnvConfig{});
   value.outcome = j.value("outcome", OutcomeConfig{});
   value.action_table = j.value("action_table", ActionTableConfig{});
   value.model = j.value("model", ModelConfig{});
-  value.lfpo = j.value("lfpo", LFPOConfig{});
-  value.future_evaluator = j.value("future_evaluator", FutureEvaluatorConfig{});
+  value.ppo = j.value("ppo", PPOConfig{});
   value.offline_dataset = j.value("offline_dataset", OfflineDatasetConfig{});
-  value.offline_pretraining = j.value("offline_pretraining", OfflinePretrainingConfig{});
+  value.behavior_cloning = j.value("behavior_cloning", BehaviorCloningConfig{});
   value.self_play_league = j.value("self_play_league", SelfPlayLeagueConfig{});
   value.wandb = j.value("wandb", WandbConfig{});
-  value.model.future_latent_dim = value.future_evaluator.latent_dim;
-  value.model.future_horizon_count = static_cast<int>(value.future_evaluator.horizons.size());
 }
 
 void to_json(json& j, const CheckpointMetadata& value) {
@@ -390,11 +349,6 @@ void to_json(json& j, const CheckpointMetadata& value) {
       {"device", value.device},
       {"global_step", value.global_step},
       {"update_index", value.update_index},
-      {"future_evaluator_checkpoint", value.future_evaluator_checkpoint},
-      {"future_evaluator_config_hash", value.future_evaluator_config_hash},
-      {"future_evaluator_global_step", value.future_evaluator_global_step},
-      {"future_evaluator_update_index", value.future_evaluator_update_index},
-      {"future_evaluator_target_update_index", value.future_evaluator_target_update_index},
   };
 }
 
@@ -407,12 +361,6 @@ void from_json(const json& j, CheckpointMetadata& value) {
   value.device = j.at("device").get<std::string>();
   value.global_step = j.at("global_step").get<std::int64_t>();
   value.update_index = j.at("update_index").get<std::int64_t>();
-  value.future_evaluator_checkpoint = j.value("future_evaluator_checkpoint", std::string{});
-  value.future_evaluator_config_hash = j.value("future_evaluator_config_hash", std::string{});
-  value.future_evaluator_global_step = j.value("future_evaluator_global_step", static_cast<std::int64_t>(0));
-  value.future_evaluator_update_index = j.value("future_evaluator_update_index", static_cast<std::int64_t>(0));
-  value.future_evaluator_target_update_index =
-      j.value("future_evaluator_target_update_index", static_cast<std::int64_t>(0));
 }
 
 ExperimentConfig load_experiment_config(const std::string& path) {

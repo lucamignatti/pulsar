@@ -26,24 +26,26 @@ struct ContinuumState {
 
 struct ActorStepOutput {
   torch::Tensor policy_logits;
+  torch::Tensor value_logits;
   torch::Tensor features;
   ContinuumState state;
 };
 
 struct ActorSequenceOutput {
   torch::Tensor policy_logits;
+  torch::Tensor value_logits;
   torch::Tensor features;
   ContinuumState final_state;
 };
 
-class LatentFutureActorImpl : public torch::nn::Module {
+class PPOActorImpl : public torch::nn::Module {
  public:
-  explicit LatentFutureActorImpl(ModelConfig config);
+  explicit PPOActorImpl(ModelConfig config);
 
   [[nodiscard]] ContinuumState initial_state(std::int64_t batch_size, const torch::Device& device) const;
   ActorStepOutput forward_step(torch::Tensor obs, ContinuumState state, torch::Tensor episode_starts = {});
   ActorSequenceOutput forward_sequence(torch::Tensor obs_seq, ContinuumState state, torch::Tensor episode_starts = {});
-  [[nodiscard]] torch::Tensor predict_future_latents(torch::Tensor features, torch::Tensor actions);
+  [[nodiscard]] torch::Tensor value_support() const;
   [[nodiscard]] int feature_dim() const;
   [[nodiscard]] const ModelConfig& config() const;
 
@@ -76,16 +78,16 @@ class LatentFutureActorImpl : public torch::nn::Module {
   torch::nn::Linear stm_key_write_{nullptr};
   torch::nn::Linear stm_value_write_{nullptr};
   torch::nn::Linear policy_head_{nullptr};
-  torch::nn::Embedding action_embedding_{nullptr};
-  torch::nn::Linear future_head_{nullptr};
+  torch::nn::Linear value_head_{nullptr};
   torch::Tensor ltm_basis_keys_;
   torch::Tensor ltm_basis_values_;
+  torch::Tensor atom_support_;
 };
 
-TORCH_MODULE(LatentFutureActor);
+TORCH_MODULE(PPOActor);
 
-LatentFutureActor load_latent_future_actor(const std::string& checkpoint_path, const std::string& device);
-LatentFutureActor clone_latent_future_actor(const LatentFutureActor& source, const torch::Device& device);
+PPOActor load_ppo_actor(const std::string& checkpoint_path, const std::string& device);
+PPOActor clone_ppo_actor(const PPOActor& source, const torch::Device& device);
 
 #else
 
@@ -93,9 +95,9 @@ struct ContinuumState {};
 struct ActorStepOutput {};
 struct ActorSequenceOutput {};
 
-class LatentFutureActor {
+class PPOActor {
  public:
-  LatentFutureActor() = default;
+  PPOActor() = default;
 };
 
 #endif

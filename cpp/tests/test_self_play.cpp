@@ -4,7 +4,7 @@
 #include <iostream>
 
 #include "pulsar/env/obs_builder.hpp"
-#include "pulsar/model/latent_future_actor.hpp"
+#include "pulsar/model/ppo_actor.hpp"
 #include "pulsar/rl/action_table.hpp"
 #include "pulsar/training/self_play_manager.hpp"
 #include "test_utils.hpp"
@@ -20,14 +20,14 @@ void test_snapshot_save_load_trim_and_assignment() {
   config.self_play_league.snapshot_interval_updates = 1;
   config.self_play_league.max_snapshots = 1;
   config.self_play_league.eval_interval_updates = 0;
-  config.lfpo.device = "cpu";
+  config.ppo.device = "cpu";
 
   const fs::path root = fs::temp_directory_path() / "pulsar_self_play_test";
   fs::remove_all(root);
   auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
-  pulsar::LatentFutureActor model(config.model);
+  pulsar::PPOActor model(config.model);
   pulsar::ObservationNormalizer normalizer(config.model.observation_dim);
   normalizer.update(torch::randn({16, config.model.observation_dim}));
 
@@ -75,14 +75,14 @@ void test_opponent_inference_and_elo_math() {
   config.self_play_league.max_snapshots = 2;
   config.self_play_league.eval_interval_updates = 0;
   config.self_play_league.training_opponent_policy = "stochastic";
-  config.lfpo.device = "cpu";
+  config.ppo.device = "cpu";
 
   const auto root = std::filesystem::temp_directory_path() / "pulsar_self_play_infer";
   std::filesystem::remove_all(root);
   auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
-  pulsar::LatentFutureActor model(config.model);
+  pulsar::PPOActor model(config.model);
   pulsar::ObservationNormalizer normalizer(config.model.observation_dim);
   normalizer.update(torch::randn({8, config.model.observation_dim}));
   {

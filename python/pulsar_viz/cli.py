@@ -12,7 +12,7 @@ import tempfile
 from .api import (
     ensure_checkpoint_config_matches,
     load_config,
-    load_latent_future_actor,
+    load_ppo_actor,
     make_eval_env,
     run_viz_episode,
 )
@@ -75,7 +75,7 @@ def _ignore_sigint_during_cleanup() -> object:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a Pulsar visualization episode")
-    parser.add_argument("--config", required=True, help="Path to the LFPO experiment JSON")
+    parser.add_argument("--config", required=True, help="Path to the Pulsar experiment JSON")
     parser.add_argument("--checkpoint", required=True, help="Path to a checkpoint directory")
     parser.add_argument("--device", default="cpu", help="Torch device string")
     parser.add_argument("--seed", type=int, default=0, help="Episode seed")
@@ -111,7 +111,7 @@ def main() -> None:
         parser.error(f"Unsupported policy mode: {policy_mode}")
 
     _resolve_collision_meshes(config, original_cwd)
-    model = load_latent_future_actor(checkpoint_path, args.device)
+    model = load_ppo_actor(checkpoint_path, args.device)
     if args.renderer == "rocketsimvis":
         print(
             "RocketSimVis backend selected. Start the external RocketSimVis viewer separately; "

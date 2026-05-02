@@ -1,6 +1,6 @@
 # Linux + CUDA Notes
 
-`Pulsar` targets NVIDIA CUDA systems for production LFPO training. H100 is the high-throughput target, but CUDA validation runs on any CUDA-capable GPU. The intended deployment stack is:
+`Pulsar` targets NVIDIA CUDA systems for production APPO training. H100 is the high-throughput target, but CUDA validation runs on any CUDA-capable GPU. The intended deployment stack is:
 
 - NVIDIA driver with CUDA 12.x support
 - CUDA-enabled PyTorch
@@ -41,9 +41,9 @@ cmake --build build/release --parallel
 
 ## Runtime Defaults
 
-- Use `lfpo.device = "cuda"` or `"cuda:0"` in LFPO configs.
+- Use `ppo.device = "cuda"` or `"cuda:0"` in APPO configs.
 - CUDA pinned host buffers are enabled for collector-to-GPU transfers when the runtime device is CUDA.
-- The CUDA smoke test enables TF32 matmul and cuDNN paths through PyTorch when supported before running the LFPO pretrain/train slice.
+- The CUDA smoke test enables TF32 matmul and cuDNN paths through PyTorch when supported before running the BC pretrain/APPO train slice.
 
 ## Expected External Inputs
 
@@ -65,7 +65,7 @@ ctest --test-dir build/release -L cuda --output-on-failure
 
 If the Torch targets are enabled, also validate:
 
-- `pulsar_lfpo_pretrain` writes the Continuum actor plus `future_evaluator/`.
-- `pulsar_lfpo_train` loads that checkpoint via `lfpo.init_checkpoint` and runs on `cuda:0`.
+- `pulsar_bc_pretrain` writes the Continuum actor checkpoint.
+- `pulsar_appo_train` loads that checkpoint via `ppo.init_checkpoint` and runs on `cuda:0`.
 - The CUDA smoke test is skipped only when no CUDA device is available or PyTorch is not CUDA-enabled.
 - Python bindings are optional. If `Python3 Development.Module` is unavailable, CMake skips `pulsar_native` without blocking the C++ trainer build.

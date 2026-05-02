@@ -8,53 +8,41 @@
 
 #include "pulsar/config/config.hpp"
 #include "pulsar/logging/wandb_logger.hpp"
-#include "pulsar/model/future_evaluator.hpp"
-#include "pulsar/model/latent_future_actor.hpp"
 #include "pulsar/model/normalizer.hpp"
+#include "pulsar/model/ppo_actor.hpp"
 #include "pulsar/training/offline_dataset.hpp"
 
 namespace pulsar {
 
-struct OfflineEpochMetrics {
-  double evaluator_loss = 0.0;
-  double evaluator_outcome_loss = 0.0;
-  double evaluator_delta_loss = 0.0;
-  double evaluator_accuracy = 0.0;
+struct BCEpochMetrics {
   double behavior_loss = 0.0;
   double behavior_accuracy = 0.0;
-  double latent_loss = 0.0;
-  std::int64_t evaluator_samples = 0;
-  std::int64_t evaluator_outcome_samples = 0;
-  std::int64_t evaluator_delta_samples = 0;
+  double value_loss = 0.0;
   std::int64_t behavior_samples = 0;
-  std::int64_t latent_samples = 0;
+  std::int64_t value_samples = 0;
   std::int64_t samples = 0;
 };
 
-class OfflinePretrainer {
+class BCPretrainer {
  public:
-  explicit OfflinePretrainer(ExperimentConfig config);
+  explicit BCPretrainer(ExperimentConfig config);
 
   void train(const std::string& output_dir, const std::string& config_path = "");
 
  private:
   void validate_config() const;
   void fit_normalizers();
-  OfflineEpochMetrics train_evaluator_epoch(int epoch_index);
-  OfflineEpochMetrics train_actor_epoch(int epoch_index);
-  OfflineEpochMetrics evaluate();
+  BCEpochMetrics train_epoch(int epoch_index);
+  BCEpochMetrics evaluate();
   void save_checkpoint(const std::string& output_dir, int epoch_index) const;
+  [[nodiscard]] torch::Tensor map_outcome_to_value_target(const torch::Tensor& outcomes) const;
 
   ExperimentConfig config_{};
   OfflineTensorDataset train_dataset_;
   OfflineTensorDataset val_dataset_;
-  LatentFutureActor actor_{nullptr};
-  FutureEvaluator evaluator_{nullptr};
-  FutureEvaluator target_evaluator_{nullptr};
+  PPOActor actor_{nullptr};
   ObservationNormalizer actor_normalizer_;
-  ObservationNormalizer evaluator_normalizer_;
   std::unique_ptr<torch::optim::AdamW> actor_optimizer_{};
-  std::unique_ptr<torch::optim::AdamW> evaluator_optimizer_{};
   torch::Device device_{torch::kCPU};
 };
 

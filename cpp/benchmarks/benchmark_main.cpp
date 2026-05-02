@@ -5,9 +5,8 @@
 
 #include <torch/cuda.h>
 
-#include "pulsar/model/future_evaluator.hpp"
-#include "pulsar/model/latent_future_actor.hpp"
-#include "pulsar/training/lfpo_math.hpp"
+#include "pulsar/model/ppo_actor.hpp"
+#include "pulsar/training/ppo_math.hpp"
 
 namespace {
 
@@ -33,20 +32,10 @@ pulsar::ModelConfig benchmark_model_config() {
   config.ltm_slots = 8;
   config.ltm_dim = 16;
   config.controller_dim = 64;
-  config.action_embedding_dim = 16;
-  config.future_latent_dim = 32;
-  config.future_horizon_count = 3;
-  return config;
-}
-
-pulsar::FutureEvaluatorConfig benchmark_evaluator_config() {
-  pulsar::FutureEvaluatorConfig config;
-  config.horizons = {8, 32, 96};
-  config.latent_dim = 32;
-  config.model_dim = 64;
-  config.layers = 1;
-  config.heads = 4;
-  config.feedforward_dim = 128;
+  config.value_hidden_dim = 128;
+  config.value_num_atoms = 51;
+  config.value_v_min = -10.0F;
+  config.value_v_max = 10.0F;
   return config;
 }
 
@@ -58,22 +47,17 @@ int main(int argc, char** argv) {
   const torch::Device device =
       argc > 3 ? torch::Device(argv[3])
                : (torch::cuda::is_available() ? torch::Device(torch::kCUDA, 0) : torch::Device(torch::kCPU));
-  const int candidates = 8;
   const int sequence = 8;
 
   const pulsar::ModelConfig model_config = benchmark_model_config();
-  const pulsar::FutureEvaluatorConfig evaluator_config = benchmark_evaluator_config();
-  pulsar::LatentFutureActor actor(model_config);
-  pulsar::FutureEvaluator evaluator(evaluator_config, model_config.observation_dim);
+  pulsar::PPOActor actor(model_config);
   actor->to(device);
-  evaluator->to(device);
   torch::optim::Adam optimizer(actor->parameters(), torch::optim::AdamOptions(3.0e-4));
 
   std::cout << "device=" << device.str() << '\n';
 
   double policy_forward_seconds = 0.0;
-  double evaluator_seconds = 0.0;
-  double lfpo_seconds = 0.0;
+  double ppo_seconds = 0.0;
   std::int64_t samples = 0;
 
   for (int update = 0; update < updates; ++update) {
@@ -86,48 +70,46 @@ int main(int argc, char** argv) {
     synchronize_if_cuda(device);
     policy_forward_seconds += seconds_since(forward_start);
 
-    const torch::Tensor features = output.features.reshape({sequence * batch, actor->feature_dim()});
-    const torch::Tensor candidate_actions =
-        torch::randint(
-            model_config.action_dim,
-            {sequence * batch, candidates},
-            torch::TensorOptions().dtype(torch::kLong).device(device));
-    const torch::Tensor feature_candidates =
-        features.unsqueeze(1).expand({features.size(0), candidates, actor->feature_dim()}).reshape({-1, actor->feature_dim()});
-
-    synchronize_if_cuda(device);
-    auto lfpo_start = std::chrono::steady_clock::now();
-    const torch::Tensor predicted =
-        actor->predict_future_latents(feature_candidates, candidate_actions.reshape({-1}))
-            .reshape({features.size(0), candidates, model_config.future_horizon_count, model_config.future_latent_dim});
-    synchronize_if_cuda(device);
-    auto evaluator_start = std::chrono::steady_clock::now();
-    const torch::Tensor scores = pulsar::latent_action_scores(evaluator->classify_embeddings(predicted));
-    synchronize_if_cuda(device);
-    evaluator_seconds += seconds_since(evaluator_start);
-    const torch::Tensor advantages = pulsar::relative_candidate_advantages(scores);
     const torch::Tensor logits = output.policy_logits.reshape({sequence * batch, model_config.action_dim});
     const torch::Tensor masks = torch::ones(logits.sizes(), torch::TensorOptions().dtype(torch::kBool).device(device));
-    const torch::Tensor log_probs =
-        torch::log_softmax(pulsar::apply_action_mask_to_logits(logits, masks), -1).gather(1, candidate_actions);
-    const torch::Tensor loss =
-        pulsar::clipped_lfpo_policy_loss(log_probs, log_probs.detach(), advantages, 0.2F) -
-        0.01F * pulsar::masked_action_entropy(logits, masks).mean();
+    const torch::Tensor actions = pulsar::sample_masked_actions(logits, masks, false);
+    const torch::Tensor old_log_probs =
+        torch::log_softmax(pulsar::apply_action_mask_to_logits(logits, masks), -1).gather(1, actions.unsqueeze(1)).squeeze(1);
+    const torch::Tensor values = torch::zeros({sequence * batch}, device);
+    const torch::Tensor rewards = torch::zeros({sequence * batch}, device);
+    const torch::Tensor dones = torch::zeros({sequence * batch}, device);
+    const torch::Tensor advantages = pulsar::compute_gae(
+        values.reshape({sequence, batch}),
+        rewards.reshape({sequence, batch}),
+        dones.reshape({sequence, batch}),
+        0.99F, 0.95F).reshape({sequence * batch});
+
+    synchronize_if_cuda(device);
+    auto ppo_start = std::chrono::steady_clock::now();
+    const torch::Tensor current_log_probs =
+        torch::log_softmax(pulsar::apply_action_mask_to_logits(logits, masks), -1).gather(1, actions.unsqueeze(1)).squeeze(1);
+    const torch::Tensor policy_loss =
+        pulsar::clipped_ppo_policy_loss(current_log_probs, old_log_probs.detach(), advantages, 0.2F);
+    const torch::Tensor entropy_loss = -0.01F * pulsar::masked_action_entropy(logits, masks).mean();
+    const torch::Tensor value_logits = output.value_logits.reshape({sequence * batch, model_config.value_num_atoms});
+    const torch::Tensor value_loss = pulsar::distributional_value_loss(
+        value_logits, advantages, actor->value_support(),
+        model_config.value_v_min, model_config.value_v_max, model_config.value_num_atoms);
+    const torch::Tensor loss = policy_loss + entropy_loss + 1.0F * value_loss;
     optimizer.zero_grad();
     loss.backward();
     optimizer.step();
     synchronize_if_cuda(device);
-    lfpo_seconds += seconds_since(lfpo_start);
+    ppo_seconds += seconds_since(ppo_start);
     samples += sequence * batch;
   }
 
-  const double total_seconds = std::max(policy_forward_seconds + lfpo_seconds, 1.0e-9);
+  const double total_seconds = std::max(policy_forward_seconds + ppo_seconds, 1.0e-9);
   std::cout << "collection_agent_steps_per_second=" << static_cast<double>(samples) / total_seconds << '\n';
-  std::cout << "lfpo_update_agent_steps_per_second=" << static_cast<double>(samples) / std::max(lfpo_seconds, 1.0e-9) << '\n';
+  std::cout << "ppo_update_agent_steps_per_second=" << static_cast<double>(samples) / std::max(ppo_seconds, 1.0e-9) << '\n';
   std::cout << "offline_pretrain_samples_per_second=" << static_cast<double>(samples) / total_seconds << '\n';
   std::cout << "offline_pretrain_epoch_seconds=" << total_seconds << '\n';
   std::cout << "policy_forward_seconds=" << policy_forward_seconds << '\n';
-  std::cout << "future_evaluator_seconds=" << evaluator_seconds << '\n';
-  std::cout << "lfpo_forward_backward_seconds=" << lfpo_seconds << '\n';
+  std::cout << "ppo_forward_backward_seconds=" << ppo_seconds << '\n';
   return EXIT_SUCCESS;
 }

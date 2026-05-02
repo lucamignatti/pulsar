@@ -11,7 +11,7 @@
     "no_touch_timeout_seconds": 10.0,
     "spawn_opponents": true,
     "randomize_kickoffs": true,
-    "seed": 0
+    "seed": 7
   },
   "outcome": {
     "score": 1.0,
@@ -36,11 +36,12 @@
     "controller_dim": 512,
     "consolidation_stride": 8,
     "retired_decay": 0.96,
-    "action_embedding_dim": 64,
-    "future_latent_dim": 128,
-    "future_horizon_count": 3
+    "value_hidden_dim": 256,
+    "value_num_atoms": 51,
+    "value_v_min": -10.0,
+    "value_v_max": 10.0
   },
-  "lfpo": {
+  "ppo": {
     "num_envs": 512,
     "collection_workers": 16,
     "init_checkpoint": "",
@@ -49,9 +50,9 @@
     "update_epochs": 3,
     "clip_range": 0.2,
     "entropy_coef": 0.01,
-    "latent_loss_coef": 1.0,
-    "behavior_prior_coef": 0.0,
-    "behavior_prior_decay_updates": 0,
+    "value_coef": 1.0,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
     "learning_rate": 0.0002,
     "max_grad_norm": 1.0,
     "device": "cuda:0",
@@ -59,27 +60,14 @@
     "max_rolling_checkpoints": 5,
     "sequence_length": 16,
     "burn_in": 0,
-    "candidate_count": 8,
-    "evaluator_update_interval": 4,
-    "evaluator_target_update_interval": 1,
-    "evaluator_target_ema_tau": 0.01,
-    "online_window_capacity": 64,
-    "evaluator_anchor_ratio": 0.25
-  },
-  "future_evaluator": {
-    "horizons": [8, 32, 96],
-    "latent_dim": 128,
-    "model_dim": 256,
-    "layers": 4,
-    "heads": 8,
-    "feedforward_dim": 1024,
-    "dropout": 0.0,
-    "outcome_classes": 3,
-    "learning_rate": 0.0003,
-    "weight_decay": 0.000001,
-    "max_grad_norm": 1.0,
-    "class_weights": [1.0, 1.0, 0.25],
-    "future_delta_loss_coef": 0.1
+    "use_adaptive_epsilon": true,
+    "adaptive_epsilon_beta": 1.0,
+    "epsilon_min": 0.05,
+    "epsilon_max": 0.3,
+    "use_confidence_weighting": true,
+    "confidence_weight_type": "entropy",
+    "confidence_weight_delta": 1e-06,
+    "normalize_confidence_weights": false
   },
   "offline_dataset": {
     "train_manifest": "data/offline/2v2/train_manifest.json",
@@ -88,22 +76,18 @@
     "shuffle": true,
     "seed": 7
   },
-  "offline_pretraining": {
-    "evaluator_epochs": 8,
-    "actor_epochs": 8,
+  "behavior_cloning": {
+    "enabled": true,
+    "epochs": 10,
     "sequence_length": 32,
-    "behavior_cloning_learning_rate": 0.0003,
-    "actor_learning_rate": 0.0003,
-    "evaluator_learning_rate": 0.0003,
+    "learning_rate": 0.0003,
     "weight_decay": 0.000001,
     "label_smoothing": 0.01,
-    "behavior_cloning_loss_coef": 1.0,
-    "latent_loss_coef": 1.0,
     "max_grad_norm": 1.0
   },
   "self_play_league": {
-    "enabled": false,
-    "opponent_probability": 0.0,
+    "enabled": true,
+    "opponent_probability": 0.5,
     "snapshot_interval_updates": 10,
     "max_snapshots": 8,
     "training_opponent_policy": "stochastic",
@@ -119,12 +103,12 @@
     "project": "pulsar",
     "entity": "",
     "run_name": "",
-    "group": "lfpo",
-    "job_type": "offline_pretrain",
+    "group": "dappo",
+    "job_type": "dappo_train",
     "dir": "",
     "mode": "online",
     "python_executable": "python3",
     "script_path": "scripts/wandb_stream.py",
-    "tags": ["offline", "lfpo", "future_evaluator", "continuum"]
+    "tags": ["online", "dappo", "continuum"]
   }
 }

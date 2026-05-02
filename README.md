@@ -1,27 +1,29 @@
 # Pulsar
 
-`Pulsar` is an LFPO-native Rocket League bot training stack built around a high-throughput C++ runtime and a thin Python visualization layer.
+`Pulsar` is a DAPPO-native Rocket League bot training stack built around a high-throughput C++ runtime and a thin Python visualization layer.
 
 The training workflow has two stages:
 
-1. `pulsar_lfpo_pretrain` trains a separate transformer future evaluator on replay trajectory windows and sparse terminal outcome labels, then behavior-clones the Continuum actor while training its unconditional action-conditioned latent future predictor.
-2. `pulsar_lfpo_train` runs self-play only. It samples candidate actions, predicts each candidate's future embedding, scores those embeddings with the frozen/target evaluator, computes relative latent advantages, and applies the clipped LFPO policy update.
+1. `pulsar_bc_pretrain` behavior-clones the Continuum actor on offline replay data using cross-entropy on action targets, with optional distributional value pretraining on terminal outcome labels.
+2. `pulsar_appo_train` runs self-play Distributional APPO. It samples actions from the policy, estimates advantages via GAE on quantile-sampled distributional values, applies adaptive clipping based on critic variance, confidence-weights the PPO objective by inverse distribution entropy, and uses a distributional value loss.
 
-The actor remains the Continuum recurrent memory architecture, but its heads are only `pi(a|s)` and `F(s,a)`. The transformer future evaluator is a separate model and is refreshed online from completed self-play windows only.
+The actor is the Continuum recurrent memory architecture with `pi(a|s)` and categorical distributional `V(s)` heads. Only sparse terminal outcomes (goal scored/conceded) are used as the reward signal.
 
 ## Design Goals
 
-- LFPO as the only training path
+- DAPPO (Distributional APPO) with BC pretraining
+- Adaptive clipping driven by critic distribution variance
+- Confidence-weighted PPO objectives (inverse entropy)
+- Quantile-sampled distributional values for GAE
 - Sparse terminal outcomes as the only ground-truth reward signal
-- Separate transformer future evaluator with fixed horizons `[8, 32, 96]`
-- Continuum actor with policy and latent future prediction heads
+- Continuum actor with policy and distributional value heads
 - CUDA production build path, optimized for H100-class throughput
 
 ## Repository Layout
 
-- `cpp/`: runtime, LFPO models, training code, tests, and benchmarks
+- `cpp/`: runtime, DAPPO models, training code, tests, and benchmarks
 - `python/pulsar_viz/`: visualization and evaluation package
-- `configs/`: LFPO experiment configs
+- `configs/`: APPO + BC experiment configs
 - `scripts/`: setup, preprocessing, smoke tests, and utility scripts
 - `docs/`: platform-specific notes such as CUDA setup
 - `external/RocketSim/`: vendored RocketSim submodule
@@ -71,9 +73,9 @@ ctest --test-dir build/release -L cuda --output-on-failure
 
 ## Core Binaries
 
-- `pulsar_lfpo_pretrain`: offline LFPO pretraining
-- `pulsar_lfpo_train`: online LFPO self-play training
-- `pulsar_bench`: LFPO model throughput benchmark
+- `pulsar_bc_pretrain`: offline BC pretraining
+- `pulsar_appo_train`: online DAPPO self-play training
+- `pulsar_bench`: DAPPO model throughput benchmark
 - `pulsar_native`: Python extension used by visualization
 - `pulsar-viz`: Python CLI for checkpoint playback
 
@@ -81,7 +83,7 @@ ctest --test-dir build/release -L cuda --output-on-failure
 
 ### 1. Build An Offline Dataset
 
-The offline pretrainer consumes schema v4 tensor manifests. Shards contain observations, optional behavior actions or action probabilities, terminal outcome labels, outcome-known masks, trajectory starts, and end flags. Future windows are built on the fly during training.
+The offline pretrainer consumes schema v4 tensor manifests. Shards contain observations, optional behavior actions or action probabilities, terminal outcome labels, and trajectory boundary flags.
 
 ```bash
 .venv/bin/python scripts/download_kaggle_dataset.py \
@@ -92,28 +94,28 @@ The offline pretrainer consumes schema v4 tensor manifests. Shards contain obser
   /path/to/pulsar_offline_2v2
 ```
 
-Set `offline_dataset.train_manifest` and `offline_dataset.val_manifest` in `configs/2v2_offline.json`.
+Set `offline_dataset.train_manifest` and `offline_dataset.val_manifest` in `configs/2v2_bc.json`.
 
-### 2. Run Offline LFPO Pretraining
+### 2. Run BC Pretraining
 
 ```bash
-./build/release/pulsar_lfpo_pretrain configs/2v2_offline.json /path/to/offline_outputs
+./build/release/pulsar_bc_pretrain configs/2v2_bc.json /path/to/bc_outputs
 ```
 
-This writes the actor checkpoint at the output root and the target future evaluator under `future_evaluator/`.
+This writes the actor checkpoint at the output root.
 
-### 3. Run Online LFPO
+### 3. Run Online DAPPO
 
-Set `lfpo.init_checkpoint` in `configs/2v2_lfpo.json` to the offline output directory, then launch:
+Set `ppo.init_checkpoint` in `configs/2v2_appo.json` to the BC output directory, then launch:
 
 ```bash
-./build/release/pulsar_lfpo_train configs/2v2_lfpo.json /path/to/run_outputs
+./build/release/pulsar_appo_train configs/2v2_appo.json /path/to/run_outputs
 ```
 
 To run a bounded smoke or evaluation training slice:
 
 ```bash
-./build/release/pulsar_lfpo_train configs/2v2_lfpo.json /path/to/run_outputs 100
+./build/release/pulsar_appo_train configs/2v2_appo.json /path/to/run_outputs 100
 ```
 
 Self-play policy snapshots are written under `policy_versions/` when `self_play_league.enabled` is true.
@@ -127,4 +129,4 @@ pulsar-viz \
   --device cpu
 ```
 
-The Python side loads the LFPO config, loads the native Continuum actor, builds an evaluation environment, and runs a visualization episode through `RLViser` or `RocketSimVis`.
+The Python side loads the DAPPO config, loads the native Continuum actor, builds an evaluation environment, and runs a visualization episode through `RLViser` or `RocketSimVis`.

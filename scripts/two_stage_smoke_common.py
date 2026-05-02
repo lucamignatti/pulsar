@@ -78,44 +78,34 @@ def write_synthetic_offline_dataset(
     return manifest_path
 
 
-def run_offline_pretrain(
+def run_bc_pretrain(
     repo_root: Path,
-    offline_binary: Path,
-    offline_base_config_path: Path,
+    pretrain_binary: Path,
+    bc_base_config_path: Path,
     work_dir: Path,
     device: str,
     model_overrides: dict[str, Any] | None = None,
 ) -> Path:
     data_dir = work_dir / "offline_data"
-    output_dir = work_dir / "offline_output"
-    config_path = work_dir / "offline_config.json"
+    output_dir = work_dir / "bc_output"
+    config_path = work_dir / "bc_config.json"
     manifest_path = write_synthetic_offline_dataset(data_dir)
 
-    config: dict[str, Any] = json.loads(offline_base_config_path.read_text(encoding="utf-8"))
+    config: dict[str, Any] = json.loads(bc_base_config_path.read_text(encoding="utf-8"))
     config["offline_dataset"]["train_manifest"] = str(manifest_path.resolve())
     config["offline_dataset"]["val_manifest"] = str(manifest_path.resolve())
     config["offline_dataset"]["batch_size"] = 8
-    config["offline_pretraining"]["evaluator_epochs"] = 1
-    config["offline_pretraining"]["actor_epochs"] = 1
-    config["offline_pretraining"]["sequence_length"] = 4
-    config["future_evaluator"].update(
-        {
-            "horizons": [1, 2, 3],
-            "latent_dim": 8,
-            "model_dim": 16,
-            "layers": 1,
-            "heads": 4,
-            "feedforward_dim": 32,
-        }
-    )
-    config["lfpo"]["device"] = device
+    config["behavior_cloning"]["enabled"] = True
+    config["behavior_cloning"]["epochs"] = 1
+    config["behavior_cloning"]["sequence_length"] = 4
+    config["ppo"]["device"] = device
     config["wandb"]["enabled"] = False
     if model_overrides:
         config["model"].update(model_overrides)
     config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
     subprocess.run(
-        [str(offline_binary), str(config_path), str(output_dir)],
+        [str(pretrain_binary), str(config_path), str(output_dir)],
         check=True,
         cwd=repo_root,
     )

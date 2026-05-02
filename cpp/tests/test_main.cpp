@@ -114,7 +114,7 @@ int main() {
         .obs_schema_version = config.obs_schema_version,
         .config_hash = pulsar::config_hash(config),
         .action_table_hash = pulsar::action_table_hash(config.action_table),
-        .architecture_name = "lfpo_continuum",
+        .architecture_name = "ppo_continuum",
         .device = "cpu",
         .global_step = 12,
         .update_index = 3,

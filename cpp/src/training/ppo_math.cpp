@@ -1,4 +1,4 @@
-#include "pulsar/training/lfpo_math.hpp"
+#include "pulsar/training/ppo_math.hpp"
 
 #ifdef PULSAR_HAS_TORCH
 
@@ -62,20 +62,28 @@ torch::Tensor masked_action_entropy(const torch::Tensor& logits, const torch::Te
   return -(probs * torch::log(probs + 1.0e-8)).sum(-1) / valid_counts.log().clamp_min(1.0e-6);
 }
 
-torch::Tensor latent_action_scores(const torch::Tensor& outcome_logits) {
-  const torch::Tensor log_probs = torch::log_softmax(outcome_logits, -1);
-  const torch::Tensor score_logp = log_probs.select(-1, 0);
-  const torch::Tensor concede_logp = log_probs.select(-1, 1);
-  return (score_logp - concede_logp).mean(-1);
+torch::Tensor compute_gae(
+    const torch::Tensor& values,
+    const torch::Tensor& rewards,
+    const torch::Tensor& dones,
+    float gamma,
+    float gae_lambda) {
+  const int64_t steps = values.size(0);
+  const int64_t agents = values.size(1);
+  torch::Tensor advantages = torch::zeros({steps, agents}, values.options());
+  torch::Tensor last_gae = torch::zeros({agents}, values.options());
+
+  for (int64_t t = steps - 1; t >= 0; --t) {
+    const torch::Tensor next_value = (t < steps - 1) ? values[t + 1] : torch::zeros({agents}, values.options());
+    const torch::Tensor non_terminal = 1.0 - dones[t];
+    const torch::Tensor delta = rewards[t] + gamma * next_value * non_terminal - values[t];
+    last_gae = delta + gamma * gae_lambda * non_terminal * last_gae;
+    advantages[t] = last_gae.clone();
+  }
+  return advantages;
 }
 
-torch::Tensor relative_candidate_advantages(const torch::Tensor& candidate_scores) {
-  torch::Tensor advantages = candidate_scores - candidate_scores.mean(-1, true);
-  const torch::Tensor std = advantages.pow(2).mean(-1, true).sqrt().clamp_min(1.0e-6);
-  return (advantages / std).detach();
-}
-
-torch::Tensor clipped_lfpo_policy_loss(
+torch::Tensor clipped_ppo_policy_loss(
     const torch::Tensor& current_log_probs,
     const torch::Tensor& old_log_probs,
     const torch::Tensor& advantages,
@@ -83,6 +91,96 @@ torch::Tensor clipped_lfpo_policy_loss(
   const torch::Tensor ratio = torch::exp(current_log_probs - old_log_probs);
   const torch::Tensor clipped_ratio = torch::clamp(ratio, 1.0 - clip_range, 1.0 + clip_range);
   return -torch::min(ratio * advantages, clipped_ratio * advantages).mean();
+}
+
+torch::Tensor distributional_value_loss(
+    const torch::Tensor& value_logits,
+    const torch::Tensor& returns,
+    const torch::Tensor& atom_support,
+    float v_min,
+    float v_max,
+    int num_atoms) {
+  const float delta_z = (v_max - v_min) / static_cast<float>(num_atoms - 1);
+  const torch::Tensor clamped_returns = returns.clamp(v_min, v_max);
+  const torch::Tensor b = (clamped_returns - v_min) / delta_z;
+  const torch::Tensor lower = b.floor().clamp(0, num_atoms - 1).to(torch::kLong);
+  const torch::Tensor upper = b.ceil().clamp(0, num_atoms - 1).to(torch::kLong);
+  const torch::Tensor weight_upper = (b - lower.to(torch::kFloat32)).clamp(0.0, 1.0);
+
+  const torch::Tensor log_probs = torch::log_softmax(value_logits, -1);
+  const torch::Tensor lower_log_probs = log_probs.gather(-1, lower.unsqueeze(-1)).squeeze(-1);
+  const torch::Tensor upper_log_probs = log_probs.gather(-1, upper.unsqueeze(-1)).squeeze(-1);
+
+  const torch::Tensor projection =
+      lower_log_probs * (1.0 - weight_upper) + upper_log_probs * weight_upper;
+  return -projection.mean();
+}
+
+torch::Tensor sample_quantile_value(
+    const torch::Tensor& value_logits,
+    const torch::Tensor& atom_support) {
+  const torch::Tensor dist = torch::distributions::Categorical{}.sample(
+      [&](const torch::Tensor& logits) { return logits; }(value_logits));
+  torch::Tensor sampled_indices = torch::multinomial(
+      torch::softmax(value_logits, -1), 1, true).squeeze(-1);
+  return atom_support.index_select(0, sampled_indices.view({-1}))
+      .view_as(sampled_indices);
+}
+
+torch::Tensor compute_mean_value(
+    const torch::Tensor& value_logits,
+    const torch::Tensor& atom_support) {
+  const torch::Tensor probs = torch::softmax(value_logits, -1);
+  return (probs * atom_support).sum(-1);
+}
+
+torch::Tensor compute_distribution_variance(
+    const torch::Tensor& value_logits,
+    const torch::Tensor& atom_support) {
+  const torch::Tensor probs = torch::softmax(value_logits, -1);
+  const torch::Tensor expected = (probs * atom_support).sum(-1);
+  const torch::Tensor expected_sq = (probs * atom_support.pow(2)).sum(-1);
+  return torch::relu(expected_sq - expected.pow(2));
+}
+
+torch::Tensor compute_distribution_entropy(
+    const torch::Tensor& value_logits) {
+  const torch::Tensor probs = torch::softmax(value_logits, -1);
+  const float eps = 1.0e-8F;
+  return -(probs * torch::log(probs + eps)).sum(-1);
+}
+
+float compute_adaptive_epsilon(
+    const torch::Tensor& variance,
+    float epsilon_base,
+    float epsilon_beta,
+    float epsilon_min,
+    float epsilon_max) {
+  const float mean_variance = variance.mean().item<float>();
+  float adaptive = epsilon_base / (1.0F + epsilon_beta * mean_variance);
+  return std::clamp(adaptive, epsilon_min, epsilon_max);
+}
+
+torch::Tensor compute_confidence_weights(
+    const torch::Tensor& value_logits,
+    const torch::Tensor& atom_support,
+    const std::string& weight_type,
+    float weight_delta,
+    bool normalize) {
+  torch::Tensor raw_weights;
+  if (weight_type == "entropy") {
+    const torch::Tensor entropy = compute_distribution_entropy(value_logits);
+    raw_weights = 1.0 / (entropy + weight_delta);
+  } else if (weight_type == "variance") {
+    const torch::Tensor variance = compute_distribution_variance(value_logits, atom_support);
+    raw_weights = 1.0 / (variance + weight_delta);
+  } else {
+    return torch::ones({value_logits.size(0)}, value_logits.options());
+  }
+  if (normalize) {
+    raw_weights = raw_weights / (raw_weights.mean() + 1.0e-8F);
+  }
+  return raw_weights.detach();
 }
 
 ContinuumState detach_state(ContinuumState state) {
