@@ -242,6 +242,7 @@ void SelfPlayManager::save_snapshot(const Snapshot& snapshot) const {
           .device = device_.str(),
           .global_step = snapshot.global_step,
           .update_index = snapshot.update_index,
+          .critic_heads = snapshot.model->enabled_critic_heads(),
       },
       (directory / "metadata.json").string());
 

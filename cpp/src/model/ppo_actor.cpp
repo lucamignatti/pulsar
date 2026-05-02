@@ -66,6 +66,64 @@ void validate_model_config(const ModelConfig& config) {
 
 }  // namespace
 
+torch::nn::Sequential PPOActorImpl::make_value_head(int input_dim, const CriticHeadConfig& head_config) const {
+  torch::nn::Sequential head;
+  head->push_back(torch::nn::Linear(input_dim, head_config.value_hidden_dim));
+  head->push_back(torch::nn::Functional(torch::relu));
+  head->push_back(torch::nn::Linear(head_config.value_hidden_dim, head_config.value_num_atoms));
+  return head;
+}
+
+torch::nn::Sequential PPOActorImpl::make_forward_head(int input_dim, int forward_action_dim) const {
+  const int hidden = config_.forward_model.hidden_dim;
+  torch::nn::Sequential head;
+  head->push_back(torch::nn::Linear(input_dim + forward_action_dim, hidden));
+  head->push_back(torch::nn::Functional(torch::relu));
+  for (int i = 1; i < config_.forward_model.num_layers; ++i) {
+    head->push_back(torch::nn::Linear(hidden, hidden));
+    head->push_back(torch::nn::Functional(torch::relu));
+  }
+  head->push_back(torch::nn::Linear(hidden, config_.encoder_dim));
+  return head;
+}
+
+torch::nn::Sequential PPOActorImpl::make_inverse_head() const {
+  const int hidden = config_.inverse_model.hidden_dim;
+  torch::nn::Sequential head;
+  head->push_back(torch::nn::Linear(config_.encoder_dim * 2, hidden));
+  head->push_back(torch::nn::Functional(torch::relu));
+  for (int i = 1; i < config_.inverse_model.num_layers; ++i) {
+    head->push_back(torch::nn::Linear(hidden, hidden));
+    head->push_back(torch::nn::Functional(torch::relu));
+  }
+  head->push_back(torch::nn::Linear(hidden, config_.action_dim));
+  return head;
+}
+
+torch::Tensor PPOActorImpl::make_atom_support(float v_min, float v_max, int num_atoms) const {
+  const float atom_delta = (v_max - v_min) / static_cast<float>(num_atoms - 1);
+  return torch::arange(
+      static_cast<float>(num_atoms),
+      torch::TensorOptions().dtype(torch::kFloat32))
+      .mul_(atom_delta)
+      .add_(v_min);
+}
+
+void PPOActorImpl::build_value_head(
+    const std::string& name,
+    torch::nn::Sequential& head,
+    torch::Tensor& support,
+    const CriticHeadConfig& head_cfg) {
+  head = make_value_head(feature_dim_, head_cfg);
+  register_module("value_head_" + name, head);
+  support = register_buffer(
+      "atom_support_" + name,
+      make_atom_support(head_cfg.value_v_min, head_cfg.value_v_max, head_cfg.value_num_atoms));
+  value_heads_[name] = &head;
+  atom_supports_[name] = &support;
+  enabled_critic_heads_.push_back(name);
+}
+
 PPOActorImpl::PPOActorImpl(ModelConfig config)
     : config_(std::move(config)) {
   validate_model_config(config_);
@@ -103,24 +161,23 @@ PPOActorImpl::PPOActorImpl(ModelConfig config)
   feature_dim_ = config_.workspace_dim + config_.controller_dim + config_.encoder_dim;
   policy_head_ = register_module("policy_head", torch::nn::Linear(feature_dim_, config_.action_dim));
 
-  const int value_input_dim = feature_dim_;
-  const int value_atom_dim = config_.value_num_atoms;
-  value_head_ = register_module(
-      "value_head",
-      torch::nn::Sequential(
-          torch::nn::Linear(value_input_dim, config_.value_hidden_dim),
-          torch::nn::Functional(torch::relu),
-          torch::nn::Linear(config_.value_hidden_dim, value_atom_dim)));
+  const CriticHeadConfig default_head{
+      true, config_.value_hidden_dim, config_.value_num_atoms,
+      config_.value_v_min, config_.value_v_max};
 
-  const float atom_delta = (config_.value_v_max - config_.value_v_min) /
-                           static_cast<float>(config_.value_num_atoms - 1);
-  atom_support_ = register_buffer(
-      "atom_support",
-      torch::arange(
-          static_cast<float>(config_.value_num_atoms),
-          torch::TensorOptions().dtype(torch::kFloat32))
-          .mul_(atom_delta)
-          .add_(config_.value_v_min));
+  build_value_head("extrinsic", value_head_ext_, atom_support_ext_, default_head);
+  build_value_head("curiosity", value_head_cur_, atom_support_cur_, default_head);
+  build_value_head("learning_progress", value_head_learn_, atom_support_learn_, default_head);
+
+  CriticHeadConfig ctrl_head_cfg = default_head;
+  ctrl_head_cfg.enabled = false;
+  build_value_head("controllability", value_head_ctrl_, atom_support_ctrl_, ctrl_head_cfg);
+
+  forward_head_ = make_forward_head(config_.encoder_dim, config_.action_dim);
+  register_module("forward_head", forward_head_);
+
+  inverse_head_ = make_inverse_head();
+  register_module("inverse_head", inverse_head_);
 
   ltm_basis_keys_ = register_parameter(
       "ltm_basis_keys",
@@ -236,7 +293,11 @@ ActorStepOutput PPOActorImpl::forward_encoded_step(
   const torch::Tensor features = torch::cat({encoded, fused_ctx, new_workspace}, -1);
   return {
       policy_head_->forward(features),
-      value_head_->forward(features),
+      encoded,
+      {value_head_ext_->forward(features), atom_support_ext_},
+      {value_head_cur_->forward(features), atom_support_cur_},
+      {value_head_learn_->forward(features), atom_support_learn_},
+      {value_head_ctrl_->forward(features), atom_support_ctrl_},
       features,
       std::move(state),
   };
@@ -256,10 +317,18 @@ ActorSequenceOutput PPOActorImpl::forward_sequence(
       encoder_->forward(obs_seq.reshape({time * batch, config_.observation_dim}))
           .reshape({time, batch, config_.encoder_dim});
   std::vector<torch::Tensor> policy_logits;
-  std::vector<torch::Tensor> value_logits;
+  std::vector<torch::Tensor> encoded_seq_stack;
+  std::vector<torch::Tensor> value_logits_ext;
+  std::vector<torch::Tensor> value_logits_cur;
+  std::vector<torch::Tensor> value_logits_learn;
+  std::vector<torch::Tensor> value_logits_ctrl;
   std::vector<torch::Tensor> features;
   policy_logits.reserve(time);
-  value_logits.reserve(time);
+  encoded_seq_stack.reserve(time);
+  value_logits_ext.reserve(time);
+  value_logits_cur.reserve(time);
+  value_logits_learn.reserve(time);
+  value_logits_ctrl.reserve(time);
   features.reserve(time);
 
   for (std::int64_t t = 0; t < time; ++t) {
@@ -269,21 +338,53 @@ ActorSequenceOutput PPOActorImpl::forward_sequence(
     }
     ActorStepOutput out = forward_encoded_step(encoded_seq[t], std::move(state), starts);
     policy_logits.push_back(out.policy_logits);
-    value_logits.push_back(out.value_logits);
+    encoded_seq_stack.push_back(out.encoded);
+    value_logits_ext.push_back(out.value_ext.logits);
+    value_logits_cur.push_back(out.value_cur.logits);
+    value_logits_learn.push_back(out.value_learn.logits);
+    value_logits_ctrl.push_back(out.value_ctrl.logits);
     features.push_back(out.features);
     state = std::move(out.state);
   }
 
   return {
       torch::stack(policy_logits, 0),
-      torch::stack(value_logits, 0),
+      torch::stack(encoded_seq_stack, 0),
+      {torch::stack(value_logits_ext, 0), atom_support_ext_},
+      {torch::stack(value_logits_cur, 0), atom_support_cur_},
+      {torch::stack(value_logits_learn, 0), atom_support_learn_},
+      {torch::stack(value_logits_ctrl, 0), atom_support_ctrl_},
       torch::stack(features, 0),
       std::move(state),
   };
 }
 
-torch::Tensor PPOActorImpl::value_support() const {
-  return atom_support_;
+torch::Tensor PPOActorImpl::value_support(const std::string& head_name) const {
+  auto it = atom_supports_.find(head_name);
+  if (it != atom_supports_.end()) {
+    return *(it->second);
+  }
+  return atom_support_ext_;
+}
+
+const ValueHeadOutput& PPOActorImpl::value_head_output(const std::string& head_name, const ActorStepOutput& output) const {
+  if (head_name == "extrinsic") return output.value_ext;
+  if (head_name == "curiosity") return output.value_cur;
+  if (head_name == "learning_progress") return output.value_learn;
+  if (head_name == "controllability") return output.value_ctrl;
+  return output.value_ext;
+}
+
+const ValueHeadOutput& PPOActorImpl::value_head_output(const std::string& head_name, const ActorSequenceOutput& output) const {
+  if (head_name == "extrinsic") return output.value_ext;
+  if (head_name == "curiosity") return output.value_cur;
+  if (head_name == "learning_progress") return output.value_learn;
+  if (head_name == "controllability") return output.value_ctrl;
+  return output.value_ext;
+}
+
+std::vector<std::string> PPOActorImpl::enabled_critic_heads() const {
+  return enabled_critic_heads_;
 }
 
 int PPOActorImpl::feature_dim() const {
@@ -294,13 +395,31 @@ const ModelConfig& PPOActorImpl::config() const {
   return config_;
 }
 
+torch::Tensor PPOActorImpl::forward_predict_next(torch::Tensor encoded, torch::Tensor actions) {
+  torch::Tensor action_features = torch::nn::functional::one_hot(
+      actions.to(torch::kLong), config_.action_dim).to(encoded.device()).to(torch::kFloat32);
+  torch::Tensor combined = torch::cat({encoded, action_features}, -1);
+  return forward_head_->forward(combined);
+}
+
+torch::Tensor PPOActorImpl::forward_predict_action(torch::Tensor encoded_t, torch::Tensor encoded_tp1) {
+  torch::Tensor combined = torch::cat({encoded_t, encoded_tp1}, -1);
+  return inverse_head_->forward(combined);
+}
+
+torch::Tensor PPOActorImpl::compute_forward_prediction_error(
+    torch::Tensor encoded, torch::Tensor actions, torch::Tensor encoded_tp1) {
+  torch::Tensor predicted_next = forward_predict_next(encoded, actions);
+  return torch::mse_loss(predicted_next, encoded_tp1, torch::Reduction::None).mean(-1);
+}
+
 PPOActor load_ppo_actor(const std::string& checkpoint_path, const std::string& device) {
   namespace fs = std::filesystem;
   const fs::path base(checkpoint_path);
   const ExperimentConfig config = load_experiment_config((base / "config.json").string());
   const CheckpointMetadata metadata = load_checkpoint_metadata((base / "metadata.json").string());
   validate_inference_checkpoint_metadata(metadata, config);
-  if (metadata.architecture_name != "ppo_continuum") {
+  if (metadata.architecture_name != "ppo_continuum" && metadata.architecture_name != "dappo_continuum") {
     throw std::runtime_error("Checkpoint is not a PPO actor checkpoint.");
   }
 

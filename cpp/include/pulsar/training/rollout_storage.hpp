@@ -2,6 +2,10 @@
 
 #ifdef PULSAR_HAS_TORCH
 
+#include <string>
+#include <unordered_map>
+#include <vector>
+
 #include <torch/torch.h>
 
 #include "pulsar/model/ppo_actor.hpp"
@@ -26,8 +30,8 @@ class RolloutStorage {
       const torch::Tensor& learner_active,
       const torch::Tensor& actions,
       const torch::Tensor& action_log_probs,
-      const torch::Tensor& values,
-      const torch::Tensor& rewards,
+      const std::unordered_map<std::string, torch::Tensor>& values,
+      const std::unordered_map<std::string, torch::Tensor>& rewards,
       const torch::Tensor& dones);
 
   void set_final_observation(const torch::Tensor& raw_obs);
@@ -36,6 +40,11 @@ class RolloutStorage {
 
   [[nodiscard]] int rollout_length() const;
   [[nodiscard]] int num_agents() const;
+
+  [[nodiscard]] torch::Tensor value(const std::string& head_name) const;
+  [[nodiscard]] torch::Tensor reward(const std::string& stream_name) const;
+  [[nodiscard]] const std::unordered_map<std::string, torch::Tensor>& all_values() const;
+  [[nodiscard]] const std::unordered_map<std::string, torch::Tensor>& all_rewards() const;
 
   ContinuumState initial_state{};
   torch::Tensor raw_obs;
@@ -46,14 +55,14 @@ class RolloutStorage {
   torch::Tensor learner_active;
   torch::Tensor actions;
   torch::Tensor action_log_probs;
-  torch::Tensor values;
-  torch::Tensor rewards;
   torch::Tensor dones;
 
  private:
   int rollout_length_ = 0;
   int num_agents_ = 0;
   torch::Device device_{torch::kCPU};
+  std::unordered_map<std::string, torch::Tensor> values_;
+  std::unordered_map<std::string, torch::Tensor> rewards_;
 };
 
 }  // namespace pulsar

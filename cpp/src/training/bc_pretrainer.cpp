@@ -113,11 +113,11 @@ torch::Tensor BCPretrainer::map_outcome_to_value_target(const torch::Tensor& out
 BCEpochMetrics BCPretrainer::train_epoch(int epoch_index) {
   BCEpochMetrics metrics{};
   actor_->train();
-  train_dataset_.for_each_batch(
+  train_dataset_.for_each_packed_trajectory_batch(
       config_.offline_dataset.batch_size,
       config_.offline_dataset.shuffle,
       config_.offline_dataset.seed + static_cast<std::uint64_t>(epoch_index),
-      [&](const OfflineTensorBatch& batch) {
+      [&](const OfflineTensorPackedBatch& batch) {
         const torch::Tensor obs = batch.obs.to(device_);
         const torch::Tensor normalized =
             actor_normalizer_
@@ -163,12 +163,12 @@ BCEpochMetrics BCPretrainer::train_epoch(int epoch_index) {
         }
 
         torch::Tensor value_loss = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-        if (batch.outcomes.defined()) {
-          const torch::Tensor flat_outcomes = batch.outcomes.reshape({-1}).index({flat_valid});
+        if (batch.outcome.defined()) {
+          const torch::Tensor flat_outcomes = batch.outcome.reshape({-1}).index({flat_valid});
           const torch::Tensor value_targets = map_outcome_to_value_target(flat_outcomes);
           const torch::Tensor flat_value_logits =
-              output.value_logits.reshape({-1, config_.model.value_num_atoms}).index({flat_valid});
-          const torch::Tensor atom_support = actor_->value_support().to(device_);
+              output.value_ext.logits.reshape({-1, config_.model.value_num_atoms}).index({flat_valid});
+          const torch::Tensor atom_support = actor_->value_support("extrinsic").to(device_);
           const torch::Tensor proj = torch::log_softmax(flat_value_logits, -1);
           torch::Tensor proj_loss = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
           const float delta_z = (config_.model.value_v_max - config_.model.value_v_min) /
@@ -201,11 +201,11 @@ BCEpochMetrics BCPretrainer::evaluate() {
   BCEpochMetrics metrics{};
   actor_->eval();
   torch::NoGradGuard no_grad;
-  val_dataset_.for_each_batch(
+  val_dataset_.for_each_packed_trajectory_batch(
       config_.offline_dataset.batch_size,
       false,
       config_.offline_dataset.seed,
-      [&](const OfflineTensorBatch& batch) {
+      [&](const OfflineTensorPackedBatch& batch) {
         const torch::Tensor obs = batch.obs.to(device_);
         const torch::Tensor normalized =
             actor_normalizer_
@@ -258,6 +258,7 @@ void BCPretrainer::save_checkpoint(const std::string& output_dir, int epoch_inde
           .device = config_.ppo.device,
           .global_step = 0,
           .update_index = 0,
+          .critic_heads = actor_->enabled_critic_heads(),
       },
       (base / "metadata.json").string());
 

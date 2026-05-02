@@ -2,10 +2,12 @@
 
 #ifdef PULSAR_HAS_TORCH
 
+#include <deque>
 #include <filesystem>
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "pulsar/checkpoint/checkpoint.hpp"
@@ -19,6 +21,11 @@
 #include "pulsar/training/self_play_manager.hpp"
 
 namespace pulsar {
+
+struct SuccessBufferEntry {
+  torch::Tensor obs;
+  torch::Tensor action;
+};
 
 struct TrainerMetrics {
   double collection_agent_steps_per_second = 0.0;
@@ -40,7 +47,14 @@ struct TrainerMetrics {
   double adaptive_epsilon = 0.0;
   double critic_variance = 0.0;
   double mean_confidence_weight = 0.0;
+  double extrinsic_reward_mean = 0.0;
+  double curiosity_reward_mean = 0.0;
+  double learning_progress_reward_mean = 0.0;
+  double bc_regularization_beta = 0.0;
+  double novelty_ema = 0.0;
+  double learning_progress_ema = 0.0;
   std::map<std::string, double> elo_ratings{};
+  std::map<std::string, double> value_losses{};
 };
 
 class APPOTrainer {
@@ -63,6 +77,11 @@ class APPOTrainer {
   TrainerMetrics update_actor();
   CheckpointMetadata make_checkpoint_metadata(std::int64_t global_step, int update_index) const;
 
+  void update_weight_schedule();
+  void decay_bc_beta();
+  void add_to_success_buffer(const torch::Tensor& obs, const torch::Tensor& action);
+  void maybe_sample_success_buffer(torch::Tensor& obs_batch, torch::Tensor& action_batch, int batch_size);
+
   ExperimentConfig config_{};
   std::unique_ptr<BatchedRocketSimCollector> collector_{};
   std::unique_ptr<SelfPlayManager> self_play_manager_{};
@@ -80,6 +99,13 @@ class APPOTrainer {
   ContinuumState collection_state_{};
   ContinuumState opponent_collection_state_{};
   bool use_pinned_host_buffers_ = false;
+
+  std::unordered_map<std::string, float> head_weights_{};
+  float current_beta_ = 0.0F;
+  double novelty_ema_ = 0.0;
+  double learning_progress_ema_ = 0.0;
+  std::deque<SuccessBufferEntry> success_buffer_{};
+  std::int64_t updates_since_last_success_ = 0;
 };
 
 }  // namespace pulsar

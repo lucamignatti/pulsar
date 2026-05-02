@@ -5,16 +5,17 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <random>
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
 #include <ATen/Context.h>
 
-#include "pulsar/tracing/tracing.hpp"
 #include "pulsar/training/ppo_math.hpp"
 
 namespace pulsar {
@@ -66,6 +67,12 @@ void append_metrics_line(
       {"adaptive_epsilon", metrics.adaptive_epsilon},
       {"critic_variance", metrics.critic_variance},
       {"mean_confidence_weight", metrics.mean_confidence_weight},
+      {"extrinsic_reward_mean", metrics.extrinsic_reward_mean},
+      {"curiosity_reward_mean", metrics.curiosity_reward_mean},
+      {"learning_progress_reward_mean", metrics.learning_progress_reward_mean},
+      {"bc_regularization_beta", metrics.bc_regularization_beta},
+      {"novelty_ema", metrics.novelty_ema},
+      {"learning_progress_ema", metrics.learning_progress_ema},
       {"obs_build_seconds", metrics.obs_build_seconds},
       {"mask_build_seconds", metrics.mask_build_seconds},
       {"policy_forward_seconds", metrics.policy_forward_seconds},
@@ -78,6 +85,9 @@ void append_metrics_line(
   };
   for (const auto& [mode, rating] : metrics.elo_ratings) {
     line["elo_" + mode] = rating;
+  }
+  for (const auto& [head, loss] : metrics.value_losses) {
+    line["value_loss_" + head] = loss;
   }
   std::filesystem::create_directories(checkpoint_dir);
   std::ofstream output(checkpoint_dir / "metrics.jsonl", std::ios::app);
@@ -116,6 +126,17 @@ APPOTrainer::APPOTrainer(
   use_pinned_host_buffers_ = device_.is_cuda();
   actor_->to(device_);
   actor_normalizer_.to(device_);
+
+  head_weights_["extrinsic"] = config_.weight_schedule.initial_extrinsic_weight;
+  head_weights_["curiosity"] = config_.weight_schedule.initial_curiosity_weight;
+  head_weights_["learning_progress"] = config_.weight_schedule.initial_learning_progress_weight;
+  head_weights_["controllability"] = config_.weight_schedule.initial_controllability_weight;
+
+  current_beta_ = config_.bc_regularization.initial_beta;
+  novelty_ema_ = 0.0;
+  learning_progress_ema_ = 0.0;
+  updates_since_last_success_ = 0;
+
   maybe_initialize_from_checkpoint();
 
   if (self_play_manager_ && self_play_manager_->enabled()) {
@@ -159,6 +180,64 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
   }
 }
 
+void APPOTrainer::update_weight_schedule() {
+  head_weights_["extrinsic"] = advance_weight_schedule(
+      head_weights_["extrinsic"],
+      config_.weight_schedule.extrinsic_weight_growth_rate,
+      config_.weight_schedule.max_extrinsic_weight);
+  head_weights_["curiosity"] = std::max(
+      head_weights_["curiosity"] * config_.weight_schedule.intrinsic_weight_decay_rate,
+      config_.weight_schedule.min_intrinsic_weight);
+  head_weights_["learning_progress"] = std::max(
+      head_weights_["learning_progress"] * config_.weight_schedule.intrinsic_weight_decay_rate,
+      config_.weight_schedule.min_intrinsic_weight);
+}
+
+void APPOTrainer::decay_bc_beta() {
+  current_beta_ = std::max(current_beta_ * config_.bc_regularization.beta_decay, config_.bc_regularization.min_beta);
+}
+
+void APPOTrainer::add_to_success_buffer(const torch::Tensor& obs, const torch::Tensor& action) {
+  torch::Tensor obs_cpu = obs.detach().to(torch::kCPU).clone();
+  torch::Tensor action_cpu = action.detach().to(torch::kCPU).clone();
+  success_buffer_.push_back({obs_cpu, action_cpu});
+  while (static_cast<int>(success_buffer_.size()) > config_.success_buffer.capacity) {
+    success_buffer_.pop_front();
+  }
+}
+
+void APPOTrainer::maybe_sample_success_buffer(
+    torch::Tensor& obs_batch,
+    torch::Tensor& action_batch,
+    int batch_size) {
+  if (success_buffer_.empty()) {
+    return;
+  }
+  const int num_success_samples = std::max(
+      1, static_cast<int>(batch_size * config_.success_buffer.oversample_ratio));
+  const int actual_samples = std::min(num_success_samples, static_cast<int>(success_buffer_.size()));
+
+  static thread_local std::mt19937 rng(std::random_device{}());
+  std::uniform_int_distribution<size_t> dist(0, success_buffer_.size() - 1);
+
+  std::vector<torch::Tensor> sampled_obs;
+  std::vector<torch::Tensor> sampled_actions;
+  sampled_obs.reserve(actual_samples);
+  sampled_actions.reserve(actual_samples);
+
+  for (int i = 0; i < actual_samples; ++i) {
+    size_t idx = dist(rng);
+    sampled_obs.push_back(success_buffer_[idx].obs);
+    sampled_actions.push_back(success_buffer_[idx].action);
+  }
+
+  torch::Tensor success_obs = torch::stack(sampled_obs, 0).to(device_);
+  torch::Tensor success_actions = torch::stack(sampled_actions, 0).to(device_);
+
+  obs_batch = torch::cat({obs_batch, success_obs}, 0);
+  action_batch = torch::cat({action_batch, success_actions}, 0);
+}
+
 TrainerMetrics APPOTrainer::update_actor() {
   const auto update_start = std::chrono::steady_clock::now();
   TrainerMetrics metrics{};
@@ -170,22 +249,24 @@ TrainerMetrics APPOTrainer::update_actor() {
   double accumulated_epsilon = 0.0;
   double accumulated_confidence = 0.0;
 
-  const torch::Tensor value_scalars = rollout_.values;
-  const torch::Tensor advantages = compute_gae(
-      value_scalars, rollout_.rewards, rollout_.dones,
-      config_.ppo.gamma, config_.ppo.gae_lambda);
-  const torch::Tensor returns = advantages + value_scalars.detach();
+  const auto& all_values = rollout_.all_values();
+  const auto& all_rewards = rollout_.all_rewards();
 
-  torch::Tensor advantages_normalized = advantages;
-  const int64_t active_count = rollout_.learner_active.sum().item<int64_t>();
-  if (active_count > 0) {
-    const torch::Tensor active_adv = advantages.masked_select(rollout_.learner_active > 0.5F);
-    const float adv_mean = active_adv.mean().item<float>();
-    const float adv_std = active_adv.std().item<float>();
-    advantages_normalized = (advantages - adv_mean) / (adv_std + 1.0e-8F);
+  std::unordered_map<std::string, torch::Tensor> per_head_advantages =
+      compute_per_head_advantages(all_values, all_rewards, rollout_.dones,
+                                   config_.ppo.gamma, config_.ppo.gae_lambda);
+  std::unordered_map<std::string, torch::Tensor> per_head_returns =
+      compute_per_head_returns(per_head_advantages, all_values);
+
+  torch::Tensor active_mask = rollout_.learner_active > 0.5F;
+  std::unordered_map<std::string, torch::Tensor> normalized_advantages;
+  for (const auto& [name, adv] : per_head_advantages) {
+    normalized_advantages[name] = normalize_advantage(adv, active_mask);
   }
 
-  const torch::Tensor atom_support = actor_->value_support().to(device_);
+  torch::Tensor mixed_advantages = mix_advantages(normalized_advantages, head_weights_, active_mask);
+
+  const torch::Tensor atom_support_ext = actor_->value_support("extrinsic").to(device_);
 
   for (int epoch = 0; epoch < config_.ppo.update_epochs; ++epoch) {
     const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
@@ -217,7 +298,6 @@ TrainerMetrics APPOTrainer::update_actor() {
         }
 
         torch::Tensor policy_logits = output.policy_logits.narrow(0, burn, loss_steps);
-        torch::Tensor new_value_logits = output.value_logits.narrow(0, burn, loss_steps);
 
         const torch::Tensor action_masks =
             rollout_.action_masks.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_).to(torch::kBool);
@@ -227,10 +307,8 @@ TrainerMetrics APPOTrainer::update_actor() {
             rollout_.actions.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
         const torch::Tensor old_log_probs =
             rollout_.action_log_probs.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
-        const torch::Tensor chunk_returns =
-            returns.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
         const torch::Tensor chunk_advantages =
-            advantages_normalized.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
+            mixed_advantages.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
 
         const auto samples = loss_steps * count;
         const torch::Tensor flat_active = learner_active.reshape({samples}) > 0.5F;
@@ -242,17 +320,13 @@ TrainerMetrics APPOTrainer::update_actor() {
         torch::Tensor flat_masks = action_masks.reshape({samples, config_.model.action_dim});
         torch::Tensor flat_actions = old_actions.reshape({samples});
         torch::Tensor flat_old_log_probs = old_log_probs.reshape({samples});
-        torch::Tensor flat_returns = chunk_returns.reshape({samples});
         torch::Tensor flat_advantages = chunk_advantages.reshape({samples});
-        torch::Tensor flat_value_logits = new_value_logits.reshape({samples, config_.model.value_num_atoms});
 
         const torch::Tensor active_logits = flat_logits.index({flat_active});
         const torch::Tensor active_masks = flat_masks.index({flat_active});
         const torch::Tensor active_actions = flat_actions.index({flat_active});
         const torch::Tensor active_old_log_probs = flat_old_log_probs.index({flat_active});
-        const torch::Tensor active_returns = flat_returns.index({flat_active});
         const torch::Tensor active_advantages = flat_advantages.index({flat_active});
-        const torch::Tensor active_value_logits = flat_value_logits.index({flat_active});
 
         const torch::Tensor log_probs =
             torch::log_softmax(apply_action_mask_to_logits(active_logits, active_masks), -1);
@@ -261,7 +335,10 @@ TrainerMetrics APPOTrainer::update_actor() {
         float epsilon = config_.ppo.clip_range;
         torch::Tensor confidence_weights = torch::ones({active_advantages.size(0)}, active_advantages.options());
         if (config_.ppo.use_adaptive_epsilon || config_.ppo.use_confidence_weighting) {
-          const torch::Tensor critic_variance = compute_distribution_variance(active_value_logits, atom_support);
+          torch::Tensor ext_value_logits_chunk = output.value_ext.logits.narrow(0, burn, loss_steps);
+          torch::Tensor flat_ext_value_logits = ext_value_logits_chunk.reshape({samples, config_.model.value_num_atoms});
+          torch::Tensor active_ext_value_logits = flat_ext_value_logits.index({flat_active});
+          const torch::Tensor critic_variance = compute_distribution_variance(active_ext_value_logits, atom_support_ext);
           if (config_.ppo.use_adaptive_epsilon) {
             epsilon = compute_adaptive_epsilon(
                 critic_variance,
@@ -272,8 +349,8 @@ TrainerMetrics APPOTrainer::update_actor() {
           }
           if (config_.ppo.use_confidence_weighting) {
             confidence_weights = compute_confidence_weights(
-                active_value_logits,
-                atom_support,
+                active_ext_value_logits,
+                atom_support_ext,
                 config_.ppo.confidence_weight_type,
                 config_.ppo.confidence_weight_delta,
                 config_.ppo.normalize_confidence_weights);
@@ -287,17 +364,42 @@ TrainerMetrics APPOTrainer::update_actor() {
             clipped_ppo_policy_loss(current_log_probs, active_old_log_probs, active_advantages, epsilon);
         policy_loss = (policy_loss * confidence_weights).mean();
 
+        if (current_beta_ > 0.0F) {
+          torch::Tensor bc_loss = torch::nn::functional::cross_entropy(
+              active_logits,
+              active_actions.to(torch::kLong),
+              torch::nn::functional::CrossEntropyFuncOptions().reduction(torch::kMean));
+          policy_loss = policy_loss + current_beta_ * bc_loss;
+        }
+
         const torch::Tensor entropy = masked_action_entropy(active_logits, active_masks).mean();
-        const torch::Tensor value_loss = distributional_value_loss(
-            active_value_logits,
-            active_returns,
-            atom_support,
-            config_.model.value_v_min,
-            config_.model.value_v_max,
-            config_.model.value_num_atoms);
+
+        torch::Tensor total_value_loss = torch::zeros({}, active_advantages.options());
+        const std::vector<std::string> trainable_heads = {"extrinsic", "curiosity", "learning_progress"};
+
+        for (const auto& head_name : trainable_heads) {
+          auto returns_it = per_head_returns.find(head_name);
+          if (returns_it == per_head_returns.end()) {
+            continue;
+          }
+          torch::Tensor flat_head_returns =
+              returns_it->second.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_).reshape({samples});
+          torch::Tensor active_head_returns = flat_head_returns.index({flat_active});
+
+          const ValueHeadOutput& head_output = actor_->value_head_output(head_name, output);
+          torch::Tensor head_logits_chunk = head_output.logits.narrow(0, burn, loss_steps);
+          torch::Tensor flat_head_logits = head_logits_chunk.reshape({samples, head_output.support.size(0)});
+          torch::Tensor active_head_logits = flat_head_logits.index({flat_active});
+
+          torch::Tensor head_loss = distributional_value_loss(
+              active_head_logits, active_head_returns, head_output.support,
+              config_.model.value_v_min, config_.model.value_v_max, config_.model.value_num_atoms);
+          total_value_loss = total_value_loss + head_loss;
+          metrics.value_losses[head_name] += head_loss.item<double>() * static_cast<double>(active_logits.size(0));
+        }
 
         const torch::Tensor loss =
-            policy_loss + config_.ppo.value_coef * value_loss - config_.ppo.entropy_coef * entropy;
+            policy_loss + config_.ppo.value_coef * total_value_loss - config_.ppo.entropy_coef * entropy;
 
         metrics.forward_backward_seconds +=
             std::chrono::duration<double>(std::chrono::steady_clock::now() - forward_start).count();
@@ -311,7 +413,7 @@ TrainerMetrics APPOTrainer::update_actor() {
 
         const auto active_samples = active_logits.size(0);
         metrics.policy_loss += policy_loss.item<double>() * static_cast<double>(active_samples);
-        metrics.value_loss += value_loss.item<double>() * static_cast<double>(active_samples);
+        metrics.value_loss += total_value_loss.item<double>() * static_cast<double>(active_samples);
         metrics.entropy += entropy.item<double>() * static_cast<double>(active_samples);
         metric_steps += active_samples;
       }
@@ -325,6 +427,9 @@ TrainerMetrics APPOTrainer::update_actor() {
     metrics.adaptive_epsilon = accumulated_epsilon / static_cast<double>(metric_steps);
     metrics.critic_variance = accumulated_variance / static_cast<double>(metric_steps);
     metrics.mean_confidence_weight = accumulated_confidence / static_cast<double>(metric_steps);
+    for (auto& [name, loss] : metrics.value_losses) {
+      loss /= static_cast<double>(metric_steps);
+    }
   }
   metrics.update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count();
   return metrics;
@@ -338,7 +443,15 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
 
   const auto collection_start = std::chrono::steady_clock::now();
   rollout_.set_initial_state(collection_state_);
-  const torch::Tensor atom_support = actor_->value_support().to(device_);
+  const torch::Tensor atom_support_ext = actor_->value_support("extrinsic").to(device_);
+
+  torch::Tensor prev_encoded;
+  torch::Tensor prev_action;
+  bool has_prev_step = false;
+  double total_extrinsic_reward = 0.0;
+  double total_curiosity_reward = 0.0;
+  double total_learning_progress_reward = 0.0;
+  int64_t total_steps = 0;
 
   for (int step = 0; step < config_.ppo.rollout_length; ++step) {
     torch::Tensor raw_obs_host = collector_->host_observations();
@@ -351,16 +464,15 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     torch::Tensor normalized_obs;
     torch::Tensor actions;
     torch::Tensor action_log_probs;
-    torch::Tensor sampled_values;
+    ActorStepOutput output;
     const auto policy_start = std::chrono::steady_clock::now();
     {
       torch::NoGradGuard no_grad;
       actor_normalizer_.update(raw_obs);
       normalized_obs = actor_normalizer_.normalize(raw_obs);
-      ActorStepOutput output = actor_->forward_step(normalized_obs, std::move(collection_state_), episode_starts);
+      output = actor_->forward_step(normalized_obs, std::move(collection_state_), episode_starts);
       collection_state_ = std::move(output.state);
       actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
-      sampled_values = sample_quantile_value(output.value_logits, atom_support);
     }
     metrics.policy_forward_seconds +=
         std::chrono::duration<double>(std::chrono::steady_clock::now() - policy_start).count();
@@ -379,6 +491,8 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
       actions = torch::where(snapshot_ids >= 0, opponent_actions, actions);
     }
 
+    torch::Tensor sampled_ext_value = sample_quantile_value(output.value_ext.logits, atom_support_ext);
+
     const auto decode_start = std::chrono::steady_clock::now();
     const torch::Tensor action_indices_cpu = actions.contiguous().to(torch::kCPU);
     collector_->step(
@@ -391,27 +505,110 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
 
     torch::Tensor dones = collector_->host_dones().to(device_, use_pinned_host_buffers_);
     torch::Tensor terminal_labels = collector_->host_terminal_outcome_labels();
-    torch::Tensor step_rewards = map_outcome_labels_to_rewards(terminal_labels);
-    step_rewards = step_rewards.to(device_, use_pinned_host_buffers_) * dones;
+    torch::Tensor extrinsic_rewards = map_outcome_labels_to_rewards(terminal_labels);
+    extrinsic_rewards = extrinsic_rewards.to(device_, use_pinned_host_buffers_) * dones;
+
+    torch::Tensor curiosity_rewards = torch::zeros_like(extrinsic_rewards);
+    torch::Tensor learning_progress_rewards = torch::zeros_like(extrinsic_rewards);
+    torch::Tensor controllability_rewards = torch::zeros_like(extrinsic_rewards);
+
+    {
+      torch::NoGradGuard no_grad;
+      if (has_prev_step) {
+        torch::Tensor predicted_next = actor_->forward_predict_next(prev_encoded, prev_action);
+        torch::Tensor encoded_now = output.encoded;
+        torch::Tensor pred_error = torch::mse_loss(
+            predicted_next, encoded_now, torch::Reduction::None).mean(-1);
+
+        double novel_val = pred_error.mean().item<double>();
+        double novelty_delta = novel_val - novelty_ema_;
+        novelty_ema_ = config_.intrinsic_rewards.novelty_ema_decay * novelty_ema_ +
+                       (1.0 - config_.intrinsic_rewards.novelty_ema_decay) * novel_val;
+        learning_progress_ema_ = config_.intrinsic_rewards.learning_progress_ema_decay * learning_progress_ema_ +
+                                (1.0 - config_.intrinsic_rewards.learning_progress_ema_decay) * std::abs(novelty_delta);
+
+        curiosity_rewards = pred_error * config_.intrinsic_rewards.curiosity_weight;
+
+        double learn_val = static_cast<double>(learning_progress_ema_);
+        learning_progress_rewards = torch::full_like(extrinsic_rewards, learn_val * config_.intrinsic_rewards.learning_progress_weight);
+
+        if (config_.intrinsic_rewards.use_controllability_gate) {
+          torch::Tensor inv_logits = actor_->forward_predict_action(prev_encoded, encoded_now);
+          torch::Tensor inv_probs = torch::softmax(inv_logits, -1);
+          torch::Tensor correct_probs = inv_probs.gather(1, prev_action.unsqueeze(1)).squeeze(1);
+          torch::Tensor controllability = correct_probs;
+          curiosity_rewards = curiosity_rewards * controllability;
+          learning_progress_rewards = learning_progress_rewards * controllability;
+          controllability_rewards = controllability * config_.intrinsic_rewards.controllability_weight;
+        }
+      }
+    }
+
+    total_extrinsic_reward += extrinsic_rewards.sum().item<double>();
+    total_curiosity_reward += curiosity_rewards.sum().item<double>();
+    total_learning_progress_reward += learning_progress_rewards.sum().item<double>();
+    total_steps += extrinsic_rewards.numel();
+
+    has_prev_step = true;
+    prev_encoded = output.encoded.detach().clone();
+    prev_action = actions.detach().clone();
+
+    torch::Tensor episode_starts_cpu = episode_starts.to(torch::kCPU);
+    if (step == 0 || episode_starts_cpu.any().item<bool>()) {
+      has_prev_step = false;
+    }
+
+    const torch::Tensor atom_support_cur = actor_->value_support("curiosity").to(device_);
+    const torch::Tensor atom_support_learn = actor_->value_support("learning_progress").to(device_);
+
+    std::unordered_map<std::string, torch::Tensor> all_values;
+    all_values["extrinsic"] = sampled_ext_value.to(torch::kCPU);
+    all_values["curiosity"] = compute_mean_value(output.value_cur.logits, atom_support_cur).to(torch::kCPU);
+    all_values["learning_progress"] = compute_mean_value(output.value_learn.logits, atom_support_learn).to(torch::kCPU);
+
+    std::unordered_map<std::string, torch::Tensor> all_rewards;
+    all_rewards["extrinsic"] = extrinsic_rewards.to(torch::kCPU);
+    all_rewards["curiosity"] = curiosity_rewards.to(torch::kCPU);
+    all_rewards["learning_progress"] = learning_progress_rewards.to(torch::kCPU);
 
     rollout_.append(
         step,
         raw_obs_host,
         normalized_obs.to(torch::kCPU),
-        episode_starts.to(torch::kCPU),
+        episode_starts_cpu,
         action_masks.to(torch::kUInt8).to(torch::kCPU),
         learner_active.to(torch::kCPU),
         actions.to(torch::kCPU),
         action_log_probs.to(torch::kCPU),
-        sampled_values.to(torch::kCPU),
-        step_rewards.to(torch::kCPU),
+        all_values,
+        all_rewards,
         dones.to(torch::kCPU));
 
     collected_agent_steps += learner_active.sum().item<std::int64_t>();
+
+    bool any_extrinsic_success = (extrinsic_rewards > 0.0F).any().item<bool>();
+    if (any_extrinsic_success) {
+      torch::Tensor success_mask = extrinsic_rewards > 0.0F;
+      torch::Tensor success_obs = normalized_obs.index({success_mask});
+      torch::Tensor success_actions = actions.index({success_mask});
+      if (success_obs.size(0) > 0) {
+        add_to_success_buffer(success_obs, success_actions);
+      }
+      updates_since_last_success_ = 0;
+    }
   }
   rollout_.set_final_observation(collector_->host_observations());
   const double collection_seconds =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - collection_start).count();
+
+  if (total_steps > 0) {
+    metrics.extrinsic_reward_mean = total_extrinsic_reward / static_cast<double>(total_steps);
+    metrics.curiosity_reward_mean = total_curiosity_reward / static_cast<double>(total_steps);
+    metrics.learning_progress_reward_mean = total_learning_progress_reward / static_cast<double>(total_steps);
+  }
+  metrics.novelty_ema = novelty_ema_;
+  metrics.learning_progress_ema = learning_progress_ema_;
+  metrics.bc_regularization_beta = static_cast<double>(current_beta_);
 
   TrainerMetrics update_metrics = update_actor();
   metrics.policy_loss = update_metrics.policy_loss;
@@ -423,6 +620,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   metrics.adaptive_epsilon = update_metrics.adaptive_epsilon;
   metrics.critic_variance = update_metrics.critic_variance;
   metrics.mean_confidence_weight = update_metrics.mean_confidence_weight;
+  metrics.value_losses = update_metrics.value_losses;
 
   metrics.obs_build_seconds = collector_timings.obs_build_seconds;
   metrics.mask_build_seconds = collector_timings.mask_build_seconds;
@@ -442,6 +640,11 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     metrics.self_play_eval_seconds = self_play_metrics.eval_seconds;
     metrics.elo_ratings = self_play_metrics.ratings;
   }
+
+  update_weight_schedule();
+  decay_bc_beta();
+  updates_since_last_success_++;
+
   metrics.overall_agent_steps_per_second =
       collected_agent_steps > 0
           ? static_cast<double>(collected_agent_steps) /
@@ -460,6 +663,7 @@ CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
       .device = config_.ppo.device,
       .global_step = global_step,
       .update_index = update_index,
+      .critic_heads = actor_->enabled_critic_heads(),
   };
 }
 
@@ -517,6 +721,10 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " epsilon=" << metrics.adaptive_epsilon
               << " critic_var=" << metrics.critic_variance
               << " conf_weight=" << metrics.mean_confidence_weight
+              << " ext_r=" << metrics.extrinsic_reward_mean
+              << " cur_r=" << metrics.curiosity_reward_mean
+              << " learn_r=" << metrics.learning_progress_reward_mean
+              << " beta=" << metrics.bc_regularization_beta
               << '\n';
     if (wandb.enabled()) {
       wandb.log(nlohmann::json{
@@ -528,6 +736,11 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"adaptive_epsilon", metrics.adaptive_epsilon},
           {"critic_variance", metrics.critic_variance},
           {"mean_confidence_weight", metrics.mean_confidence_weight},
+          {"extrinsic_reward_mean", metrics.extrinsic_reward_mean},
+          {"curiosity_reward_mean", metrics.curiosity_reward_mean},
+          {"learning_progress_reward_mean", metrics.learning_progress_reward_mean},
+          {"bc_regularization_beta", metrics.bc_regularization_beta},
+          {"novelty_ema", metrics.novelty_ema},
       });
     }
     if (config_.ppo.checkpoint_interval > 0 && update_index % config_.ppo.checkpoint_interval == 0) {

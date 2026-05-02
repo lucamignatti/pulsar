@@ -126,6 +126,7 @@ if(PULSAR_ENABLE_TORCH)
       cpp/src/model/ppo_actor.cpp
       cpp/src/model/normalizer.cpp
       cpp/src/training/offline_dataset.cpp
+      cpp/src/training/transition_dataset.cpp
       cpp/src/training/bc_pretrainer.cpp
       cpp/src/training/rollout_storage.cpp
       cpp/src/training/ppo_math.cpp

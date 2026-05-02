@@ -1,12 +1,46 @@
 #include "pulsar/checkpoint/checkpoint.hpp"
 
+#include <array>
+#include <algorithm>
 #include <fstream>
 #include <iomanip>
+#include <string_view>
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
 
 namespace pulsar {
+namespace {
+
+void validate_critic_heads(const CheckpointMetadata& metadata) {
+  if (metadata.critic_heads.empty()) {
+    return;
+  }
+
+  constexpr std::array<std::string_view, 4> supported_heads = {
+      "extrinsic",
+      "curiosity",
+      "learning_progress",
+      "controllability",
+  };
+
+  const bool has_extrinsic = std::find(
+      metadata.critic_heads.begin(),
+      metadata.critic_heads.end(),
+      std::string{"extrinsic"}) != metadata.critic_heads.end();
+  if (!has_extrinsic) {
+    throw std::runtime_error("Checkpoint critic_heads metadata must include the extrinsic head.");
+  }
+
+  for (const auto& head_name : metadata.critic_heads) {
+    const auto it = std::find(supported_heads.begin(), supported_heads.end(), head_name);
+    if (it == supported_heads.end()) {
+      throw std::runtime_error("Checkpoint critic_heads metadata contains an unsupported head: " + head_name);
+    }
+  }
+}
+
+}  // namespace
 
 void save_checkpoint_metadata(const CheckpointMetadata& metadata, const std::string& path) {
   std::ofstream output(path);
@@ -30,6 +64,7 @@ CheckpointMetadata load_checkpoint_metadata(const std::string& path) {
 }
 
 void validate_checkpoint_metadata(const CheckpointMetadata& metadata, const ExperimentConfig& config) {
+  validate_critic_heads(metadata);
   if (metadata.schema_version != config.schema_version) {
     throw std::runtime_error("Checkpoint schema_version does not match config.");
   }
@@ -45,6 +80,7 @@ void validate_checkpoint_metadata(const CheckpointMetadata& metadata, const Expe
 }
 
 void validate_inference_checkpoint_metadata(const CheckpointMetadata& metadata, const ExperimentConfig& config) {
+  validate_critic_heads(metadata);
   if (metadata.schema_version != config.schema_version) {
     throw std::runtime_error("Checkpoint schema_version does not match config.");
   }

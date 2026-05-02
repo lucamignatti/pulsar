@@ -2,6 +2,9 @@
 
 #ifdef PULSAR_HAS_TORCH
 
+#include <string>
+#include <unordered_map>
+
 #include <torch/torch.h>
 
 #include "pulsar/config/config.hpp"
@@ -57,6 +60,25 @@ torch::Tensor compute_confidence_weights(
     const std::string& weight_type,
     float weight_delta,
     bool normalize);
+
+std::unordered_map<std::string, torch::Tensor> compute_per_head_advantages(
+    const std::unordered_map<std::string, torch::Tensor>& values,
+    const std::unordered_map<std::string, torch::Tensor>& rewards,
+    const torch::Tensor& dones,
+    float gamma,
+    float gae_lambda);
+
+std::unordered_map<std::string, torch::Tensor> compute_per_head_returns(
+    const std::unordered_map<std::string, torch::Tensor>& advantages,
+    const std::unordered_map<std::string, torch::Tensor>& values);
+
+torch::Tensor normalize_advantage(const torch::Tensor& advantages, const torch::Tensor& active_mask);
+torch::Tensor mix_advantages(
+    const std::unordered_map<std::string, torch::Tensor>& normalized_advantages,
+    const std::unordered_map<std::string, float>& head_weights,
+    const torch::Tensor& active_mask);
+float advance_weight_schedule(float current, float growth_rate, float max_val);
+
 ContinuumState detach_state(ContinuumState state);
 ContinuumState clone_state(const ContinuumState& state);
 ContinuumState state_to_device(ContinuumState state, const torch::Device& device);

@@ -91,9 +91,9 @@ int main(int argc, char** argv) {
     const torch::Tensor policy_loss =
         pulsar::clipped_ppo_policy_loss(current_log_probs, old_log_probs.detach(), advantages, 0.2F);
     const torch::Tensor entropy_loss = -0.01F * pulsar::masked_action_entropy(logits, masks).mean();
-    const torch::Tensor value_logits = output.value_logits.reshape({sequence * batch, model_config.value_num_atoms});
+    const torch::Tensor value_logits = output.value_ext.logits.reshape({sequence * batch, model_config.value_num_atoms});
     const torch::Tensor value_loss = pulsar::distributional_value_loss(
-        value_logits, advantages, actor->value_support(),
+        value_logits, advantages, actor->value_support("extrinsic"),
         model_config.value_v_min, model_config.value_v_max, model_config.value_num_atoms);
     const torch::Tensor loss = policy_loss + entropy_loss + 1.0F * value_loss;
     optimizer.zero_grad();

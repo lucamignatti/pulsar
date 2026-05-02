@@ -40,7 +40,7 @@ int main() {
     if (output.policy_logits.sizes() != torch::IntArrayRef({4, model_config.action_dim})) {
       throw std::runtime_error("policy logits shape mismatch");
     }
-    if (output.value_logits.sizes() != torch::IntArrayRef({4, model_config.value_num_atoms})) {
+    if (output.value_ext.logits.sizes() != torch::IntArrayRef({4, model_config.value_num_atoms})) {
       throw std::runtime_error("value logits shape mismatch");
     }
     if (output.features.sizes() != torch::IntArrayRef({4, actor->feature_dim()})) {
@@ -56,7 +56,7 @@ int main() {
       }
     }
 
-    const torch::Tensor value_support = actor->value_support();
+    const torch::Tensor value_support = actor->value_support("extrinsic");
     if (value_support.sizes() != torch::IntArrayRef({model_config.value_num_atoms})) {
       throw std::runtime_error("value support shape mismatch");
     }

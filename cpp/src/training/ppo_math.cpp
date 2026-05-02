@@ -119,8 +119,6 @@ torch::Tensor distributional_value_loss(
 torch::Tensor sample_quantile_value(
     const torch::Tensor& value_logits,
     const torch::Tensor& atom_support) {
-  const torch::Tensor dist = torch::distributions::Categorical{}.sample(
-      [&](const torch::Tensor& logits) { return logits; }(value_logits));
   torch::Tensor sampled_indices = torch::multinomial(
       torch::softmax(value_logits, -1), 1, true).squeeze(-1);
   return atom_support.index_select(0, sampled_indices.view({-1}))
@@ -181,6 +179,64 @@ torch::Tensor compute_confidence_weights(
     raw_weights = raw_weights / (raw_weights.mean() + 1.0e-8F);
   }
   return raw_weights.detach();
+}
+
+std::unordered_map<std::string, torch::Tensor> compute_per_head_advantages(
+    const std::unordered_map<std::string, torch::Tensor>& values,
+    const std::unordered_map<std::string, torch::Tensor>& rewards,
+    const torch::Tensor& dones,
+    float gamma,
+    float gae_lambda) {
+  std::unordered_map<std::string, torch::Tensor> advantages;
+  for (const auto& [name, head_values] : values) {
+    auto reward_it = rewards.find(name);
+    const torch::Tensor& head_rewards = (reward_it != rewards.end()) ? reward_it->second : rewards.at("extrinsic");
+    advantages[name] = compute_gae(head_values, head_rewards, dones, gamma, gae_lambda);
+  }
+  return advantages;
+}
+
+std::unordered_map<std::string, torch::Tensor> compute_per_head_returns(
+    const std::unordered_map<std::string, torch::Tensor>& advantages,
+    const std::unordered_map<std::string, torch::Tensor>& values) {
+  std::unordered_map<std::string, torch::Tensor> returns;
+  for (const auto& [name, head_advantages] : advantages) {
+    auto value_it = values.find(name);
+    if (value_it != values.end()) {
+      returns[name] = head_advantages + value_it->second.detach();
+    }
+  }
+  return returns;
+}
+
+torch::Tensor normalize_advantage(const torch::Tensor& advantages, const torch::Tensor& active_mask) {
+  const int64_t active_count = active_mask.sum().item<int64_t>();
+  if (active_count <= 0) {
+    return advantages;
+  }
+  const torch::Tensor active_adv = advantages.masked_select(active_mask > 0.5F);
+  const float adv_mean = active_adv.mean().item<float>();
+  const float adv_std = active_adv.std().item<float>();
+  return (advantages - adv_mean) / (adv_std + 1.0e-8F);
+}
+
+torch::Tensor mix_advantages(
+    const std::unordered_map<std::string, torch::Tensor>& normalized_advantages,
+    const std::unordered_map<std::string, float>& head_weights,
+    const torch::Tensor& active_mask) {
+  torch::Tensor mixed = torch::zeros_like(normalized_advantages.begin()->second);
+  for (const auto& [name, normalized] : normalized_advantages) {
+    auto weight_it = head_weights.find(name);
+    float weight = (weight_it != head_weights.end()) ? weight_it->second : 0.0F;
+    if (weight > 0.0F) {
+      mixed = mixed + weight * normalized;
+    }
+  }
+  return mixed;
+}
+
+float advance_weight_schedule(float current, float growth_rate, float max_val) {
+  return std::min(current * growth_rate, max_val);
 }
 
 ContinuumState detach_state(ContinuumState state) {

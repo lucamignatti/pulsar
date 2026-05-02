@@ -23,8 +23,8 @@ std::shared_ptr<MutatorSequence> make_default_reset_mutator(const EnvConfig& con
 std::vector<TransitionEnginePtr> make_default_engines(const ExperimentConfig& config) {
   std::vector<TransitionEnginePtr> engines;
   const auto reset_mutator = make_default_reset_mutator(config.env);
-  engines.reserve(static_cast<std::size_t>(config.lfpo.num_envs));
-  for (int env_idx = 0; env_idx < config.lfpo.num_envs; ++env_idx) {
+  engines.reserve(static_cast<std::size_t>(config.ppo.num_envs));
+  for (int env_idx = 0; env_idx < config.ppo.num_envs; ++env_idx) {
     EnvConfig env_config = config.env;
     env_config.seed += static_cast<std::uint64_t>(env_idx);
     engines.push_back(std::make_shared<RocketSimTransitionEngine>(env_config, reset_mutator));
@@ -44,7 +44,7 @@ BatchedRocketSimCollector::BatchedRocketSimCollector(
       obs_builder_(std::move(obs_builder)),
       action_parser_(std::move(action_parser)),
       done_condition_(std::move(done_condition)),
-      executor_(static_cast<std::size_t>(config_.lfpo.collection_workers)) {
+      executor_(static_cast<std::size_t>(config_.ppo.collection_workers)) {
   initialize(make_default_engines(config_), pin_host_memory);
 }
 
@@ -59,7 +59,7 @@ BatchedRocketSimCollector::BatchedRocketSimCollector(
       obs_builder_(std::move(obs_builder)),
       action_parser_(std::move(action_parser)),
       done_condition_(std::move(done_condition)),
-      executor_(static_cast<std::size_t>(config_.lfpo.collection_workers)) {
+      executor_(static_cast<std::size_t>(config_.ppo.collection_workers)) {
   initialize(std::move(engines), pin_host_memory);
 }
 

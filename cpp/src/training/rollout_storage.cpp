@@ -25,9 +25,13 @@ RolloutStorage::RolloutStorage(
   learner_active = torch::zeros({rollout_length, num_agents}, device);
   actions = torch::zeros({rollout_length, num_agents}, torch::TensorOptions().dtype(torch::kLong).device(device));
   action_log_probs = torch::zeros({rollout_length, num_agents}, device);
-  values = torch::zeros({rollout_length, num_agents}, device);
-  rewards = torch::zeros({rollout_length, num_agents}, device);
   dones = torch::zeros({rollout_length, num_agents}, device);
+
+  const std::vector<std::string> head_names = {"extrinsic", "curiosity", "learning_progress", "controllability"};
+  for (const auto& name : head_names) {
+    values_[name] = torch::zeros({rollout_length, num_agents}, device);
+    rewards_[name] = torch::zeros({rollout_length, num_agents}, device);
+  }
 }
 
 void RolloutStorage::append(
@@ -39,8 +43,8 @@ void RolloutStorage::append(
     const torch::Tensor& learner_active_in,
     const torch::Tensor& actions_in,
     const torch::Tensor& action_log_probs_in,
-    const torch::Tensor& values_in,
-    const torch::Tensor& rewards_in,
+    const std::unordered_map<std::string, torch::Tensor>& values_in,
+    const std::unordered_map<std::string, torch::Tensor>& rewards_in,
     const torch::Tensor& dones_in) {
   raw_obs[step].copy_(raw_obs_in.detach());
   obs[step].copy_(obs_in.detach());
@@ -49,9 +53,20 @@ void RolloutStorage::append(
   learner_active[step].copy_(learner_active_in.detach());
   actions[step].copy_(actions_in.detach());
   action_log_probs[step].copy_(action_log_probs_in.detach());
-  values[step].copy_(values_in.detach());
-  rewards[step].copy_(rewards_in.detach());
   dones[step].copy_(dones_in.detach());
+
+  for (const auto& [name, tensor] : values_in) {
+    auto it = values_.find(name);
+    if (it != values_.end()) {
+      it->second[step].copy_(tensor.detach());
+    }
+  }
+  for (const auto& [name, tensor] : rewards_in) {
+    auto it = rewards_.find(name);
+    if (it != rewards_.end()) {
+      it->second[step].copy_(tensor.detach());
+    }
+  }
 }
 
 void RolloutStorage::set_final_observation(const torch::Tensor& raw_obs_in) {
@@ -72,6 +87,30 @@ int RolloutStorage::rollout_length() const {
 
 int RolloutStorage::num_agents() const {
   return num_agents_;
+}
+
+torch::Tensor RolloutStorage::value(const std::string& head_name) const {
+  auto it = values_.find(head_name);
+  if (it != values_.end()) {
+    return it->second;
+  }
+  return values_.at("extrinsic");
+}
+
+torch::Tensor RolloutStorage::reward(const std::string& stream_name) const {
+  auto it = rewards_.find(stream_name);
+  if (it != rewards_.end()) {
+    return it->second;
+  }
+  return rewards_.at("extrinsic");
+}
+
+const std::unordered_map<std::string, torch::Tensor>& RolloutStorage::all_values() const {
+  return values_;
+}
+
+const std::unordered_map<std::string, torch::Tensor>& RolloutStorage::all_rewards() const {
+  return rewards_;
 }
 
 }  // namespace pulsar

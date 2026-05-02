@@ -306,6 +306,139 @@ void from_json(const json& j, WandbConfig& value) {
   value.tags = j.value("tags", std::vector<std::string>{});
 }
 
+void to_json(json& j, const CriticHeadConfig& value) {
+  j = json{
+      {"enabled", value.enabled},
+      {"value_hidden_dim", value.value_hidden_dim},
+      {"value_num_atoms", value.value_num_atoms},
+      {"value_v_min", value.value_v_min},
+      {"value_v_max", value.value_v_max},
+  };
+}
+
+void from_json(const json& j, CriticHeadConfig& value) {
+  value.enabled = j.value("enabled", true);
+  value.value_hidden_dim = j.value("value_hidden_dim", 256);
+  value.value_num_atoms = j.value("value_num_atoms", 51);
+  value.value_v_min = j.value("value_v_min", -10.0F);
+  value.value_v_max = j.value("value_v_max", 10.0F);
+}
+
+void to_json(json& j, const CriticConfig& value) {
+  j = json{
+      {"extrinsic", value.extrinsic},
+      {"curiosity", value.curiosity},
+      {"learning_progress", value.learning_progress},
+      {"controllability", value.controllability},
+  };
+}
+
+void from_json(const json& j, CriticConfig& value) {
+  value.extrinsic = j.value("extrinsic", CriticHeadConfig{});
+  value.extrinsic.enabled = true;
+  value.curiosity = j.value("curiosity", CriticHeadConfig{});
+  value.learning_progress = j.value("learning_progress", CriticHeadConfig{});
+  value.controllability = j.value("controllability", CriticHeadConfig{false});
+}
+
+void to_json(json& j, const ForwardModelConfig& value) {
+  j = json{
+      {"hidden_dim", value.hidden_dim},
+      {"num_layers", value.num_layers},
+      {"learning_rate", value.learning_rate},
+  };
+}
+
+void from_json(const json& j, ForwardModelConfig& value) {
+  value.hidden_dim = j.value("hidden_dim", 256);
+  value.num_layers = j.value("num_layers", 2);
+  value.learning_rate = j.value("learning_rate", 3.0e-4F);
+}
+
+void to_json(json& j, const InverseModelConfig& value) {
+  j = json{
+      {"hidden_dim", value.hidden_dim},
+      {"num_layers", value.num_layers},
+      {"learning_rate", value.learning_rate},
+  };
+}
+
+void from_json(const json& j, InverseModelConfig& value) {
+  value.hidden_dim = j.value("hidden_dim", 256);
+  value.num_layers = j.value("num_layers", 2);
+  value.learning_rate = j.value("learning_rate", 3.0e-4F);
+}
+
+void to_json(json& j, const IntrinsicRewardConfig& value) {
+  j = json{
+      {"curiosity_weight", value.curiosity_weight},
+      {"learning_progress_weight", value.learning_progress_weight},
+      {"controllability_weight", value.controllability_weight},
+      {"novelty_ema_decay", value.novelty_ema_decay},
+      {"learning_progress_ema_decay", value.learning_progress_ema_decay},
+      {"use_controllability_gate", value.use_controllability_gate},
+  };
+}
+
+void from_json(const json& j, IntrinsicRewardConfig& value) {
+  value.curiosity_weight = j.value("curiosity_weight", 1.0F);
+  value.learning_progress_weight = j.value("learning_progress_weight", 1.0F);
+  value.controllability_weight = j.value("controllability_weight", 0.5F);
+  value.novelty_ema_decay = j.value("novelty_ema_decay", 0.99F);
+  value.learning_progress_ema_decay = j.value("learning_progress_ema_decay", 0.95F);
+  value.use_controllability_gate = j.value("use_controllability_gate", true);
+}
+
+void to_json(json& j, const BCRegularizationConfig& value) {
+  j = json{
+      {"initial_beta", value.initial_beta},
+      {"beta_decay", value.beta_decay},
+      {"min_beta", value.min_beta},
+  };
+}
+
+void from_json(const json& j, BCRegularizationConfig& value) {
+  value.initial_beta = j.value("initial_beta", 0.1F);
+  value.beta_decay = j.value("beta_decay", 0.999F);
+  value.min_beta = j.value("min_beta", 0.0F);
+}
+
+void to_json(json& j, const WeightScheduleConfig& value) {
+  j = json{
+      {"initial_extrinsic_weight", value.initial_extrinsic_weight},
+      {"initial_curiosity_weight", value.initial_curiosity_weight},
+      {"initial_learning_progress_weight", value.initial_learning_progress_weight},
+      {"initial_controllability_weight", value.initial_controllability_weight},
+      {"extrinsic_weight_growth_rate", value.extrinsic_weight_growth_rate},
+      {"intrinsic_weight_decay_rate", value.intrinsic_weight_decay_rate},
+      {"max_extrinsic_weight", value.max_extrinsic_weight},
+      {"min_intrinsic_weight", value.min_intrinsic_weight},
+  };
+}
+
+void from_json(const json& j, WeightScheduleConfig& value) {
+  value.initial_extrinsic_weight = j.value("initial_extrinsic_weight", 0.1F);
+  value.initial_curiosity_weight = j.value("initial_curiosity_weight", 1.0F);
+  value.initial_learning_progress_weight = j.value("initial_learning_progress_weight", 1.0F);
+  value.initial_controllability_weight = j.value("initial_controllability_weight", 0.0F);
+  value.extrinsic_weight_growth_rate = j.value("extrinsic_weight_growth_rate", 1.001F);
+  value.intrinsic_weight_decay_rate = j.value("intrinsic_weight_decay_rate", 0.999F);
+  value.max_extrinsic_weight = j.value("max_extrinsic_weight", 1.0F);
+  value.min_intrinsic_weight = j.value("min_intrinsic_weight", 0.01F);
+}
+
+void to_json(json& j, const SuccessBufferConfig& value) {
+  j = json{
+      {"capacity", value.capacity},
+      {"oversample_ratio", value.oversample_ratio},
+  };
+}
+
+void from_json(const json& j, SuccessBufferConfig& value) {
+  value.capacity = j.value("capacity", 10000);
+  value.oversample_ratio = j.value("oversample_ratio", 0.1F);
+}
+
 void to_json(json& j, const ExperimentConfig& value) {
   j = json{
       {"schema_version", value.schema_version},
@@ -319,6 +452,13 @@ void to_json(json& j, const ExperimentConfig& value) {
       {"behavior_cloning", value.behavior_cloning},
       {"self_play_league", value.self_play_league},
       {"wandb", value.wandb},
+      {"critic", value.critic},
+      {"forward_model", value.forward_model},
+      {"inverse_model", value.inverse_model},
+      {"intrinsic_rewards", value.intrinsic_rewards},
+      {"bc_regularization", value.bc_regularization},
+      {"weight_schedule", value.weight_schedule},
+      {"success_buffer", value.success_buffer},
   };
 }
 
@@ -337,6 +477,15 @@ void from_json(const json& j, ExperimentConfig& value) {
   value.behavior_cloning = j.value("behavior_cloning", BehaviorCloningConfig{});
   value.self_play_league = j.value("self_play_league", SelfPlayLeagueConfig{});
   value.wandb = j.value("wandb", WandbConfig{});
+  value.critic = j.value("critic", CriticConfig{});
+  value.forward_model = j.value("forward_model", ForwardModelConfig{});
+  value.inverse_model = j.value("inverse_model", InverseModelConfig{});
+  value.model.forward_model = value.forward_model;
+  value.model.inverse_model = value.inverse_model;
+  value.intrinsic_rewards = j.value("intrinsic_rewards", IntrinsicRewardConfig{});
+  value.bc_regularization = j.value("bc_regularization", BCRegularizationConfig{});
+  value.weight_schedule = j.value("weight_schedule", WeightScheduleConfig{});
+  value.success_buffer = j.value("success_buffer", SuccessBufferConfig{});
 }
 
 void to_json(json& j, const CheckpointMetadata& value) {
@@ -349,6 +498,7 @@ void to_json(json& j, const CheckpointMetadata& value) {
       {"device", value.device},
       {"global_step", value.global_step},
       {"update_index", value.update_index},
+      {"critic_heads", value.critic_heads},
   };
 }
 
@@ -361,6 +511,7 @@ void from_json(const json& j, CheckpointMetadata& value) {
   value.device = j.at("device").get<std::string>();
   value.global_step = j.at("global_step").get<std::int64_t>();
   value.update_index = j.at("update_index").get<std::int64_t>();
+  value.critic_heads = j.value("critic_heads", std::vector<std::string>{});
 }
 
 ExperimentConfig load_experiment_config(const std::string& path) {

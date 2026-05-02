@@ -34,6 +34,18 @@ struct EnvConfig {
   std::uint64_t seed = 0;
 };
 
+struct ForwardModelConfig {
+  int hidden_dim = 256;
+  int num_layers = 2;
+  float learning_rate = 3.0e-4F;
+};
+
+struct InverseModelConfig {
+  int hidden_dim = 256;
+  int num_layers = 2;
+  float learning_rate = 3.0e-4F;
+};
+
 struct ModelConfig {
   int observation_dim = 132;
   int action_dim = 90;
@@ -52,6 +64,54 @@ struct ModelConfig {
   int value_num_atoms = 51;
   float value_v_min = -10.0F;
   float value_v_max = 10.0F;
+  ForwardModelConfig forward_model{};
+  InverseModelConfig inverse_model{};
+};
+
+struct CriticHeadConfig {
+  bool enabled = true;
+  int value_hidden_dim = 256;
+  int value_num_atoms = 51;
+  float value_v_min = -10.0F;
+  float value_v_max = 10.0F;
+};
+
+struct CriticConfig {
+  CriticHeadConfig extrinsic{};
+  CriticHeadConfig curiosity{};
+  CriticHeadConfig learning_progress{};
+  CriticHeadConfig controllability = CriticHeadConfig{false};
+};
+
+struct IntrinsicRewardConfig {
+  float curiosity_weight = 1.0F;
+  float learning_progress_weight = 1.0F;
+  float controllability_weight = 0.5F;
+  float novelty_ema_decay = 0.99F;
+  float learning_progress_ema_decay = 0.95F;
+  bool use_controllability_gate = true;
+};
+
+struct BCRegularizationConfig {
+  float initial_beta = 0.1F;
+  float beta_decay = 0.999F;
+  float min_beta = 0.0F;
+};
+
+struct WeightScheduleConfig {
+  float initial_extrinsic_weight = 0.1F;
+  float initial_curiosity_weight = 1.0F;
+  float initial_learning_progress_weight = 1.0F;
+  float initial_controllability_weight = 0.0F;
+  float extrinsic_weight_growth_rate = 1.001F;
+  float intrinsic_weight_decay_rate = 0.999F;
+  float max_extrinsic_weight = 1.0F;
+  float min_intrinsic_weight = 0.01F;
+};
+
+struct SuccessBufferConfig {
+  int capacity = 10000;
+  float oversample_ratio = 0.1F;
 };
 
 struct PPOConfig {
@@ -142,6 +202,13 @@ struct ExperimentConfig {
   BehaviorCloningConfig behavior_cloning{};
   SelfPlayLeagueConfig self_play_league{};
   WandbConfig wandb{};
+  CriticConfig critic{};
+  ForwardModelConfig forward_model{};
+  InverseModelConfig inverse_model{};
+  IntrinsicRewardConfig intrinsic_rewards{};
+  BCRegularizationConfig bc_regularization{};
+  WeightScheduleConfig weight_schedule{};
+  SuccessBufferConfig success_buffer{};
 };
 
 struct CheckpointMetadata {
@@ -153,6 +220,7 @@ struct CheckpointMetadata {
   std::string device = "cpu";
   std::int64_t global_step = 0;
   std::int64_t update_index = 0;
+  std::vector<std::string> critic_heads{};
 };
 
 void to_json(nlohmann::json& j, const ControllerState& value);
@@ -176,6 +244,22 @@ void to_json(nlohmann::json& j, const SelfPlayLeagueConfig& value);
 void from_json(const nlohmann::json& j, SelfPlayLeagueConfig& value);
 void to_json(nlohmann::json& j, const WandbConfig& value);
 void from_json(const nlohmann::json& j, WandbConfig& value);
+void to_json(nlohmann::json& j, const CriticHeadConfig& value);
+void from_json(const nlohmann::json& j, CriticHeadConfig& value);
+void to_json(nlohmann::json& j, const CriticConfig& value);
+void from_json(const nlohmann::json& j, CriticConfig& value);
+void to_json(nlohmann::json& j, const ForwardModelConfig& value);
+void from_json(const nlohmann::json& j, ForwardModelConfig& value);
+void to_json(nlohmann::json& j, const InverseModelConfig& value);
+void from_json(const nlohmann::json& j, InverseModelConfig& value);
+void to_json(nlohmann::json& j, const IntrinsicRewardConfig& value);
+void from_json(const nlohmann::json& j, IntrinsicRewardConfig& value);
+void to_json(nlohmann::json& j, const BCRegularizationConfig& value);
+void from_json(const nlohmann::json& j, BCRegularizationConfig& value);
+void to_json(nlohmann::json& j, const WeightScheduleConfig& value);
+void from_json(const nlohmann::json& j, WeightScheduleConfig& value);
+void to_json(nlohmann::json& j, const SuccessBufferConfig& value);
+void from_json(const nlohmann::json& j, SuccessBufferConfig& value);
 void to_json(nlohmann::json& j, const ExperimentConfig& value);
 void from_json(const nlohmann::json& j, ExperimentConfig& value);
 void to_json(nlohmann::json& j, const CheckpointMetadata& value);
