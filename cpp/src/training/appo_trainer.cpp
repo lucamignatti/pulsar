@@ -419,14 +419,15 @@ TrainerMetrics APPOTrainer::update_actor() {
               .logical_and_(ep_tp1.less_equal(0.5F));
 
           auto trans_samples = transition_steps * count;
-          torch::Tensor flat_trans_valid = transition_valid.reshape({trans_samples}) > 0.5F;
-          std::int64_t valid_count = flat_trans_valid.sum().item<std::int64_t>();
+          torch::Tensor flat_trans_valid_cpu = transition_valid.reshape({trans_samples}) > 0.5F;
+          std::int64_t valid_count = flat_trans_valid_cpu.sum().item<std::int64_t>();
 
           if (valid_count > 0) {
             torch::Tensor flat_encoded_t = chunk_encoded_t.reshape({trans_samples, config_.model.encoder_dim});
             torch::Tensor flat_encoded_tp1 = chunk_encoded_tp1.reshape({trans_samples, config_.model.encoder_dim});
             torch::Tensor flat_actions_t = chunk_actions_t.reshape({trans_samples});
 
+            torch::Tensor flat_trans_valid = flat_trans_valid_cpu.to(device_);
             torch::Tensor active_encoded_t = flat_encoded_t.index({flat_trans_valid});
             torch::Tensor active_encoded_tp1 = flat_encoded_tp1.index({flat_trans_valid});
             torch::Tensor active_actions_t = flat_actions_t.index({flat_trans_valid});
@@ -753,6 +754,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
 
       torch::Tensor final_valid_device = final_intrinsic_valid.to(device_);
       if (final_valid_device.any().item<bool>() && prev_intrinsic_encoded_.defined()) {
+        torch::NoGradGuard no_grad;
         torch::Tensor predicted_next = actor_->forward_predict_next(
             prev_intrinsic_encoded_.to(device_),
             prev_intrinsic_action_.to(device_));
@@ -764,7 +766,22 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
         torch::Tensor mask = final_valid_device.to(torch::kFloat32);
         pred_error = pred_error * mask;
 
+        torch::Tensor pred_error_cpu = pred_error.to(torch::kCPU).to(torch::kFloat64);
+        torch::Tensor novelty_delta = pred_error_cpu - novelty_ema_;
+        double alpha_novel = static_cast<double>(config_.intrinsic_rewards.novelty_ema_decay);
+        double alpha_learn = static_cast<double>(config_.intrinsic_rewards.learning_progress_ema_decay);
+        novelty_ema_ = torch::where(
+            final_intrinsic_valid,
+            alpha_novel * novelty_ema_ + (1.0 - alpha_novel) * pred_error_cpu,
+            novelty_ema_);
+        learning_progress_ema_ = torch::where(
+            final_intrinsic_valid,
+            alpha_learn * learning_progress_ema_ + (1.0 - alpha_learn) * novelty_delta.abs(),
+            learning_progress_ema_);
+
         torch::Tensor step_curiosity = pred_error * config_.intrinsic_rewards.curiosity_weight;
+        torch::Tensor step_learn = learning_progress_ema_.to(device_).to(torch::kFloat32)
+            * config_.intrinsic_rewards.learning_progress_weight * mask;
         torch::Tensor step_ctrl = torch::zeros_like(step_curiosity);
 
         if (config_.intrinsic_rewards.use_controllability_gate) {
@@ -776,6 +793,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
           torch::Tensor correct_probs = inv_probs.gather(1, prev_act_dev.unsqueeze(1)).squeeze(1);
           torch::Tensor controllability = correct_probs * mask;
           step_curiosity = step_curiosity * controllability;
+          step_learn = step_learn * controllability;
           step_ctrl = controllability * config_.intrinsic_rewards.controllability_weight;
         }
 
@@ -783,11 +801,12 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
             last_step,
             {
                 {"curiosity", step_curiosity.to(torch::kCPU)},
-                {"learning_progress", torch::zeros_like(step_curiosity).to(torch::kCPU)},
+                {"learning_progress", step_learn.to(torch::kCPU)},
                 {"controllability", step_ctrl.to(torch::kCPU)},
             });
 
         total_curiosity_reward += step_curiosity.sum().item<double>();
+        total_learning_progress_reward += step_learn.sum().item<double>();
       }
     }
   }
