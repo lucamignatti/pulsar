@@ -136,7 +136,7 @@ if(PULSAR_ENABLE_TORCH)
     )
 
     target_include_directories(pulsar_torch PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
-    target_link_libraries(pulsar_torch PUBLIC pulsar_core torch)
+    target_link_libraries(pulsar_torch PRIVATE pulsar_core PUBLIC torch)
     target_compile_definitions(pulsar_torch PUBLIC PULSAR_HAS_TORCH=1)
     pulsar_force_target_cxx20(pulsar_torch)
 
