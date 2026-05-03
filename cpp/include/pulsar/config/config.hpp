@@ -149,6 +149,7 @@ struct OfflineDatasetConfig {
   int batch_size = 4096;
   bool shuffle = true;
   std::uint64_t seed = 0;
+  bool allow_pickle = false;
 };
 
 struct BehaviorCloningConfig {

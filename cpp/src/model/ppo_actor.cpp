@@ -62,6 +62,14 @@ void validate_model_config(const ModelConfig& config) {
   require_positive(config.consolidation_stride, "consolidation_stride");
   require_positive(config.value_hidden_dim, "value_hidden_dim");
   require_positive(config.value_num_atoms, "value_num_atoms");
+
+  // Distributional RL requires at least 2 atoms (divides by num_atoms - 1).
+  if (config.value_num_atoms < 2) {
+    throw std::invalid_argument("ModelConfig.value_num_atoms must be >= 2 for distributional RL.");
+  }
+  if (!(config.value_v_max > config.value_v_min)) {
+    throw std::invalid_argument("ModelConfig.value_v_max must be greater than value_v_min.");
+  }
 }
 
 }  // namespace
@@ -165,12 +173,18 @@ PPOActorImpl::PPOActorImpl(ModelConfig config)
       true, config_.value_hidden_dim, config_.value_num_atoms,
       config_.value_v_min, config_.value_v_max};
 
+  // NOTE: The actor currently uses ModelConfig defaults for value-head dimensions.
+  // Full per-head CriticConfig (v_min, v_max, num_atoms, hidden_dim) from
+  // ExperimentConfig is not yet wired through the PPOActorImpl constructor.
+  // Only the enabled/disabled flag from CriticConfig is respected at the call site
+  // (see load_ppo_actor / APPOTrainer).  For now all heads are built unconditionally;
+  // heads that are not trained simply receive zero loss weight via head_weights_.
   build_value_head("extrinsic", value_head_ext_, atom_support_ext_, default_head);
   build_value_head("curiosity", value_head_cur_, atom_support_cur_, default_head);
   build_value_head("learning_progress", value_head_learn_, atom_support_learn_, default_head);
 
   CriticHeadConfig ctrl_head_cfg = default_head;
-  ctrl_head_cfg.enabled = false;
+  ctrl_head_cfg.enabled = false;  // Controllability head is auxiliary only.
   build_value_head("controllability", value_head_ctrl_, atom_support_ctrl_, ctrl_head_cfg);
 
   forward_head_ = make_forward_head(config_.encoder_dim, config_.action_dim);

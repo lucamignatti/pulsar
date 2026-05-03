@@ -33,6 +33,11 @@ option(PULSAR_ENABLE_BENCHMARKS "Build benchmark targets" ON)
 option(PULSAR_ENABLE_ROCKETSIM "Enable RocketSim-backed simulation" ON)
 option(PULSAR_ENABLE_CUDA_SMOKE "Enable CUDA integration smoke test when Python and Torch are available." ON)
 option(
+  PULSAR_ENABLE_PPO_MATH_TESTS
+  "Enable standalone PPO math unit tests (pure computation, no IO). Should always be ON for CI."
+  ON
+)
+option(
   PULSAR_ENABLE_CXX_TORCH_IO_TESTS
   "Enable standalone C++ libtorch serialization/checkpoint unit tests. Disabled by default because CUDA Linux libtorch builds can segfault or hang during standalone test process teardown; the production binary smokes cover these paths."
   OFF
@@ -170,7 +175,7 @@ if(PULSAR_ENABLE_TESTS)
     pulsar_link_torch_whole_core(pulsar_torch_tests)
     add_test(NAME pulsar_torch_tests COMMAND pulsar_torch_tests)
 
-    if(PULSAR_ENABLE_CXX_TORCH_IO_TESTS)
+    if(PULSAR_ENABLE_PPO_MATH_TESTS)
       add_executable(
         pulsar_ppo_math_tests
         cpp/tests/test_ppo_math.cpp
@@ -179,7 +184,9 @@ if(PULSAR_ENABLE_TESTS)
       pulsar_link_torch_whole_core(pulsar_ppo_math_tests)
       add_test(NAME pulsar_ppo_math_tests COMMAND pulsar_ppo_math_tests)
       set_tests_properties(pulsar_ppo_math_tests PROPERTIES LABELS "reference")
+    endif()
 
+    if(PULSAR_ENABLE_CXX_TORCH_IO_TESTS)
       add_executable(
         pulsar_collector_tests
         cpp/tests/test_collector.cpp

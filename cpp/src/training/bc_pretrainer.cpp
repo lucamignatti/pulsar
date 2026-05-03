@@ -62,6 +62,7 @@ BCPretrainer::BCPretrainer(ExperimentConfig config)
           torch::optim::AdamWOptions(config_.behavior_cloning.learning_rate)
               .weight_decay(config_.behavior_cloning.weight_decay))),
       device_(config_.ppo.device) {
+  seed_everything(config_.env.seed);
   configure_cuda_runtime(device_);
   validate_config();
   actor_->to(device_);
@@ -101,6 +102,7 @@ torch::Tensor BCPretrainer::map_outcome_to_value_target(const torch::Tensor& out
   torch::Tensor targets = torch::zeros_like(outcomes, torch::TensorOptions().dtype(torch::kFloat32));
   targets.masked_fill_(outcomes == 0, config_.outcome.score);
   targets.masked_fill_(outcomes == 1, config_.outcome.concede);
+  targets.masked_fill_(outcomes == 2, config_.outcome.neutral);
   return targets;
 }
 
@@ -137,17 +139,29 @@ BCEpochMetrics BCPretrainer::train_epoch(int epoch_index) {
           if (action_probs.defined()) {
             const torch::Tensor targets =
                 action_probs.reshape({-1, config_.model.action_dim}).index({flat_valid});
-            behavior_loss = -(targets * torch::log_softmax(flat_logits, -1)).sum(-1).mean();
+            torch::Tensor flat_weights = torch::ones({flat_logits.size(0)},
+                torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+            if (batch.weights.defined()) {
+              flat_weights = batch.weights.reshape({-1}).to(device_).index({flat_valid});
+            }
+            torch::Tensor per_sample_kl = -(targets * torch::log_softmax(flat_logits, -1)).sum(-1);
+            behavior_loss = (per_sample_kl * flat_weights).sum() / flat_weights.sum().clamp_min(1e-8);
             metrics.behavior_accuracy +=
                 flat_logits.argmax(-1).eq(targets.argmax(-1)).to(torch::kFloat32).mean().item<double>() *
                 static_cast<double>(flat_logits.size(0));
           } else {
             const torch::Tensor target_actions = actions.reshape({-1}).index({flat_valid});
-            auto options = torch::nn::functional::CrossEntropyFuncOptions();
+            torch::Tensor flat_weights = torch::ones({flat_logits.size(0)},
+                torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+            if (batch.weights.defined()) {
+              flat_weights = batch.weights.reshape({-1}).to(device_).index({flat_valid});
+            }
+            auto options = torch::nn::functional::CrossEntropyFuncOptions().reduction(torch::kNone);
             if (config_.behavior_cloning.label_smoothing > 0.0F) {
               options = options.label_smoothing(config_.behavior_cloning.label_smoothing);
             }
-            behavior_loss = torch::nn::functional::cross_entropy(flat_logits, target_actions, options);
+            torch::Tensor per_sample_ce = torch::nn::functional::cross_entropy(flat_logits, target_actions, options);
+            behavior_loss = (per_sample_ce * flat_weights).sum() / flat_weights.sum().clamp_min(1e-8);
             metrics.behavior_accuracy +=
                 flat_logits.argmax(-1).eq(target_actions).to(torch::kFloat32).mean().item<double>() *
                 static_cast<double>(flat_logits.size(0));
@@ -157,17 +171,22 @@ BCEpochMetrics BCPretrainer::train_epoch(int epoch_index) {
         }
 
         torch::Tensor value_loss = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-        if (batch.outcome.defined()) {
+        if (batch.outcome.defined() && batch.outcome_known.defined()) {
           const torch::Tensor flat_outcomes = batch.outcome.reshape({-1}).index({flat_valid});
-          const torch::Tensor value_targets = map_outcome_to_value_target(flat_outcomes);
-          const torch::Tensor flat_value_logits =
-              output.value_ext.logits.reshape({-1, config_.model.value_num_atoms}).index({flat_valid});
-          const torch::Tensor atom_support = actor_->value_support("extrinsic").to(device_);
-          value_loss = distributional_value_loss(
-              flat_value_logits, value_targets, atom_support,
-              config_.model.value_v_min, config_.model.value_v_max, config_.model.value_num_atoms);
-          metrics.value_loss += value_loss.item<double>() * static_cast<double>(flat_logits.size(0));
-          metrics.value_samples += flat_logits.size(0);
+          const torch::Tensor flat_known = batch.outcome_known.reshape({-1}).to(device_).index({flat_valid}) > 0.5F;
+          if (flat_known.sum().item<int64_t>() > 0) {
+            const torch::Tensor known_outcomes = flat_outcomes.index({flat_known});
+            const torch::Tensor value_targets = map_outcome_to_value_target(known_outcomes);
+            const torch::Tensor flat_value_logits_all =
+                output.value_ext.logits.reshape({-1, config_.model.value_num_atoms}).index({flat_valid});
+            const torch::Tensor known_value_logits = flat_value_logits_all.index({flat_known});
+            const torch::Tensor atom_support = actor_->value_support("extrinsic").to(device_);
+            value_loss = distributional_value_loss(
+                known_value_logits, value_targets,
+                config_.model.value_v_min, config_.model.value_v_max, config_.model.value_num_atoms);
+            metrics.value_loss += value_loss.item<double>() * static_cast<double>(known_value_logits.size(0));
+            metrics.value_samples += known_value_logits.size(0);
+          }
         }
 
         const torch::Tensor loss = behavior_loss + value_loss;
@@ -233,17 +252,22 @@ BCEpochMetrics BCPretrainer::evaluate() {
           metrics.samples += flat_logits.size(0);
         }
 
-        if (batch.outcome.defined()) {
+        if (batch.outcome.defined() && batch.outcome_known.defined()) {
           const torch::Tensor flat_outcomes = batch.outcome.reshape({-1}).index({flat_valid});
-          const torch::Tensor value_targets = map_outcome_to_value_target(flat_outcomes);
-          const torch::Tensor flat_value_logits =
-              output.value_ext.logits.reshape({-1, config_.model.value_num_atoms}).index({flat_valid});
-          const torch::Tensor atom_support = actor_->value_support("extrinsic").to(device_);
-          const torch::Tensor value_loss = distributional_value_loss(
-              flat_value_logits, value_targets, atom_support,
-              config_.model.value_v_min, config_.model.value_v_max, config_.model.value_num_atoms);
-          metrics.value_loss += value_loss.item<double>() * static_cast<double>(flat_logits.size(0));
-          metrics.value_samples += flat_logits.size(0);
+          const torch::Tensor flat_known = batch.outcome_known.reshape({-1}).to(device_).index({flat_valid}) > 0.5F;
+          if (flat_known.sum().item<int64_t>() > 0) {
+            const torch::Tensor known_outcomes = flat_outcomes.index({flat_known});
+            const torch::Tensor value_targets = map_outcome_to_value_target(known_outcomes);
+            const torch::Tensor flat_value_logits_all =
+                output.value_ext.logits.reshape({-1, config_.model.value_num_atoms}).index({flat_valid});
+            const torch::Tensor known_value_logits = flat_value_logits_all.index({flat_known});
+            const torch::Tensor atom_support = actor_->value_support("extrinsic").to(device_);
+            const torch::Tensor value_loss = distributional_value_loss(
+                known_value_logits, value_targets,
+                config_.model.value_v_min, config_.model.value_v_max, config_.model.value_num_atoms);
+            metrics.value_loss += value_loss.item<double>() * static_cast<double>(known_value_logits.size(0));
+            metrics.value_samples += known_value_logits.size(0);
+          }
         }
       });
   return average_metrics(metrics);

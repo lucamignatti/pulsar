@@ -3,6 +3,14 @@
 #ifdef PULSAR_HAS_TORCH
 
 namespace pulsar {
+
+void seed_everything(std::uint64_t seed) {
+  torch::manual_seed(static_cast<int64_t>(seed));
+  if (torch::cuda::is_available()) {
+    torch::cuda::manual_seed_all(static_cast<int64_t>(seed));
+  }
+}
+
 namespace {
 
 torch::Tensor sample_categorical_from_logits(const torch::Tensor& logits) {
@@ -101,14 +109,13 @@ torch::Tensor clipped_ppo_policy_loss(
     float clip_range) {
   const torch::Tensor ratio = torch::exp(current_log_probs - old_log_probs);
   const torch::Tensor clipped_ratio = torch::clamp(ratio, 1.0 - clip_range, 1.0 + clip_range);
-  // Returns per-element loss; caller applies confidence weights and mean.
-  return -torch::min(ratio * advantages, clipped_ratio * advantages).mean();
+  // Returns per-sample loss; caller applies confidence weights and reduction.
+  return -torch::min(ratio * advantages, clipped_ratio * advantages);
 }
 
 torch::Tensor distributional_value_loss(
     const torch::Tensor& value_logits,
     const torch::Tensor& returns,
-    const torch::Tensor& atom_support,
     float v_min,
     float v_max,
     int num_atoms) {

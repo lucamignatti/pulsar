@@ -12,6 +12,10 @@
 
 namespace pulsar {
 
+/// Seed torch (CPU + CUDA) RNGs for reproducibility.
+/// Call once at trainer / pretrainer startup.
+void seed_everything(std::uint64_t seed);
+
 torch::Tensor apply_action_mask_to_logits(const torch::Tensor& logits, const torch::Tensor& action_masks);
 torch::Tensor sample_masked_actions(
     const torch::Tensor& logits,
@@ -34,7 +38,6 @@ torch::Tensor clipped_ppo_policy_loss(
 torch::Tensor distributional_value_loss(
     const torch::Tensor& value_logits,
     const torch::Tensor& returns,
-    const torch::Tensor& atom_support,
     float v_min,
     float v_max,
     int num_atoms);

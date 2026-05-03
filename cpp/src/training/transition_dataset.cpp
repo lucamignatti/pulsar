@@ -18,7 +18,7 @@ namespace {
 
 constexpr float kBoundaryThreshold = 0.5F;
 
-torch::Tensor load_tensor_checked(const std::string& path) {
+torch::Tensor load_tensor_checked(const std::string& path, bool allow_pickle = false) {
   try {
     torch::Tensor tensor;
     torch::load(tensor, path);
@@ -27,6 +27,12 @@ torch::Tensor load_tensor_checked(const std::string& path) {
     }
     return tensor.contiguous();
   } catch (const c10::Error&) {
+    if (!allow_pickle) {
+      throw std::runtime_error(
+          "Tensor load failed for '" + path +
+          "' and pickle fallback is disabled. "
+          "Set OfflineDatasetConfig.allow_pickle=true if the shard files are trusted.");
+    }
     std::ifstream input(path, std::ios::binary);
     if (!input) {
       throw std::runtime_error("Failed to open tensor file: " + path);

@@ -109,6 +109,7 @@ APPOTrainer::APPOTrainer(
     throw std::invalid_argument("APPOTrainer requires a collector.");
   }
   total_agents_ = collector_->total_agents();
+  seed_everything(config_.env.seed);
   collection_state_ = actor_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
   opponent_collection_state_ = actor_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
   configure_cuda_runtime(device_);
@@ -143,6 +144,7 @@ torch::Tensor APPOTrainer::map_outcome_labels_to_rewards(const torch::Tensor& la
   torch::Tensor rewards = torch::zeros_like(labels, torch::TensorOptions().dtype(torch::kFloat32));
   rewards.masked_fill_(labels == 0, config_.outcome.score);
   rewards.masked_fill_(labels == 1, config_.outcome.concede);
+  rewards.masked_fill_(labels == 2, config_.outcome.neutral);
   return rewards;
 }
 
@@ -345,7 +347,7 @@ TrainerMetrics APPOTrainer::update_actor() {
           torch::Tensor active_head_logits = flat_head_logits.index({flat_active});
 
           torch::Tensor head_loss = distributional_value_loss(
-              active_head_logits, active_head_returns, head_output.support,
+              active_head_logits, active_head_returns,
               config_.model.value_v_min, config_.model.value_v_max, config_.model.value_num_atoms);
           total_value_loss = total_value_loss + head_loss;
           metrics.value_losses[head_name] += head_loss.item<double>() * static_cast<double>(active_logits.size(0));
@@ -424,6 +426,8 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
       collection_state_ = std::move(output.state);
       actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
     }
+    // CUDA synchronize gives accurate policy timing but adds CPU/GPU sync
+    // overhead.  Disable this block for maximum training throughput.
     if (device_.is_cuda()) {
       torch::cuda::synchronize();
     }
@@ -578,12 +582,10 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     torch::NoGradGuard no_grad;
     torch::Tensor final_raw_obs = collector_->host_observations().to(device_, use_pinned_host_buffers_);
     torch::Tensor final_normalized = actor_normalizer_.normalize(final_raw_obs);
-    torch::Tensor final_starts = torch::ones(
-        {static_cast<std::int64_t>(total_agents_)},
-        torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+    torch::Tensor final_starts = collector_->host_episode_starts().to(device_, use_pinned_host_buffers_);
+    ContinuumState bootstrap_state = clone_state(collection_state_);
     ActorStepOutput final_output = actor_->forward_step(
-        final_normalized, std::move(collection_state_), final_starts);
-    collection_state_ = std::move(final_output.state);
+        final_normalized, std::move(bootstrap_state), final_starts);
 
     const torch::Tensor atom_support_cur = actor_->value_support("curiosity").to(device_);
     const torch::Tensor atom_support_learn = actor_->value_support("learning_progress").to(device_);
