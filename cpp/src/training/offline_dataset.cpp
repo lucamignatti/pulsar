@@ -179,6 +179,23 @@ std::vector<std::int64_t> build_trajectory_order(
   return ordering;
 }
 
+std::vector<OfflineTensorRange> chunk_ranges(
+    const std::vector<OfflineTensorRange>& ranges,
+    int max_sequence_length) {
+  if (max_sequence_length <= 0) {
+    return ranges;
+  }
+  std::vector<OfflineTensorRange> chunks;
+  for (const auto& range : ranges) {
+    for (std::int64_t offset = 0; offset < range.length; offset += max_sequence_length) {
+      const std::int64_t chunk_len =
+          std::min<std::int64_t>(max_sequence_length, range.length - offset);
+      chunks.push_back({range.start + offset, chunk_len});
+    }
+  }
+  return chunks;
+}
+
 OfflineTensorPackedBatch pack_trajectory_batch(
     const LoadedOfflineShard& loaded,
     const std::vector<OfflineTensorRange>& ranges,
@@ -413,16 +430,19 @@ void OfflineTensorDataset::for_each_packed_trajectory_batch_until(
   for (const auto& shard : manifest_.shards) {
     const LoadedOfflineShard loaded = load_shard_tensors(manifest_dir, shard, manifest_.observation_dim, allow_pickle_);
     const std::vector<OfflineTensorRange> ranges = build_trajectory_ranges(loaded.episode_starts);
-    const std::vector<std::int64_t> ordering = build_trajectory_order(ranges, shuffle, rng);
+    const std::vector<OfflineTensorRange> chunked = chunk_ranges(ranges, max_sequence_length);
+    const std::vector<std::int64_t> ordering = build_trajectory_order(chunked, shuffle, rng);
     std::vector<std::int64_t> packed;
     std::int64_t packed_tokens = 0;
     for (const std::int64_t range_index : ordering) {
-      std::int64_t length = ranges[static_cast<std::size_t>(range_index)].length;
-      if (max_sequence_length > 0 && length > max_sequence_length) {
-        length = static_cast<std::int64_t>(max_sequence_length);
-      }
+      const std::int64_t length = chunked[static_cast<std::size_t>(range_index)].length;
       if (!packed.empty() && packed_tokens + length > max_tokens) {
-        if (!fn(pack_trajectory_batch(loaded, ranges, packed, manifest_.action_dim, max_sequence_length))) {
+        OfflineTensorPackedBatch batch =
+            pack_trajectory_batch(loaded, chunked, packed, manifest_.action_dim, max_sequence_length);
+        if (max_sequence_length > 0) {
+          batch.episode_starts[0].fill_(1);
+        }
+        if (!fn(std::move(batch))) {
           return;
         }
         packed.clear();
@@ -432,7 +452,12 @@ void OfflineTensorDataset::for_each_packed_trajectory_batch_until(
       packed_tokens += length;
     }
     if (!packed.empty()) {
-      if (!fn(pack_trajectory_batch(loaded, ranges, packed, manifest_.action_dim, max_sequence_length))) {
+      OfflineTensorPackedBatch batch =
+          pack_trajectory_batch(loaded, chunked, packed, manifest_.action_dim, max_sequence_length);
+      if (max_sequence_length > 0) {
+        batch.episode_starts[0].fill_(1);
+      }
+      if (!fn(std::move(batch))) {
         return;
       }
     }

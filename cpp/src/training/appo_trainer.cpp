@@ -10,6 +10,7 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <unordered_set>
 
 #include <nlohmann/json.hpp>
 #include "pulsar/training/cuda_utils.hpp"
@@ -219,7 +220,16 @@ TrainerMetrics APPOTrainer::update_actor() {
     normalized_advantages[name] = normalize_advantage(adv, active_mask);
   }
 
-  torch::Tensor mixed_advantages = mix_advantages(normalized_advantages, head_weights_, active_mask);
+  std::unordered_map<std::string, float> active_head_weights = head_weights_;
+  const std::vector<std::string> enabled_heads = actor_->enabled_critic_heads();
+  const std::unordered_set<std::string> enabled_set(enabled_heads.begin(), enabled_heads.end());
+  for (auto& [name, weight] : active_head_weights) {
+    if (enabled_set.find(name) == enabled_set.end()) {
+      weight = 0.0F;
+    }
+  }
+
+  torch::Tensor mixed_advantages = mix_advantages(normalized_advantages, active_head_weights, active_mask);
 
   const torch::Tensor atom_support_ext = actor_->value_support("extrinsic").to(device_);
 
