@@ -95,6 +95,7 @@ def run_bc_pretrain(
     config["offline_dataset"]["train_manifest"] = str(manifest_path.resolve())
     config["offline_dataset"]["val_manifest"] = str(manifest_path.resolve())
     config["offline_dataset"]["batch_size"] = 8
+    config["offline_dataset"]["allow_pickle"] = True
     config["behavior_cloning"]["enabled"] = True
     config["behavior_cloning"]["epochs"] = 1
     config["behavior_cloning"]["sequence_length"] = 4

@@ -89,7 +89,8 @@ int main(int argc, char** argv) {
     const torch::Tensor current_log_probs =
         torch::log_softmax(pulsar::apply_action_mask_to_logits(logits, masks), -1).gather(1, actions.unsqueeze(1)).squeeze(1);
     const torch::Tensor policy_loss =
-        pulsar::clipped_ppo_policy_loss(current_log_probs, old_log_probs.detach(), advantages, 0.2F);
+        pulsar::clipped_ppo_policy_loss(current_log_probs, old_log_probs.detach(), advantages, 0.2F)
+            .mean();
     const torch::Tensor entropy_loss = -0.01F * pulsar::masked_action_entropy(logits, masks).mean();
     const torch::Tensor value_logits = output.value_ext.logits.reshape({sequence * batch, model_config.value_num_atoms});
     const torch::Tensor value_loss = pulsar::distributional_value_loss(
