@@ -124,20 +124,23 @@ class PyPPOActor {
       if (obs.size() != static_cast<std::size_t>(config_.model.observation_dim)) {
         throw std::runtime_error("Observation length does not match model.observation_dim.");
       }
-      input[static_cast<std::int64_t>(slot)] = torch::from_blob(
-          const_cast<float*>(obs.data()),
-          {config_.model.observation_dim},
-          torch::TensorOptions().dtype(torch::kFloat32)).clone().to(torch_device_);
+      input[static_cast<std::int64_t>(slot)].copy_(
+          torch::from_blob(
+              const_cast<float*>(obs.data()),
+              {config_.model.observation_dim},
+              torch::TensorOptions().dtype(torch::kFloat32))
+              .clone()
+              .to(torch_device_));
 
       if (!episode_starts.empty() && episode_starts[i] > 0.5F) {
-        starts[static_cast<std::int64_t>(slot)] = 1.0F;
+        starts[static_cast<std::int64_t>(slot)].fill_(1.0F);
       }
     }
 
     // For inactive slots, keep episode_starts=1 so their state resets harmlessly.
     for (std::size_t s = 0; s < static_cast<std::size_t>(max_batch_size_); ++s) {
       if (slot_to_agent_id_[s] < 0) {
-        starts[static_cast<std::int64_t>(s)] = 1.0F;
+        starts[static_cast<std::int64_t>(s)].fill_(1.0F);
       }
     }
 

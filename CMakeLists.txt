@@ -12,31 +12,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-function(pulsar_force_target_cxx20 target_name)
-  if(NOT TARGET "${target_name}")
-    return()
-  endif()
-
-  get_target_property(_pulsar_target_sources "${target_name}" SOURCES)
-  if(NOT _pulsar_target_sources)
-    return()
-  endif()
-
-  foreach(_pulsar_source IN LISTS _pulsar_target_sources)
-    get_source_file_property(_pulsar_source_options "${_pulsar_source}" COMPILE_OPTIONS)
-    if(_pulsar_source_options STREQUAL "NOTFOUND")
-      unset(_pulsar_source_options)
-    endif()
-
-    list(APPEND _pulsar_source_options "$<$<COMPILE_LANGUAGE:CXX>:-std=c++20>")
-    set_source_files_properties(
-      "${_pulsar_source}"
-      TARGET_DIRECTORY "${target_name}"
-      PROPERTIES COMPILE_OPTIONS "${_pulsar_source_options}"
-    )
-  endforeach()
-endfunction()
-
 function(pulsar_link_torch_whole_core target_name)
   target_link_libraries(
     "${target_name}"
@@ -140,15 +115,12 @@ if(PULSAR_ENABLE_TORCH)
     target_include_directories(pulsar_torch PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
     target_link_libraries(pulsar_torch PRIVATE pulsar_core_usage PUBLIC torch)
     target_compile_definitions(pulsar_torch PUBLIC PULSAR_HAS_TORCH=1)
-    pulsar_force_target_cxx20(pulsar_torch)
 
     add_executable(pulsar_appo_train cpp/src/apps/train_main.cpp)
     pulsar_link_torch_whole_core(pulsar_appo_train)
-    pulsar_force_target_cxx20(pulsar_appo_train)
 
     add_executable(pulsar_bc_pretrain cpp/src/apps/offline_train_main.cpp)
     pulsar_link_torch_whole_core(pulsar_bc_pretrain)
-    pulsar_force_target_cxx20(pulsar_bc_pretrain)
   else()
     message(WARNING "Torch not found; skipping pulsar_torch and APPO training targets.")
   endif()
@@ -162,7 +134,6 @@ if(PULSAR_ENABLE_PYTHON)
     target_include_directories(pulsar_native PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
     target_link_libraries(pulsar_native PRIVATE pulsar_torch pulsar_core torch)
     target_compile_definitions(pulsar_native PRIVATE PULSAR_HAS_TORCH=1)
-    pulsar_force_target_cxx20(pulsar_native)
     set_target_properties(
       pulsar_native
       PROPERTIES
@@ -197,7 +168,6 @@ if(PULSAR_ENABLE_TESTS)
     )
     target_include_directories(pulsar_torch_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
     pulsar_link_torch_whole_core(pulsar_torch_tests)
-    pulsar_force_target_cxx20(pulsar_torch_tests)
     add_test(NAME pulsar_torch_tests COMMAND pulsar_torch_tests)
 
     if(PULSAR_ENABLE_CXX_TORCH_IO_TESTS)
@@ -207,7 +177,6 @@ if(PULSAR_ENABLE_TESTS)
       )
       target_include_directories(pulsar_ppo_math_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
       pulsar_link_torch_whole_core(pulsar_ppo_math_tests)
-      pulsar_force_target_cxx20(pulsar_ppo_math_tests)
       add_test(NAME pulsar_ppo_math_tests COMMAND pulsar_ppo_math_tests)
       set_tests_properties(pulsar_ppo_math_tests PROPERTIES LABELS "reference")
 
@@ -217,7 +186,6 @@ if(PULSAR_ENABLE_TESTS)
       )
       target_include_directories(pulsar_collector_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
       pulsar_link_torch_whole_core(pulsar_collector_tests)
-      pulsar_force_target_cxx20(pulsar_collector_tests)
       add_test(NAME pulsar_collector_tests COMMAND pulsar_collector_tests)
       set_tests_properties(pulsar_collector_tests PROPERTIES LABELS "reference")
 
@@ -227,7 +195,6 @@ if(PULSAR_ENABLE_TESTS)
       )
       target_include_directories(pulsar_offline_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
       pulsar_link_torch_whole_core(pulsar_offline_tests)
-      pulsar_force_target_cxx20(pulsar_offline_tests)
       add_test(NAME pulsar_offline_tests COMMAND pulsar_offline_tests)
       set_tests_properties(
         pulsar_offline_tests
@@ -242,7 +209,6 @@ if(PULSAR_ENABLE_TESTS)
       )
       target_include_directories(pulsar_dataset_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
       pulsar_link_torch_whole_core(pulsar_dataset_tests)
-      pulsar_force_target_cxx20(pulsar_dataset_tests)
       add_test(NAME pulsar_dataset_tests COMMAND pulsar_dataset_tests)
       set_tests_properties(
         pulsar_dataset_tests
@@ -257,7 +223,6 @@ if(PULSAR_ENABLE_TESTS)
       )
       target_include_directories(pulsar_self_play_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
       pulsar_link_torch_whole_core(pulsar_self_play_tests)
-      pulsar_force_target_cxx20(pulsar_self_play_tests)
       add_test(NAME pulsar_self_play_tests COMMAND pulsar_self_play_tests)
       set_tests_properties(
         pulsar_self_play_tests
@@ -317,7 +282,6 @@ if(PULSAR_ENABLE_BENCHMARKS AND TARGET pulsar_torch)
   )
   target_include_directories(pulsar_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
   pulsar_link_torch_whole_core(pulsar_bench)
-  pulsar_force_target_cxx20(pulsar_bench)
 
   if(PULSAR_ENABLE_TESTS AND Python3_EXECUTABLE)
     add_test(

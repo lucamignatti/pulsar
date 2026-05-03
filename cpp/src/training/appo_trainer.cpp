@@ -424,6 +424,9 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
       collection_state_ = std::move(output.state);
       actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
     }
+    if (device_.is_cuda()) {
+      torch::cuda::synchronize();
+    }
     metrics.policy_forward_seconds +=
         std::chrono::duration<double>(std::chrono::steady_clock::now() - policy_start).count();
 
