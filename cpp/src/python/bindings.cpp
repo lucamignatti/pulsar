@@ -1,5 +1,4 @@
 #include <cstring>
-#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -12,7 +11,6 @@
 #include "pulsar/config/config.hpp"
 #include "pulsar/model/normalizer.hpp"
 #include "pulsar/model/ppo_actor.hpp"
-#include "pulsar/training/ppo_math.hpp"
 
 namespace py = pybind11;
 
@@ -35,9 +33,22 @@ class PyPPOActor {
     normalizer_.to(torch_device_);
   }
 
-  void reset(std::size_t batch_size) {
-    // Reset all tracked agent states.
-    agent_states_.clear();
+  void reset(std::size_t max_batch_size) {
+    max_batch_size_ = static_cast<std::int64_t>(max_batch_size);
+    batched_state_ = model_->initial_state(max_batch_size_, torch_device_);
+    agent_id_to_slot_.clear();
+    slot_to_agent_id_.assign(static_cast<std::size_t>(max_batch_size_), -1);
+  }
+
+  void remove_agents(const std::vector<std::int64_t>& agent_ids) {
+    for (std::int64_t agent_id : agent_ids) {
+      auto it = agent_id_to_slot_.find(agent_id);
+      if (it != agent_id_to_slot_.end()) {
+        std::size_t slot = it->second;
+        slot_to_agent_id_[slot] = -1;
+        agent_id_to_slot_.erase(it);
+      }
+    }
   }
 
   std::vector<float> forward(const std::vector<float>& obs) {
@@ -64,118 +75,103 @@ class PyPPOActor {
       throw std::runtime_error("episode_starts length must match batch size.");
     }
 
-    // Gather per-agent RNN states into a batched ContinuumState.
-    // For new agents, allocate a fresh initial state.
-    std::vector<ContinuumState> per_agent_states(batch_size);
-    for (std::size_t i = 0; i < batch_size; ++i) {
-      std::int64_t agent_id = agent_ids[i];
-      auto it = agent_states_.find(agent_id);
-      if (it == agent_states_.end()) {
-        it = agent_states_.emplace(
-            agent_id,
-            model_->initial_state(1, torch_device_)).first;
-      }
-      per_agent_states[i] = clone_state(it->second);
+    // Lazy-initialize the persistent batched state on first call.
+    if (!batched_state_.workspace.defined()) {
+      reset(std::max<std::size_t>(batch_size, 1));
     }
 
-    // Stack the per-agent states into a single batched state.
-    ContinuumState batched_state = stack_states(per_agent_states);
+    // Assign slots to any previously unseen agent IDs.
+    // Reuse freed slots when available.
+    for (std::size_t i = 0; i < batch_size; ++i) {
+      std::int64_t agent_id = agent_ids[i];
+      if (agent_id_to_slot_.find(agent_id) != agent_id_to_slot_.end()) {
+        continue;  // Already assigned.
+      }
+      // Find a free slot.
+      std::int64_t assigned_slot = -1;
+      for (std::size_t s = 0; s < static_cast<std::size_t>(max_batch_size_); ++s) {
+        if (slot_to_agent_id_[s] < 0) {
+          assigned_slot = static_cast<std::int64_t>(s);
+          break;
+        }
+      }
+      if (assigned_slot < 0) {
+        throw std::runtime_error(
+            "No free slots in persistent batched state. "
+            "Call reset() with a larger max_batch_size or remove_agents() to free slots.");
+      }
+      std::size_t slot = static_cast<std::size_t>(assigned_slot);
+      slot_to_agent_id_[slot] = agent_id;
+      agent_id_to_slot_[agent_id] = slot;
 
-    // Flatten observations.
-    std::vector<float> flat;
-    flat.reserve(batch_size * static_cast<std::size_t>(config_.model.observation_dim));
-    for (const auto& obs : obs_batch) {
+      // Initialize this agent's slice with a fresh state.
+      ContinuumState init = model_->initial_state(1, torch_device_);
+      copy_slice_in(batched_state_, slot, init);
+    }
+
+    // Build the observation tensor at max_batch_size_: zero-fill inactive slots.
+    torch::Tensor input = torch::zeros(
+        {max_batch_size_, config_.model.observation_dim},
+        torch::TensorOptions().dtype(torch::kFloat32).device(torch_device_));
+    torch::Tensor starts = torch::zeros(
+        {max_batch_size_},
+        torch::TensorOptions().dtype(torch::kFloat32).device(torch_device_));
+
+    for (std::size_t i = 0; i < batch_size; ++i) {
+      std::int64_t agent_id = agent_ids[i];
+      std::size_t slot = agent_id_to_slot_[agent_id];
+      const auto& obs = obs_batch[i];
       if (obs.size() != static_cast<std::size_t>(config_.model.observation_dim)) {
         throw std::runtime_error("Observation length does not match model.observation_dim.");
       }
-      flat.insert(flat.end(), obs.begin(), obs.end());
+      input[static_cast<std::int64_t>(slot)] = torch::from_blob(
+          const_cast<float*>(obs.data()),
+          {config_.model.observation_dim},
+          torch::TensorOptions().dtype(torch::kFloat32)).clone().to(torch_device_);
+
+      if (!episode_starts.empty() && episode_starts[i] > 0.5F) {
+        starts[static_cast<std::int64_t>(slot)] = 1.0F;
+      }
     }
 
-    torch::Tensor input = torch::from_blob(
-                              flat.data(),
-                              {static_cast<std::int64_t>(batch_size), config_.model.observation_dim},
-                              torch::TensorOptions().dtype(torch::kFloat32))
-                              .clone()
-                              .to(torch_device_);
-    torch::Tensor starts;
-    if (!episode_starts.empty()) {
-      starts = torch::tensor(episode_starts, torch::TensorOptions().dtype(torch::kFloat32)).to(torch_device_);
-    } else {
-      starts = torch::zeros({static_cast<std::int64_t>(batch_size)},
-                            torch::TensorOptions().dtype(torch::kFloat32).device(torch_device_));
+    // For inactive slots, keep episode_starts=1 so their state resets harmlessly.
+    for (std::size_t s = 0; s < static_cast<std::size_t>(max_batch_size_); ++s) {
+      if (slot_to_agent_id_[s] < 0) {
+        starts[static_cast<std::int64_t>(s)] = 1.0F;
+      }
     }
 
     torch::NoGradGuard no_grad;
     const torch::Tensor normalized = normalizer_.normalize(input);
-    ActorStepOutput output = model_->forward_step(normalized, std::move(batched_state), starts);
+    ActorStepOutput output = model_->forward_step(
+        normalized, std::move(batched_state_), starts);
+    batched_state_ = std::move(output.state);
 
-    // Unstack the output state and write back per-agent.
-    std::vector<ContinuumState> output_states = unstack_states(output.state, batch_size);
-    for (std::size_t i = 0; i < batch_size; ++i) {
-      std::int64_t agent_id = agent_ids[i];
-      bool is_episode_start = !episode_starts.empty() && episode_starts[i] > 0.5F;
-      if (is_episode_start) {
-        agent_states_[agent_id] = model_->initial_state(1, torch_device_);
-      } else {
-        agent_states_[agent_id] = std::move(output_states[i]);
-      }
-    }
-
+    // Extract logits only for the requested agents.
     const torch::Tensor logits = output.policy_logits.to(torch::kCPU).contiguous();
     std::vector<std::vector<float>> result(batch_size, std::vector<float>(config_.model.action_dim));
     for (std::size_t i = 0; i < batch_size; ++i) {
+      std::int64_t agent_id = agent_ids[i];
+      std::size_t slot = agent_id_to_slot_[agent_id];
       std::memcpy(
           result[i].data(),
-          logits[i].data_ptr<float>(),
+          logits[static_cast<std::int64_t>(slot)].data_ptr<float>(),
           static_cast<std::size_t>(config_.model.action_dim) * sizeof(float));
     }
     return result;
   }
 
  private:
-  // Stack a vector of single-agent ContinuumStates into one batched state.
-  static ContinuumState stack_states(const std::vector<ContinuumState>& states) {
-    if (states.empty()) {
-      return {};
-    }
-    std::vector<torch::Tensor> workspaces, stm_keys, stm_values, stm_strengths;
-    std::vector<torch::Tensor> stm_write_indices, ltm_coeffs, timesteps;
-    for (const auto& s : states) {
-      workspaces.push_back(s.workspace);
-      stm_keys.push_back(s.stm_keys);
-      stm_values.push_back(s.stm_values);
-      stm_strengths.push_back(s.stm_strengths);
-      stm_write_indices.push_back(s.stm_write_index);
-      ltm_coeffs.push_back(s.ltm_coeffs);
-      timesteps.push_back(s.timestep);
-    }
-    return {
-        torch::cat(workspaces, 0),
-        torch::cat(stm_keys, 0),
-        torch::cat(stm_values, 0),
-        torch::cat(stm_strengths, 0),
-        torch::cat(stm_write_indices, 0),
-        torch::cat(ltm_coeffs, 0),
-        torch::cat(timesteps, 0),
-    };
-  }
-
-  // Unstack a batched ContinuumState into per-agent states.
-  static std::vector<ContinuumState> unstack_states(const ContinuumState& batched, std::size_t count) {
-    std::vector<ContinuumState> result(count);
-    for (std::size_t i = 0; i < count; ++i) {
-      std::int64_t idx = static_cast<std::int64_t>(i);
-      result[i] = {
-          batched.workspace[idx].unsqueeze(0),
-          batched.stm_keys[idx].unsqueeze(0),
-          batched.stm_values[idx].unsqueeze(0),
-          batched.stm_strengths[idx].unsqueeze(0),
-          batched.stm_write_index[idx].unsqueeze(0),
-          batched.ltm_coeffs[idx].unsqueeze(0),
-          batched.timestep[idx].unsqueeze(0),
-      };
-    }
-    return result;
+  // Copy a single-agent state into one slice of the persistent batched state.
+  static void copy_slice_in(ContinuumState& batched, std::size_t slot, const ContinuumState& single) {
+    std::int64_t idx = static_cast<std::int64_t>(slot);
+    batched.workspace[idx].copy_(single.workspace.squeeze(0));
+    batched.stm_keys[idx].copy_(single.stm_keys.squeeze(0));
+    batched.stm_values[idx].copy_(single.stm_values.squeeze(0));
+    batched.stm_strengths[idx].copy_(single.stm_strengths.squeeze(0));
+    batched.stm_write_index[idx].copy_(single.stm_write_index.squeeze(0));
+    batched.ltm_coeffs[idx].copy_(single.ltm_coeffs.squeeze(0));
+    batched.timestep[idx].copy_(single.timestep.squeeze(0));
   }
 
   std::string checkpoint_dir_{};
@@ -185,14 +181,21 @@ class PyPPOActor {
   PPOActor model_{nullptr};
   ObservationNormalizer normalizer_;
   torch::Device torch_device_;
-  std::unordered_map<std::int64_t, ContinuumState> agent_states_{};
+
+  // Persistent batched state: allocated once at max_batch_size_, slices updated
+  // in-place by forward_step.  No per-call stack/unstack overhead.
+  std::int64_t max_batch_size_ = 0;
+  ContinuumState batched_state_{};
+  std::unordered_map<std::int64_t, std::size_t> agent_id_to_slot_{};
+  std::vector<std::int64_t> slot_to_agent_id_{};  // -1 for empty slots
 };
 
 }  // namespace pulsar
 
 PYBIND11_MODULE(pulsar_native, m) {
   py::class_<pulsar::PyPPOActor>(m, "PPOActor")
-      .def("reset", &pulsar::PyPPOActor::reset, py::arg("batch_size"))
+      .def("reset", &pulsar::PyPPOActor::reset, py::arg("max_batch_size"))
+      .def("remove_agents", &pulsar::PyPPOActor::remove_agents, py::arg("agent_ids"))
       .def("forward", &pulsar::PyPPOActor::forward, py::arg("obs"))
       .def(
           "forward_batch",

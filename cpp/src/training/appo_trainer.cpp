@@ -462,6 +462,11 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     torch::Tensor learning_progress_rewards = torch::zeros_like(extrinsic_rewards);
     torch::Tensor controllability_rewards = torch::zeros_like(extrinsic_rewards);
 
+    // Reset intrinsic memory for agents starting a new episode *before* the reward
+    // calculation so we do not compute cross-episode prediction errors.
+    torch::Tensor episode_starts_cpu = episode_starts.to(torch::kCPU).to(torch::kBool);
+    has_prev_intrinsic_step_.masked_fill_(episode_starts_cpu, false);
+
     {
       torch::NoGradGuard no_grad;
       // Use per-agent persistent memory: only compute intrinsic rewards for agents
@@ -530,10 +535,6 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
       prev_intrinsic_action_.copy_(actions.detach().to(torch::kCPU));
     }
     has_prev_intrinsic_step_.fill_(true);
-
-    // Reset intrinsic memory for agents starting a new episode.
-    torch::Tensor episode_starts_cpu = episode_starts.to(torch::kCPU).to(torch::kBool);
-    has_prev_intrinsic_step_.masked_fill_(episode_starts_cpu, false);
 
     const torch::Tensor atom_support_cur = actor_->value_support("curiosity").to(device_);
     const torch::Tensor atom_support_learn = actor_->value_support("learning_progress").to(device_);
