@@ -6,7 +6,7 @@ namespace pulsar {
 namespace {
 
 torch::Tensor sample_categorical_from_logits(const torch::Tensor& logits) {
-  const torch::Tensor uniform = torch::rand_like(logits).clamp_(1.0e-6, 1.0 - 1.0e-6);
+  const torch::Tensor uniform = torch::rand_like(logits).clamp_min_(1.0e-6);
   const torch::Tensor gumbel = -torch::log(-torch::log(uniform));
   return (logits + gumbel).argmax(-1);
 }
@@ -90,6 +90,7 @@ torch::Tensor clipped_ppo_policy_loss(
     float clip_range) {
   const torch::Tensor ratio = torch::exp(current_log_probs - old_log_probs);
   const torch::Tensor clipped_ratio = torch::clamp(ratio, 1.0 - clip_range, 1.0 + clip_range);
+  // Returns per-element loss; caller applies confidence weights and mean.
   return -torch::min(ratio * advantages, clipped_ratio * advantages).mean();
 }
 
@@ -176,7 +177,8 @@ torch::Tensor compute_confidence_weights(
     return torch::ones({value_logits.size(0)}, value_logits.options());
   }
   if (normalize) {
-    raw_weights = raw_weights / (raw_weights.mean() + 1.0e-8F);
+    // Clamp mean away from zero before division to avoid NaNs when all weights are zero.
+    raw_weights = raw_weights / (raw_weights.mean().clamp_min(1.0e-8F));
   }
   return raw_weights.detach();
 }

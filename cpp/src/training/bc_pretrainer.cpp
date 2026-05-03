@@ -2,17 +2,16 @@
 
 #ifdef PULSAR_HAS_TORCH
 
-#include <algorithm>
-#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
-#include <ATen/Context.h>
 
 #include "pulsar/checkpoint/checkpoint.hpp"
+#include "pulsar/training/cuda_utils.hpp"
+#include "pulsar/training/ppo_math.hpp"
 
 namespace pulsar {
 namespace {
@@ -48,14 +47,6 @@ BCEpochMetrics average_metrics(BCEpochMetrics metrics) {
   return metrics;
 }
 
-void configure_cuda_runtime(const torch::Device& device) {
-  if (!device.is_cuda()) {
-    return;
-  }
-  at::globalContext().setAllowTF32CuBLAS(true);
-  at::globalContext().setAllowTF32CuDNN(true);
-}
-
 }  // namespace
 
 BCPretrainer::BCPretrainer(ExperimentConfig config)
@@ -89,6 +80,9 @@ void BCPretrainer::validate_config() const {
   }
   if (!train_dataset_.has_episode_starts()) {
     throw std::runtime_error("BC pretraining requires trajectory-safe manifests with episode_starts_path.");
+  }
+  if (!val_dataset_.has_episode_starts()) {
+    throw std::runtime_error("BC pretraining validation manifest must also have episode_starts_path.");
   }
 }
 
@@ -169,19 +163,9 @@ BCEpochMetrics BCPretrainer::train_epoch(int epoch_index) {
           const torch::Tensor flat_value_logits =
               output.value_ext.logits.reshape({-1, config_.model.value_num_atoms}).index({flat_valid});
           const torch::Tensor atom_support = actor_->value_support("extrinsic").to(device_);
-          const torch::Tensor proj = torch::log_softmax(flat_value_logits, -1);
-          torch::Tensor proj_loss = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-          const float delta_z = (config_.model.value_v_max - config_.model.value_v_min) /
-                               static_cast<float>(config_.model.value_num_atoms - 1);
-          const torch::Tensor clamped = value_targets.clamp(config_.model.value_v_min, config_.model.value_v_max);
-          const torch::Tensor b = (clamped - config_.model.value_v_min) / delta_z;
-          const torch::Tensor lower = b.floor().clamp(0, config_.model.value_num_atoms - 1).to(torch::kLong);
-          const torch::Tensor upper = b.ceil().clamp(0, config_.model.value_num_atoms - 1).to(torch::kLong);
-          const torch::Tensor weight_upper = (b - lower.to(torch::kFloat32)).clamp(0.0, 1.0);
-          const torch::Tensor lower_probs = proj.gather(-1, lower.unsqueeze(-1)).squeeze(-1);
-          const torch::Tensor upper_probs = proj.gather(-1, upper.unsqueeze(-1)).squeeze(-1);
-          proj_loss = -(lower_probs * (1.0 - weight_upper) + upper_probs * weight_upper).mean();
-          value_loss = proj_loss;
+          value_loss = distributional_value_loss(
+              flat_value_logits, value_targets, atom_support,
+              config_.model.value_v_min, config_.model.value_v_max, config_.model.value_num_atoms);
           metrics.value_loss += value_loss.item<double>() * static_cast<double>(flat_logits.size(0));
           metrics.value_samples += flat_logits.size(0);
         }
@@ -230,14 +214,36 @@ BCEpochMetrics BCPretrainer::evaluate() {
             metrics.behavior_accuracy +=
                 flat_logits.argmax(-1).eq(targets.argmax(-1)).to(torch::kFloat32).mean().item<double>() *
                 static_cast<double>(flat_logits.size(0));
+            metrics.behavior_loss +=
+                (-(targets * torch::log_softmax(flat_logits, -1)).sum(-1).mean()).item<double>() *
+                static_cast<double>(flat_logits.size(0));
           } else {
             const torch::Tensor target_actions = actions.reshape({-1}).index({flat_valid});
             metrics.behavior_accuracy +=
                 flat_logits.argmax(-1).eq(target_actions).to(torch::kFloat32).mean().item<double>() *
                 static_cast<double>(flat_logits.size(0));
+            metrics.behavior_loss +=
+                torch::nn::functional::cross_entropy(
+                    flat_logits, target_actions,
+                    torch::nn::functional::CrossEntropyFuncOptions().reduction(torch::kMean))
+                    .item<double>() *
+                static_cast<double>(flat_logits.size(0));
           }
           metrics.behavior_samples += flat_logits.size(0);
           metrics.samples += flat_logits.size(0);
+        }
+
+        if (batch.outcome.defined()) {
+          const torch::Tensor flat_outcomes = batch.outcome.reshape({-1}).index({flat_valid});
+          const torch::Tensor value_targets = map_outcome_to_value_target(flat_outcomes);
+          const torch::Tensor flat_value_logits =
+              output.value_ext.logits.reshape({-1, config_.model.value_num_atoms}).index({flat_valid});
+          const torch::Tensor atom_support = actor_->value_support("extrinsic").to(device_);
+          const torch::Tensor value_loss = distributional_value_loss(
+              flat_value_logits, value_targets, atom_support,
+              config_.model.value_v_min, config_.model.value_v_max, config_.model.value_num_atoms);
+          metrics.value_loss += value_loss.item<double>() * static_cast<double>(flat_logits.size(0));
+          metrics.value_samples += flat_logits.size(0);
         }
       });
   return average_metrics(metrics);
@@ -272,16 +278,26 @@ void BCPretrainer::save_checkpoint(const std::string& output_dir, int epoch_inde
   optimizer_archive.save_to((base / "actor_optimizer.pt").string());
 }
 
-void BCPretrainer::train(const std::string& output_dir, const std::string&) {
+void BCPretrainer::train(const std::string& output_dir, const std::string& config_path) {
   if (!config_.behavior_cloning.enabled) {
     throw std::runtime_error("BC pretraining requires behavior_cloning.enabled = true.");
   }
   fit_normalizers();
+  WandbLogger wandb(config_.wandb, output_dir, config_path, "bc_pretrain");
   int epoch_index = 0;
   for (int epoch = 1; epoch <= config_.behavior_cloning.epochs; ++epoch) {
     epoch_index += 1;
     const BCEpochMetrics metrics = train_epoch(epoch);
     append_metrics_line(output_dir, epoch_index, "train", metrics);
+    if (wandb.enabled()) {
+      wandb.log(nlohmann::json{
+          {"epoch", epoch},
+          {"phase", "train"},
+          {"behavior_loss", metrics.behavior_loss},
+          {"behavior_accuracy", metrics.behavior_accuracy},
+          {"value_loss", metrics.value_loss},
+      });
+    }
     std::cout << "epoch=" << epoch
               << " behavior_loss=" << metrics.behavior_loss
               << " behavior_accuracy=" << metrics.behavior_accuracy
@@ -293,8 +309,11 @@ void BCPretrainer::train(const std::string& output_dir, const std::string&) {
   append_metrics_line(output_dir, epoch_index, "val", val);
   std::cout << "phase=val"
             << " behavior_accuracy=" << val.behavior_accuracy
+            << " behavior_loss=" << val.behavior_loss
+            << " value_loss=" << val.value_loss
             << '\n';
   save_checkpoint(output_dir, epoch_index);
+  wandb.finish();
 }
 
 }  // namespace pulsar

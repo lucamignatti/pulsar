@@ -64,6 +64,17 @@ std::vector<ControllerState> make_rlgym_lookup_actions() {
   return actions;
 }
 
+// Shared per-action validity check used by both single-agent and batch mask builders.
+bool action_is_valid(const ControllerState& action, const CarState& car) {
+  if (action.boost && car.boost <= 0.5F) {
+    return false;
+  }
+  if (action.jump && !(car.on_ground || car.has_flip)) {
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 ControllerActionTable::ControllerActionTable(ActionTableConfig config) : config_(std::move(config)) {
@@ -143,17 +154,7 @@ std::vector<std::uint8_t> DiscreteActionParser::build_action_mask(const EnvState
   const CarState& car = state.cars[agent_id];
   std::vector<std::uint8_t> mask(action_table_.size(), static_cast<std::uint8_t>(1));
   for (std::size_t index = 0; index < action_table_.size(); ++index) {
-    const ControllerState& action = action_table_.at(index);
-    bool valid = true;
-
-    if (action.boost && car.boost <= 0.5F) {
-      valid = false;
-    }
-    if (action.jump && !(car.on_ground || car.has_flip)) {
-      valid = false;
-    }
-
-    mask[index] = static_cast<std::uint8_t>(valid ? 1 : 0);
+    mask[index] = static_cast<std::uint8_t>(action_is_valid(action_table_.at(index), car) ? 1 : 0);
   }
   return mask;
 }
@@ -176,17 +177,7 @@ void DiscreteActionParser::build_action_mask_batch(const EnvState& state, std::s
     const CarState& car = state.cars[agent_id];
     std::uint8_t* dst = out.data() + static_cast<std::ptrdiff_t>(agent_id * stride);
     for (std::size_t index = 0; index < stride; ++index) {
-      const ControllerState& action = action_table_.at(index);
-      bool valid = true;
-
-      if (action.boost && car.boost <= 0.5F) {
-        valid = false;
-      }
-      if (action.jump && !(car.on_ground || car.has_flip)) {
-        valid = false;
-      }
-
-      dst[index] = static_cast<std::uint8_t>(valid ? 1 : 0);
+      dst[index] = static_cast<std::uint8_t>(action_is_valid(action_table_.at(index), car) ? 1 : 0);
     }
   }
 }

@@ -2,7 +2,6 @@
 
 #ifdef PULSAR_HAS_TORCH
 
-#include <deque>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -21,11 +20,6 @@
 #include "pulsar/training/self_play_manager.hpp"
 
 namespace pulsar {
-
-struct SuccessBufferEntry {
-  torch::Tensor obs;
-  torch::Tensor action;
-};
 
 struct TrainerMetrics {
   double collection_agent_steps_per_second = 0.0;
@@ -79,8 +73,6 @@ class APPOTrainer {
 
   void update_weight_schedule();
   void decay_bc_beta();
-  void add_to_success_buffer(const torch::Tensor& obs, const torch::Tensor& action);
-  void maybe_sample_success_buffer(torch::Tensor& obs_batch, torch::Tensor& action_batch, int batch_size);
 
   ExperimentConfig config_{};
   std::unique_ptr<BatchedRocketSimCollector> collector_{};
@@ -104,8 +96,7 @@ class APPOTrainer {
   float current_beta_ = 0.0F;
   double novelty_ema_ = 0.0;
   double learning_progress_ema_ = 0.0;
-  std::deque<SuccessBufferEntry> success_buffer_{};
-  std::int64_t updates_since_last_success_ = 0;
+
 };
 
 }  // namespace pulsar

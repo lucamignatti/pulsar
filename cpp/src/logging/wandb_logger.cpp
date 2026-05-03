@@ -1,5 +1,7 @@
 #include "pulsar/logging/wandb_logger.hpp"
 
+#include <cerrno>
+#include <cstdio>
 #include <filesystem>
 #include <iostream>
 #include <sstream>
@@ -106,9 +108,11 @@ void WandbLogger::log(const nlohmann::json& payload) {
     return;
   }
   const std::string line = payload.dump();
-  std::fwrite(line.data(), 1, line.size(), pipe_);
-  std::fwrite("\n", 1, 1, pipe_);
-  std::fflush(pipe_);
+  const std::size_t written = std::fwrite(line.data(), 1, line.size(), pipe_);
+  if (written != line.size() || std::fwrite("\n", 1, 1, pipe_) != 1 || std::fflush(pipe_) != 0) {
+    std::cerr << "wandb logging pipe write failed (errno " << errno << "); disabling further logging\n";
+    enabled_ = false;
+  }
 }
 
 void WandbLogger::finish() {

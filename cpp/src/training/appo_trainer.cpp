@@ -5,17 +5,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
-#include <random>
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
-#include <ATen/Context.h>
-
+#include "pulsar/training/cuda_utils.hpp"
 #include "pulsar/training/ppo_math.hpp"
 
 namespace pulsar {
@@ -39,14 +36,6 @@ RolloutStorage make_rollout_storage(
       config.model.observation_dim,
       action_dim,
       torch::Device(torch::kCPU));
-}
-
-void configure_cuda_runtime(const torch::Device& device) {
-  if (!device.is_cuda()) {
-    return;
-  }
-  at::globalContext().setAllowTF32CuBLAS(true);
-  at::globalContext().setAllowTF32CuDNN(true);
 }
 
 void append_metrics_line(
@@ -135,7 +124,6 @@ APPOTrainer::APPOTrainer(
   current_beta_ = config_.bc_regularization.initial_beta;
   novelty_ema_ = 0.0;
   learning_progress_ema_ = 0.0;
-  updates_since_last_success_ = 0;
 
   maybe_initialize_from_checkpoint();
 
@@ -180,6 +168,11 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
   }
 }
 
+
+void APPOTrainer::decay_bc_beta() {
+  current_beta_ = std::max(current_beta_ * config_.bc_regularization.beta_decay, config_.bc_regularization.min_beta);
+}
+
 void APPOTrainer::update_weight_schedule() {
   head_weights_["extrinsic"] = advance_weight_schedule(
       head_weights_["extrinsic"],
@@ -191,51 +184,6 @@ void APPOTrainer::update_weight_schedule() {
   head_weights_["learning_progress"] = std::max(
       head_weights_["learning_progress"] * config_.weight_schedule.intrinsic_weight_decay_rate,
       config_.weight_schedule.min_intrinsic_weight);
-}
-
-void APPOTrainer::decay_bc_beta() {
-  current_beta_ = std::max(current_beta_ * config_.bc_regularization.beta_decay, config_.bc_regularization.min_beta);
-}
-
-void APPOTrainer::add_to_success_buffer(const torch::Tensor& obs, const torch::Tensor& action) {
-  torch::Tensor obs_cpu = obs.detach().to(torch::kCPU).clone();
-  torch::Tensor action_cpu = action.detach().to(torch::kCPU).clone();
-  success_buffer_.push_back({obs_cpu, action_cpu});
-  while (static_cast<int>(success_buffer_.size()) > config_.success_buffer.capacity) {
-    success_buffer_.pop_front();
-  }
-}
-
-void APPOTrainer::maybe_sample_success_buffer(
-    torch::Tensor& obs_batch,
-    torch::Tensor& action_batch,
-    int batch_size) {
-  if (success_buffer_.empty()) {
-    return;
-  }
-  const int num_success_samples = std::max(
-      1, static_cast<int>(batch_size * config_.success_buffer.oversample_ratio));
-  const int actual_samples = std::min(num_success_samples, static_cast<int>(success_buffer_.size()));
-
-  static thread_local std::mt19937 rng(std::random_device{}());
-  std::uniform_int_distribution<size_t> dist(0, success_buffer_.size() - 1);
-
-  std::vector<torch::Tensor> sampled_obs;
-  std::vector<torch::Tensor> sampled_actions;
-  sampled_obs.reserve(actual_samples);
-  sampled_actions.reserve(actual_samples);
-
-  for (int i = 0; i < actual_samples; ++i) {
-    size_t idx = dist(rng);
-    sampled_obs.push_back(success_buffer_[idx].obs);
-    sampled_actions.push_back(success_buffer_[idx].action);
-  }
-
-  torch::Tensor success_obs = torch::stack(sampled_obs, 0).to(device_);
-  torch::Tensor success_actions = torch::stack(sampled_actions, 0).to(device_);
-
-  obs_batch = torch::cat({obs_batch, success_obs}, 0);
-  action_batch = torch::cat({action_batch, success_actions}, 0);
 }
 
 TrainerMetrics APPOTrainer::update_actor() {
@@ -560,16 +508,19 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
 
     const torch::Tensor atom_support_cur = actor_->value_support("curiosity").to(device_);
     const torch::Tensor atom_support_learn = actor_->value_support("learning_progress").to(device_);
+    const torch::Tensor atom_support_ctrl = actor_->value_support("controllability").to(device_);
 
     std::unordered_map<std::string, torch::Tensor> all_values;
     all_values["extrinsic"] = sampled_ext_value.to(torch::kCPU);
     all_values["curiosity"] = compute_mean_value(output.value_cur.logits, atom_support_cur).to(torch::kCPU);
     all_values["learning_progress"] = compute_mean_value(output.value_learn.logits, atom_support_learn).to(torch::kCPU);
+    all_values["controllability"] = compute_mean_value(output.value_ctrl.logits, atom_support_ctrl).to(torch::kCPU);
 
     std::unordered_map<std::string, torch::Tensor> all_rewards;
     all_rewards["extrinsic"] = extrinsic_rewards.to(torch::kCPU);
     all_rewards["curiosity"] = curiosity_rewards.to(torch::kCPU);
     all_rewards["learning_progress"] = learning_progress_rewards.to(torch::kCPU);
+    all_rewards["controllability"] = controllability_rewards.to(torch::kCPU);
 
     rollout_.append(
         step,
@@ -586,16 +537,6 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
 
     collected_agent_steps += learner_active.sum().item<std::int64_t>();
 
-    bool any_extrinsic_success = (extrinsic_rewards > 0.0F).any().item<bool>();
-    if (any_extrinsic_success) {
-      torch::Tensor success_mask = extrinsic_rewards > 0.0F;
-      torch::Tensor success_obs = normalized_obs.index({success_mask});
-      torch::Tensor success_actions = actions.index({success_mask});
-      if (success_obs.size(0) > 0) {
-        add_to_success_buffer(success_obs, success_actions);
-      }
-      updates_since_last_success_ = 0;
-    }
   }
   rollout_.set_final_observation(collector_->host_observations());
   const double collection_seconds =
@@ -643,7 +584,6 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
 
   update_weight_schedule();
   decay_bc_beta();
-  updates_since_last_success_++;
 
   metrics.overall_agent_steps_per_second =
       collected_agent_steps > 0
