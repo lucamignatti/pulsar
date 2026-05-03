@@ -58,17 +58,16 @@ class ParallelExecutor {
       return;
     }
 
-    std::function<void(std::size_t, std::size_t)> task(std::forward<Fn>(fn));
     {
       std::lock_guard<std::mutex> lock(mutex_);
       count_ = count;
       pending_workers_ = workers_.size();
-      task_ = &task;
+      task_ = std::function<void(std::size_t, std::size_t)>(std::forward<Fn>(fn));
       ++generation_;
     }
     start_cv_.notify_all();
 
-    run_chunk(worker_count_ - 1, count, task);
+    run_chunk(worker_count_ - 1, count, task_);
 
     std::unique_lock<std::mutex> lock(mutex_);
     done_cv_.wait(lock, [this]() { return pending_workers_ == 0; });
@@ -91,7 +90,7 @@ class ParallelExecutor {
 #endif
     std::size_t local_generation = 0;
     while (true) {
-      const std::function<void(std::size_t, std::size_t)>* task = nullptr;
+      std::function<void(std::size_t, std::size_t)> task;
       std::size_t count = 0;
       {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -104,7 +103,7 @@ class ParallelExecutor {
         count = count_;
       }
 
-      run_chunk(worker_index, count, *task);
+      run_chunk(worker_index, count, task);
 
       {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -134,7 +133,7 @@ class ParallelExecutor {
   std::mutex mutex_{};
   std::condition_variable start_cv_{};
   std::condition_variable done_cv_{};
-  const std::function<void(std::size_t, std::size_t)>* task_ = nullptr;
+  std::function<void(std::size_t, std::size_t)> task_{};
   std::size_t count_ = 0;
   std::size_t pending_workers_ = 0;
   std::size_t generation_ = 0;

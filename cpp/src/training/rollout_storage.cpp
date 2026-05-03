@@ -73,6 +73,17 @@ void RolloutStorage::set_final_observation(const torch::Tensor& raw_obs_in) {
   final_raw_obs.copy_(raw_obs_in.detach());
 }
 
+void RolloutStorage::set_final_values(
+    const std::unordered_map<std::string, torch::Tensor>& final_values) {
+  for (const auto& [name, tensor] : final_values) {
+    final_values_[name] = tensor.detach().clone();
+  }
+}
+
+const std::unordered_map<std::string, torch::Tensor>& RolloutStorage::final_values() const {
+  return final_values_;
+}
+
 void RolloutStorage::set_initial_state(const ContinuumState& state) {
   initial_state = state_to_device(clone_state(state), device_);
 }

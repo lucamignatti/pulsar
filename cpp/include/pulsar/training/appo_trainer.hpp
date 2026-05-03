@@ -94,8 +94,14 @@ class APPOTrainer {
 
   std::unordered_map<std::string, float> head_weights_{};
   float current_beta_ = 0.0F;
-  double novelty_ema_ = 0.0;
-  double learning_progress_ema_ = 0.0;
+  torch::Tensor novelty_ema_{};
+  torch::Tensor learning_progress_ema_{};
+
+  // Persistent intrinsic-reward memory (one slot per agent).
+  // Reset entries for agents whose episode_starts is true.
+  torch::Tensor prev_intrinsic_encoded_{};
+  torch::Tensor prev_intrinsic_action_{};
+  torch::Tensor has_prev_intrinsic_step_{};  // bool tensor, shape [num_agents]
 
 };
 

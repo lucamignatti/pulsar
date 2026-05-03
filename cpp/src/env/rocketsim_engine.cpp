@@ -263,7 +263,7 @@ void RocketSimTransitionEngine::sync_state_from_arena() {
 #endif
 
 void RocketSimTransitionEngine::apply_placeholder_dynamics(std::span<const ControllerState> actions) {
-  static constexpr float kDt = 8.0F / 120.0F;
+  const float kDt = static_cast<float>(config_.tick_skip) / 120.0F;
   static constexpr float kAccel = 900.0F;
 
   state_.goal_scored = false;

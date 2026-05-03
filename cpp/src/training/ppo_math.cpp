@@ -58,8 +58,13 @@ torch::Tensor sample_masked_actions(
 torch::Tensor masked_action_entropy(const torch::Tensor& logits, const torch::Tensor& action_masks) {
   const torch::Tensor masked = apply_action_mask_to_logits(logits, action_masks);
   const torch::Tensor probs = torch::softmax(masked, -1);
-  const torch::Tensor valid_counts = action_masks.to(torch::kFloat32).sum(-1).clamp_min(1.0F);
-  return -(probs * torch::log(probs + 1.0e-8)).sum(-1) / valid_counts.log().clamp_min(1.0e-6);
+  const torch::Tensor valid_counts = action_masks.to(torch::kFloat32).sum(-1);
+  // Guard: if an agent has only 0 or 1 valid action, entropy is 0 by definition.
+  // log(1) == 0 would produce a division-by-tiny after clamp_min, yielding spurious huge losses.
+  const torch::Tensor trivial = valid_counts <= 1.0F;
+  const torch::Tensor raw_entropy = -(probs * torch::log(probs + 1.0e-8)).sum(-1);
+  const torch::Tensor normalized = raw_entropy / valid_counts.log().clamp_min(1.0e-6);
+  return torch::where(trivial, torch::zeros_like(normalized), normalized);
 }
 
 torch::Tensor compute_gae(
@@ -67,14 +72,20 @@ torch::Tensor compute_gae(
     const torch::Tensor& rewards,
     const torch::Tensor& dones,
     float gamma,
-    float gae_lambda) {
+    float gae_lambda,
+    const torch::Tensor& next_values) {
   const int64_t steps = values.size(0);
   const int64_t agents = values.size(1);
   torch::Tensor advantages = torch::zeros({steps, agents}, values.options());
   torch::Tensor last_gae = torch::zeros({agents}, values.options());
 
+  // Use the provided bootstrap values for the boundary; fall back to zeros if not provided.
+  const torch::Tensor boundary_value = next_values.defined()
+      ? next_values.to(values.device()).to(values.dtype())
+      : torch::zeros({agents}, values.options());
+
   for (int64_t t = steps - 1; t >= 0; --t) {
-    const torch::Tensor next_value = (t < steps - 1) ? values[t + 1] : torch::zeros({agents}, values.options());
+    const torch::Tensor next_value = (t < steps - 1) ? values[t + 1] : boundary_value;
     const torch::Tensor non_terminal = 1.0 - dones[t];
     const torch::Tensor delta = rewards[t] + gamma * next_value * non_terminal - values[t];
     last_gae = delta + gamma * gae_lambda * non_terminal * last_gae;
@@ -188,12 +199,18 @@ std::unordered_map<std::string, torch::Tensor> compute_per_head_advantages(
     const std::unordered_map<std::string, torch::Tensor>& rewards,
     const torch::Tensor& dones,
     float gamma,
-    float gae_lambda) {
+    float gae_lambda,
+    const std::unordered_map<std::string, torch::Tensor>& next_values) {
   std::unordered_map<std::string, torch::Tensor> advantages;
   for (const auto& [name, head_values] : values) {
     auto reward_it = rewards.find(name);
     const torch::Tensor& head_rewards = (reward_it != rewards.end()) ? reward_it->second : rewards.at("extrinsic");
-    advantages[name] = compute_gae(head_values, head_rewards, dones, gamma, gae_lambda);
+    torch::Tensor head_next_values;
+    auto nv_it = next_values.find(name);
+    if (nv_it != next_values.end()) {
+      head_next_values = nv_it->second;
+    }
+    advantages[name] = compute_gae(head_values, head_rewards, dones, gamma, gae_lambda, head_next_values);
   }
   return advantages;
 }

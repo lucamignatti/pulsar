@@ -12,6 +12,7 @@
 #include "pulsar/config/config.hpp"
 #include "pulsar/model/normalizer.hpp"
 #include "pulsar/model/ppo_actor.hpp"
+#include "pulsar/training/ppo_math.hpp"
 
 namespace py = pybind11;
 
@@ -35,11 +36,13 @@ class PyPPOActor {
   }
 
   void reset(std::size_t batch_size) {
-    state_ = model_->initial_state(static_cast<std::int64_t>(batch_size), torch_device_);
+    // Reset all tracked agent states.
+    agent_states_.clear();
   }
 
   std::vector<float> forward(const std::vector<float>& obs) {
-    const auto batch = forward_batch({obs});
+    // Convenience: use agent ID 0 for single-step forward.
+    const auto batch = forward_batch({obs}, {0});
     if (batch.empty()) {
       return {};
     }
@@ -48,15 +51,37 @@ class PyPPOActor {
 
   std::vector<std::vector<float>> forward_batch(
       const std::vector<std::vector<float>>& obs_batch,
+      const std::vector<std::int64_t>& agent_ids,
       const std::vector<float>& episode_starts = {}) {
     if (obs_batch.empty()) {
       return {};
     }
     const std::size_t batch_size = obs_batch.size();
-    if (!state_.workspace.defined() || state_.workspace.size(0) != static_cast<std::int64_t>(batch_size)) {
-      reset(batch_size);
+    if (agent_ids.size() != batch_size) {
+      throw std::runtime_error("agent_ids length must match batch size.");
+    }
+    if (!episode_starts.empty() && episode_starts.size() != batch_size) {
+      throw std::runtime_error("episode_starts length must match batch size.");
     }
 
+    // Gather per-agent RNN states into a batched ContinuumState.
+    // For new agents, allocate a fresh initial state.
+    std::vector<ContinuumState> per_agent_states(batch_size);
+    for (std::size_t i = 0; i < batch_size; ++i) {
+      std::int64_t agent_id = agent_ids[i];
+      auto it = agent_states_.find(agent_id);
+      if (it == agent_states_.end()) {
+        it = agent_states_.emplace(
+            agent_id,
+            model_->initial_state(1, torch_device_)).first;
+      }
+      per_agent_states[i] = clone_state(it->second);
+    }
+
+    // Stack the per-agent states into a single batched state.
+    ContinuumState batched_state = stack_states(per_agent_states);
+
+    // Flatten observations.
     std::vector<float> flat;
     flat.reserve(batch_size * static_cast<std::size_t>(config_.model.observation_dim));
     for (const auto& obs : obs_batch) {
@@ -74,9 +99,6 @@ class PyPPOActor {
                               .to(torch_device_);
     torch::Tensor starts;
     if (!episode_starts.empty()) {
-      if (episode_starts.size() != batch_size) {
-        throw std::runtime_error("episode_starts length must match batch size.");
-      }
       starts = torch::tensor(episode_starts, torch::TensorOptions().dtype(torch::kFloat32)).to(torch_device_);
     } else {
       starts = torch::zeros({static_cast<std::int64_t>(batch_size)},
@@ -85,8 +107,19 @@ class PyPPOActor {
 
     torch::NoGradGuard no_grad;
     const torch::Tensor normalized = normalizer_.normalize(input);
-    ActorStepOutput output = model_->forward_step(normalized, std::move(state_), starts);
-    state_ = std::move(output.state);
+    ActorStepOutput output = model_->forward_step(normalized, std::move(batched_state), starts);
+
+    // Unstack the output state and write back per-agent.
+    std::vector<ContinuumState> output_states = unstack_states(output.state, batch_size);
+    for (std::size_t i = 0; i < batch_size; ++i) {
+      std::int64_t agent_id = agent_ids[i];
+      bool is_episode_start = !episode_starts.empty() && episode_starts[i] > 0.5F;
+      if (is_episode_start) {
+        agent_states_[agent_id] = model_->initial_state(1, torch_device_);
+      } else {
+        agent_states_[agent_id] = std::move(output_states[i]);
+      }
+    }
 
     const torch::Tensor logits = output.policy_logits.to(torch::kCPU).contiguous();
     std::vector<std::vector<float>> result(batch_size, std::vector<float>(config_.model.action_dim));
@@ -100,6 +133,51 @@ class PyPPOActor {
   }
 
  private:
+  // Stack a vector of single-agent ContinuumStates into one batched state.
+  static ContinuumState stack_states(const std::vector<ContinuumState>& states) {
+    if (states.empty()) {
+      return {};
+    }
+    std::vector<torch::Tensor> workspaces, stm_keys, stm_values, stm_strengths;
+    std::vector<torch::Tensor> stm_write_indices, ltm_coeffs, timesteps;
+    for (const auto& s : states) {
+      workspaces.push_back(s.workspace);
+      stm_keys.push_back(s.stm_keys);
+      stm_values.push_back(s.stm_values);
+      stm_strengths.push_back(s.stm_strengths);
+      stm_write_indices.push_back(s.stm_write_index);
+      ltm_coeffs.push_back(s.ltm_coeffs);
+      timesteps.push_back(s.timestep);
+    }
+    return {
+        torch::cat(workspaces, 0),
+        torch::cat(stm_keys, 0),
+        torch::cat(stm_values, 0),
+        torch::cat(stm_strengths, 0),
+        torch::cat(stm_write_indices, 0),
+        torch::cat(ltm_coeffs, 0),
+        torch::cat(timesteps, 0),
+    };
+  }
+
+  // Unstack a batched ContinuumState into per-agent states.
+  static std::vector<ContinuumState> unstack_states(const ContinuumState& batched, std::size_t count) {
+    std::vector<ContinuumState> result(count);
+    for (std::size_t i = 0; i < count; ++i) {
+      std::int64_t idx = static_cast<std::int64_t>(i);
+      result[i] = {
+          batched.workspace[idx].unsqueeze(0),
+          batched.stm_keys[idx].unsqueeze(0),
+          batched.stm_values[idx].unsqueeze(0),
+          batched.stm_strengths[idx].unsqueeze(0),
+          batched.stm_write_index[idx].unsqueeze(0),
+          batched.ltm_coeffs[idx].unsqueeze(0),
+          batched.timestep[idx].unsqueeze(0),
+      };
+    }
+    return result;
+  }
+
   std::string checkpoint_dir_{};
   std::string device_{};
   ExperimentConfig config_{};
@@ -107,7 +185,7 @@ class PyPPOActor {
   PPOActor model_{nullptr};
   ObservationNormalizer normalizer_;
   torch::Device torch_device_;
-  ContinuumState state_{};
+  std::unordered_map<std::int64_t, ContinuumState> agent_states_{};
 };
 
 }  // namespace pulsar
@@ -120,6 +198,7 @@ PYBIND11_MODULE(pulsar_native, m) {
           "forward_batch",
           &pulsar::PyPPOActor::forward_batch,
           py::arg("obs_batch"),
+          py::arg("agent_ids"),
           py::arg("episode_starts") = std::vector<float>{});
 
   m.def(

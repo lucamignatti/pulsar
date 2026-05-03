@@ -24,7 +24,8 @@ torch::Tensor compute_gae(
     const torch::Tensor& rewards,
     const torch::Tensor& dones,
     float gamma,
-    float gae_lambda);
+    float gae_lambda,
+    const torch::Tensor& next_values = {});
 torch::Tensor clipped_ppo_policy_loss(
     const torch::Tensor& current_log_probs,
     const torch::Tensor& old_log_probs,
@@ -66,7 +67,8 @@ std::unordered_map<std::string, torch::Tensor> compute_per_head_advantages(
     const std::unordered_map<std::string, torch::Tensor>& rewards,
     const torch::Tensor& dones,
     float gamma,
-    float gae_lambda);
+    float gae_lambda,
+    const std::unordered_map<std::string, torch::Tensor>& next_values = {});
 
 std::unordered_map<std::string, torch::Tensor> compute_per_head_returns(
     const std::unordered_map<std::string, torch::Tensor>& advantages,

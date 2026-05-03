@@ -35,6 +35,8 @@ class RolloutStorage {
       const torch::Tensor& dones);
 
   void set_final_observation(const torch::Tensor& raw_obs);
+  void set_final_values(const std::unordered_map<std::string, torch::Tensor>& final_values);
+  [[nodiscard]] const std::unordered_map<std::string, torch::Tensor>& final_values() const;
   void set_initial_state(const ContinuumState& state);
   [[nodiscard]] ContinuumState initial_state_for_agents(const torch::Tensor& agent_indices) const;
 
@@ -56,6 +58,7 @@ class RolloutStorage {
   torch::Tensor actions;
   torch::Tensor action_log_probs;
   torch::Tensor dones;
+  std::unordered_map<std::string, torch::Tensor> final_values_;
 
  private:
   int rollout_length_ = 0;

@@ -122,8 +122,12 @@ APPOTrainer::APPOTrainer(
   head_weights_["controllability"] = config_.weight_schedule.initial_controllability_weight;
 
   current_beta_ = config_.bc_regularization.initial_beta;
-  novelty_ema_ = 0.0;
-  learning_progress_ema_ = 0.0;
+  novelty_ema_ = torch::zeros({static_cast<std::int64_t>(total_agents_)},
+                               torch::TensorOptions().dtype(torch::kFloat64).device(torch::kCPU));
+  learning_progress_ema_ = torch::zeros({static_cast<std::int64_t>(total_agents_)},
+                                         torch::TensorOptions().dtype(torch::kFloat64).device(torch::kCPU));
+  has_prev_intrinsic_step_ = torch::zeros({static_cast<std::int64_t>(total_agents_)},
+                                           torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU));
 
   maybe_initialize_from_checkpoint();
 
@@ -202,7 +206,8 @@ TrainerMetrics APPOTrainer::update_actor() {
 
   std::unordered_map<std::string, torch::Tensor> per_head_advantages =
       compute_per_head_advantages(all_values, all_rewards, rollout_.dones,
-                                   config_.ppo.gamma, config_.ppo.gae_lambda);
+                                   config_.ppo.gamma, config_.ppo.gae_lambda,
+                                   rollout_.final_values());
   std::unordered_map<std::string, torch::Tensor> per_head_returns =
       compute_per_head_returns(per_head_advantages, all_values);
 
@@ -393,9 +398,6 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   rollout_.set_initial_state(collection_state_);
   const torch::Tensor atom_support_ext = actor_->value_support("extrinsic").to(device_);
 
-  torch::Tensor prev_encoded;
-  torch::Tensor prev_action;
-  bool has_prev_step = false;
   double total_extrinsic_reward = 0.0;
   double total_curiosity_reward = 0.0;
   double total_learning_progress_reward = 0.0;
@@ -462,29 +464,50 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
 
     {
       torch::NoGradGuard no_grad;
-      if (has_prev_step) {
-        torch::Tensor predicted_next = actor_->forward_predict_next(prev_encoded, prev_action);
+      // Use per-agent persistent memory: only compute intrinsic rewards for agents
+      // that have a valid previous step.
+      torch::Tensor has_prev_device = has_prev_intrinsic_step_.to(device_);
+      torch::Tensor any_has_prev = has_prev_device.any();
+      if (any_has_prev.item<bool>()) {
         torch::Tensor encoded_now = output.encoded;
+        torch::Tensor predicted_next = actor_->forward_predict_next(
+            prev_intrinsic_encoded_.to(device_), prev_intrinsic_action_.to(device_));
         torch::Tensor pred_error = torch::mse_loss(
             predicted_next, encoded_now, torch::Reduction::None).mean(-1);
 
-        double novel_val = pred_error.mean().item<double>();
-        double novelty_delta = novel_val - novelty_ema_;
-        novelty_ema_ = config_.intrinsic_rewards.novelty_ema_decay * novelty_ema_ +
-                       (1.0 - config_.intrinsic_rewards.novelty_ema_decay) * novel_val;
-        learning_progress_ema_ = config_.intrinsic_rewards.learning_progress_ema_decay * learning_progress_ema_ +
-                                (1.0 - config_.intrinsic_rewards.learning_progress_ema_decay) * std::abs(novelty_delta);
+        // Only compute rewards where has_prev_step is true; zero elsewhere.
+        torch::Tensor mask = has_prev_device.to(torch::kFloat32);
+        pred_error = pred_error * mask;
+
+        // Per-agent EMA update: pred_error has shape [num_agents].
+        torch::Tensor pred_error_cpu = pred_error.to(torch::kCPU).to(torch::kFloat64);
+        torch::Tensor novelty_delta = pred_error_cpu - novelty_ema_;
+        // Only update EMA for agents that have a previous step.
+        double alpha_novel = static_cast<double>(config_.intrinsic_rewards.novelty_ema_decay);
+        double alpha_learn = static_cast<double>(config_.intrinsic_rewards.learning_progress_ema_decay);
+        novelty_ema_ = torch::where(
+            has_prev_intrinsic_step_,
+            alpha_novel * novelty_ema_ + (1.0 - alpha_novel) * pred_error_cpu,
+            novelty_ema_);
+        learning_progress_ema_ = torch::where(
+            has_prev_intrinsic_step_,
+            alpha_learn * learning_progress_ema_ + (1.0 - alpha_learn) * novelty_delta.abs(),
+            learning_progress_ema_);
 
         curiosity_rewards = pred_error * config_.intrinsic_rewards.curiosity_weight;
 
-        double learn_val = static_cast<double>(learning_progress_ema_);
-        learning_progress_rewards = torch::full_like(extrinsic_rewards, learn_val * config_.intrinsic_rewards.learning_progress_weight);
+        // Learning progress rewards are per-agent, shaped by the per-agent EMA.
+        learning_progress_rewards = learning_progress_ema_.to(device_).to(torch::kFloat32) *
+                                     config_.intrinsic_rewards.learning_progress_weight *
+                                     mask;
 
         if (config_.intrinsic_rewards.use_controllability_gate) {
-          torch::Tensor inv_logits = actor_->forward_predict_action(prev_encoded, encoded_now);
+          torch::Tensor prev_enc_dev = prev_intrinsic_encoded_.to(device_);
+          torch::Tensor inv_logits = actor_->forward_predict_action(prev_enc_dev, encoded_now);
           torch::Tensor inv_probs = torch::softmax(inv_logits, -1);
-          torch::Tensor correct_probs = inv_probs.gather(1, prev_action.unsqueeze(1)).squeeze(1);
-          torch::Tensor controllability = correct_probs;
+          torch::Tensor prev_act_dev = prev_intrinsic_action_.to(device_);
+          torch::Tensor correct_probs = inv_probs.gather(1, prev_act_dev.unsqueeze(1)).squeeze(1);
+          torch::Tensor controllability = correct_probs * mask;
           curiosity_rewards = curiosity_rewards * controllability;
           learning_progress_rewards = learning_progress_rewards * controllability;
           controllability_rewards = controllability * config_.intrinsic_rewards.controllability_weight;
@@ -497,14 +520,20 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     total_learning_progress_reward += learning_progress_rewards.sum().item<double>();
     total_steps += extrinsic_rewards.numel();
 
-    has_prev_step = true;
-    prev_encoded = output.encoded.detach().clone();
-    prev_action = actions.detach().clone();
-
-    torch::Tensor episode_starts_cpu = episode_starts.to(torch::kCPU);
-    if (step == 0 || episode_starts_cpu.any().item<bool>()) {
-      has_prev_step = false;
+    // Store current encoded/action for next step's intrinsic reward.
+    // Allocate persistent tensors on first use (encoded dim not known until first forward).
+    if (!prev_intrinsic_encoded_.defined()) {
+      prev_intrinsic_encoded_ = output.encoded.detach().to(torch::kCPU).clone();
+      prev_intrinsic_action_ = actions.detach().to(torch::kCPU).clone();
+    } else {
+      prev_intrinsic_encoded_.copy_(output.encoded.detach().to(torch::kCPU));
+      prev_intrinsic_action_.copy_(actions.detach().to(torch::kCPU));
     }
+    has_prev_intrinsic_step_.fill_(true);
+
+    // Reset intrinsic memory for agents starting a new episode.
+    torch::Tensor episode_starts_cpu = episode_starts.to(torch::kCPU).to(torch::kBool);
+    has_prev_intrinsic_step_.masked_fill_(episode_starts_cpu, false);
 
     const torch::Tensor atom_support_cur = actor_->value_support("curiosity").to(device_);
     const torch::Tensor atom_support_learn = actor_->value_support("learning_progress").to(device_);
@@ -539,6 +568,35 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
 
   }
   rollout_.set_final_observation(collector_->host_observations());
+
+  // Compute bootstrap values for GAE from the final observation.
+  {
+    torch::NoGradGuard no_grad;
+    torch::Tensor final_raw_obs = collector_->host_observations().to(device_, use_pinned_host_buffers_);
+    torch::Tensor final_normalized = actor_normalizer_.normalize(final_raw_obs);
+    torch::Tensor final_starts = torch::ones(
+        {static_cast<std::int64_t>(total_agents_)},
+        torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+    ActorStepOutput final_output = actor_->forward_step(
+        final_normalized, std::move(collection_state_), final_starts);
+    collection_state_ = std::move(final_output.state);
+
+    const torch::Tensor atom_support_cur = actor_->value_support("curiosity").to(device_);
+    const torch::Tensor atom_support_learn = actor_->value_support("learning_progress").to(device_);
+    const torch::Tensor atom_support_ctrl = actor_->value_support("controllability").to(device_);
+
+    std::unordered_map<std::string, torch::Tensor> bootstrap_values;
+    bootstrap_values["extrinsic"] = compute_mean_value(
+        final_output.value_ext.logits, atom_support_ext).to(torch::kCPU);
+    bootstrap_values["curiosity"] = compute_mean_value(
+        final_output.value_cur.logits, atom_support_cur).to(torch::kCPU);
+    bootstrap_values["learning_progress"] = compute_mean_value(
+        final_output.value_learn.logits, atom_support_learn).to(torch::kCPU);
+    bootstrap_values["controllability"] = compute_mean_value(
+        final_output.value_ctrl.logits, atom_support_ctrl).to(torch::kCPU);
+    rollout_.set_final_values(bootstrap_values);
+  }
+
   const double collection_seconds =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - collection_start).count();
 
@@ -547,8 +605,8 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     metrics.curiosity_reward_mean = total_curiosity_reward / static_cast<double>(total_steps);
     metrics.learning_progress_reward_mean = total_learning_progress_reward / static_cast<double>(total_steps);
   }
-  metrics.novelty_ema = novelty_ema_;
-  metrics.learning_progress_ema = learning_progress_ema_;
+  metrics.novelty_ema = novelty_ema_.mean().item<double>();
+  metrics.learning_progress_ema = learning_progress_ema_.mean().item<double>();
   metrics.bc_regularization_beta = static_cast<double>(current_beta_);
 
   TrainerMetrics update_metrics = update_actor();
