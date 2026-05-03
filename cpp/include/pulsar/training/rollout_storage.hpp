@@ -39,6 +39,7 @@ class RolloutStorage {
   void set_final_observation(const torch::Tensor& raw_obs);
   void set_final_encoded(const torch::Tensor& encoded);
   void set_final_values(const std::unordered_map<std::string, torch::Tensor>& final_values);
+  void set_rewards_at(int step, const std::unordered_map<std::string, torch::Tensor>& rewards_in);
   [[nodiscard]] const std::unordered_map<std::string, torch::Tensor>& final_values() const;
   void set_initial_state(const ContinuumState& state);
   [[nodiscard]] ContinuumState initial_state_for_agents(const torch::Tensor& agent_indices) const;

@@ -133,6 +133,17 @@ const std::unordered_map<std::string, torch::Tensor>& RolloutStorage::all_reward
   return rewards_;
 }
 
+void RolloutStorage::set_rewards_at(
+    int step,
+    const std::unordered_map<std::string, torch::Tensor>& rewards_in) {
+  for (const auto& [name, tensor] : rewards_in) {
+    auto it = rewards_.find(name);
+    if (it != rewards_.end()) {
+      it->second[step].copy_(tensor.detach());
+    }
+  }
+}
+
 }  // namespace pulsar
 
 #endif
