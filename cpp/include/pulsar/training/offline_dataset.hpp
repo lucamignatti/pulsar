@@ -90,12 +90,14 @@ class OfflineTensorDataset {
       int max_tokens,
       bool shuffle,
       std::uint64_t seed,
-      const std::function<void(const OfflineTensorPackedBatch&)>& fn) const;
+      const std::function<void(const OfflineTensorPackedBatch&)>& fn,
+      int max_sequence_length = 0) const;
   void for_each_packed_trajectory_batch_until(
       int max_tokens,
       bool shuffle,
       std::uint64_t seed,
-      const std::function<bool(const OfflineTensorPackedBatch&)>& fn) const;
+      const std::function<bool(const OfflineTensorPackedBatch&)>& fn,
+      int max_sequence_length = 0) const;
 
  private:
   OfflineTensorManifest manifest_{};

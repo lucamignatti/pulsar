@@ -291,7 +291,8 @@ TrainerMetrics APPOTrainer::update_actor() {
         torch::Tensor confidence_weights = torch::ones({active_advantages.size(0)}, active_advantages.options());
         if (config_.ppo.use_adaptive_epsilon || config_.ppo.use_confidence_weighting) {
           torch::Tensor ext_value_logits_chunk = output.value_ext.logits.narrow(0, burn, loss_steps);
-          torch::Tensor flat_ext_value_logits = ext_value_logits_chunk.reshape({samples, config_.model.value_num_atoms});
+          const int64_t ext_atoms = atom_support_ext.size(0);
+          torch::Tensor flat_ext_value_logits = ext_value_logits_chunk.reshape({samples, ext_atoms});
           torch::Tensor active_ext_value_logits = flat_ext_value_logits.index({flat_active});
           const torch::Tensor critic_variance = compute_distribution_variance(active_ext_value_logits, atom_support_ext);
           if (config_.ppo.use_adaptive_epsilon) {
@@ -330,7 +331,7 @@ TrainerMetrics APPOTrainer::update_actor() {
         const torch::Tensor entropy = masked_action_entropy(active_logits, active_masks).mean();
 
         torch::Tensor total_value_loss = torch::zeros({}, active_advantages.options());
-        const std::vector<std::string> trainable_heads = {"extrinsic", "curiosity", "learning_progress"};
+        const std::vector<std::string> trainable_heads = actor_->enabled_critic_heads();
 
         for (const auto& head_name : trainable_heads) {
           auto returns_it = per_head_returns.find(head_name);
@@ -346,9 +347,12 @@ TrainerMetrics APPOTrainer::update_actor() {
           torch::Tensor flat_head_logits = head_logits_chunk.reshape({samples, head_output.support.size(0)});
           torch::Tensor active_head_logits = flat_head_logits.index({flat_active});
 
+          const torch::Tensor head_support = head_output.support.to(device_);
+          const float v_min = head_support[0].item<float>();
+          const float v_max = head_support[-1].item<float>();
+          const int num_atoms = static_cast<int>(head_support.size(0));
           torch::Tensor head_loss = distributional_value_loss(
-              active_head_logits, active_head_returns,
-              config_.model.value_v_min, config_.model.value_v_max, config_.model.value_num_atoms);
+              active_head_logits, active_head_returns, v_min, v_max, num_atoms);
           total_value_loss = total_value_loss + head_loss;
           metrics.value_losses[head_name] += head_loss.item<double>() * static_cast<double>(active_logits.size(0));
         }

@@ -72,6 +72,39 @@ void validate_model_config(const ModelConfig& config) {
   }
 }
 
+void validate_critic_head_config(const CriticHeadConfig& cfg, const std::string& name) {
+  if (cfg.value_hidden_dim <= 0) {
+    throw std::invalid_argument("CriticConfig." + name + ".value_hidden_dim must be positive.");
+  }
+  if (cfg.value_num_atoms < 2) {
+    throw std::invalid_argument("CriticConfig." + name + ".value_num_atoms must be >= 2.");
+  }
+  if (!(cfg.value_v_max > cfg.value_v_min)) {
+    throw std::invalid_argument("CriticConfig." + name + ".value_v_max must be greater than value_v_min.");
+  }
+}
+
+CriticHeadConfig materialize_head_config(
+    const CriticHeadConfig& cfg,
+    const ModelConfig& model,
+    bool enabled) {
+  CriticHeadConfig out = cfg;
+  out.enabled = out.enabled && enabled;
+
+  if (out.value_hidden_dim <= 0) {
+    out.value_hidden_dim = model.value_hidden_dim;
+  }
+  if (out.value_num_atoms <= 0) {
+    out.value_num_atoms = model.value_num_atoms;
+  }
+  if (!(out.value_v_max > out.value_v_min)) {
+    out.value_v_min = model.value_v_min;
+    out.value_v_max = model.value_v_max;
+  }
+
+  return out;
+}
+
 }  // namespace
 
 torch::nn::Sequential PPOActorImpl::make_value_head(int input_dim, const CriticHeadConfig& head_config) const {
@@ -121,7 +154,8 @@ void PPOActorImpl::build_value_head(
     const std::string& name,
     torch::nn::Sequential& head,
     torch::Tensor& support,
-    const CriticHeadConfig& head_cfg) {
+    const CriticHeadConfig& head_cfg,
+    bool enabled) {
   head = make_value_head(feature_dim_, head_cfg);
   register_module("value_head_" + name, head);
   support = register_buffer(
@@ -129,7 +163,9 @@ void PPOActorImpl::build_value_head(
       make_atom_support(head_cfg.value_v_min, head_cfg.value_v_max, head_cfg.value_num_atoms));
   value_heads_[name] = &head;
   atom_supports_[name] = &support;
-  enabled_critic_heads_.push_back(name);
+  if (enabled) {
+    enabled_critic_heads_.push_back(name);
+  }
 }
 
 PPOActorImpl::PPOActorImpl(ModelConfig config, CriticConfig critic_config)
@@ -169,42 +205,29 @@ PPOActorImpl::PPOActorImpl(ModelConfig config, CriticConfig critic_config)
   feature_dim_ = config_.workspace_dim + config_.controller_dim + config_.encoder_dim;
   policy_head_ = register_module("policy_head", torch::nn::Linear(feature_dim_, config_.action_dim));
 
-  // Build value heads according to CriticConfig.  Heads that are disabled in
-  // the config are not built at all; heads that lack per-head overrides fall
-  // back to ModelConfig defaults.
-  auto head_cfg_or_default = [&](const CriticHeadConfig& cfg,
-                                  int default_hidden, int default_atoms,
-                                  float default_vmin, float default_vmax) {
-    CriticHeadConfig out = cfg;
-    if (out.value_hidden_dim <= 0) out.value_hidden_dim = default_hidden;
-    if (out.value_num_atoms <= 0) out.value_num_atoms = default_atoms;
-    if (out.value_v_min == 0.0F && out.value_v_max == 0.0F) {
-      out.value_v_min = default_vmin;
-      out.value_v_max = default_vmax;
-    }
-    return out;
-  };
+  // Materialize per-head config from ModelConfig defaults, then always
+  // build all four heads.  The `enabled` flag only controls whether the
+  // head appears in `enabled_critic_heads_` (training / metrics / checkpoints).
+  // All heads are built so that forward_encoded_step / forward_sequence
+  // never dereference a null module.
+  const CriticHeadConfig ext_cfg =
+      materialize_head_config(critic_config_.extrinsic, config_, true);
+  const CriticHeadConfig cur_cfg =
+      materialize_head_config(critic_config_.curiosity, config_, critic_config_.curiosity.enabled);
+  const CriticHeadConfig learn_cfg =
+      materialize_head_config(critic_config_.learning_progress, config_, critic_config_.learning_progress.enabled);
+  const CriticHeadConfig ctrl_cfg =
+      materialize_head_config(critic_config_.controllability, config_, critic_config_.controllability.enabled);
 
-  if (critic_config_.extrinsic.enabled) {
-    build_value_head("extrinsic", value_head_ext_, atom_support_ext_,
-                     head_cfg_or_default(critic_config_.extrinsic, config_.value_hidden_dim,
-                                         config_.value_num_atoms, config_.value_v_min, config_.value_v_max));
-  }
-  if (critic_config_.curiosity.enabled) {
-    build_value_head("curiosity", value_head_cur_, atom_support_cur_,
-                     head_cfg_or_default(critic_config_.curiosity, config_.value_hidden_dim,
-                                         config_.value_num_atoms, config_.value_v_min, config_.value_v_max));
-  }
-  if (critic_config_.learning_progress.enabled) {
-    build_value_head("learning_progress", value_head_learn_, atom_support_learn_,
-                     head_cfg_or_default(critic_config_.learning_progress, config_.value_hidden_dim,
-                                         config_.value_num_atoms, config_.value_v_min, config_.value_v_max));
-  }
-  if (critic_config_.controllability.enabled) {
-    build_value_head("controllability", value_head_ctrl_, atom_support_ctrl_,
-                     head_cfg_or_default(critic_config_.controllability, config_.value_hidden_dim,
-                                         config_.value_num_atoms, config_.value_v_min, config_.value_v_max));
-  }
+  validate_critic_head_config(ext_cfg, "extrinsic");
+  if (cur_cfg.enabled) validate_critic_head_config(cur_cfg, "curiosity");
+  if (learn_cfg.enabled) validate_critic_head_config(learn_cfg, "learning_progress");
+  if (ctrl_cfg.enabled) validate_critic_head_config(ctrl_cfg, "controllability");
+
+  build_value_head("extrinsic", value_head_ext_, atom_support_ext_, ext_cfg, ext_cfg.enabled);
+  build_value_head("curiosity", value_head_cur_, atom_support_cur_, cur_cfg, cur_cfg.enabled);
+  build_value_head("learning_progress", value_head_learn_, atom_support_learn_, learn_cfg, learn_cfg.enabled);
+  build_value_head("controllability", value_head_ctrl_, atom_support_ctrl_, ctrl_cfg, ctrl_cfg.enabled);
 
   forward_head_ = make_forward_head(config_.encoder_dim, config_.action_dim);
   register_module("forward_head", forward_head_);
@@ -428,6 +451,10 @@ const ModelConfig& PPOActorImpl::config() const {
   return config_;
 }
 
+const CriticConfig& PPOActorImpl::critic_config() const {
+  return critic_config_;
+}
+
 torch::Tensor PPOActorImpl::forward_predict_next(torch::Tensor encoded, torch::Tensor actions) {
   torch::Tensor action_features = torch::nn::functional::one_hot(
       actions.to(torch::kLong), config_.action_dim).to(encoded.device()).to(torch::kFloat32);
@@ -470,7 +497,7 @@ PPOActor clone_ppo_actor(const PPOActor& source, const torch::Device& device) {
   if (!source) {
     return nullptr;
   }
-  auto clone = PPOActor(source->config());
+  auto clone = PPOActor(source->config(), source->critic_config());
   torch::serialize::OutputArchive out;
   source->save(out);
   torch::serialize::InputArchive in;

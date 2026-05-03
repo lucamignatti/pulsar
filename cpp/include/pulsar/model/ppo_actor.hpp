@@ -65,6 +65,7 @@ class PPOActorImpl : public torch::nn::Module {
   [[nodiscard]] std::vector<std::string> enabled_critic_heads() const;
   [[nodiscard]] int feature_dim() const;
   [[nodiscard]] const ModelConfig& config() const;
+  [[nodiscard]] const CriticConfig& critic_config() const;
   [[nodiscard]] torch::Tensor forward_predict_next(torch::Tensor encoded, torch::Tensor actions);
   [[nodiscard]] torch::Tensor forward_predict_action(torch::Tensor encoded_t, torch::Tensor encoded_tp1);
   [[nodiscard]] torch::Tensor compute_forward_prediction_error(torch::Tensor encoded, torch::Tensor actions, torch::Tensor encoded_tp1);
@@ -86,7 +87,7 @@ class PPOActorImpl : public torch::nn::Module {
   [[nodiscard]] torch::nn::Sequential make_forward_head(int input_dim, int forward_action_dim) const;
   [[nodiscard]] torch::nn::Sequential make_inverse_head() const;
   [[nodiscard]] torch::Tensor make_atom_support(float v_min, float v_max, int num_atoms) const;
-  void build_value_head(const std::string& name, torch::nn::Sequential& head, torch::Tensor& support, const CriticHeadConfig& head_cfg);
+  void build_value_head(const std::string& name, torch::nn::Sequential& head, torch::Tensor& support, const CriticHeadConfig& head_cfg, bool enabled);
 
   ModelConfig config_{};
   CriticConfig critic_config_{};

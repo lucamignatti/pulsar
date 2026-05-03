@@ -60,9 +60,10 @@ struct LoadedTransitionShard {
 LoadedTransitionShard load_shard_tensors(
     const std::filesystem::path& manifest_dir,
     const OfflineTensorShardEntry& shard,
-    int observation_dim) {
+    int observation_dim,
+    bool allow_pickle = false) {
   LoadedTransitionShard loaded;
-  loaded.obs = load_tensor_checked((manifest_dir / shard.obs_path).string()).to(torch::kFloat32).contiguous();
+  loaded.obs = load_tensor_checked((manifest_dir / shard.obs_path).string(), allow_pickle).to(torch::kFloat32).contiguous();
   if (loaded.obs.dim() != 2 || loaded.obs.size(1) != observation_dim) {
     throw std::runtime_error("Transition shard obs tensor has unexpected shape.");
   }
@@ -70,11 +71,11 @@ LoadedTransitionShard load_shard_tensors(
   if (shard.actions_path.empty()) {
     throw std::runtime_error("TransitionTensorDataset requires actions_path in every shard.");
   }
-  loaded.actions = load_tensor_checked((manifest_dir / shard.actions_path).string()).to(torch::kLong).view({-1});
+  loaded.actions = load_tensor_checked((manifest_dir / shard.actions_path).string(), allow_pickle).to(torch::kLong).view({-1});
 
   if (!shard.episode_starts_path.empty()) {
     loaded.episode_starts =
-        load_tensor_checked((manifest_dir / shard.episode_starts_path).string()).to(torch::kFloat32).view({-1});
+        load_tensor_checked((manifest_dir / shard.episode_starts_path).string(), allow_pickle).to(torch::kFloat32).view({-1});
   } else {
     loaded.episode_starts = torch::zeros({loaded.obs.size(0)}, torch::TensorOptions().dtype(torch::kFloat32));
     if (loaded.obs.size(0) > 0) {
@@ -82,10 +83,10 @@ LoadedTransitionShard load_shard_tensors(
     }
   }
   loaded.terminated = !shard.terminated_path.empty()
-      ? load_tensor_checked((manifest_dir / shard.terminated_path).string()).to(torch::kFloat32).view({-1})
+      ? load_tensor_checked((manifest_dir / shard.terminated_path).string(), allow_pickle).to(torch::kFloat32).view({-1})
       : torch::zeros({loaded.obs.size(0)}, torch::TensorOptions().dtype(torch::kFloat32));
   loaded.truncated = !shard.truncated_path.empty()
-      ? load_tensor_checked((manifest_dir / shard.truncated_path).string()).to(torch::kFloat32).view({-1})
+      ? load_tensor_checked((manifest_dir / shard.truncated_path).string(), allow_pickle).to(torch::kFloat32).view({-1})
       : torch::zeros({loaded.obs.size(0)}, torch::TensorOptions().dtype(torch::kFloat32));
 
   if (loaded.obs.size(0) != loaded.actions.size(0) ||
@@ -123,10 +124,11 @@ torch::Tensor build_done_flags(const LoadedTransitionShard& loaded) {
 
 }  // namespace
 
-TransitionTensorDataset::TransitionTensorDataset(std::string manifest_path, torch::Device device)
+TransitionTensorDataset::TransitionTensorDataset(std::string manifest_path, torch::Device device, bool allow_pickle)
     : manifest_(load_offline_tensor_manifest(manifest_path)),
       manifest_path_(std::move(manifest_path)),
-      device_(std::move(device)) {
+      device_(std::move(device)),
+      allow_pickle_(allow_pickle) {
   for (const auto& shard : manifest_.shards) {
     if (shard.actions_path.empty()) {
       throw std::runtime_error("TransitionTensorDataset requires actions_path in every shard.");
@@ -199,7 +201,7 @@ void TransitionTensorDataset::for_each_batch(
   const std::filesystem::path manifest_dir = std::filesystem::path(manifest_path_).parent_path();
   std::mt19937_64 rng(seed);
   for (const auto& shard : manifest_.shards) {
-    const LoadedTransitionShard loaded = load_shard_tensors(manifest_dir, shard, manifest_.observation_dim);
+    const LoadedTransitionShard loaded = load_shard_tensors(manifest_dir, shard, manifest_.observation_dim, allow_pickle_);
     const std::int64_t shard_transition_count = std::max<std::int64_t>(loaded.obs.size(0) - 1, 0);
     if (shard_transition_count == 0) {
       continue;

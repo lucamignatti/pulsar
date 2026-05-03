@@ -61,6 +61,30 @@ int main() {
       throw std::runtime_error("value support shape mismatch");
     }
 
+    // Smoke test: disabled critic heads must not crash forward pass.
+    {
+      pulsar::ModelConfig cfg = small_model_config();
+      pulsar::CriticConfig critic;
+      critic.controllability.enabled = false;
+      pulsar::PPOActor actor_with_disabled(cfg, critic);
+      auto s = actor_with_disabled->initial_state(2, torch::kCPU);
+      auto obs = torch::zeros({2, cfg.observation_dim});
+      auto starts = torch::zeros({2});
+      auto out = actor_with_disabled->forward_step(obs, std::move(s), starts);
+
+      const auto enabled = actor_with_disabled->enabled_critic_heads();
+      bool found_ctrl = false;
+      for (const auto& h : enabled) {
+        if (h == "controllability") found_ctrl = true;
+      }
+      if (found_ctrl) {
+        throw std::runtime_error("controllability should not appear in enabled_critic_heads when disabled");
+      }
+      if (out.value_ctrl.logits.defined() && out.value_ctrl.logits.numel() == 0) {
+        throw std::runtime_error("disabled value head should still produce output");
+      }
+    }
+
     pulsar::ObservationNormalizer normalizer(model_config.observation_dim);
     normalizer.update(torch::randn({8, model_config.observation_dim}));
     const auto normalizer_clone = normalizer.clone();

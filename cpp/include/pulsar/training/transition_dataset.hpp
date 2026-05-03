@@ -23,7 +23,7 @@ struct TransitionTensorBatch {
 
 class TransitionTensorDataset {
  public:
-  explicit TransitionTensorDataset(std::string manifest_path, torch::Device device = torch::kCPU);
+  explicit TransitionTensorDataset(std::string manifest_path, torch::Device device = torch::kCPU, bool allow_pickle = false);
 
   [[nodiscard]] bool empty() const;
   [[nodiscard]] std::int64_t sample_count() const;
@@ -48,6 +48,7 @@ class TransitionTensorDataset {
   std::string manifest_path_{};
   std::int64_t transition_count_ = 0;
   torch::Device device_{torch::kCPU};
+  bool allow_pickle_ = false;
 };
 
 #endif

@@ -178,12 +178,16 @@ BCEpochMetrics BCPretrainer::train_epoch(int epoch_index) {
           if (flat_known.sum().item<int64_t>() > 0) {
             const torch::Tensor known_outcomes = flat_outcomes.index({flat_known});
             const torch::Tensor value_targets = map_outcome_to_value_target(known_outcomes);
+            const int64_t ext_atoms = output.value_ext.support.size(0);
             const torch::Tensor flat_value_logits_all =
-                output.value_ext.logits.reshape({-1, config_.model.value_num_atoms}).index({flat_valid});
+                output.value_ext.logits.reshape({-1, ext_atoms}).index({flat_valid});
             const torch::Tensor known_value_logits = flat_value_logits_all.index({flat_known});
+            const torch::Tensor ext_support = output.value_ext.support;
+            const float v_min = ext_support[0].item<float>();
+            const float v_max = ext_support[-1].item<float>();
+            const int num_atoms = static_cast<int>(ext_support.size(0));
             value_loss = distributional_value_loss(
-                known_value_logits, value_targets,
-                config_.model.value_v_min, config_.model.value_v_max, config_.model.value_num_atoms);
+                known_value_logits, value_targets, v_min, v_max, num_atoms);
             metrics.value_loss += value_loss.item<double>() * static_cast<double>(known_value_logits.size(0));
             metrics.value_samples += known_value_logits.size(0);
           }
@@ -196,7 +200,8 @@ BCEpochMetrics BCPretrainer::train_epoch(int epoch_index) {
           actor_optimizer_->step();
         }
         metrics.samples += batch.valid_mask.sum().item<std::int64_t>();
-      });
+      },
+      config_.behavior_cloning.sequence_length);
   return average_metrics(metrics);
 }
 
@@ -258,17 +263,22 @@ BCEpochMetrics BCPretrainer::evaluate() {
           if (flat_known.sum().item<int64_t>() > 0) {
             const torch::Tensor known_outcomes = flat_outcomes.index({flat_known});
             const torch::Tensor value_targets = map_outcome_to_value_target(known_outcomes);
+            const int64_t ext_atoms = output.value_ext.support.size(0);
             const torch::Tensor flat_value_logits_all =
-                output.value_ext.logits.reshape({-1, config_.model.value_num_atoms}).index({flat_valid});
+                output.value_ext.logits.reshape({-1, ext_atoms}).index({flat_valid});
             const torch::Tensor known_value_logits = flat_value_logits_all.index({flat_known});
+            const torch::Tensor ext_support = output.value_ext.support;
+            const float v_min = ext_support[0].item<float>();
+            const float v_max = ext_support[-1].item<float>();
+            const int num_atoms = static_cast<int>(ext_support.size(0));
             const torch::Tensor value_loss = distributional_value_loss(
-                known_value_logits, value_targets,
-                config_.model.value_v_min, config_.model.value_v_max, config_.model.value_num_atoms);
+                known_value_logits, value_targets, v_min, v_max, num_atoms);
             metrics.value_loss += value_loss.item<double>() * static_cast<double>(known_value_logits.size(0));
             metrics.value_samples += known_value_logits.size(0);
           }
         }
-      });
+      },
+      config_.behavior_cloning.sequence_length);
   return average_metrics(metrics);
 }
 
