@@ -19,12 +19,14 @@ class RolloutStorage {
       int num_agents,
       int obs_dim,
       int action_dim,
+      int encoder_dim,
       torch::Device device);
 
   void append(
       int step,
       const torch::Tensor& raw_obs,
       const torch::Tensor& obs,
+      const torch::Tensor& encoded,
       const torch::Tensor& episode_starts,
       const torch::Tensor& action_masks,
       const torch::Tensor& learner_active,
@@ -35,6 +37,7 @@ class RolloutStorage {
       const torch::Tensor& dones);
 
   void set_final_observation(const torch::Tensor& raw_obs);
+  void set_final_encoded(const torch::Tensor& encoded);
   void set_final_values(const std::unordered_map<std::string, torch::Tensor>& final_values);
   [[nodiscard]] const std::unordered_map<std::string, torch::Tensor>& final_values() const;
   void set_initial_state(const ContinuumState& state);
@@ -52,6 +55,8 @@ class RolloutStorage {
   torch::Tensor raw_obs;
   torch::Tensor final_raw_obs;
   torch::Tensor obs;
+  torch::Tensor encoded;
+  torch::Tensor final_encoded;
   torch::Tensor episode_starts;
   torch::Tensor action_masks;
   torch::Tensor learner_active;

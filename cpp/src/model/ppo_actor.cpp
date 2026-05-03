@@ -84,27 +84,6 @@ void validate_critic_head_config(const CriticHeadConfig& cfg, const std::string&
   }
 }
 
-CriticHeadConfig materialize_head_config(
-    const CriticHeadConfig& cfg,
-    const ModelConfig& model,
-    bool enabled) {
-  CriticHeadConfig out = cfg;
-  out.enabled = out.enabled && enabled;
-
-  if (out.value_hidden_dim <= 0) {
-    out.value_hidden_dim = model.value_hidden_dim;
-  }
-  if (out.value_num_atoms <= 0) {
-    out.value_num_atoms = model.value_num_atoms;
-  }
-  if (!(out.value_v_max > out.value_v_min)) {
-    out.value_v_min = model.value_v_min;
-    out.value_v_max = model.value_v_max;
-  }
-
-  return out;
-}
-
 }  // namespace
 
 torch::nn::Sequential PPOActorImpl::make_value_head(int input_dim, const CriticHeadConfig& head_config) const {
@@ -211,13 +190,13 @@ PPOActorImpl::PPOActorImpl(ModelConfig config, CriticConfig critic_config)
   // All heads are built so that forward_encoded_step / forward_sequence
   // never dereference a null module.
   const CriticHeadConfig ext_cfg =
-      materialize_head_config(critic_config_.extrinsic, config_, true);
+      materialize_critic_head_config(critic_config_.extrinsic, config_, true);
   const CriticHeadConfig cur_cfg =
-      materialize_head_config(critic_config_.curiosity, config_, critic_config_.curiosity.enabled);
+      materialize_critic_head_config(critic_config_.curiosity, config_, critic_config_.curiosity.enabled);
   const CriticHeadConfig learn_cfg =
-      materialize_head_config(critic_config_.learning_progress, config_, critic_config_.learning_progress.enabled);
+      materialize_critic_head_config(critic_config_.learning_progress, config_, critic_config_.learning_progress.enabled);
   const CriticHeadConfig ctrl_cfg =
-      materialize_head_config(critic_config_.controllability, config_, critic_config_.controllability.enabled);
+      materialize_critic_head_config(critic_config_.controllability, config_, critic_config_.controllability.enabled);
 
   validate_critic_head_config(ext_cfg, "extrinsic");
   if (cur_cfg.enabled) validate_critic_head_config(cur_cfg, "curiosity");

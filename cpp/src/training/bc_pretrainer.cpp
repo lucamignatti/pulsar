@@ -65,6 +65,7 @@ BCPretrainer::BCPretrainer(ExperimentConfig config)
       device_(config_.ppo.device) {
   seed_everything(config_.env.seed);
   configure_cuda_runtime(device_);
+  validate_experiment_config(config_);
   validate_config();
   actor_->to(device_);
   actor_normalizer_.to(device_);

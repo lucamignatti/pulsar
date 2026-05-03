@@ -36,7 +36,14 @@ RolloutStorage make_rollout_storage(
       num_agents,
       config.model.observation_dim,
       action_dim,
+      config.model.encoder_dim,
       torch::Device(torch::kCPU));
+}
+
+void require_finite(const torch::Tensor& tensor, const std::string& name) {
+  if (tensor.defined() && !torch::isfinite(tensor).all().item<bool>()) {
+    throw std::runtime_error("Non-finite tensor: " + name);
+  }
 }
 
 void append_metrics_line(
@@ -54,6 +61,9 @@ void append_metrics_line(
       {"policy_loss", metrics.policy_loss},
       {"value_loss", metrics.value_loss},
       {"entropy", metrics.entropy},
+      {"forward_loss", metrics.forward_loss},
+      {"inverse_loss", metrics.inverse_loss},
+      {"grad_norm", metrics.grad_norm},
       {"adaptive_epsilon", metrics.adaptive_epsilon},
       {"critic_variance", metrics.critic_variance},
       {"mean_confidence_weight", metrics.mean_confidence_weight},
@@ -106,6 +116,7 @@ APPOTrainer::APPOTrainer(
       device_(resolve_runtime_device(config_.ppo.device)),
       run_output_root_(std::move(run_output_root)),
       log_initialization_(log_initialization) {
+  validate_experiment_config(config_);
   if (!collector_) {
     throw std::invalid_argument("APPOTrainer requires a collector.");
   }
@@ -203,6 +214,9 @@ TrainerMetrics APPOTrainer::update_actor() {
   double accumulated_variance = 0.0;
   double accumulated_epsilon = 0.0;
   double accumulated_confidence = 0.0;
+  double accumulated_forward_loss = 0.0;
+  double accumulated_inverse_loss = 0.0;
+  std::int64_t accumulated_aux_count = 0;
 
   const auto& all_values = rollout_.all_values();
   const auto& all_rewards = rollout_.all_rewards();
@@ -367,15 +381,121 @@ TrainerMetrics APPOTrainer::update_actor() {
           metrics.value_losses[head_name] += head_loss.item<double>() * static_cast<double>(active_logits.size(0));
         }
 
+        torch::Tensor forward_loss = torch::zeros({}, active_advantages.options());
+        torch::Tensor inverse_loss = torch::zeros({}, active_advantages.options());
+        double chunk_aux_transitions = 0.0;
+
+        const bool has_aux_losses = config_.intrinsic_model.forward_loss_coef > 0.0F
+            || config_.intrinsic_model.inverse_loss_coef > 0.0F;
+
+        if (has_aux_losses && loss_steps >= 2) {
+          const int transition_steps = loss_steps - 1;
+
+          torch::Tensor chunk_encoded_t =
+              rollout_.encoded.narrow(0, loss_start, transition_steps)
+                  .index_select(1, agent_indices).to(device_);
+          torch::Tensor chunk_actions_t =
+              rollout_.actions.narrow(0, loss_start, transition_steps)
+                  .index_select(1, agent_indices).to(device_);
+
+          torch::Tensor chunk_encoded_tp1;
+          if (loss_start + loss_steps >= rollout_.rollout_length()) {
+            auto main_steps = transition_steps - 1;
+            if (main_steps > 0) {
+              auto main_part = rollout_.encoded.narrow(0, loss_start + 1, main_steps)
+                  .index_select(1, agent_indices).to(device_);
+              auto final_part = rollout_.final_encoded.index_select(0, agent_indices)
+                  .to(device_).unsqueeze(0);
+              chunk_encoded_tp1 = torch::cat({main_part, final_part}, 0);
+            } else {
+              chunk_encoded_tp1 = rollout_.final_encoded.index_select(0, agent_indices)
+                  .to(device_).unsqueeze(0);
+            }
+          } else {
+            chunk_encoded_tp1 =
+                rollout_.encoded.narrow(0, loss_start + 1, transition_steps)
+                    .index_select(1, agent_indices).to(device_);
+          }
+
+          torch::Tensor la_t = rollout_.learner_active.narrow(0, loss_start, transition_steps)
+              .index_select(1, agent_indices);
+          torch::Tensor la_tp1 = rollout_.learner_active.narrow(0, loss_start + 1, transition_steps)
+              .index_select(1, agent_indices);
+          torch::Tensor dones_t = rollout_.dones.narrow(0, loss_start, transition_steps)
+              .index_select(1, agent_indices);
+          torch::Tensor ep_tp1;
+          if (loss_start + loss_steps >= rollout_.rollout_length() && transition_steps == 1) {
+            ep_tp1 = rollout_.episode_starts.narrow(0, loss_start + 1, 1)
+                .index_select(1, agent_indices);
+          } else {
+            ep_tp1 = rollout_.episode_starts.narrow(0, loss_start + 1, transition_steps)
+                .index_select(1, agent_indices);
+          }
+
+          torch::Tensor transition_valid =
+              la_t.greater(0.5F)
+              .logical_and_(la_tp1.greater(0.5F))
+              .logical_and_(dones_t.less_equal(0.5F))
+              .logical_and_(ep_tp1.less_equal(0.5F));
+
+          auto trans_samples = transition_steps * count;
+          torch::Tensor flat_trans_valid = transition_valid.reshape({trans_samples}) > 0.5F;
+          std::int64_t valid_count = flat_trans_valid.sum().item<std::int64_t>();
+
+          if (valid_count > 0) {
+            torch::Tensor flat_encoded_t = chunk_encoded_t.reshape({trans_samples, config_.model.encoder_dim});
+            torch::Tensor flat_encoded_tp1 = chunk_encoded_tp1.reshape({trans_samples, config_.model.encoder_dim});
+            torch::Tensor flat_actions_t = chunk_actions_t.reshape({trans_samples});
+
+            torch::Tensor active_encoded_t = flat_encoded_t.index({flat_trans_valid});
+            torch::Tensor active_encoded_tp1 = flat_encoded_tp1.index({flat_trans_valid});
+            torch::Tensor active_actions_t = flat_actions_t.index({flat_trans_valid});
+
+            if (config_.intrinsic_model.forward_loss_coef > 0.0F) {
+              torch::Tensor forward_pred = actor_->forward_predict_next(
+                  active_encoded_t, active_actions_t);
+              forward_loss = torch::mse_loss(forward_pred, active_encoded_tp1);
+            }
+
+            if (config_.intrinsic_model.inverse_loss_coef > 0.0F) {
+              torch::Tensor inverse_logits = actor_->forward_predict_action(
+                  active_encoded_t, active_encoded_tp1);
+              inverse_loss = torch::nn::functional::cross_entropy(
+                  inverse_logits,
+                  active_actions_t.to(torch::kLong),
+                  torch::nn::functional::CrossEntropyFuncOptions().reduction(torch::kMean));
+            }
+
+            chunk_aux_transitions = static_cast<double>(valid_count);
+            accumulated_forward_loss += forward_loss.item<double>() * valid_count;
+            accumulated_inverse_loss += inverse_loss.item<double>() * valid_count;
+            accumulated_aux_count += valid_count;
+          }
+        }
+
         const torch::Tensor loss =
-            policy_loss + config_.ppo.value_coef * total_value_loss - config_.ppo.entropy_coef * entropy;
+            policy_loss
+            + config_.ppo.value_coef * total_value_loss
+            - config_.ppo.entropy_coef * entropy
+            + config_.intrinsic_model.forward_loss_coef * forward_loss
+            + config_.intrinsic_model.inverse_loss_coef * inverse_loss;
 
         metrics.forward_backward_seconds +=
             std::chrono::duration<double>(std::chrono::steady_clock::now() - forward_start).count();
+
+        require_finite(loss, "loss");
+        require_finite(policy_loss, "policy_loss");
+        require_finite(total_value_loss, "total_value_loss");
+        require_finite(entropy, "entropy");
+        if (has_aux_losses) {
+          require_finite(forward_loss, "forward_loss");
+          require_finite(inverse_loss, "inverse_loss");
+        }
+
         const auto optim_start = std::chrono::steady_clock::now();
         actor_optimizer_.zero_grad();
         loss.backward();
-        torch::nn::utils::clip_grad_norm_(actor_->parameters(), config_.ppo.max_grad_norm);
+        const double grad_norm = torch::nn::utils::clip_grad_norm_(actor_->parameters(), config_.ppo.max_grad_norm);
         actor_optimizer_.step();
         metrics.optimizer_step_seconds +=
             std::chrono::duration<double>(std::chrono::steady_clock::now() - optim_start).count();
@@ -384,6 +504,7 @@ TrainerMetrics APPOTrainer::update_actor() {
         metrics.policy_loss += policy_loss.item<double>() * static_cast<double>(active_samples);
         metrics.value_loss += total_value_loss.item<double>() * static_cast<double>(active_samples);
         metrics.entropy += entropy.item<double>() * static_cast<double>(active_samples);
+        metrics.grad_norm += grad_norm * static_cast<double>(active_samples);
         metric_steps += active_samples;
       }
     }
@@ -393,12 +514,17 @@ TrainerMetrics APPOTrainer::update_actor() {
     metrics.policy_loss /= static_cast<double>(metric_steps);
     metrics.value_loss /= static_cast<double>(metric_steps);
     metrics.entropy /= static_cast<double>(metric_steps);
+    metrics.grad_norm /= static_cast<double>(metric_steps);
     metrics.adaptive_epsilon = accumulated_epsilon / static_cast<double>(metric_steps);
     metrics.critic_variance = accumulated_variance / static_cast<double>(metric_steps);
     metrics.mean_confidence_weight = accumulated_confidence / static_cast<double>(metric_steps);
     for (auto& [name, loss] : metrics.value_losses) {
       loss /= static_cast<double>(metric_steps);
     }
+  }
+  if (accumulated_aux_count > 0) {
+    metrics.forward_loss = accumulated_forward_loss / static_cast<double>(accumulated_aux_count);
+    metrics.inverse_loss = accumulated_inverse_loss / static_cast<double>(accumulated_aux_count);
   }
   metrics.update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count();
   return metrics;
@@ -484,37 +610,41 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     // Reset intrinsic memory for agents starting a new episode *before* the reward
     // calculation so we do not compute cross-episode prediction errors.
     torch::Tensor episode_starts_cpu = episode_starts.to(torch::kCPU).to(torch::kBool);
+    torch::Tensor learner_active_cpu = learner_active.to(torch::kCPU).to(torch::kBool);
+    torch::Tensor dones_cpu = dones.to(torch::kCPU).to(torch::kBool);
     has_prev_intrinsic_step_.masked_fill_(episode_starts_cpu, false);
+
+    // Only compute intrinsic rewards for learner-active, same-episode transitions.
+    torch::Tensor intrinsic_valid = has_prev_intrinsic_step_
+        .logical_and_(learner_active_cpu)
+        .logical_and_(episode_starts_cpu.logical_not());
 
     {
       torch::NoGradGuard no_grad;
-      // Use per-agent persistent memory: only compute intrinsic rewards for agents
-      // that have a valid previous step.
-      torch::Tensor has_prev_device = has_prev_intrinsic_step_.to(device_);
-      torch::Tensor any_has_prev = has_prev_device.any();
-      if (any_has_prev.item<bool>()) {
+      torch::Tensor intrinsic_valid_device = intrinsic_valid.to(device_);
+      torch::Tensor any_valid = intrinsic_valid_device.any();
+      if (any_valid.item<bool>()) {
         torch::Tensor encoded_now = output.encoded;
         torch::Tensor predicted_next = actor_->forward_predict_next(
             prev_intrinsic_encoded_.to(device_), prev_intrinsic_action_.to(device_));
         torch::Tensor pred_error = torch::mse_loss(
             predicted_next, encoded_now, torch::Reduction::None).mean(-1);
 
-        // Only compute rewards where has_prev_step is true; zero elsewhere.
-        torch::Tensor mask = has_prev_device.to(torch::kFloat32);
+        torch::Tensor mask = intrinsic_valid_device.to(torch::kFloat32);
         pred_error = pred_error * mask;
 
         // Per-agent EMA update: pred_error has shape [num_agents].
         torch::Tensor pred_error_cpu = pred_error.to(torch::kCPU).to(torch::kFloat64);
         torch::Tensor novelty_delta = pred_error_cpu - novelty_ema_;
-        // Only update EMA for agents that have a previous step.
+        // Only update EMA for agents that have a valid previous step.
         double alpha_novel = static_cast<double>(config_.intrinsic_rewards.novelty_ema_decay);
         double alpha_learn = static_cast<double>(config_.intrinsic_rewards.learning_progress_ema_decay);
         novelty_ema_ = torch::where(
-            has_prev_intrinsic_step_,
+            intrinsic_valid,
             alpha_novel * novelty_ema_ + (1.0 - alpha_novel) * pred_error_cpu,
             novelty_ema_);
         learning_progress_ema_ = torch::where(
-            has_prev_intrinsic_step_,
+            intrinsic_valid,
             alpha_learn * learning_progress_ema_ + (1.0 - alpha_learn) * novelty_delta.abs(),
             learning_progress_ema_);
 
@@ -553,7 +683,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
       prev_intrinsic_encoded_.copy_(output.encoded.detach().to(torch::kCPU));
       prev_intrinsic_action_.copy_(actions.detach().to(torch::kCPU));
     }
-    has_prev_intrinsic_step_.fill_(true);
+    has_prev_intrinsic_step_ = learner_active_cpu.logical_and_(dones_cpu.logical_not());
 
     const torch::Tensor atom_support_cur = actor_->value_support("curiosity").to(device_);
     const torch::Tensor atom_support_learn = actor_->value_support("learning_progress").to(device_);
@@ -575,6 +705,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
         step,
         raw_obs_host,
         normalized_obs.to(torch::kCPU),
+        output.encoded.to(torch::kCPU),
         episode_starts_cpu,
         action_masks.to(torch::kUInt8).to(torch::kCPU),
         learner_active.to(torch::kCPU),
@@ -613,6 +744,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     bootstrap_values["controllability"] = compute_mean_value(
         final_output.value_ctrl.logits, atom_support_ctrl).to(torch::kCPU);
     rollout_.set_final_values(bootstrap_values);
+    rollout_.set_final_encoded(final_output.encoded.to(torch::kCPU));
   }
 
   const double collection_seconds =
@@ -631,6 +763,9 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   metrics.policy_loss = update_metrics.policy_loss;
   metrics.value_loss = update_metrics.value_loss;
   metrics.entropy = update_metrics.entropy;
+  metrics.forward_loss = update_metrics.forward_loss;
+  metrics.inverse_loss = update_metrics.inverse_loss;
+  metrics.grad_norm = update_metrics.grad_norm;
   metrics.update_seconds = update_metrics.update_seconds;
   metrics.forward_backward_seconds = update_metrics.forward_backward_seconds;
   metrics.optimizer_step_seconds = update_metrics.optimizer_step_seconds;
@@ -734,6 +869,9 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " policy_loss=" << metrics.policy_loss
               << " value_loss=" << metrics.value_loss
               << " entropy=" << metrics.entropy
+              << " fwd_loss=" << metrics.forward_loss
+              << " inv_loss=" << metrics.inverse_loss
+              << " grad_norm=" << metrics.grad_norm
               << " epsilon=" << metrics.adaptive_epsilon
               << " critic_var=" << metrics.critic_variance
               << " conf_weight=" << metrics.mean_confidence_weight

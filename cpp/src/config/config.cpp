@@ -322,10 +322,10 @@ void to_json(json& j, const CriticHeadConfig& value) {
 
 void from_json(const json& j, CriticHeadConfig& value) {
   value.enabled = j.value("enabled", true);
-  value.value_hidden_dim = j.value("value_hidden_dim", 256);
-  value.value_num_atoms = j.value("value_num_atoms", 51);
-  value.value_v_min = j.value("value_v_min", -10.0F);
-  value.value_v_max = j.value("value_v_max", 10.0F);
+  value.value_hidden_dim = j.value("value_hidden_dim", 0);
+  value.value_num_atoms = j.value("value_num_atoms", 0);
+  value.value_v_min = j.value("value_v_min", 0.0F);
+  value.value_v_max = j.value("value_v_max", 0.0F);
 }
 
 void to_json(json& j, const CriticConfig& value) {
@@ -391,6 +391,18 @@ void from_json(const json& j, IntrinsicRewardConfig& value) {
   value.novelty_ema_decay = j.value("novelty_ema_decay", 0.99F);
   value.learning_progress_ema_decay = j.value("learning_progress_ema_decay", 0.95F);
   value.use_controllability_gate = j.value("use_controllability_gate", true);
+}
+
+void to_json(json& j, const IntrinsicModelConfig& value) {
+  j = json{
+      {"forward_loss_coef", value.forward_loss_coef},
+      {"inverse_loss_coef", value.inverse_loss_coef},
+  };
+}
+
+void from_json(const json& j, IntrinsicModelConfig& value) {
+  value.forward_loss_coef = j.value("forward_loss_coef", 1.0F);
+  value.inverse_loss_coef = j.value("inverse_loss_coef", 1.0F);
 }
 
 void to_json(json& j, const BCRegularizationConfig& value) {
@@ -460,6 +472,7 @@ void to_json(json& j, const ExperimentConfig& value) {
       {"forward_model", value.forward_model},
       {"inverse_model", value.inverse_model},
       {"intrinsic_rewards", value.intrinsic_rewards},
+      {"intrinsic_model", value.intrinsic_model},
       {"bc_regularization", value.bc_regularization},
       {"weight_schedule", value.weight_schedule},
       {"success_buffer", value.success_buffer},
@@ -487,6 +500,7 @@ void from_json(const json& j, ExperimentConfig& value) {
   value.model.forward_model = value.forward_model;
   value.model.inverse_model = value.inverse_model;
   value.intrinsic_rewards = j.value("intrinsic_rewards", IntrinsicRewardConfig{});
+  value.intrinsic_model = j.value("intrinsic_model", IntrinsicModelConfig{});
   value.bc_regularization = j.value("bc_regularization", BCRegularizationConfig{});
   value.weight_schedule = j.value("weight_schedule", WeightScheduleConfig{});
   value.success_buffer = j.value("success_buffer", SuccessBufferConfig{});
@@ -516,6 +530,76 @@ void from_json(const json& j, CheckpointMetadata& value) {
   value.global_step = j.at("global_step").get<std::int64_t>();
   value.update_index = j.at("update_index").get<std::int64_t>();
   value.critic_heads = j.value("critic_heads", std::vector<std::string>{});
+}
+
+CriticHeadConfig materialize_critic_head_config(
+    const CriticHeadConfig& cfg,
+    const ModelConfig& model,
+    bool enabled) {
+  CriticHeadConfig out = cfg;
+  out.enabled = out.enabled && enabled;
+
+  if (out.value_hidden_dim <= 0) {
+    out.value_hidden_dim = model.value_hidden_dim;
+  }
+  if (out.value_num_atoms <= 0) {
+    out.value_num_atoms = model.value_num_atoms;
+  }
+  if (!(out.value_v_max > out.value_v_min)) {
+    out.value_v_min = model.value_v_min;
+    out.value_v_max = model.value_v_max;
+  }
+
+  return out;
+}
+
+void validate_experiment_config(const ExperimentConfig& config) {
+  if (config.ppo.rollout_length <= 1) {
+    throw std::invalid_argument("ppo.rollout_length must be > 1.");
+  }
+  if (config.ppo.sequence_length <= 0) {
+    throw std::invalid_argument("ppo.sequence_length must be positive.");
+  }
+  if (config.ppo.minibatch_size < config.ppo.sequence_length) {
+    throw std::invalid_argument("ppo.minibatch_size must be >= ppo.sequence_length.");
+  }
+  if (config.ppo.burn_in < 0 || config.ppo.burn_in >= config.ppo.sequence_length) {
+    throw std::invalid_argument("ppo.burn_in must satisfy 0 <= burn_in < sequence_length.");
+  }
+  if (config.behavior_cloning.sequence_length <= 0) {
+    throw std::invalid_argument("behavior_cloning.sequence_length must be positive.");
+  }
+  if (config.model.encoder_dim <= 0) {
+    throw std::invalid_argument("model.encoder_dim must be positive.");
+  }
+
+  const bool uses_intrinsic =
+      config.intrinsic_rewards.curiosity_weight > 0.0F ||
+      config.intrinsic_rewards.learning_progress_weight > 0.0F ||
+      config.intrinsic_rewards.controllability_weight > 0.0F ||
+      config.intrinsic_rewards.use_controllability_gate;
+
+  if (uses_intrinsic) {
+    if (config.intrinsic_model.forward_loss_coef <= 0.0F) {
+      throw std::invalid_argument("Intrinsic rewards require forward_loss_coef > 0.");
+    }
+    if (config.intrinsic_model.inverse_loss_coef <= 0.0F) {
+      throw std::invalid_argument("Intrinsic rewards require inverse_loss_coef > 0.");
+    }
+  }
+
+  if (!config.critic.curiosity.enabled &&
+      config.weight_schedule.initial_curiosity_weight != 0.0F) {
+    throw std::invalid_argument("curiosity weight is nonzero but curiosity critic is disabled.");
+  }
+  if (!config.critic.learning_progress.enabled &&
+      config.weight_schedule.initial_learning_progress_weight != 0.0F) {
+    throw std::invalid_argument("learning_progress weight is nonzero but learning_progress critic is disabled.");
+  }
+  if (!config.critic.controllability.enabled &&
+      config.weight_schedule.initial_controllability_weight != 0.0F) {
+    throw std::invalid_argument("controllability weight is nonzero but controllability critic is disabled.");
+  }
 }
 
 ExperimentConfig load_experiment_config(const std::string& path) {

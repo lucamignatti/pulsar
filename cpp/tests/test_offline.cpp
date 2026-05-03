@@ -5,6 +5,7 @@
 #include <stdexcept>
 
 #include "pulsar/training/bc_pretrainer.hpp"
+#include "test_utils.hpp"
 
 namespace {
 
@@ -111,9 +112,62 @@ int main() {
     write_manifest_fixture(root);
 
     pulsar::ExperimentConfig config = make_bc_smoke_config(root / "data" / "manifest.json");
+    const auto output_dir = (root / "output").string();
     {
       pulsar::BCPretrainer pretrainer(config);
-      (void)pretrainer;
+      pretrainer.train(output_dir);
+    }
+
+    pulsar::test::require(
+        std::filesystem::exists(root / "output" / "model.pt"),
+        "BC training should produce model.pt");
+    pulsar::test::require(
+        std::filesystem::exists(root / "output" / "metadata.json"),
+        "BC training should produce metadata.json");
+    pulsar::test::require(
+        std::filesystem::exists(root / "output" / "config.json"),
+        "BC training should produce config.json");
+    pulsar::test::require(
+        std::filesystem::exists(root / "output" / "bc_metrics.jsonl"),
+        "BC training should produce bc_metrics.jsonl");
+
+    // Verify metrics are sane
+    {
+      std::ifstream metrics_file(root / "output" / "bc_metrics.jsonl");
+      pulsar::test::require(metrics_file.good(), "bc_metrics.jsonl should be readable");
+      std::string line;
+      bool found_train = false;
+      bool found_val = false;
+      while (std::getline(metrics_file, line)) {
+        if (line.find("\"phase\":\"train\"") != std::string::npos) {
+          found_train = true;
+          pulsar::test::require(line.find("behavior_samples") != std::string::npos,
+                                "train metrics should include behavior_samples");
+          pulsar::test::require(line.find("value_samples") != std::string::npos,
+                                "train metrics should include value_samples");
+        }
+        if (line.find("\"phase\":\"val\"") != std::string::npos) {
+          found_val = true;
+        }
+      }
+      pulsar::test::require(found_train, "bc_metrics should contain train phase");
+      pulsar::test::require(found_val, "bc_metrics should contain val phase");
+    }
+
+    // Verify model checkpoint loads and runs forward pass
+    {
+      auto torch_device = torch::kCPU;
+      pulsar::PPOActor loaded = pulsar::load_ppo_actor(root / "output", "cpu");
+      pulsar::test::require(loaded.ptr() != nullptr, "load_ppo_actor should return non-null model");
+      auto state = loaded->initial_state(2, torch_device);
+      auto output = loaded->forward_step(
+          torch::randn({2, config.model.observation_dim}, torch_device), std::move(state));
+      pulsar::test::require(
+          output.policy_logits.sizes() == torch::IntArrayRef({2, config.model.action_dim}),
+          "loaded model forward pass should produce valid policy logits");
+      pulsar::test::require(
+          torch::isfinite(output.policy_logits).all().item<bool>(),
+          "loaded model policy logits should be finite");
     }
 
     fs::remove_all(root);

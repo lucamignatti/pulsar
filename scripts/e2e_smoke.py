@@ -65,6 +65,7 @@ def main() -> int:
         config["ppo"]["num_envs"] = 2
         config["ppo"]["rollout_length"] = 4
         config["ppo"]["minibatch_size"] = 8
+        config["ppo"]["sequence_length"] = 4
         config["ppo"]["update_epochs"] = 1
         config["ppo"]["checkpoint_interval"] = 1
         config["ppo"]["device"] = "cpu"

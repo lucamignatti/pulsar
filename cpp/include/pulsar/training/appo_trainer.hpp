@@ -29,6 +29,9 @@ struct TrainerMetrics {
   double policy_loss = 0.0;
   double value_loss = 0.0;
   double entropy = 0.0;
+  double forward_loss = 0.0;
+  double inverse_loss = 0.0;
+  double grad_norm = 0.0;
   double obs_build_seconds = 0.0;
   double mask_build_seconds = 0.0;
   double policy_forward_seconds = 0.0;
@@ -47,6 +50,8 @@ struct TrainerMetrics {
   double bc_regularization_beta = 0.0;
   double novelty_ema = 0.0;
   double learning_progress_ema = 0.0;
+  double sampled_ext_value_mean = 0.0;
+  double extrinsic_value_entropy = 0.0;
   std::map<std::string, double> elo_ratings{};
   std::map<std::string, double> value_losses{};
 };

@@ -70,10 +70,15 @@ struct ModelConfig {
 
 struct CriticHeadConfig {
   bool enabled = true;
-  int value_hidden_dim = 256;
-  int value_num_atoms = 51;
-  float value_v_min = -10.0F;
-  float value_v_max = 10.0F;
+  int value_hidden_dim = 0;
+  int value_num_atoms = 0;
+  float value_v_min = 0.0F;
+  float value_v_max = 0.0F;
+};
+
+struct IntrinsicModelConfig {
+  float forward_loss_coef = 1.0F;
+  float inverse_loss_coef = 1.0F;
 };
 
 struct CriticConfig {
@@ -208,6 +213,7 @@ struct ExperimentConfig {
   ForwardModelConfig forward_model{};
   InverseModelConfig inverse_model{};
   IntrinsicRewardConfig intrinsic_rewards{};
+  IntrinsicModelConfig intrinsic_model{};
   BCRegularizationConfig bc_regularization{};
   WeightScheduleConfig weight_schedule{};
   SuccessBufferConfig success_buffer{};
@@ -256,6 +262,8 @@ void to_json(nlohmann::json& j, const InverseModelConfig& value);
 void from_json(const nlohmann::json& j, InverseModelConfig& value);
 void to_json(nlohmann::json& j, const IntrinsicRewardConfig& value);
 void from_json(const nlohmann::json& j, IntrinsicRewardConfig& value);
+void to_json(nlohmann::json& j, const IntrinsicModelConfig& value);
+void from_json(const nlohmann::json& j, IntrinsicModelConfig& value);
 void to_json(nlohmann::json& j, const BCRegularizationConfig& value);
 void from_json(const nlohmann::json& j, BCRegularizationConfig& value);
 void to_json(nlohmann::json& j, const WeightScheduleConfig& value);
@@ -266,6 +274,13 @@ void to_json(nlohmann::json& j, const ExperimentConfig& value);
 void from_json(const nlohmann::json& j, ExperimentConfig& value);
 void to_json(nlohmann::json& j, const CheckpointMetadata& value);
 void from_json(const nlohmann::json& j, CheckpointMetadata& value);
+
+CriticHeadConfig materialize_critic_head_config(
+    const CriticHeadConfig& cfg,
+    const ModelConfig& model,
+    bool enabled);
+
+void validate_experiment_config(const ExperimentConfig& config);
 
 ExperimentConfig load_experiment_config(const std::string& path);
 void save_experiment_config(const ExperimentConfig& config, const std::string& path);

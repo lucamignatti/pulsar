@@ -241,9 +241,12 @@ torch::Tensor normalize_advantage(const torch::Tensor& advantages, const torch::
     return advantages;
   }
   const torch::Tensor active_adv = advantages.masked_select(active_mask > 0.5F);
-  const float adv_mean = active_adv.mean().item<float>();
-  const float adv_std = active_adv.std().item<float>();
-  return (advantages - adv_mean) / (adv_std + 1.0e-8F);
+  const torch::Tensor mean = active_adv.mean();
+  if (active_count <= 1) {
+    return advantages - mean;
+  }
+  const torch::Tensor std = active_adv.std(false).clamp_min(1.0e-8);
+  return (advantages - mean) / std;
 }
 
 torch::Tensor mix_advantages(

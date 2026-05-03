@@ -142,6 +142,237 @@ void test_dataset_default_episode_starts_and_mismatch() {
   fs::remove_all(mismatch_root);
 }
 
+void test_packed_batch_chunking() {
+  namespace fs = std::filesystem;
+  // Create a fixture with 100 samples in a single trajectory
+  const fs::path root = fs::temp_directory_path() / "pulsar_dataset_chunk_test";
+  fs::remove_all(root);
+  fs::create_directories(root);
+
+  const int64_t samples = 100;
+  const int64_t obs_dim = 4;
+  const int64_t action_dim = 7;
+  torch::Tensor obs = torch::randn({samples, obs_dim});
+  torch::Tensor actions = torch::randint(0, action_dim, {samples}, torch::kLong);
+  torch::Tensor action_probs = torch::rand({samples, action_dim});
+  action_probs = action_probs / action_probs.sum(-1, true);
+  torch::Tensor outcome = torch::randint(0, 3, {samples}, torch::kLong);
+  torch::Tensor outcome_known = torch::ones({samples}, torch::kFloat32);
+  torch::Tensor weights = torch::ones({samples}, torch::kFloat32);
+  torch::Tensor episode_starts = torch::zeros({samples}, torch::kFloat32);
+  episode_starts[0] = 1.0F;
+  torch::Tensor terminated = torch::cat({
+      torch::zeros({samples - 1}, torch::kFloat32),
+      torch::ones({1}, torch::kFloat32),
+  });
+  torch::Tensor truncated = torch::zeros({samples}, torch::kFloat32);
+
+  torch::save(obs, (root / "obs.pt").string());
+  torch::save(actions, (root / "actions.pt").string());
+  torch::save(action_probs, (root / "action_probs.pt").string());
+  torch::save(outcome, (root / "outcome.pt").string());
+  torch::save(outcome_known, (root / "outcome_known.pt").string());
+  torch::save(weights, (root / "weights.pt").string());
+  torch::save(episode_starts, (root / "episode_starts.pt").string());
+  torch::save(terminated, (root / "terminated.pt").string());
+  torch::save(truncated, (root / "truncated.pt").string());
+
+  std::ofstream manifest(root / "manifest.json");
+  manifest << "{\n"
+              "  \"schema_version\": 4,\n"
+              "  \"observation_dim\": " << obs_dim << ",\n"
+              "  \"action_dim\": " << action_dim << ",\n"
+              "  \"outcome_classes\": 3,\n"
+              "  \"shards\": [\n"
+              "    {\n"
+              "      \"obs_path\": \"obs.pt\",\n"
+              "      \"actions_path\": \"actions.pt\",\n"
+              "      \"action_probs_path\": \"action_probs.pt\",\n"
+              "      \"outcome_path\": \"outcome.pt\",\n"
+              "      \"outcome_known_path\": \"outcome_known.pt\",\n"
+              "      \"weights_path\": \"weights.pt\",\n"
+              "      \"episode_starts_path\": \"episode_starts.pt\",\n"
+              "      \"terminated_path\": \"terminated.pt\",\n"
+              "      \"truncated_path\": \"truncated.pt\",\n"
+              "      \"samples\": " << samples << "\n"
+              "    }\n"
+              "  ]\n"
+              "}\n";
+
+  pulsar::OfflineTensorDataset dataset((root / "manifest.json").string());
+  int total_valid = 0;
+  int chunk_count = 0;
+  std::vector<int> chunk_sizes;
+  dataset.for_each_packed_trajectory_batch_until(
+      1000, false, 7,
+      [&](const pulsar::OfflineTensorPackedBatch& batch) -> bool {
+        ++chunk_count;
+        auto n_valid = batch.valid_mask.sum().item<int64_t>();
+        total_valid += static_cast<int>(n_valid);
+        chunk_sizes.push_back(static_cast<int>(n_valid));
+        return true;
+      },
+      32);
+  pulsar::test::require(total_valid == 100,
+      "packed batch chunking total samples mismatch: " + std::to_string(total_valid));
+  pulsar::test::require(chunk_sizes == std::vector<int>({32, 32, 32, 4}),
+      "packed batch chunk sizes incorrect: got " +
+      std::to_string(chunk_sizes[0]) + "," +
+      std::to_string(chunk_sizes[1]) + "," +
+      std::to_string(chunk_sizes[2]) + "," +
+      std::to_string(chunk_sizes[3]));
+
+  // Verify chunk reset: first chunk should have episode_starts at position 0
+  bool saw_chunk_reset = false;
+  dataset.for_each_packed_trajectory_batch(
+      1000, false, 7,
+      [&](const pulsar::OfflineTensorPackedBatch& batch) {
+        if (batch.episode_starts[0].all().item<bool>()) {
+          saw_chunk_reset = true;
+        }
+      },
+      32);
+  pulsar::test::require(saw_chunk_reset,
+      "chunk reset: first position should have episode_starts all true");
+
+  fs::remove_all(root);
+}
+
+void test_outcome_filtering() {
+  namespace fs = std::filesystem;
+  const fs::path root = fs::temp_directory_path() / "pulsar_dataset_outcome_test";
+  fs::remove_all(root);
+  fs::create_directories(root);
+
+  int64_t samples = 4;
+  torch::Tensor obs = torch::randn({samples, 4});
+  torch::Tensor actions = torch::randint(0, 7, {samples}, torch::kLong);
+  torch::Tensor action_probs = torch::rand({samples, 7});
+  action_probs = action_probs / action_probs.sum(-1, true);
+  // outcome = [0, 1, 2, 0], outcome_known = [1, 0, 0, 1] => only 2 known outcomes
+  torch::Tensor outcome = torch::tensor({static_cast<int64_t>(0), 1, 2, 0}, torch::kLong);
+  torch::Tensor outcome_known = torch::tensor({1.0F, 0.0F, 0.0F, 1.0F});
+  torch::Tensor weights = torch::tensor({1.0F, 2.0F, 1.0F, 3.0F});
+  torch::Tensor episode_starts = torch::tensor({1.0F, 0.0F, 1.0F, 0.0F});
+  torch::Tensor terminated = torch::tensor({0.0F, 1.0F, 0.0F, 1.0F});
+  torch::Tensor truncated = torch::zeros({samples});
+
+  torch::save(obs, (root / "obs.pt").string());
+  torch::save(actions, (root / "actions.pt").string());
+  torch::save(action_probs, (root / "action_probs.pt").string());
+  torch::save(outcome, (root / "outcome.pt").string());
+  torch::save(outcome_known, (root / "outcome_known.pt").string());
+  torch::save(weights, (root / "weights.pt").string());
+  torch::save(episode_starts, (root / "episode_starts.pt").string());
+  torch::save(terminated, (root / "terminated.pt").string());
+  torch::save(truncated, (root / "truncated.pt").string());
+
+  std::ofstream manifest(root / "manifest.json");
+  manifest << "{\n"
+              "  \"schema_version\": 4,\n"
+              "  \"observation_dim\": 4,\n"
+              "  \"action_dim\": 7,\n"
+              "  \"outcome_classes\": 3,\n"
+              "  \"shards\": [\n"
+              "    {\n"
+              "      \"obs_path\": \"obs.pt\",\n"
+              "      \"actions_path\": \"actions.pt\",\n"
+              "      \"action_probs_path\": \"action_probs.pt\",\n"
+              "      \"outcome_path\": \"outcome.pt\",\n"
+              "      \"outcome_known_path\": \"outcome_known.pt\",\n"
+              "      \"weights_path\": \"weights.pt\",\n"
+              "      \"episode_starts_path\": \"episode_starts.pt\",\n"
+              "      \"terminated_path\": \"terminated.pt\",\n"
+              "      \"truncated_path\": \"truncated.pt\",\n"
+              "      \"samples\": " << samples << "\n"
+              "    }\n"
+              "  ]\n"
+              "}\n";
+
+  pulsar::OfflineTensorDataset dataset((root / "manifest.json").string());
+  int known_count = 0;
+  int total_samples = 0;
+  dataset.for_each_trajectory(false, 7, [&](const pulsar::OfflineTensorBatch& batch) {
+    auto known = batch.outcome_known.greater(0.5F);
+    known_count += static_cast<int>(known.sum().item<int64_t>());
+    total_samples += static_cast<int>(batch.outcome.size(0));
+  });
+  pulsar::test::require(known_count == 2,
+      "outcome_known filtering: expected 2 known outcomes, got " + std::to_string(known_count));
+  pulsar::test::require(total_samples == 4,
+      "outcome_known filtering: total samples unchanged");
+
+  fs::remove_all(root);
+}
+
+void test_sample_weights() {
+  namespace fs = std::filesystem;
+  const fs::path root = fs::temp_directory_path() / "pulsar_dataset_weight_test";
+  fs::remove_all(root);
+  fs::create_directories(root);
+
+  const int64_t samples = 4;
+  torch::Tensor obs = torch::randn({samples, 8});
+  torch::Tensor actions = torch::randint(0, 7, {samples}, torch::kLong);
+  torch::Tensor action_probs = torch::rand({samples, 7});
+  action_probs = action_probs / action_probs.sum(-1, true);
+  torch::Tensor outcome = torch::randint(0, 3, {samples}, torch::kLong);
+  torch::Tensor outcome_known = torch::ones({samples});
+  // Two different weight values
+  torch::Tensor weights = torch::tensor({1.0F, 10.0F, 1.0F, 10.0F});
+  torch::Tensor episode_starts = torch::ones({samples});
+  torch::Tensor terminated = torch::ones({samples});
+  torch::Tensor truncated = torch::zeros({samples});
+
+  torch::save(obs, (root / "obs.pt").string());
+  torch::save(actions, (root / "actions.pt").string());
+  torch::save(action_probs, (root / "action_probs.pt").string());
+  torch::save(outcome, (root / "outcome.pt").string());
+  torch::save(outcome_known, (root / "outcome_known.pt").string());
+  torch::save(weights, (root / "weights.pt").string());
+  torch::save(episode_starts, (root / "episode_starts.pt").string());
+  torch::save(terminated, (root / "terminated.pt").string());
+  torch::save(truncated, (root / "truncated.pt").string());
+
+  std::ofstream manifest(root / "manifest.json");
+  manifest << "{\n"
+              "  \"schema_version\": 4,\n"
+              "  \"observation_dim\": 8,\n"
+              "  \"action_dim\": 7,\n"
+              "  \"outcome_classes\": 3,\n"
+              "  \"shards\": [\n"
+              "    {\n"
+              "      \"obs_path\": \"obs.pt\",\n"
+              "      \"actions_path\": \"actions.pt\",\n"
+              "      \"action_probs_path\": \"action_probs.pt\",\n"
+              "      \"outcome_path\": \"outcome.pt\",\n"
+              "      \"outcome_known_path\": \"outcome_known.pt\",\n"
+              "      \"weights_path\": \"weights.pt\",\n"
+              "      \"episode_starts_path\": \"episode_starts.pt\",\n"
+              "      \"terminated_path\": \"terminated.pt\",\n"
+              "      \"truncated_path\": \"truncated.pt\",\n"
+              "      \"samples\": " << samples << "\n"
+              "    }\n"
+              "  ]\n"
+              "}\n";
+
+  // Verify weights are loaded correctly and vary
+  pulsar::OfflineTensorDataset dataset((root / "manifest.json").string());
+  bool found_light = false;
+  bool found_heavy = false;
+  dataset.for_each_batch(samples, false, 7, [&](const pulsar::OfflineTensorBatch& batch) {
+    for (int i = 0; i < batch.weights.size(0); ++i) {
+      float w = batch.weights[i].item<float>();
+      if (w < 2.0F) found_light = true;
+      if (w > 5.0F) found_heavy = true;
+    }
+  });
+  pulsar::test::require(found_light && found_heavy,
+      "sample weights should have distinct values loaded from fixture");
+
+  fs::remove_all(root);
+}
+
 }  // namespace
 
 int main() {
@@ -150,6 +381,9 @@ int main() {
     torch::set_num_interop_threads(1);
     test_dataset_iteration_and_trajectories();
     test_dataset_default_episode_starts_and_mismatch();
+    test_packed_batch_chunking();
+    test_outcome_filtering();
+    test_sample_weights();
     std::cout << "pulsar_dataset_tests passed\n" << std::flush;
     std::_Exit(EXIT_SUCCESS);
   } catch (const std::exception& exc) {
