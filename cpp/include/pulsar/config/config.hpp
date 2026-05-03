@@ -141,6 +141,7 @@ struct PPOConfig {
   std::string confidence_weight_type = "entropy";
   float confidence_weight_delta = 1.0e-6F;
   bool normalize_confidence_weights = false;
+  bool synchronize_cuda_timing = false;
 };
 
 struct OfflineDatasetConfig {

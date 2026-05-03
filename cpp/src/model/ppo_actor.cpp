@@ -132,8 +132,8 @@ void PPOActorImpl::build_value_head(
   enabled_critic_heads_.push_back(name);
 }
 
-PPOActorImpl::PPOActorImpl(ModelConfig config)
-    : config_(std::move(config)) {
+PPOActorImpl::PPOActorImpl(ModelConfig config, CriticConfig critic_config)
+    : config_(std::move(config)), critic_config_(std::move(critic_config)) {
   validate_model_config(config_);
   append_encoder_block(encoder_, config_.observation_dim, config_.encoder_dim, config_.use_layer_norm);
   register_module("encoder", encoder_);
@@ -169,23 +169,42 @@ PPOActorImpl::PPOActorImpl(ModelConfig config)
   feature_dim_ = config_.workspace_dim + config_.controller_dim + config_.encoder_dim;
   policy_head_ = register_module("policy_head", torch::nn::Linear(feature_dim_, config_.action_dim));
 
-  const CriticHeadConfig default_head{
-      true, config_.value_hidden_dim, config_.value_num_atoms,
-      config_.value_v_min, config_.value_v_max};
+  // Build value heads according to CriticConfig.  Heads that are disabled in
+  // the config are not built at all; heads that lack per-head overrides fall
+  // back to ModelConfig defaults.
+  auto head_cfg_or_default = [&](const CriticHeadConfig& cfg,
+                                  int default_hidden, int default_atoms,
+                                  float default_vmin, float default_vmax) {
+    CriticHeadConfig out = cfg;
+    if (out.value_hidden_dim <= 0) out.value_hidden_dim = default_hidden;
+    if (out.value_num_atoms <= 0) out.value_num_atoms = default_atoms;
+    if (out.value_v_min == 0.0F && out.value_v_max == 0.0F) {
+      out.value_v_min = default_vmin;
+      out.value_v_max = default_vmax;
+    }
+    return out;
+  };
 
-  // NOTE: The actor currently uses ModelConfig defaults for value-head dimensions.
-  // Full per-head CriticConfig (v_min, v_max, num_atoms, hidden_dim) from
-  // ExperimentConfig is not yet wired through the PPOActorImpl constructor.
-  // Only the enabled/disabled flag from CriticConfig is respected at the call site
-  // (see load_ppo_actor / APPOTrainer).  For now all heads are built unconditionally;
-  // heads that are not trained simply receive zero loss weight via head_weights_.
-  build_value_head("extrinsic", value_head_ext_, atom_support_ext_, default_head);
-  build_value_head("curiosity", value_head_cur_, atom_support_cur_, default_head);
-  build_value_head("learning_progress", value_head_learn_, atom_support_learn_, default_head);
-
-  CriticHeadConfig ctrl_head_cfg = default_head;
-  ctrl_head_cfg.enabled = false;  // Controllability head is auxiliary only.
-  build_value_head("controllability", value_head_ctrl_, atom_support_ctrl_, ctrl_head_cfg);
+  if (critic_config_.extrinsic.enabled) {
+    build_value_head("extrinsic", value_head_ext_, atom_support_ext_,
+                     head_cfg_or_default(critic_config_.extrinsic, config_.value_hidden_dim,
+                                         config_.value_num_atoms, config_.value_v_min, config_.value_v_max));
+  }
+  if (critic_config_.curiosity.enabled) {
+    build_value_head("curiosity", value_head_cur_, atom_support_cur_,
+                     head_cfg_or_default(critic_config_.curiosity, config_.value_hidden_dim,
+                                         config_.value_num_atoms, config_.value_v_min, config_.value_v_max));
+  }
+  if (critic_config_.learning_progress.enabled) {
+    build_value_head("learning_progress", value_head_learn_, atom_support_learn_,
+                     head_cfg_or_default(critic_config_.learning_progress, config_.value_hidden_dim,
+                                         config_.value_num_atoms, config_.value_v_min, config_.value_v_max));
+  }
+  if (critic_config_.controllability.enabled) {
+    build_value_head("controllability", value_head_ctrl_, atom_support_ctrl_,
+                     head_cfg_or_default(critic_config_.controllability, config_.value_hidden_dim,
+                                         config_.value_num_atoms, config_.value_v_min, config_.value_v_max));
+  }
 
   forward_head_ = make_forward_head(config_.encoder_dim, config_.action_dim);
   register_module("forward_head", forward_head_);
@@ -438,7 +457,7 @@ PPOActor load_ppo_actor(const std::string& checkpoint_path, const std::string& d
   }
 
   torch::Device torch_device(device);
-  auto model = PPOActor(config.model);
+  auto model = PPOActor(config.model, config.critic);
   torch::serialize::InputArchive archive;
   archive.load_from((base / "model.pt").string(), torch_device);
   model->load(archive);

@@ -95,7 +95,7 @@ APPOTrainer::APPOTrainer(
       collector_(std::move(collector)),
       self_play_manager_(std::move(self_play_manager)),
       action_table_(config_.action_table),
-      actor_(PPOActor(config_.model)),
+      actor_(PPOActor(config_.model, config_.critic)),
       actor_normalizer_(config_.model.observation_dim),
       actor_optimizer_(actor_->parameters(), torch::optim::AdamOptions(config_.ppo.learning_rate)),
       rollout_(make_rollout_storage(
@@ -426,9 +426,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
       collection_state_ = std::move(output.state);
       actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
     }
-    // CUDA synchronize gives accurate policy timing but adds CPU/GPU sync
-    // overhead.  Disable this block for maximum training throughput.
-    if (device_.is_cuda()) {
+    if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
       torch::cuda::synchronize();
     }
     metrics.policy_forward_seconds +=

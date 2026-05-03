@@ -172,6 +172,7 @@ void to_json(json& j, const PPOConfig& value) {
       {"confidence_weight_type", value.confidence_weight_type},
       {"confidence_weight_delta", value.confidence_weight_delta},
       {"normalize_confidence_weights", value.normalize_confidence_weights},
+      {"synchronize_cuda_timing", value.synchronize_cuda_timing},
   };
 }
 
@@ -202,6 +203,7 @@ void from_json(const json& j, PPOConfig& value) {
   value.confidence_weight_type = j.value("confidence_weight_type", std::string{"entropy"});
   value.confidence_weight_delta = j.value("confidence_weight_delta", 1.0e-6F);
   value.normalize_confidence_weights = j.value("normalize_confidence_weights", false);
+  value.synchronize_cuda_timing = j.value("synchronize_cuda_timing", false);
 }
 
 void to_json(json& j, const OfflineDatasetConfig& value) {
@@ -211,6 +213,7 @@ void to_json(json& j, const OfflineDatasetConfig& value) {
       {"batch_size", value.batch_size},
       {"shuffle", value.shuffle},
       {"seed", value.seed},
+      {"allow_pickle", value.allow_pickle},
   };
 }
 
@@ -220,6 +223,7 @@ void from_json(const json& j, OfflineDatasetConfig& value) {
   value.batch_size = j.value("batch_size", 4096);
   value.shuffle = j.value("shuffle", true);
   value.seed = j.value("seed", static_cast<std::uint64_t>(0));
+  value.allow_pickle = j.value("allow_pickle", false);
 }
 
 void to_json(json& j, const BehaviorCloningConfig& value) {

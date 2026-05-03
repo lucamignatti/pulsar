@@ -64,7 +64,7 @@ struct OfflineTensorManifest {
 
 class OfflineTensorDataset {
  public:
-  explicit OfflineTensorDataset(std::string manifest_path);
+  explicit OfflineTensorDataset(std::string manifest_path, bool allow_pickle = false);
 
   [[nodiscard]] bool empty() const;
   [[nodiscard]] std::int64_t sample_count() const;
@@ -101,6 +101,7 @@ class OfflineTensorDataset {
   OfflineTensorManifest manifest_{};
   std::string manifest_path_{};
   std::int64_t sample_count_ = 0;
+  bool allow_pickle_ = false;
 };
 
 OfflineTensorManifest load_offline_tensor_manifest(const std::string& path);

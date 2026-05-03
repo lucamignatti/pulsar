@@ -51,11 +51,12 @@ BCEpochMetrics average_metrics(BCEpochMetrics metrics) {
 
 BCPretrainer::BCPretrainer(ExperimentConfig config)
     : config_(std::move(config)),
-      train_dataset_(config_.offline_dataset.train_manifest),
+      train_dataset_(config_.offline_dataset.train_manifest, config_.offline_dataset.allow_pickle),
       val_dataset_(
           config_.offline_dataset.val_manifest.empty() ? config_.offline_dataset.train_manifest
-                                                        : config_.offline_dataset.val_manifest),
-      actor_(PPOActor(config_.model)),
+                                                        : config_.offline_dataset.val_manifest,
+          config_.offline_dataset.allow_pickle),
+      actor_(PPOActor(config_.model, config_.critic)),
       actor_normalizer_(config_.model.observation_dim),
       actor_optimizer_(std::make_unique<torch::optim::AdamW>(
           actor_->parameters(),
@@ -172,15 +173,14 @@ BCEpochMetrics BCPretrainer::train_epoch(int epoch_index) {
 
         torch::Tensor value_loss = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
         if (batch.outcome.defined() && batch.outcome_known.defined()) {
-          const torch::Tensor flat_outcomes = batch.outcome.reshape({-1}).index({flat_valid});
-          const torch::Tensor flat_known = batch.outcome_known.reshape({-1}).to(device_).index({flat_valid}) > 0.5F;
+          const torch::Tensor flat_outcomes = batch.outcome.to(device_).reshape({-1}).index({flat_valid});
+          const torch::Tensor flat_known = batch.outcome_known.to(device_).reshape({-1}).index({flat_valid}) > 0.5F;
           if (flat_known.sum().item<int64_t>() > 0) {
             const torch::Tensor known_outcomes = flat_outcomes.index({flat_known});
             const torch::Tensor value_targets = map_outcome_to_value_target(known_outcomes);
             const torch::Tensor flat_value_logits_all =
                 output.value_ext.logits.reshape({-1, config_.model.value_num_atoms}).index({flat_valid});
             const torch::Tensor known_value_logits = flat_value_logits_all.index({flat_known});
-            const torch::Tensor atom_support = actor_->value_support("extrinsic").to(device_);
             value_loss = distributional_value_loss(
                 known_value_logits, value_targets,
                 config_.model.value_v_min, config_.model.value_v_max, config_.model.value_num_atoms);
@@ -253,15 +253,14 @@ BCEpochMetrics BCPretrainer::evaluate() {
         }
 
         if (batch.outcome.defined() && batch.outcome_known.defined()) {
-          const torch::Tensor flat_outcomes = batch.outcome.reshape({-1}).index({flat_valid});
-          const torch::Tensor flat_known = batch.outcome_known.reshape({-1}).to(device_).index({flat_valid}) > 0.5F;
+          const torch::Tensor flat_outcomes = batch.outcome.to(device_).reshape({-1}).index({flat_valid});
+          const torch::Tensor flat_known = batch.outcome_known.to(device_).reshape({-1}).index({flat_valid}) > 0.5F;
           if (flat_known.sum().item<int64_t>() > 0) {
             const torch::Tensor known_outcomes = flat_outcomes.index({flat_known});
             const torch::Tensor value_targets = map_outcome_to_value_target(known_outcomes);
             const torch::Tensor flat_value_logits_all =
                 output.value_ext.logits.reshape({-1, config_.model.value_num_atoms}).index({flat_valid});
             const torch::Tensor known_value_logits = flat_value_logits_all.index({flat_known});
-            const torch::Tensor atom_support = actor_->value_support("extrinsic").to(device_);
             const torch::Tensor value_loss = distributional_value_loss(
                 known_value_logits, value_targets,
                 config_.model.value_v_min, config_.model.value_v_max, config_.model.value_num_atoms);

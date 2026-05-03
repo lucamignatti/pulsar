@@ -54,7 +54,7 @@ struct ActorSequenceOutput {
 
 class PPOActorImpl : public torch::nn::Module {
  public:
-  explicit PPOActorImpl(ModelConfig config);
+  explicit PPOActorImpl(ModelConfig config, CriticConfig critic_config = {});
 
   [[nodiscard]] ContinuumState initial_state(std::int64_t batch_size, const torch::Device& device) const;
   ActorStepOutput forward_step(torch::Tensor obs, ContinuumState state, torch::Tensor episode_starts = {});
@@ -89,6 +89,7 @@ class PPOActorImpl : public torch::nn::Module {
   void build_value_head(const std::string& name, torch::nn::Sequential& head, torch::Tensor& support, const CriticHeadConfig& head_cfg);
 
   ModelConfig config_{};
+  CriticConfig critic_config_{};
   int feature_dim_ = 0;
   torch::nn::Sequential encoder_{};
   torch::nn::Linear query_proj_{nullptr};
