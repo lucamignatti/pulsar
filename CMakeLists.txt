@@ -44,10 +44,6 @@ function(pulsar_link_torch_whole_core target_name)
       pulsar_torch
       "$<LINK_LIBRARY:WHOLE_ARCHIVE,pulsar_core>"
   )
-
-  # pulsar_torch is static, so its private pulsar_core dependency also reaches
-  # final link targets. Keep every pulsar_core occurrence on the same feature.
-  set_property(TARGET "${target_name}" PROPERTY LINK_LIBRARY_OVERRIDE "WHOLE_ARCHIVE,pulsar_core")
 endfunction()
 
 if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
@@ -92,6 +88,21 @@ if(PULSAR_ENABLE_ROCKETSIM AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/Rock
   endif()
 endif()
 
+add_library(pulsar_core_usage INTERFACE)
+target_include_directories(pulsar_core_usage INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
+target_link_libraries(pulsar_core_usage INTERFACE nlohmann_json::nlohmann_json)
+target_compile_features(pulsar_core_usage INTERFACE cxx_std_20)
+
+if(TARGET RocketSim)
+  target_link_libraries(pulsar_core_usage INTERFACE RocketSim)
+  target_include_directories(pulsar_core_usage INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/RocketSim/src)
+  target_compile_definitions(pulsar_core_usage INTERFACE PULSAR_HAS_ROCKETSIM=1)
+endif()
+
+if(PULSAR_ENABLE_TRACING)
+  target_compile_definitions(pulsar_core_usage INTERFACE PULSAR_ENABLE_TRACING=1)
+endif()
+
 add_library(
   pulsar_core
   cpp/src/config/config.cpp
@@ -106,29 +117,7 @@ add_library(
   cpp/src/tracing/tracing.cpp
 )
 
-target_include_directories(
-  pulsar_core
-  PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include
-)
-
-target_link_libraries(
-  pulsar_core
-  PUBLIC
-    nlohmann_json::nlohmann_json
-)
-
-if(TARGET RocketSim)
-  target_link_libraries(pulsar_core PUBLIC RocketSim)
-  target_include_directories(pulsar_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/external/RocketSim/src)
-  target_compile_definitions(pulsar_core PUBLIC PULSAR_HAS_ROCKETSIM=1)
-endif()
-
-target_compile_features(pulsar_core PUBLIC cxx_std_20)
-
-if(PULSAR_ENABLE_TRACING)
-  target_compile_definitions(pulsar_core PUBLIC PULSAR_ENABLE_TRACING=1)
-endif()
+target_link_libraries(pulsar_core PUBLIC pulsar_core_usage)
 
 if(PULSAR_ENABLE_TORCH)
   pulsar_find_torch()
@@ -149,7 +138,7 @@ if(PULSAR_ENABLE_TORCH)
     )
 
     target_include_directories(pulsar_torch PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
-    target_link_libraries(pulsar_torch PRIVATE pulsar_core PUBLIC torch)
+    target_link_libraries(pulsar_torch PRIVATE pulsar_core_usage PUBLIC torch)
     target_compile_definitions(pulsar_torch PUBLIC PULSAR_HAS_TORCH=1)
     pulsar_force_target_cxx20(pulsar_torch)
 
