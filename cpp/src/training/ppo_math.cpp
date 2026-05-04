@@ -1,3 +1,5 @@
+#include <limits>
+
 #include "pulsar/training/ppo_math.hpp"
 
 #ifdef PULSAR_HAS_TORCH
@@ -47,7 +49,7 @@ void scatter_tensor(torch::Tensor& dst, const torch::Tensor& indices, const torc
 }  // namespace
 
 torch::Tensor apply_action_mask_to_logits(const torch::Tensor& logits, const torch::Tensor& action_masks) {
-  return logits.masked_fill(action_masks.logical_not(), -1.0e9);
+  return logits.masked_fill(action_masks.logical_not(), -std::numeric_limits<float>::infinity());
 }
 
 torch::Tensor sample_masked_actions(
@@ -155,9 +157,10 @@ torch::Tensor compute_distribution_variance(
     const torch::Tensor& value_logits,
     const torch::Tensor& atom_support) {
   const torch::Tensor probs = torch::softmax(value_logits, -1);
-  const torch::Tensor expected = (probs * atom_support).sum(-1);
-  const torch::Tensor expected_sq = (probs * atom_support.pow(2)).sum(-1);
-  return torch::relu(expected_sq - expected.pow(2));
+  const torch::Tensor expected = (probs * atom_support).sum(-1, true);
+  const torch::Tensor shifted_support = atom_support.unsqueeze(0) - expected;
+  const torch::Tensor variance = (probs * shifted_support.pow(2)).sum(-1);
+  return variance.clamp_min(1.0e-6F);
 }
 
 torch::Tensor compute_distribution_entropy(

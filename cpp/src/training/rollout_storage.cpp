@@ -12,7 +12,8 @@ RolloutStorage::RolloutStorage(
     int obs_dim,
     int action_dim,
     int encoder_dim,
-    torch::Device device)
+    torch::Device device,
+    std::vector<std::string> head_names)
     : rollout_length_(rollout_length),
       num_agents_(num_agents),
       device_(device) {
@@ -30,7 +31,6 @@ RolloutStorage::RolloutStorage(
   action_log_probs = torch::zeros({rollout_length, num_agents}, device);
   dones = torch::zeros({rollout_length, num_agents}, device);
 
-  const std::vector<std::string> head_names = {"extrinsic", "curiosity", "learning_progress", "controllability"};
   for (const auto& name : head_names) {
     values_[name] = torch::zeros({rollout_length, num_agents}, device);
     rewards_[name] = torch::zeros({rollout_length, num_agents}, device);

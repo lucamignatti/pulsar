@@ -103,7 +103,20 @@ class ParallelExecutor {
         count = count_;
       }
 
-      run_chunk(worker_index, count, task);
+      try {
+        run_chunk(worker_index, count, task);
+      } catch (...) {
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          if (pending_workers_ > 0) {
+            --pending_workers_;
+            if (pending_workers_ == 0) {
+              done_cv_.notify_one();
+            }
+          }
+        }
+        throw;
+      }
 
       {
         std::lock_guard<std::mutex> lock(mutex_);

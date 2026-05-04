@@ -71,7 +71,7 @@ void write_agent_obs(const EnvState& state, const EnvConfig& config, AgentId age
 
   std::size_t ally_count = 0;
   std::size_t enemy_count = 0;
-  for (std::size_t other_id = 0; other_id < state.cars.size(); ++other_id) {
+  for (std::size_t other_id = 0; other_id < state.cars.size() && ally_count < static_cast<std::size_t>(config.team_size - 1); ++other_id) {
     if (other_id == agent_id) {
       continue;
     }
@@ -88,7 +88,7 @@ void write_agent_obs(const EnvState& state, const EnvConfig& config, AgentId age
     ++ally_count;
   }
 
-  for (std::size_t other_id = 0; other_id < state.cars.size(); ++other_id) {
+  for (std::size_t other_id = 0; other_id < state.cars.size() && enemy_count < static_cast<std::size_t>(config.team_size); ++other_id) {
     if (other_id == agent_id) {
       continue;
     }

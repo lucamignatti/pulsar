@@ -2,6 +2,7 @@
 
 #ifdef PULSAR_HAS_TORCH
 
+#include <cmath>
 #include <filesystem>
 #include <sstream>
 #include <stdexcept>
@@ -266,7 +267,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> PPOActorImpl::read_memor
     const ContinuumState& state) {
   const torch::Tensor query_input = torch::cat({encoded, state.workspace}, -1);
   const torch::Tensor stm_query = query_proj_->forward(query_input).unsqueeze(1);
-  const torch::Tensor stm_scores = torch::bmm(stm_query, state.stm_keys.transpose(1, 2)).squeeze(1);
+  const float scale = 1.0f / std::sqrt(static_cast<float>(config_.stm_key_dim));
+  const torch::Tensor stm_scores = torch::bmm(stm_query, state.stm_keys.transpose(1, 2)).squeeze(1) * scale;
   const torch::Tensor stm_weights = masked_softmax(stm_scores, state.stm_strengths);
   const torch::Tensor stm_read = torch::bmm(stm_weights.unsqueeze(1), state.stm_values).squeeze(1);
 
@@ -301,17 +303,15 @@ ContinuumState PPOActorImpl::maybe_consolidate(
     ContinuumState state,
     const torch::Tensor& controller_hidden) {
   const torch::Tensor should_consolidate =
-      state.timestep.remainder(config_.consolidation_stride).eq(0).to(torch::kFloat32).unsqueeze(-1);
+      (state.timestep > 0).logical_and_(
+          state.timestep.remainder(config_.consolidation_stride).eq(0))
+          .to(torch::kFloat32).unsqueeze(-1);
   const torch::Tensor strengths = state.stm_strengths / state.stm_strengths.sum(-1, true).clamp_min(1.0e-6);
   const torch::Tensor stm_summary = torch::bmm(strengths.unsqueeze(1), state.stm_values).squeeze(1);
   const torch::Tensor write_logits = ltm_write_proj_->forward(controller_hidden + stm_context_proj_->forward(stm_summary));
   const torch::Tensor write_gate = torch::sigmoid(ltm_gate_proj_->forward(controller_hidden));
   const torch::Tensor delta = torch::tanh(write_logits) * write_gate * should_consolidate;
   state.ltm_coeffs = torch::clamp(state.ltm_coeffs + delta, -8.0, 8.0);
-  state.stm_strengths = torch::where(
-      should_consolidate.expand_as(state.stm_strengths) > 0.0,
-      state.stm_strengths * config_.retired_decay,
-      state.stm_strengths);
   return state;
 }
 

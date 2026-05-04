@@ -35,6 +35,12 @@ void update_elo_impl(double& winner, double& loser, double k_factor) {
   loser += k_factor * (expected - 1.0);
 }
 
+void update_elo_draw_impl(double& rating_a, double& rating_b, double k_factor) {
+  const double expected_a = 1.0 / (1.0 + std::pow(10.0, (rating_b - rating_a) / 400.0));
+  rating_a += k_factor * (0.5 - expected_a);
+  rating_b += k_factor * (expected_a - 0.5);
+}
+
 std::shared_ptr<MutatorSequence> make_eval_reset_mutator(const EnvConfig& config) {
   return std::make_shared<MutatorSequence>(
       std::vector<StateMutatorPtr>{
@@ -326,9 +332,10 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
       ContinuumState current_state = current_model->initial_state(static_cast<std::int64_t>(total_agents), device_);
       ContinuumState snapshot_state = snapshot.model->initial_state(static_cast<std::int64_t>(total_agents), device_);
       const Team current_team = (match % 2 == 0) ? Team::Blue : Team::Orange;
-      bool winner_recorded = false;
+      std::vector<bool> env_done(engines.size(), false);
+      int active_envs = static_cast<int>(engines.size());
 
-      for (int tick = 0; tick < config_.env.max_episode_ticks && !winner_recorded; tick += config_.env.tick_skip) {
+      for (int tick = 0; tick < config_.env.max_episode_ticks && active_envs > 0; tick += config_.env.tick_skip) {
         std::vector<float> host_obs(total_agents * obs_builder_->obs_dim());
         std::vector<std::uint8_t> host_masks(total_agents * discrete->action_table().size(), 1);
         for (std::size_t env_idx = 0; env_idx < engines.size(); ++env_idx) {
@@ -378,6 +385,7 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
         std::vector<ControllerState> parsed(total_agents);
         discrete->parse_actions_into(merged, parsed);
         for (std::size_t env_idx = 0; env_idx < engines.size(); ++env_idx) {
+          if (env_done[env_idx]) continue;
           const std::size_t offset = env_idx * agents_per_env;
           engines[env_idx]->step_inplace(
               std::span<const ControllerState>(
@@ -388,23 +396,28 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
             const bool current_won =
                 (state.blue_score > state.orange_score && current_team == Team::Blue) ||
                 (state.orange_score > state.blue_score && current_team == Team::Orange);
-            double& current_rating = current_ratings_[mode];
-            if (current_rating == 0.0) {
-              current_rating = config_.self_play_league.elo_initial;
-            }
-            double& snapshot_rating = snapshot.ratings[mode];
-            if (snapshot_rating == 0.0) {
-              snapshot_rating = config_.self_play_league.elo_initial;
-            }
+            auto [current_it, _] = current_ratings_.emplace(mode, config_.self_play_league.elo_initial);
+            auto [snapshot_it, __] = snapshot.ratings.emplace(mode, config_.self_play_league.elo_initial);
             if (current_won) {
-              update_elo_ratings(current_rating, snapshot_rating, config_.self_play_league.elo_k);
+              update_elo_ratings(current_it->second, snapshot_it->second, config_.self_play_league.elo_k);
             } else {
-              update_elo_ratings(snapshot_rating, current_rating, config_.self_play_league.elo_k);
+              update_elo_ratings(snapshot_it->second, current_it->second, config_.self_play_league.elo_k);
             }
-            winner_recorded = true;
+            env_done[env_idx] = true;
+            --active_envs;
           }
         }
         episode_starts.zero_();
+      }
+
+      // Handle draws: environments that reached max_episode_ticks without a goal.
+      for (std::size_t env_idx = 0; env_idx < engines.size(); ++env_idx) {
+        if (!env_done[env_idx]) {
+          auto [current_it, _] = current_ratings_.emplace(mode, config_.self_play_league.elo_initial);
+          auto [snapshot_it, __] = snapshot.ratings.emplace(mode, config_.self_play_league.elo_initial);
+          update_elo_draw_impl(current_it->second, snapshot_it->second, config_.self_play_league.elo_k);
+          env_done[env_idx] = true;
+        }
       }
     }
   }
