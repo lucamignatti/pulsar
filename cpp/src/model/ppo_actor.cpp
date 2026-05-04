@@ -182,7 +182,17 @@ PPOActorImpl::PPOActorImpl(ModelConfig config, CriticConfig critic_config)
       torch::nn::Linear(config_.workspace_dim + config_.encoder_dim, config_.stm_value_dim));
 
   feature_dim_ = config_.workspace_dim + config_.controller_dim + config_.encoder_dim;
-  policy_head_ = register_module("policy_head", torch::nn::Linear(feature_dim_, config_.action_dim));
+  {
+    torch::nn::Sequential policy;
+    if (config_.policy_hidden_dim > 0) {
+      policy->push_back(torch::nn::Linear(feature_dim_, config_.policy_hidden_dim));
+      policy->push_back(torch::nn::Functional(torch::relu));
+      policy->push_back(torch::nn::Linear(config_.policy_hidden_dim, config_.action_dim));
+    } else {
+      policy->push_back(torch::nn::Linear(feature_dim_, config_.action_dim));
+    }
+    policy_head_ = register_module("policy_head", std::move(policy));
+  }
 
   // Materialize per-head config from ModelConfig defaults, then always
   // build all four heads.  The `enabled` flag only controls whether the

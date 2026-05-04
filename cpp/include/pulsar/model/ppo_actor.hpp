@@ -104,7 +104,7 @@ class PPOActorImpl : public torch::nn::Module {
   torch::nn::GRUCell workspace_cell_{nullptr};
   torch::nn::Linear stm_key_write_{nullptr};
   torch::nn::Linear stm_value_write_{nullptr};
-  torch::nn::Linear policy_head_{nullptr};
+  torch::nn::Sequential policy_head_{nullptr};
 
   torch::nn::Sequential value_head_ext_{nullptr};
   torch::nn::Sequential value_head_cur_{nullptr};

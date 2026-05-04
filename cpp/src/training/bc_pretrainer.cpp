@@ -27,8 +27,11 @@ void append_metrics_line(
       {"behavior_loss", metrics.behavior_loss},
       {"behavior_accuracy", metrics.behavior_accuracy},
       {"value_loss", metrics.value_loss},
+      {"forward_loss", metrics.forward_loss},
+      {"inverse_loss", metrics.inverse_loss},
       {"behavior_samples", metrics.behavior_samples},
       {"value_samples", metrics.value_samples},
+      {"forward_samples", metrics.forward_samples},
       {"samples", metrics.samples},
   };
   std::filesystem::create_directories(output_dir);
@@ -43,6 +46,10 @@ BCEpochMetrics average_metrics(BCEpochMetrics metrics) {
   }
   if (metrics.value_samples > 0) {
     metrics.value_loss /= static_cast<double>(metrics.value_samples);
+  }
+  if (metrics.forward_samples > 0) {
+    metrics.forward_loss /= static_cast<double>(metrics.forward_samples);
+    metrics.inverse_loss /= static_cast<double>(metrics.forward_samples);
   }
   return metrics;
 }
@@ -194,7 +201,62 @@ BCEpochMetrics BCPretrainer::train_epoch(int epoch_index) {
           }
         }
 
-        const torch::Tensor loss = behavior_loss + value_loss;
+        torch::Tensor forward_loss = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+        torch::Tensor inverse_loss = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+        bool has_bc_aux = (config_.intrinsic_model.forward_loss_coef > 0.0F
+            || config_.intrinsic_model.inverse_loss_coef > 0.0F)
+            && output.encoded.size(0) >= 2
+            && actions.defined();
+
+        if (has_bc_aux) {
+          const int64_t T = output.encoded.size(0);
+          const int64_t B = output.encoded.size(1);
+          const int64_t transition_steps = T - 1;
+          const int64_t trans_samples = transition_steps * B;
+
+          auto encoded_t = output.encoded.narrow(0, 0, transition_steps)
+              .reshape({trans_samples, config_.model.encoder_dim});
+          auto encoded_tp1 = output.encoded.narrow(0, 1, transition_steps)
+              .reshape({trans_samples, config_.model.encoder_dim});
+
+          auto valid_t = valid.narrow(0, 0, transition_steps).reshape({trans_samples}) > 0.5F;
+          auto valid_tp1 = valid.narrow(0, 1, transition_steps).reshape({trans_samples}) > 0.5F;
+          auto ep_tp1 = starts.narrow(0, 1, transition_steps).reshape({trans_samples}) > 0.5F;
+
+          auto trans_valid = valid_t.logical_and_(valid_tp1).logical_and_(ep_tp1.logical_not());
+
+          auto counts = trans_valid.sum().item<int64_t>();
+          if (counts > 0) {
+            auto active_encoded_t = encoded_t.index({trans_valid});
+            auto active_encoded_tp1 = encoded_tp1.index({trans_valid});
+            auto flat_actions = actions.narrow(0, 0, transition_steps)
+                .reshape({trans_samples});
+            auto active_actions = flat_actions.index({trans_valid});
+
+            if (config_.intrinsic_model.forward_loss_coef > 0.0F) {
+              auto fwd_pred = actor_->forward_predict_next(
+                  active_encoded_t, active_actions);
+              forward_loss = torch::mse_loss(fwd_pred, active_encoded_tp1);
+            }
+
+            if (config_.intrinsic_model.inverse_loss_coef > 0.0F) {
+              auto inv_logits = actor_->forward_predict_action(
+                  active_encoded_t, active_encoded_tp1);
+              inverse_loss = torch::nn::functional::cross_entropy(
+                  inv_logits, active_actions.to(torch::kLong),
+                  torch::nn::functional::CrossEntropyFuncOptions().reduction(torch::kMean));
+            }
+
+            metrics.forward_loss += forward_loss.item<double>() * static_cast<double>(counts);
+            metrics.inverse_loss += inverse_loss.item<double>() * static_cast<double>(counts);
+            metrics.forward_samples += counts;
+          }
+        }
+
+        float fwd_coef = config_.intrinsic_model.forward_loss_coef;
+        float inv_coef = config_.intrinsic_model.inverse_loss_coef;
+        const torch::Tensor loss = behavior_loss + value_loss
+            + fwd_coef * forward_loss + inv_coef * inverse_loss;
         if (loss.requires_grad()) {
           loss.backward();
           torch::nn::utils::clip_grad_norm_(actor_->parameters(), config_.behavior_cloning.max_grad_norm);
@@ -276,6 +338,55 @@ BCEpochMetrics BCPretrainer::evaluate() {
                 known_value_logits, value_targets, v_min, v_max, num_atoms);
             metrics.value_loss += value_loss.item<double>() * static_cast<double>(known_value_logits.size(0));
             metrics.value_samples += known_value_logits.size(0);
+          }
+        }
+
+        bool has_bc_aux = (config_.intrinsic_model.forward_loss_coef > 0.0F
+            || config_.intrinsic_model.inverse_loss_coef > 0.0F)
+            && output.encoded.size(0) >= 2
+            && actions.defined();
+
+        if (has_bc_aux) {
+          const int64_t T = output.encoded.size(0);
+          const int64_t B = output.encoded.size(1);
+          const int64_t transition_steps = T - 1;
+          const int64_t trans_samples = transition_steps * B;
+
+          auto encoded_t = output.encoded.narrow(0, 0, transition_steps)
+              .reshape({trans_samples, config_.model.encoder_dim});
+          auto encoded_tp1 = output.encoded.narrow(0, 1, transition_steps)
+              .reshape({trans_samples, config_.model.encoder_dim});
+
+          auto v_t = valid.narrow(0, 0, transition_steps).reshape({trans_samples}) > 0.5F;
+          auto v_tp1 = valid.narrow(0, 1, transition_steps).reshape({trans_samples}) > 0.5F;
+          auto ep_tp1 = starts.narrow(0, 1, transition_steps).reshape({trans_samples}) > 0.5F;
+
+          auto trans_valid = v_t.logical_and_(v_tp1).logical_and_(ep_tp1.logical_not());
+          auto counts = trans_valid.sum().item<int64_t>();
+
+          if (counts > 0) {
+            auto active_encoded_t = encoded_t.index({trans_valid});
+            auto active_encoded_tp1 = encoded_tp1.index({trans_valid});
+            auto flat_actions = actions.narrow(0, 0, transition_steps)
+                .reshape({trans_samples});
+            auto active_actions = flat_actions.index({trans_valid});
+
+            if (config_.intrinsic_model.forward_loss_coef > 0.0F) {
+              auto fwd_pred = actor_->forward_predict_next(
+                  active_encoded_t, active_actions);
+              double fwd = torch::mse_loss(fwd_pred, active_encoded_tp1).item<double>();
+              metrics.forward_loss += fwd * static_cast<double>(counts);
+            }
+            if (config_.intrinsic_model.inverse_loss_coef > 0.0F) {
+              auto inv_logits = actor_->forward_predict_action(
+                  active_encoded_t, active_encoded_tp1);
+              double inv = torch::nn::functional::cross_entropy(
+                  inv_logits, active_actions.to(torch::kLong),
+                  torch::nn::functional::CrossEntropyFuncOptions().reduction(torch::kMean))
+                  .item<double>();
+              metrics.inverse_loss += inv * static_cast<double>(counts);
+            }
+            metrics.forward_samples += counts;
           }
         }
       },

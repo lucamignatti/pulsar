@@ -121,6 +121,7 @@ void to_json(json& j, const ModelConfig& value) {
       {"value_num_atoms", value.value_num_atoms},
       {"value_v_min", value.value_v_min},
       {"value_v_max", value.value_v_max},
+      {"policy_hidden_dim", value.policy_hidden_dim},
   };
 }
 
@@ -142,6 +143,7 @@ void from_json(const json& j, ModelConfig& value) {
   value.value_num_atoms = j.value("value_num_atoms", 51);
   value.value_v_min = j.value("value_v_min", -10.0F);
   value.value_v_max = j.value("value_v_max", 10.0F);
+  value.policy_hidden_dim = j.value("policy_hidden_dim", 0);
 }
 
 void to_json(json& j, const PPOConfig& value) {

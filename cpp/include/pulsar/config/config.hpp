@@ -64,6 +64,7 @@ struct ModelConfig {
   int value_num_atoms = 51;
   float value_v_min = -10.0F;
   float value_v_max = 10.0F;
+  int policy_hidden_dim = 0;
   ForwardModelConfig forward_model{};
   InverseModelConfig inverse_model{};
 };

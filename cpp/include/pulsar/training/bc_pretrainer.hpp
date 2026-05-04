@@ -18,8 +18,11 @@ struct BCEpochMetrics {
   double behavior_loss = 0.0;
   double behavior_accuracy = 0.0;
   double value_loss = 0.0;
+  double forward_loss = 0.0;
+  double inverse_loss = 0.0;
   std::int64_t behavior_samples = 0;
   std::int64_t value_samples = 0;
+  std::int64_t forward_samples = 0;
   std::int64_t samples = 0;
 };
 
