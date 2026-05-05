@@ -42,11 +42,11 @@
     "value_v_max": 10.0
   },
   "ppo": {
-    "num_envs": 512,
+    "num_envs": 1024,
     "collection_workers": 28,
     "init_checkpoint": "",
     "rollout_length": 256,
-    "minibatch_size": 32768,
+    "minibatch_size": 65536,
     "update_epochs": 3,
     "clip_range": 0.2,
     "entropy_coef": 0.01,
