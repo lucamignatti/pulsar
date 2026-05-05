@@ -42,7 +42,7 @@
     "value_v_max": 10.0
   },
   "ppo": {
-    "num_envs": 512,
+    "num_envs": 256,
     "collection_workers": 28,
     "init_checkpoint": "",
     "rollout_length": 256,
