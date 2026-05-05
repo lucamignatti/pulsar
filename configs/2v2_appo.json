@@ -46,7 +46,7 @@
     "collection_workers": 16,
     "init_checkpoint": "",
     "rollout_length": 256,
-    "minibatch_size": 65536,
+    "minibatch_size": 32768,
     "update_epochs": 3,
     "clip_range": 0.2,
     "entropy_coef": 0.01,
