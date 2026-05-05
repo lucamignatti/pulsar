@@ -27,8 +27,6 @@ def main() -> int:
     required = {
         "collection_agent_steps_per_second",
         "ppo_update_agent_steps_per_second",
-        "offline_pretrain_samples_per_second",
-        "offline_pretrain_epoch_seconds",
         "policy_forward_seconds",
         "ppo_forward_backward_seconds",
     }

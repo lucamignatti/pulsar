@@ -29,8 +29,6 @@ struct TrainerMetrics {
   double policy_loss = 0.0;
   double value_loss = 0.0;
   double entropy = 0.0;
-  double forward_loss = 0.0;
-  double inverse_loss = 0.0;
   double grad_norm = 0.0;
   double obs_build_seconds = 0.0;
   double mask_build_seconds = 0.0;
@@ -44,16 +42,30 @@ struct TrainerMetrics {
   double adaptive_epsilon = 0.0;
   double critic_variance = 0.0;
   double mean_confidence_weight = 0.0;
-  double extrinsic_reward_mean = 0.0;
-  double curiosity_reward_mean = 0.0;
-  double learning_progress_reward_mean = 0.0;
-  double bc_regularization_beta = 0.0;
-  double novelty_ema = 0.0;
-  double learning_progress_ema = 0.0;
-  double sampled_ext_value_mean = 0.0;
-  double extrinsic_value_entropy = 0.0;
+  double sparse_reward_mean = 0.0;
+  double sampled_value_win_mean = 0.0;
+  double value_win_entropy = 0.0;
+
+  double goal_critic_loss = 0.0;
+  double goal_actor_loss = 0.0;
+  double mean_predicted_goal_value = 0.0;
+  double mean_actual_goal_occupancy = 0.0;
+  double mean_goal_distance = 0.0;
+  double min_goal_distance = 0.0;
+  double goal_actor_loss_ratio = 0.0;
+
+  double es_fitness_mean = 0.0;
+  double es_fitness_std = 0.0;
+  double es_fitness_best = 0.0;
+  double es_winrate_mean = 0.0;
+  double es_goal_pressure_mean = 0.0;
+  double es_kl_mean = 0.0;
+  double es_update_norm = 0.0;
+  double es_lora_a_norm = 0.0;
+  double es_lora_b_norm = 0.0;
+  double es_seconds = 0.0;
+
   std::map<std::string, double> elo_ratings{};
-  std::map<std::string, double> value_losses{};
 };
 
 class APPOTrainer {
@@ -76,8 +88,13 @@ class APPOTrainer {
   TrainerMetrics update_actor();
   CheckpointMetadata make_checkpoint_metadata(std::int64_t global_step, int update_index) const;
 
-  void update_weight_schedule();
-  void decay_bc_beta();
+  void run_es_lora_update(int update_index, TrainerMetrics& metrics);
+
+  float evaluate_es_fitness(
+      const std::vector<torch::Tensor>& perturbation,
+      float sigma_ES,
+      int eval_episodes,
+      bool no_gradient);
 
   ExperimentConfig config_{};
   std::unique_ptr<BatchedRocketSimCollector> collector_{};
@@ -96,18 +113,6 @@ class APPOTrainer {
   ContinuumState collection_state_{};
   ContinuumState opponent_collection_state_{};
   bool use_pinned_host_buffers_ = false;
-
-  std::unordered_map<std::string, float> head_weights_{};
-  float current_beta_ = 0.0F;
-  torch::Tensor novelty_ema_{};
-  torch::Tensor learning_progress_ema_{};
-
-  // Persistent intrinsic-reward memory (one slot per agent).
-  // Reset entries for agents whose episode_starts is true.
-  torch::Tensor prev_intrinsic_encoded_{};
-  torch::Tensor prev_intrinsic_action_{};
-  torch::Tensor has_prev_intrinsic_step_{};  // bool tensor, shape [num_agents]
-
 };
 
 }  // namespace pulsar

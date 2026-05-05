@@ -30,6 +30,7 @@ RolloutStorage::RolloutStorage(
   actions = torch::zeros({rollout_length, num_agents}, torch::TensorOptions().dtype(torch::kLong).device(device));
   action_log_probs = torch::zeros({rollout_length, num_agents}, device);
   dones = torch::zeros({rollout_length, num_agents}, device);
+  goal_distances = torch::zeros({rollout_length, num_agents}, device);
 
   for (const auto& name : head_names) {
     values_[name] = torch::zeros({rollout_length, num_agents}, device);
@@ -49,7 +50,8 @@ void RolloutStorage::append(
     const torch::Tensor& action_log_probs_in,
     const std::unordered_map<std::string, torch::Tensor>& values_in,
     const std::unordered_map<std::string, torch::Tensor>& rewards_in,
-    const torch::Tensor& dones_in) {
+    const torch::Tensor& dones_in,
+    const torch::Tensor& goal_distances_in) {
   raw_obs[step].copy_(raw_obs_in.detach());
   obs[step].copy_(obs_in.detach());
   encoded[step].copy_(encoded_in.detach());
@@ -59,6 +61,7 @@ void RolloutStorage::append(
   actions[step].copy_(actions_in.detach());
   action_log_probs[step].copy_(action_log_probs_in.detach());
   dones[step].copy_(dones_in.detach());
+  goal_distances[step].copy_(goal_distances_in.detach());
 
   for (const auto& [name, tensor] : values_in) {
     auto it = values_.find(name);

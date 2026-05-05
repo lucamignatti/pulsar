@@ -1,4 +1,5 @@
 #include <limits>
+#include <cmath>
 
 #include "pulsar/training/ppo_math.hpp"
 
@@ -69,8 +70,6 @@ torch::Tensor masked_action_entropy(const torch::Tensor& logits, const torch::Te
   const torch::Tensor masked = apply_action_mask_to_logits(logits, action_masks);
   const torch::Tensor probs = torch::softmax(masked, -1);
   const torch::Tensor valid_counts = action_masks.to(torch::kFloat32).sum(-1);
-  // Guard: if an agent has only 0 or 1 valid action, entropy is 0 by definition.
-  // log(1) == 0 would produce a division-by-tiny after clamp_min, yielding spurious huge losses.
   const torch::Tensor trivial = valid_counts <= 1.0F;
   const torch::Tensor raw_entropy = -(probs * torch::log(probs + 1.0e-8)).sum(-1);
   const torch::Tensor normalized = raw_entropy / valid_counts.log().clamp_min(1.0e-6);
@@ -89,7 +88,6 @@ torch::Tensor compute_gae(
   torch::Tensor advantages = torch::zeros({steps, agents}, values.options());
   torch::Tensor last_gae = torch::zeros({agents}, values.options());
 
-  // Use the provided bootstrap values for the boundary; fall back to zeros if not provided.
   const torch::Tensor boundary_value = next_values.defined()
       ? next_values.to(values.device()).to(values.dtype())
       : torch::zeros({agents}, values.options());
@@ -111,7 +109,6 @@ torch::Tensor clipped_ppo_policy_loss(
     float clip_range) {
   const torch::Tensor ratio = torch::exp(current_log_probs - old_log_probs);
   const torch::Tensor clipped_ratio = torch::clamp(ratio, 1.0 - clip_range, 1.0 + clip_range);
-  // Returns per-sample loss; caller applies confidence weights and reduction.
   return -torch::min(ratio * advantages, clipped_ratio * advantages);
 }
 
@@ -198,44 +195,9 @@ torch::Tensor compute_confidence_weights(
     return torch::ones({value_logits.size(0)}, value_logits.options());
   }
   if (normalize) {
-    // Clamp mean away from zero before division to avoid NaNs when all weights are zero.
     raw_weights = raw_weights / (raw_weights.mean().clamp_min(1.0e-8F));
   }
   return raw_weights.detach();
-}
-
-std::unordered_map<std::string, torch::Tensor> compute_per_head_advantages(
-    const std::unordered_map<std::string, torch::Tensor>& values,
-    const std::unordered_map<std::string, torch::Tensor>& rewards,
-    const torch::Tensor& dones,
-    float gamma,
-    float gae_lambda,
-    const std::unordered_map<std::string, torch::Tensor>& next_values) {
-  std::unordered_map<std::string, torch::Tensor> advantages;
-  for (const auto& [name, head_values] : values) {
-    auto reward_it = rewards.find(name);
-    const torch::Tensor& head_rewards = (reward_it != rewards.end()) ? reward_it->second : rewards.at("extrinsic");
-    torch::Tensor head_next_values;
-    auto nv_it = next_values.find(name);
-    if (nv_it != next_values.end()) {
-      head_next_values = nv_it->second;
-    }
-    advantages[name] = compute_gae(head_values, head_rewards, dones, gamma, gae_lambda, head_next_values);
-  }
-  return advantages;
-}
-
-std::unordered_map<std::string, torch::Tensor> compute_per_head_returns(
-    const std::unordered_map<std::string, torch::Tensor>& advantages,
-    const std::unordered_map<std::string, torch::Tensor>& values) {
-  std::unordered_map<std::string, torch::Tensor> returns;
-  for (const auto& [name, head_advantages] : advantages) {
-    auto value_it = values.find(name);
-    if (value_it != values.end()) {
-      returns[name] = head_advantages + value_it->second.detach();
-    }
-  }
-  return returns;
 }
 
 torch::Tensor normalize_advantage(const torch::Tensor& advantages, const torch::Tensor& active_mask) {
@@ -252,23 +214,73 @@ torch::Tensor normalize_advantage(const torch::Tensor& advantages, const torch::
   return (advantages - mean) / std;
 }
 
-torch::Tensor mix_advantages(
-    const std::unordered_map<std::string, torch::Tensor>& normalized_advantages,
-    const std::unordered_map<std::string, float>& head_weights,
-    const torch::Tensor& active_mask) {
-  torch::Tensor mixed = torch::zeros_like(normalized_advantages.begin()->second);
-  for (const auto& [name, normalized] : normalized_advantages) {
-    auto weight_it = head_weights.find(name);
-    float weight = (weight_it != head_weights.end()) ? weight_it->second : 0.0F;
-    if (weight > 0.0F) {
-      mixed = mixed + weight * normalized;
+torch::Tensor compute_finite_horizon_goal_occupancy(
+    const torch::Tensor& goal_distances,
+    const torch::Tensor& dones,
+    float gamma_g,
+    float goal_value,
+    float kernel_sigma,
+    int horizon_H) {
+  const int64_t steps = goal_distances.size(0);
+  const int64_t agents = goal_distances.size(1);
+  float two_sigma2 = 2.0F * kernel_sigma * kernel_sigma;
+
+  torch::Tensor occupancy = torch::zeros({steps, agents}, goal_distances.options());
+
+  for (int64_t t = 0; t < steps; ++t) {
+    torch::Tensor G = torch::zeros({agents}, goal_distances.options());
+    bool any_done = false;
+    for (int k = 0; k < horizon_H && (t + k) < steps; ++k) {
+      float weight = std::pow(static_cast<double>(gamma_g), static_cast<double>(k));
+      torch::Tensor m = goal_distances[t + k];
+      torch::Tensor K = torch::exp(-(m - goal_value).square() / two_sigma2);
+      G = G + static_cast<float>(weight) * K;
+      if (!any_done) {
+        any_done = dones[t + k].any().item<bool>();
+      }
     }
+    if (any_done) {
+      torch::Tensor cum_done = torch::zeros({agents}, dones.options());
+      cum_done.copy_(dones[t]);
+      for (int k = 1; k < horizon_H && (t + k) < steps; ++k) {
+        G = G * (1.0F - cum_done);
+        cum_done = cum_done + dones[t + k];
+        cum_done = cum_done.clamp_max(1.0F);
+      }
+    }
+    occupancy[t] = G;
   }
-  return mixed;
+  return occupancy;
 }
 
-float advance_weight_schedule(float current, float growth_rate, float max_val) {
-  return std::min(current * growth_rate, max_val);
+torch::Tensor compute_goal_actor_loss_discrete(
+    const torch::Tensor& policy_logits,
+    const torch::Tensor& action_masks,
+    const torch::Tensor& goal_critic_logits,
+    const torch::Tensor& goal_atom_support) {
+  const torch::Tensor masked = apply_action_mask_to_logits(policy_logits, action_masks);
+  const torch::Tensor probs = torch::softmax(masked, -1);
+
+  const torch::Tensor goal_probs = torch::softmax(goal_critic_logits, -1);
+  const torch::Tensor goal_q_values = (goal_probs * goal_atom_support).sum(-1);
+
+  const torch::Tensor expected_goal_value = (probs * goal_q_values.detach()).sum(-1);
+
+  return -expected_goal_value.mean();
+}
+
+float compute_discrete_policy_kl(
+    const torch::Tensor& base_logits,
+    const torch::Tensor& perturbed_logits,
+    const torch::Tensor& action_masks) {
+  const torch::Tensor base_masked = apply_action_mask_to_logits(base_logits, action_masks);
+  const torch::Tensor perturbed_masked = apply_action_mask_to_logits(perturbed_logits, action_masks);
+
+  const torch::Tensor base_probs = torch::softmax(base_masked, -1);
+  const torch::Tensor perturbed_probs = torch::softmax(perturbed_masked, -1);
+
+  const torch::Tensor kl = (perturbed_probs * (torch::log(perturbed_probs + 1.0e-8) - torch::log(base_probs + 1.0e-8))).sum(-1);
+  return kl.mean().item<float>();
 }
 
 ContinuumState detach_state(ContinuumState state) {

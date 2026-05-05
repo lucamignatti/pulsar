@@ -34,18 +34,6 @@ struct EnvConfig {
   std::uint64_t seed = 0;
 };
 
-struct ForwardModelConfig {
-  int hidden_dim = 256;
-  int num_layers = 2;
-  float learning_rate = 3.0e-4F;
-};
-
-struct InverseModelConfig {
-  int hidden_dim = 256;
-  int num_layers = 2;
-  float learning_rate = 3.0e-4F;
-};
-
 struct ModelConfig {
   int observation_dim = 132;
   int action_dim = 90;
@@ -65,59 +53,39 @@ struct ModelConfig {
   float value_v_min = -10.0F;
   float value_v_max = 10.0F;
   int policy_hidden_dim = 0;
-  ForwardModelConfig forward_model{};
-  InverseModelConfig inverse_model{};
 };
 
-struct CriticHeadConfig {
-  bool enabled = true;
-  int value_hidden_dim = 0;
-  int value_num_atoms = 0;
-  float value_v_min = 0.0F;
-  float value_v_max = 0.0F;
+struct GoalMappingConfig {
+  float goal = 0.0F;
+  float kernel_sigma = 0.05F;
+  float arena_max_distance = 8192.0F;
 };
 
-struct IntrinsicModelConfig {
-  float forward_loss_coef = 1.0F;
-  float inverse_loss_coef = 1.0F;
+struct GoalCriticConfig {
+  int horizon_H = 256;
+  float gamma_g = 0.99F;
+  int num_atoms = 51;
+  float v_min = 0.0F;
+  float v_max = 0.0F;
+  float lambda_Zg = 1.0F;
 };
 
-struct CriticConfig {
-  CriticHeadConfig extrinsic{};
-  CriticHeadConfig curiosity{};
-  CriticHeadConfig learning_progress{};
-  CriticHeadConfig controllability = CriticHeadConfig{false};
+struct ActorGoalConfig {
+  float lambda_g = 0.02F;
 };
 
-struct IntrinsicRewardConfig {
-  float curiosity_weight = 1.0F;
-  float learning_progress_weight = 1.0F;
-  float controllability_weight = 0.5F;
-  float novelty_ema_decay = 0.99F;
-  float learning_progress_ema_decay = 0.95F;
-  bool use_controllability_gate = true;
-};
-
-struct BCRegularizationConfig {
-  float initial_beta = 0.1F;
-  float beta_decay = 0.999F;
-  float min_beta = 0.0F;
-};
-
-struct WeightScheduleConfig {
-  float initial_extrinsic_weight = 0.1F;
-  float initial_curiosity_weight = 1.0F;
-  float initial_learning_progress_weight = 1.0F;
-  float initial_controllability_weight = 0.0F;
-  float extrinsic_weight_growth_rate = 1.001F;
-  float intrinsic_weight_decay_rate = 0.999F;
-  float max_extrinsic_weight = 1.0F;
-  float min_intrinsic_weight = 0.01F;
-};
-
-struct SuccessBufferConfig {
-  int capacity = 10000;
-  float oversample_ratio = 0.1F;
+struct ESLoraConfig {
+  int rank = 4;
+  float lora_alpha = 4.0F;
+  int population_size = 16;
+  float sigma_ES = 0.01F;
+  float eta_ES = 0.003F;
+  int es_interval = 100;
+  int eval_episodes_per_member = 8;
+  float alpha_g = 0.05F;
+  float beta_KL = 0.01F;
+  bool antithetic_sampling = true;
+  bool update_norm_clip = true;
 };
 
 struct PPOConfig {
@@ -150,25 +118,6 @@ struct PPOConfig {
   bool synchronize_cuda_timing = false;
 };
 
-struct OfflineDatasetConfig {
-  std::string train_manifest = "";
-  std::string val_manifest = "";
-  int batch_size = 4096;
-  bool shuffle = true;
-  std::uint64_t seed = 0;
-  bool allow_pickle = false;
-};
-
-struct BehaviorCloningConfig {
-  bool enabled = true;
-  int epochs = 10;
-  int sequence_length = 32;
-  float learning_rate = 3.0e-4F;
-  float weight_decay = 1.0e-6F;
-  float label_smoothing = 0.0F;
-  float max_grad_norm = 1.0F;
-};
-
 struct SelfPlayLeagueConfig {
   bool enabled = false;
   float opponent_probability = 0.0F;
@@ -199,33 +148,27 @@ struct WandbConfig {
 };
 
 struct ExperimentConfig {
-  int schema_version = 4;
-  int obs_schema_version = 1;
+  int schema_version = 5;
+  int obs_schema_version = 2;
   EnvConfig env{};
   OutcomeConfig outcome{};
   ActionTableConfig action_table{};
   ModelConfig model{};
   PPOConfig ppo{};
-  OfflineDatasetConfig offline_dataset{};
-  BehaviorCloningConfig behavior_cloning{};
+  GoalMappingConfig goal_mapping{};
+  GoalCriticConfig goal_critic{};
+  ActorGoalConfig actor_goal{};
+  ESLoraConfig es_lora{};
   SelfPlayLeagueConfig self_play_league{};
   WandbConfig wandb{};
-  CriticConfig critic{};
-  ForwardModelConfig forward_model{};
-  InverseModelConfig inverse_model{};
-  IntrinsicRewardConfig intrinsic_rewards{};
-  IntrinsicModelConfig intrinsic_model{};
-  BCRegularizationConfig bc_regularization{};
-  WeightScheduleConfig weight_schedule{};
-  SuccessBufferConfig success_buffer{};
 };
 
 struct CheckpointMetadata {
-  int schema_version = 4;
-  int obs_schema_version = 1;
+  int schema_version = 5;
+  int obs_schema_version = 2;
   std::string config_hash{};
   std::string action_table_hash{};
-  std::string architecture_name = "ppo_continuum";
+  std::string architecture_name = "continuum_goal_conditioned";
   std::string device = "cpu";
   std::int64_t global_step = 0;
   std::int64_t update_index = 0;
@@ -243,43 +186,24 @@ void to_json(nlohmann::json& j, const EnvConfig& value);
 void from_json(const nlohmann::json& j, EnvConfig& value);
 void to_json(nlohmann::json& j, const ModelConfig& value);
 void from_json(const nlohmann::json& j, ModelConfig& value);
+void to_json(nlohmann::json& j, const GoalMappingConfig& value);
+void from_json(const nlohmann::json& j, GoalMappingConfig& value);
+void to_json(nlohmann::json& j, const GoalCriticConfig& value);
+void from_json(const nlohmann::json& j, GoalCriticConfig& value);
+void to_json(nlohmann::json& j, const ActorGoalConfig& value);
+void from_json(const nlohmann::json& j, ActorGoalConfig& value);
+void to_json(nlohmann::json& j, const ESLoraConfig& value);
+void from_json(const nlohmann::json& j, ESLoraConfig& value);
 void to_json(nlohmann::json& j, const PPOConfig& value);
 void from_json(const nlohmann::json& j, PPOConfig& value);
-void to_json(nlohmann::json& j, const OfflineDatasetConfig& value);
-void from_json(const nlohmann::json& j, OfflineDatasetConfig& value);
-void to_json(nlohmann::json& j, const BehaviorCloningConfig& value);
-void from_json(const nlohmann::json& j, BehaviorCloningConfig& value);
 void to_json(nlohmann::json& j, const SelfPlayLeagueConfig& value);
 void from_json(const nlohmann::json& j, SelfPlayLeagueConfig& value);
 void to_json(nlohmann::json& j, const WandbConfig& value);
 void from_json(const nlohmann::json& j, WandbConfig& value);
-void to_json(nlohmann::json& j, const CriticHeadConfig& value);
-void from_json(const nlohmann::json& j, CriticHeadConfig& value);
-void to_json(nlohmann::json& j, const CriticConfig& value);
-void from_json(const nlohmann::json& j, CriticConfig& value);
-void to_json(nlohmann::json& j, const ForwardModelConfig& value);
-void from_json(const nlohmann::json& j, ForwardModelConfig& value);
-void to_json(nlohmann::json& j, const InverseModelConfig& value);
-void from_json(const nlohmann::json& j, InverseModelConfig& value);
-void to_json(nlohmann::json& j, const IntrinsicRewardConfig& value);
-void from_json(const nlohmann::json& j, IntrinsicRewardConfig& value);
-void to_json(nlohmann::json& j, const IntrinsicModelConfig& value);
-void from_json(const nlohmann::json& j, IntrinsicModelConfig& value);
-void to_json(nlohmann::json& j, const BCRegularizationConfig& value);
-void from_json(const nlohmann::json& j, BCRegularizationConfig& value);
-void to_json(nlohmann::json& j, const WeightScheduleConfig& value);
-void from_json(const nlohmann::json& j, WeightScheduleConfig& value);
-void to_json(nlohmann::json& j, const SuccessBufferConfig& value);
-void from_json(const nlohmann::json& j, SuccessBufferConfig& value);
 void to_json(nlohmann::json& j, const ExperimentConfig& value);
 void from_json(const nlohmann::json& j, ExperimentConfig& value);
 void to_json(nlohmann::json& j, const CheckpointMetadata& value);
 void from_json(const nlohmann::json& j, CheckpointMetadata& value);
-
-CriticHeadConfig materialize_critic_head_config(
-    const CriticHeadConfig& cfg,
-    const ModelConfig& model,
-    bool enabled);
 
 void validate_experiment_config(const ExperimentConfig& config);
 
@@ -290,5 +214,7 @@ std::string stable_json(const CheckpointMetadata& metadata);
 std::string hash_string(const std::string& value);
 std::string config_hash(const ExperimentConfig& config);
 std::string action_table_hash(const ActionTableConfig& config);
+
+float compute_goal_critic_v_max(const GoalCriticConfig& cfg);
 
 }  // namespace pulsar

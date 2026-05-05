@@ -21,7 +21,7 @@ class RolloutStorage {
       int action_dim,
       int encoder_dim,
       torch::Device device,
-      std::vector<std::string> head_names = {"extrinsic", "curiosity", "learning_progress", "controllability"});
+      std::vector<std::string> head_names = {"extrinsic"});
 
   void append(
       int step,
@@ -35,7 +35,8 @@ class RolloutStorage {
       const torch::Tensor& action_log_probs,
       const std::unordered_map<std::string, torch::Tensor>& values,
       const std::unordered_map<std::string, torch::Tensor>& rewards,
-      const torch::Tensor& dones);
+      const torch::Tensor& dones,
+      const torch::Tensor& goal_distances);
 
   void set_final_observation(const torch::Tensor& raw_obs);
   void set_final_encoded(const torch::Tensor& encoded);
@@ -65,6 +66,7 @@ class RolloutStorage {
   torch::Tensor actions;
   torch::Tensor action_log_probs;
   torch::Tensor dones;
+  torch::Tensor goal_distances;
   std::unordered_map<std::string, torch::Tensor> final_values_;
 
  private:

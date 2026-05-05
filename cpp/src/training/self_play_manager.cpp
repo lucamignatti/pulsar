@@ -211,7 +211,7 @@ void SelfPlayManager::load_existing_snapshots() {
     Snapshot snapshot{
         .global_step = metadata.global_step,
         .update_index = static_cast<int>(metadata.update_index),
-        .model = PPOActor(snapshot_config.model, snapshot_config.critic),
+        .model = PPOActor(snapshot_config.model, snapshot_config.goal_critic),
         .normalizer = ObservationNormalizer(snapshot_config.model.observation_dim),
         .ratings = {},
     };

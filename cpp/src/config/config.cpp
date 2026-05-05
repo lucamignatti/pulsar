@@ -1,5 +1,6 @@
 #include "pulsar/config/config.hpp"
 
+#include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -146,6 +147,78 @@ void from_json(const json& j, ModelConfig& value) {
   value.policy_hidden_dim = j.value("policy_hidden_dim", 0);
 }
 
+void to_json(json& j, const GoalMappingConfig& value) {
+  j = json{
+      {"goal", value.goal},
+      {"kernel_sigma", value.kernel_sigma},
+      {"arena_max_distance", value.arena_max_distance},
+  };
+}
+
+void from_json(const json& j, GoalMappingConfig& value) {
+  value.goal = j.value("goal", 0.0F);
+  value.kernel_sigma = j.value("kernel_sigma", 0.05F);
+  value.arena_max_distance = j.value("arena_max_distance", 8192.0F);
+}
+
+void to_json(json& j, const GoalCriticConfig& value) {
+  j = json{
+      {"horizon_H", value.horizon_H},
+      {"gamma_g", value.gamma_g},
+      {"num_atoms", value.num_atoms},
+      {"v_min", value.v_min},
+      {"v_max", value.v_max},
+      {"lambda_Zg", value.lambda_Zg},
+  };
+}
+
+void from_json(const json& j, GoalCriticConfig& value) {
+  value.horizon_H = j.value("horizon_H", 256);
+  value.gamma_g = j.value("gamma_g", 0.99F);
+  value.num_atoms = j.value("num_atoms", 51);
+  value.v_min = j.value("v_min", 0.0F);
+  value.v_max = j.value("v_max", 0.0F);
+  value.lambda_Zg = j.value("lambda_Zg", 1.0F);
+}
+
+void to_json(json& j, const ActorGoalConfig& value) {
+  j = json{{"lambda_g", value.lambda_g}};
+}
+
+void from_json(const json& j, ActorGoalConfig& value) {
+  value.lambda_g = j.value("lambda_g", 0.02F);
+}
+
+void to_json(json& j, const ESLoraConfig& value) {
+  j = json{
+      {"rank", value.rank},
+      {"lora_alpha", value.lora_alpha},
+      {"population_size", value.population_size},
+      {"sigma_ES", value.sigma_ES},
+      {"eta_ES", value.eta_ES},
+      {"es_interval", value.es_interval},
+      {"eval_episodes_per_member", value.eval_episodes_per_member},
+      {"alpha_g", value.alpha_g},
+      {"beta_KL", value.beta_KL},
+      {"antithetic_sampling", value.antithetic_sampling},
+      {"update_norm_clip", value.update_norm_clip},
+  };
+}
+
+void from_json(const json& j, ESLoraConfig& value) {
+  value.rank = j.value("rank", 4);
+  value.lora_alpha = j.value("lora_alpha", 4.0F);
+  value.population_size = j.value("population_size", 16);
+  value.sigma_ES = j.value("sigma_ES", 0.01F);
+  value.eta_ES = j.value("eta_ES", 0.003F);
+  value.es_interval = j.value("es_interval", 100);
+  value.eval_episodes_per_member = j.value("eval_episodes_per_member", 8);
+  value.alpha_g = j.value("alpha_g", 0.05F);
+  value.beta_KL = j.value("beta_KL", 0.01F);
+  value.antithetic_sampling = j.value("antithetic_sampling", true);
+  value.update_norm_clip = j.value("update_norm_clip", true);
+}
+
 void to_json(json& j, const PPOConfig& value) {
   j = json{
       {"num_envs", value.num_envs},
@@ -206,48 +279,6 @@ void from_json(const json& j, PPOConfig& value) {
   value.confidence_weight_delta = j.value("confidence_weight_delta", 1.0e-6F);
   value.normalize_confidence_weights = j.value("normalize_confidence_weights", false);
   value.synchronize_cuda_timing = j.value("synchronize_cuda_timing", false);
-}
-
-void to_json(json& j, const OfflineDatasetConfig& value) {
-  j = json{
-      {"train_manifest", value.train_manifest},
-      {"val_manifest", value.val_manifest},
-      {"batch_size", value.batch_size},
-      {"shuffle", value.shuffle},
-      {"seed", value.seed},
-      {"allow_pickle", value.allow_pickle},
-  };
-}
-
-void from_json(const json& j, OfflineDatasetConfig& value) {
-  value.train_manifest = j.value("train_manifest", std::string{});
-  value.val_manifest = j.value("val_manifest", std::string{});
-  value.batch_size = j.value("batch_size", 4096);
-  value.shuffle = j.value("shuffle", true);
-  value.seed = j.value("seed", static_cast<std::uint64_t>(0));
-  value.allow_pickle = j.value("allow_pickle", false);
-}
-
-void to_json(json& j, const BehaviorCloningConfig& value) {
-  j = json{
-      {"enabled", value.enabled},
-      {"epochs", value.epochs},
-      {"sequence_length", value.sequence_length},
-      {"learning_rate", value.learning_rate},
-      {"weight_decay", value.weight_decay},
-      {"label_smoothing", value.label_smoothing},
-      {"max_grad_norm", value.max_grad_norm},
-  };
-}
-
-void from_json(const json& j, BehaviorCloningConfig& value) {
-  value.enabled = j.value("enabled", true);
-  value.epochs = j.value("epochs", 10);
-  value.sequence_length = j.value("sequence_length", 32);
-  value.learning_rate = j.value("learning_rate", 3.0e-4F);
-  value.weight_decay = j.value("weight_decay", 1.0e-6F);
-  value.label_smoothing = j.value("label_smoothing", 0.0F);
-  value.max_grad_norm = j.value("max_grad_norm", 1.0F);
 }
 
 void to_json(json& j, const SelfPlayLeagueConfig& value) {
@@ -312,151 +343,6 @@ void from_json(const json& j, WandbConfig& value) {
   value.tags = j.value("tags", std::vector<std::string>{});
 }
 
-void to_json(json& j, const CriticHeadConfig& value) {
-  j = json{
-      {"enabled", value.enabled},
-      {"value_hidden_dim", value.value_hidden_dim},
-      {"value_num_atoms", value.value_num_atoms},
-      {"value_v_min", value.value_v_min},
-      {"value_v_max", value.value_v_max},
-  };
-}
-
-void from_json(const json& j, CriticHeadConfig& value) {
-  value.enabled = j.value("enabled", true);
-  value.value_hidden_dim = j.value("value_hidden_dim", 0);
-  value.value_num_atoms = j.value("value_num_atoms", 0);
-  value.value_v_min = j.value("value_v_min", 0.0F);
-  value.value_v_max = j.value("value_v_max", 0.0F);
-}
-
-void to_json(json& j, const CriticConfig& value) {
-  j = json{
-      {"extrinsic", value.extrinsic},
-      {"curiosity", value.curiosity},
-      {"learning_progress", value.learning_progress},
-      {"controllability", value.controllability},
-  };
-}
-
-void from_json(const json& j, CriticConfig& value) {
-  value.extrinsic = j.value("extrinsic", CriticHeadConfig{});
-  value.extrinsic.enabled = true;
-  value.curiosity = j.value("curiosity", CriticHeadConfig{});
-  value.learning_progress = j.value("learning_progress", CriticHeadConfig{});
-  value.controllability = j.value("controllability", CriticHeadConfig{false});
-}
-
-void to_json(json& j, const ForwardModelConfig& value) {
-  j = json{
-      {"hidden_dim", value.hidden_dim},
-      {"num_layers", value.num_layers},
-      {"learning_rate", value.learning_rate},
-  };
-}
-
-void from_json(const json& j, ForwardModelConfig& value) {
-  value.hidden_dim = j.value("hidden_dim", 256);
-  value.num_layers = j.value("num_layers", 2);
-  value.learning_rate = j.value("learning_rate", 3.0e-4F);
-}
-
-void to_json(json& j, const InverseModelConfig& value) {
-  j = json{
-      {"hidden_dim", value.hidden_dim},
-      {"num_layers", value.num_layers},
-      {"learning_rate", value.learning_rate},
-  };
-}
-
-void from_json(const json& j, InverseModelConfig& value) {
-  value.hidden_dim = j.value("hidden_dim", 256);
-  value.num_layers = j.value("num_layers", 2);
-  value.learning_rate = j.value("learning_rate", 3.0e-4F);
-}
-
-void to_json(json& j, const IntrinsicRewardConfig& value) {
-  j = json{
-      {"curiosity_weight", value.curiosity_weight},
-      {"learning_progress_weight", value.learning_progress_weight},
-      {"controllability_weight", value.controllability_weight},
-      {"novelty_ema_decay", value.novelty_ema_decay},
-      {"learning_progress_ema_decay", value.learning_progress_ema_decay},
-      {"use_controllability_gate", value.use_controllability_gate},
-  };
-}
-
-void from_json(const json& j, IntrinsicRewardConfig& value) {
-  value.curiosity_weight = j.value("curiosity_weight", 1.0F);
-  value.learning_progress_weight = j.value("learning_progress_weight", 1.0F);
-  value.controllability_weight = j.value("controllability_weight", 0.5F);
-  value.novelty_ema_decay = j.value("novelty_ema_decay", 0.99F);
-  value.learning_progress_ema_decay = j.value("learning_progress_ema_decay", 0.95F);
-  value.use_controllability_gate = j.value("use_controllability_gate", true);
-}
-
-void to_json(json& j, const IntrinsicModelConfig& value) {
-  j = json{
-      {"forward_loss_coef", value.forward_loss_coef},
-      {"inverse_loss_coef", value.inverse_loss_coef},
-  };
-}
-
-void from_json(const json& j, IntrinsicModelConfig& value) {
-  value.forward_loss_coef = j.value("forward_loss_coef", 1.0F);
-  value.inverse_loss_coef = j.value("inverse_loss_coef", 1.0F);
-}
-
-void to_json(json& j, const BCRegularizationConfig& value) {
-  j = json{
-      {"initial_beta", value.initial_beta},
-      {"beta_decay", value.beta_decay},
-      {"min_beta", value.min_beta},
-  };
-}
-
-void from_json(const json& j, BCRegularizationConfig& value) {
-  value.initial_beta = j.value("initial_beta", 0.1F);
-  value.beta_decay = j.value("beta_decay", 0.999F);
-  value.min_beta = j.value("min_beta", 0.0F);
-}
-
-void to_json(json& j, const WeightScheduleConfig& value) {
-  j = json{
-      {"initial_extrinsic_weight", value.initial_extrinsic_weight},
-      {"initial_curiosity_weight", value.initial_curiosity_weight},
-      {"initial_learning_progress_weight", value.initial_learning_progress_weight},
-      {"initial_controllability_weight", value.initial_controllability_weight},
-      {"extrinsic_weight_growth_rate", value.extrinsic_weight_growth_rate},
-      {"intrinsic_weight_decay_rate", value.intrinsic_weight_decay_rate},
-      {"max_extrinsic_weight", value.max_extrinsic_weight},
-      {"min_intrinsic_weight", value.min_intrinsic_weight},
-  };
-}
-
-void from_json(const json& j, WeightScheduleConfig& value) {
-  value.initial_extrinsic_weight = j.value("initial_extrinsic_weight", 0.1F);
-  value.initial_curiosity_weight = j.value("initial_curiosity_weight", 1.0F);
-  value.initial_learning_progress_weight = j.value("initial_learning_progress_weight", 1.0F);
-  value.initial_controllability_weight = j.value("initial_controllability_weight", 0.0F);
-  value.extrinsic_weight_growth_rate = j.value("extrinsic_weight_growth_rate", 1.001F);
-  value.intrinsic_weight_decay_rate = j.value("intrinsic_weight_decay_rate", 0.999F);
-  value.max_extrinsic_weight = j.value("max_extrinsic_weight", 1.0F);
-  value.min_intrinsic_weight = j.value("min_intrinsic_weight", 0.01F);
-}
-
-void to_json(json& j, const SuccessBufferConfig& value) {
-  j = json{
-      {"capacity", value.capacity},
-      {"oversample_ratio", value.oversample_ratio},
-  };
-}
-
-void from_json(const json& j, SuccessBufferConfig& value) {
-  value.capacity = j.value("capacity", 10000);
-  value.oversample_ratio = j.value("oversample_ratio", 0.1F);
-}
-
 void to_json(json& j, const ExperimentConfig& value) {
   j = json{
       {"schema_version", value.schema_version},
@@ -466,18 +352,12 @@ void to_json(json& j, const ExperimentConfig& value) {
       {"action_table", value.action_table},
       {"model", value.model},
       {"ppo", value.ppo},
-      {"offline_dataset", value.offline_dataset},
-      {"behavior_cloning", value.behavior_cloning},
+      {"goal_mapping", value.goal_mapping},
+      {"goal_critic", value.goal_critic},
+      {"actor_goal", value.actor_goal},
+      {"es_lora", value.es_lora},
       {"self_play_league", value.self_play_league},
       {"wandb", value.wandb},
-      {"critic", value.critic},
-      {"forward_model", value.forward_model},
-      {"inverse_model", value.inverse_model},
-      {"intrinsic_rewards", value.intrinsic_rewards},
-      {"intrinsic_model", value.intrinsic_model},
-      {"bc_regularization", value.bc_regularization},
-      {"weight_schedule", value.weight_schedule},
-      {"success_buffer", value.success_buffer},
   };
 }
 
@@ -485,27 +365,33 @@ void from_json(const json& j, ExperimentConfig& value) {
   reject_removed_section(j, "lfpo");
   reject_removed_section(j, "future_evaluator");
   reject_removed_section(j, "offline_pretraining");
-  value.schema_version = j.value("schema_version", 4);
-  value.obs_schema_version = j.value("obs_schema_version", 1);
+  reject_removed_section(j, "offline_dataset");
+  reject_removed_section(j, "behavior_cloning");
+  reject_removed_section(j, "critic");
+  reject_removed_section(j, "forward_model");
+  reject_removed_section(j, "inverse_model");
+  reject_removed_section(j, "intrinsic_rewards");
+  reject_removed_section(j, "intrinsic_model");
+  reject_removed_section(j, "bc_regularization");
+  reject_removed_section(j, "weight_schedule");
+  reject_removed_section(j, "success_buffer");
+  reject_removed_section(j, "next_goal_predictor");
+  reject_removed_section(j, "offline_optimization");
+  reject_removed_section(j, "reward");
+  reject_removed_section(j, "value_pretraining");
+  value.schema_version = j.value("schema_version", 5);
+  value.obs_schema_version = j.value("obs_schema_version", 2);
   value.env = j.value("env", EnvConfig{});
   value.outcome = j.value("outcome", OutcomeConfig{});
   value.action_table = j.value("action_table", ActionTableConfig{});
   value.model = j.value("model", ModelConfig{});
   value.ppo = j.value("ppo", PPOConfig{});
-  value.offline_dataset = j.value("offline_dataset", OfflineDatasetConfig{});
-  value.behavior_cloning = j.value("behavior_cloning", BehaviorCloningConfig{});
+  value.goal_mapping = j.value("goal_mapping", GoalMappingConfig{});
+  value.goal_critic = j.value("goal_critic", GoalCriticConfig{});
+  value.actor_goal = j.value("actor_goal", ActorGoalConfig{});
+  value.es_lora = j.value("es_lora", ESLoraConfig{});
   value.self_play_league = j.value("self_play_league", SelfPlayLeagueConfig{});
   value.wandb = j.value("wandb", WandbConfig{});
-  value.critic = j.value("critic", CriticConfig{});
-  value.forward_model = j.value("forward_model", ForwardModelConfig{});
-  value.inverse_model = j.value("inverse_model", InverseModelConfig{});
-  value.model.forward_model = value.forward_model;
-  value.model.inverse_model = value.inverse_model;
-  value.intrinsic_rewards = j.value("intrinsic_rewards", IntrinsicRewardConfig{});
-  value.intrinsic_model = j.value("intrinsic_model", IntrinsicModelConfig{});
-  value.bc_regularization = j.value("bc_regularization", BCRegularizationConfig{});
-  value.weight_schedule = j.value("weight_schedule", WeightScheduleConfig{});
-  value.success_buffer = j.value("success_buffer", SuccessBufferConfig{});
 }
 
 void to_json(json& j, const CheckpointMetadata& value) {
@@ -534,25 +420,14 @@ void from_json(const json& j, CheckpointMetadata& value) {
   value.critic_heads = j.value("critic_heads", std::vector<std::string>{});
 }
 
-CriticHeadConfig materialize_critic_head_config(
-    const CriticHeadConfig& cfg,
-    const ModelConfig& model,
-    bool enabled) {
-  CriticHeadConfig out = cfg;
-  out.enabled = out.enabled && enabled;
-
-  if (out.value_hidden_dim <= 0) {
-    out.value_hidden_dim = model.value_hidden_dim;
+float compute_goal_critic_v_max(const GoalCriticConfig& cfg) {
+  float v_max = cfg.v_max;
+  if (v_max <= 0.0F) {
+    double gamma = static_cast<double>(cfg.gamma_g);
+    int H = cfg.horizon_H;
+    v_max = static_cast<float>((1.0 - std::pow(gamma, H)) / (1.0 - gamma));
   }
-  if (out.value_num_atoms <= 0) {
-    out.value_num_atoms = model.value_num_atoms;
-  }
-  if (!(out.value_v_max > out.value_v_min)) {
-    out.value_v_min = model.value_v_min;
-    out.value_v_max = model.value_v_max;
-  }
-
-  return out;
+  return v_max;
 }
 
 void validate_experiment_config(const ExperimentConfig& config) {
@@ -568,39 +443,17 @@ void validate_experiment_config(const ExperimentConfig& config) {
   if (config.ppo.burn_in < 0 || config.ppo.burn_in >= config.ppo.sequence_length) {
     throw std::invalid_argument("ppo.burn_in must satisfy 0 <= burn_in < sequence_length.");
   }
-  if (config.behavior_cloning.sequence_length <= 0) {
-    throw std::invalid_argument("behavior_cloning.sequence_length must be positive.");
-  }
   if (config.model.encoder_dim <= 0) {
     throw std::invalid_argument("model.encoder_dim must be positive.");
   }
-
-  const bool uses_intrinsic =
-      config.intrinsic_rewards.curiosity_weight > 0.0F ||
-      config.intrinsic_rewards.learning_progress_weight > 0.0F ||
-      config.intrinsic_rewards.controllability_weight > 0.0F ||
-      config.intrinsic_rewards.use_controllability_gate;
-
-  if (uses_intrinsic) {
-    if (config.intrinsic_model.forward_loss_coef <= 0.0F) {
-      throw std::invalid_argument("Intrinsic rewards require forward_loss_coef > 0.");
-    }
-    if (config.intrinsic_model.inverse_loss_coef <= 0.0F) {
-      throw std::invalid_argument("Intrinsic rewards require inverse_loss_coef > 0.");
-    }
+  if (config.goal_critic.horizon_H <= 0) {
+    throw std::invalid_argument("goal_critic.horizon_H must be positive.");
   }
-
-  if (!config.critic.curiosity.enabled &&
-      config.weight_schedule.initial_curiosity_weight != 0.0F) {
-    throw std::invalid_argument("curiosity weight is nonzero but curiosity critic is disabled.");
+  if (config.goal_critic.num_atoms < 2) {
+    throw std::invalid_argument("goal_critic.num_atoms must be >= 2.");
   }
-  if (!config.critic.learning_progress.enabled &&
-      config.weight_schedule.initial_learning_progress_weight != 0.0F) {
-    throw std::invalid_argument("learning_progress weight is nonzero but learning_progress critic is disabled.");
-  }
-  if (!config.critic.controllability.enabled &&
-      config.weight_schedule.initial_controllability_weight != 0.0F) {
-    throw std::invalid_argument("controllability weight is nonzero but controllability critic is disabled.");
+  if (config.es_lora.rank <= 0) {
+    throw std::invalid_argument("es_lora.rank must be positive.");
   }
 }
 

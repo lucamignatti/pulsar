@@ -1,6 +1,6 @@
 {
-  "schema_version": 4,
-  "obs_schema_version": 1,
+  "schema_version": 5,
+  "obs_schema_version": 2,
   "env": {
     "mode": "soccar",
     "collision_meshes_path": "collision_meshes",
@@ -55,39 +55,53 @@
     "gae_lambda": 0.95,
     "learning_rate": 0.0002,
     "max_grad_norm": 1.0,
-    "device": "cuda:0",
+    "device": "cpu",
     "checkpoint_interval": 10,
     "max_rolling_checkpoints": 5,
     "sequence_length": 16,
-    "burn_in": 0,
+    "burn_in": 4,
     "use_adaptive_epsilon": true,
     "adaptive_epsilon_beta": 1.0,
     "epsilon_min": 0.05,
     "epsilon_max": 0.3,
     "use_confidence_weighting": true,
     "confidence_weight_type": "entropy",
-    "confidence_weight_delta": 1e-06,
-    "normalize_confidence_weights": false
+    "confidence_weight_delta": 1.0e-6,
+    "normalize_confidence_weights": false,
+    "synchronize_cuda_timing": false
   },
-  "offline_dataset": {
-    "train_manifest": "data/offline/2v2/train_manifest.json",
-    "val_manifest": "data/offline/2v2/val_manifest.json",
-    "batch_size": 8192,
-    "shuffle": true,
-    "seed": 7
+  "goal_mapping": {
+    "goal": 0.0,
+    "kernel_sigma": 0.05,
+    "arena_max_distance": 8192.0
   },
-  "behavior_cloning": {
-    "enabled": true,
-    "epochs": 10,
-    "sequence_length": 32,
-    "learning_rate": 0.0003,
-    "weight_decay": 0.000001,
-    "label_smoothing": 0.01,
-    "max_grad_norm": 1.0
+  "goal_critic": {
+    "horizon_H": 256,
+    "gamma_g": 0.99,
+    "num_atoms": 51,
+    "v_min": 0.0,
+    "v_max": 0.0,
+    "lambda_Zg": 1.0
+  },
+  "actor_goal": {
+    "lambda_g": 0.02
+  },
+  "es_lora": {
+    "rank": 4,
+    "lora_alpha": 8.0,
+    "population_size": 16,
+    "sigma_ES": 0.01,
+    "eta_ES": 0.003,
+    "es_interval": 100,
+    "eval_episodes_per_member": 8,
+    "alpha_g": 0.05,
+    "beta_KL": 0.01,
+    "antithetic_sampling": true,
+    "update_norm_clip": true
   },
   "self_play_league": {
-    "enabled": true,
-    "opponent_probability": 0.5,
+    "enabled": false,
+    "opponent_probability": 0.0,
     "snapshot_interval_updates": 10,
     "max_snapshots": 8,
     "training_opponent_policy": "stochastic",
@@ -103,12 +117,13 @@
     "project": "pulsar",
     "entity": "",
     "run_name": "",
-    "group": "dappo",
-    "job_type": "dappo_train",
+    "group": "",
+    "job_type": "",
     "dir": "",
     "mode": "online",
     "python_executable": "python3",
     "script_path": "scripts/wandb_stream.py",
-    "tags": ["online", "dappo", "continuum"]
+    "log_interval_seconds": 30.0,
+    "tags": []
   }
 }

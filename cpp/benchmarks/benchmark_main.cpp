@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
   const int sequence = 8;
 
   const pulsar::ModelConfig model_config = benchmark_model_config();
-  pulsar::PPOActor actor(model_config);
+  pulsar::PPOActor actor(model_config, pulsar::GoalCriticConfig{});
   actor->to(device);
   torch::optim::Adam optimizer(actor->parameters(), torch::optim::AdamOptions(3.0e-4));
 
@@ -92,7 +92,7 @@ int main(int argc, char** argv) {
         pulsar::clipped_ppo_policy_loss(current_log_probs, old_log_probs.detach(), advantages, 0.2F)
             .mean();
     const torch::Tensor entropy_loss = -0.01F * pulsar::masked_action_entropy(logits, masks).mean();
-    const torch::Tensor value_logits = output.value_ext.logits.reshape({sequence * batch, model_config.value_num_atoms});
+    const torch::Tensor value_logits = output.value_win_logits.reshape({sequence * batch, model_config.value_num_atoms});
     const torch::Tensor value_loss = pulsar::distributional_value_loss(
         value_logits, advantages,
         model_config.value_v_min, model_config.value_v_max, model_config.value_num_atoms);

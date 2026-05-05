@@ -12,8 +12,6 @@
 
 namespace pulsar {
 
-/// Seed torch (CPU + CUDA) RNGs for reproducibility.
-/// Call once at trainer / pretrainer startup.
 void seed_everything(std::uint64_t seed);
 
 torch::Tensor apply_action_mask_to_logits(const torch::Tensor& logits, const torch::Tensor& action_masks);
@@ -65,24 +63,26 @@ torch::Tensor compute_confidence_weights(
     float weight_delta,
     bool normalize);
 
-std::unordered_map<std::string, torch::Tensor> compute_per_head_advantages(
-    const std::unordered_map<std::string, torch::Tensor>& values,
-    const std::unordered_map<std::string, torch::Tensor>& rewards,
-    const torch::Tensor& dones,
-    float gamma,
-    float gae_lambda,
-    const std::unordered_map<std::string, torch::Tensor>& next_values = {});
-
-std::unordered_map<std::string, torch::Tensor> compute_per_head_returns(
-    const std::unordered_map<std::string, torch::Tensor>& advantages,
-    const std::unordered_map<std::string, torch::Tensor>& values);
-
 torch::Tensor normalize_advantage(const torch::Tensor& advantages, const torch::Tensor& active_mask);
-torch::Tensor mix_advantages(
-    const std::unordered_map<std::string, torch::Tensor>& normalized_advantages,
-    const std::unordered_map<std::string, float>& head_weights,
-    const torch::Tensor& active_mask);
-float advance_weight_schedule(float current, float growth_rate, float max_val);
+
+torch::Tensor compute_finite_horizon_goal_occupancy(
+    const torch::Tensor& goal_distances,
+    const torch::Tensor& dones,
+    float gamma_g,
+    float goal_value,
+    float kernel_sigma,
+    int horizon_H);
+
+torch::Tensor compute_goal_actor_loss_discrete(
+    const torch::Tensor& policy_logits,
+    const torch::Tensor& action_masks,
+    const torch::Tensor& goal_critic_logits,
+    const torch::Tensor& goal_atom_support);
+
+float compute_discrete_policy_kl(
+    const torch::Tensor& base_logits,
+    const torch::Tensor& perturbed_logits,
+    const torch::Tensor& action_masks);
 
 ContinuumState detach_state(ContinuumState state);
 ContinuumState clone_state(const ContinuumState& state);

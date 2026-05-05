@@ -64,7 +64,6 @@ void validate_model_config(const ModelConfig& config) {
   require_positive(config.value_hidden_dim, "value_hidden_dim");
   require_positive(config.value_num_atoms, "value_num_atoms");
 
-  // Distributional RL requires at least 2 atoms (divides by num_atoms - 1).
   if (config.value_num_atoms < 2) {
     throw std::invalid_argument("ModelConfig.value_num_atoms must be >= 2 for distributional RL.");
   }
@@ -73,83 +72,94 @@ void validate_model_config(const ModelConfig& config) {
   }
 }
 
-void validate_critic_head_config(const CriticHeadConfig& cfg, const std::string& name) {
-  if (cfg.value_hidden_dim <= 0) {
-    throw std::invalid_argument("CriticConfig." + name + ".value_hidden_dim must be positive.");
-  }
-  if (cfg.value_num_atoms < 2) {
-    throw std::invalid_argument("CriticConfig." + name + ".value_num_atoms must be >= 2.");
-  }
-  if (!(cfg.value_v_max > cfg.value_v_min)) {
-    throw std::invalid_argument("CriticConfig." + name + ".value_v_max must be greater than value_v_min.");
-  }
-}
-
 }  // namespace
 
-torch::nn::Sequential PPOActorImpl::make_value_head(int input_dim, const CriticHeadConfig& head_config) const {
+LoRALinearImpl::LoRALinearImpl(int in_features, int out_features, int rank, float lora_alpha)
+    : rank_(rank), scale_(lora_alpha / static_cast<float>(rank)) {
+  base = register_module("base", torch::nn::Linear(in_features, out_features));
+
+  A = register_parameter(
+      "A",
+      torch::randn({rank, in_features}) * 0.02F);
+  B = register_parameter(
+      "B",
+      torch::zeros({out_features, rank}));
+}
+
+torch::Tensor LoRALinearImpl::forward(torch::Tensor x) {
+  torch::Tensor base_out = base->forward(x);
+  torch::Tensor lora_out = scale_ * torch::matmul(
+      torch::matmul(x, A.transpose(0, 1)),
+      B.transpose(0, 1));
+  return base_out + lora_out;
+}
+
+void LoRALinearImpl::reset_lora_parameters() {
+  A.normal_(0.0, 0.02);
+  B.zero_();
+}
+
+std::vector<torch::Tensor> LoRALinearImpl::lora_parameters() const {
+  return {A, B};
+}
+
+std::vector<torch::Tensor> LoRALinearImpl::lora_parameters_flat() const {
+  return {A.view({-1}), B.view({-1})};
+}
+
+void LoRALinearImpl::restore_lora_parameters(const std::vector<torch::Tensor>& params) {
+  torch::NoGradGuard no_grad;
+  A.copy_(params[0].view_as(A));
+  B.copy_(params[1].view_as(B));
+}
+
+int LoRALinearImpl::in_features() const {
+  return static_cast<int>(base->weight.size(1));
+}
+
+int LoRALinearImpl::out_features() const {
+  return static_cast<int>(base->weight.size(0));
+}
+
+int LoRALinearImpl::rank() const {
+  return rank_;
+}
+
+float LoRALinearImpl::scale() const {
+  return scale_;
+}
+
+GoalCriticImpl::GoalCriticImpl(int feature_dim, int action_dim, int num_atoms, int hidden_dim)
+    : action_dim_(action_dim), hidden_dim_(hidden_dim) {
+  const int input_dim = feature_dim + action_dim + 1;
+  input_proj_ = register_module(
+      "input_proj", torch::nn::Linear(input_dim, hidden_dim));
+  output_proj_ = register_module(
+      "output_proj", torch::nn::Linear(hidden_dim, num_atoms));
+}
+
+torch::Tensor GoalCriticImpl::forward(
+    const torch::Tensor& features,
+    const torch::Tensor& action_ids,
+    const torch::Tensor& goal_value) {
+  torch::Tensor action_one_hot = torch::nn::functional::one_hot(
+      action_ids.to(torch::kLong), action_dim_).to(features.device()).to(torch::kFloat32);
+  torch::Tensor goal_expanded = goal_value.unsqueeze(-1);
+  torch::Tensor combined = torch::cat({features, action_one_hot, goal_expanded}, -1);
+  torch::Tensor hidden = torch::relu(input_proj_->forward(combined));
+  return output_proj_->forward(hidden);
+}
+
+torch::nn::Sequential PPOActorImpl::make_value_win_head(int input_dim) const {
   torch::nn::Sequential head;
-  head->push_back(torch::nn::Linear(input_dim, head_config.value_hidden_dim));
+  head->push_back(torch::nn::Linear(input_dim, config_.value_hidden_dim));
   head->push_back(torch::nn::Functional(torch::relu));
-  head->push_back(torch::nn::Linear(head_config.value_hidden_dim, head_config.value_num_atoms));
+  head->push_back(torch::nn::Linear(config_.value_hidden_dim, config_.value_num_atoms));
   return head;
 }
 
-torch::nn::Sequential PPOActorImpl::make_forward_head(int input_dim, int forward_action_dim) const {
-  const int hidden = config_.forward_model.hidden_dim;
-  torch::nn::Sequential head;
-  head->push_back(torch::nn::Linear(input_dim + forward_action_dim, hidden));
-  head->push_back(torch::nn::Functional(torch::relu));
-  for (int i = 1; i < config_.forward_model.num_layers; ++i) {
-    head->push_back(torch::nn::Linear(hidden, hidden));
-    head->push_back(torch::nn::Functional(torch::relu));
-  }
-  head->push_back(torch::nn::Linear(hidden, config_.encoder_dim));
-  return head;
-}
-
-torch::nn::Sequential PPOActorImpl::make_inverse_head() const {
-  const int hidden = config_.inverse_model.hidden_dim;
-  torch::nn::Sequential head;
-  head->push_back(torch::nn::Linear(config_.encoder_dim * 2, hidden));
-  head->push_back(torch::nn::Functional(torch::relu));
-  for (int i = 1; i < config_.inverse_model.num_layers; ++i) {
-    head->push_back(torch::nn::Linear(hidden, hidden));
-    head->push_back(torch::nn::Functional(torch::relu));
-  }
-  head->push_back(torch::nn::Linear(hidden, config_.action_dim));
-  return head;
-}
-
-torch::Tensor PPOActorImpl::make_atom_support(float v_min, float v_max, int num_atoms) const {
-  const float atom_delta = (v_max - v_min) / static_cast<float>(num_atoms - 1);
-  return torch::arange(
-      static_cast<float>(num_atoms),
-      torch::TensorOptions().dtype(torch::kFloat32))
-      .mul_(atom_delta)
-      .add_(v_min);
-}
-
-void PPOActorImpl::build_value_head(
-    const std::string& name,
-    torch::nn::Sequential& head,
-    torch::Tensor& support,
-    const CriticHeadConfig& head_cfg,
-    bool enabled) {
-  head = make_value_head(feature_dim_, head_cfg);
-  register_module("value_head_" + name, head);
-  support = register_buffer(
-      "atom_support_" + name,
-      make_atom_support(head_cfg.value_v_min, head_cfg.value_v_max, head_cfg.value_num_atoms));
-  value_heads_[name] = &head;
-  atom_supports_[name] = &support;
-  if (enabled) {
-    enabled_critic_heads_.push_back(name);
-  }
-}
-
-PPOActorImpl::PPOActorImpl(ModelConfig config, CriticConfig critic_config)
-    : config_(std::move(config)), critic_config_(std::move(critic_config)) {
+PPOActorImpl::PPOActorImpl(ModelConfig config, const GoalCriticConfig& goal_critic_config)
+    : config_(std::move(config)), goal_critic_config_(goal_critic_config) {
   validate_model_config(config_);
   append_encoder_block(encoder_, config_.observation_dim, config_.encoder_dim, config_.use_layer_norm);
   register_module("encoder", encoder_);
@@ -184,46 +194,52 @@ PPOActorImpl::PPOActorImpl(ModelConfig config, CriticConfig critic_config)
 
   feature_dim_ = config_.workspace_dim + config_.controller_dim + config_.encoder_dim;
   {
-    torch::nn::Sequential policy;
     if (config_.policy_hidden_dim > 0) {
-      policy->push_back(torch::nn::Linear(feature_dim_, config_.policy_hidden_dim));
-      policy->push_back(torch::nn::Functional(torch::relu));
-      policy->push_back(torch::nn::Linear(config_.policy_hidden_dim, config_.action_dim));
+      policy_hidden_ = torch::nn::Sequential();
+      policy_hidden_->push_back(torch::nn::Linear(feature_dim_, config_.policy_hidden_dim));
+      policy_hidden_->push_back(torch::nn::Functional(torch::relu));
+      register_module("policy_hidden", policy_hidden_);
+      policy_lora_ = LoRALinear(
+          config_.policy_hidden_dim, config_.action_dim, 4, 8.0F);
     } else {
-      policy->push_back(torch::nn::Linear(feature_dim_, config_.action_dim));
+      policy_lora_ = LoRALinear(feature_dim_, config_.action_dim, 4, 8.0F);
     }
-    policy_head_ = register_module("policy_head", std::move(policy));
+    register_module("policy_lora", policy_lora_);
   }
 
-  // Materialize per-head config from ModelConfig defaults, then always
-  // build all four heads.  The `enabled` flag only controls whether the
-  // head appears in `enabled_critic_heads_` (training / metrics / checkpoints).
-  // All heads are built so that forward_encoded_step / forward_sequence
-  // never dereference a null module.
-  const CriticHeadConfig ext_cfg =
-      materialize_critic_head_config(critic_config_.extrinsic, config_, true);
-  const CriticHeadConfig cur_cfg =
-      materialize_critic_head_config(critic_config_.curiosity, config_, critic_config_.curiosity.enabled);
-  const CriticHeadConfig learn_cfg =
-      materialize_critic_head_config(critic_config_.learning_progress, config_, critic_config_.learning_progress.enabled);
-  const CriticHeadConfig ctrl_cfg =
-      materialize_critic_head_config(critic_config_.controllability, config_, critic_config_.controllability.enabled);
+  value_head_win_ = make_value_win_head(feature_dim_);
+  register_module("value_head_win", value_head_win_);
 
-  validate_critic_head_config(ext_cfg, "extrinsic");
-  if (cur_cfg.enabled) validate_critic_head_config(cur_cfg, "curiosity");
-  if (learn_cfg.enabled) validate_critic_head_config(learn_cfg, "learning_progress");
-  if (ctrl_cfg.enabled) validate_critic_head_config(ctrl_cfg, "controllability");
+  {
+    const float atom_delta = (config_.value_v_max - config_.value_v_min)
+        / static_cast<float>(config_.value_num_atoms - 1);
+    atom_support_win_ = register_buffer(
+        "atom_support_win",
+        torch::arange(static_cast<float>(config_.value_num_atoms),
+                      torch::TensorOptions().dtype(torch::kFloat32))
+            .mul_(atom_delta)
+            .add_(config_.value_v_min));
+  }
 
-  build_value_head("extrinsic", value_head_ext_, atom_support_ext_, ext_cfg, ext_cfg.enabled);
-  build_value_head("curiosity", value_head_cur_, atom_support_cur_, cur_cfg, cur_cfg.enabled);
-  build_value_head("learning_progress", value_head_learn_, atom_support_learn_, learn_cfg, learn_cfg.enabled);
-  build_value_head("controllability", value_head_ctrl_, atom_support_ctrl_, ctrl_cfg, ctrl_cfg.enabled);
+  {
+    int goal_num_atoms = goal_critic_config_.num_atoms;
+    if (goal_num_atoms <= 0) {
+      goal_num_atoms = 51;
+    }
+    goal_critic_ = GoalCritic(
+        feature_dim_, config_.action_dim, goal_num_atoms, config_.value_hidden_dim);
+    register_module("goal_critic", goal_critic_);
 
-  forward_head_ = make_forward_head(config_.encoder_dim, config_.action_dim);
-  register_module("forward_head", forward_head_);
-
-  inverse_head_ = make_inverse_head();
-  register_module("inverse_head", inverse_head_);
+    float g_v_min = goal_critic_config_.v_min;
+    float g_v_max = compute_goal_critic_v_max(goal_critic_config_);
+    float g_atom_delta = (g_v_max - g_v_min) / static_cast<float>(goal_num_atoms - 1);
+    atom_support_goal_ = register_buffer(
+        "atom_support_goal",
+        torch::arange(static_cast<float>(goal_num_atoms),
+                      torch::TensorOptions().dtype(torch::kFloat32))
+            .mul_(g_atom_delta)
+            .add_(g_v_min));
+  }
 
   ltm_basis_keys_ = register_parameter(
       "ltm_basis_keys",
@@ -336,13 +352,19 @@ ActorStepOutput PPOActorImpl::forward_encoded_step(
   state.timestep = state.timestep + 1;
 
   const torch::Tensor features = torch::cat({encoded, fused_ctx, new_workspace}, -1);
+
+  torch::Tensor policy_logits;
+  if (!policy_hidden_.is_empty()) {
+    policy_logits = policy_lora_->forward(policy_hidden_->forward(features));
+  } else {
+    policy_logits = policy_lora_->forward(features);
+  }
+
   return {
-      policy_head_->forward(features),
+      policy_logits,
       encoded,
-      {value_head_ext_->forward(features), atom_support_ext_},
-      {value_head_cur_->forward(features), atom_support_cur_},
-      {value_head_learn_->forward(features), atom_support_learn_},
-      {value_head_ctrl_->forward(features), atom_support_ctrl_},
+      value_head_win_->forward(features),
+      torch::Tensor{},
       features,
       std::move(state),
   };
@@ -363,17 +385,11 @@ ActorSequenceOutput PPOActorImpl::forward_sequence(
           .reshape({time, batch, config_.encoder_dim});
   std::vector<torch::Tensor> policy_logits;
   std::vector<torch::Tensor> encoded_seq_stack;
-  std::vector<torch::Tensor> value_logits_ext;
-  std::vector<torch::Tensor> value_logits_cur;
-  std::vector<torch::Tensor> value_logits_learn;
-  std::vector<torch::Tensor> value_logits_ctrl;
+  std::vector<torch::Tensor> value_win_logits;
   std::vector<torch::Tensor> features;
   policy_logits.reserve(time);
   encoded_seq_stack.reserve(time);
-  value_logits_ext.reserve(time);
-  value_logits_cur.reserve(time);
-  value_logits_learn.reserve(time);
-  value_logits_ctrl.reserve(time);
+  value_win_logits.reserve(time);
   features.reserve(time);
 
   for (std::int64_t t = 0; t < time; ++t) {
@@ -384,10 +400,7 @@ ActorSequenceOutput PPOActorImpl::forward_sequence(
     ActorStepOutput out = forward_encoded_step(encoded_seq[t], std::move(state), starts);
     policy_logits.push_back(out.policy_logits);
     encoded_seq_stack.push_back(out.encoded);
-    value_logits_ext.push_back(out.value_ext.logits);
-    value_logits_cur.push_back(out.value_cur.logits);
-    value_logits_learn.push_back(out.value_learn.logits);
-    value_logits_ctrl.push_back(out.value_ctrl.logits);
+    value_win_logits.push_back(out.value_win_logits);
     features.push_back(out.features);
     state = std::move(out.state);
   }
@@ -395,41 +408,19 @@ ActorSequenceOutput PPOActorImpl::forward_sequence(
   return {
       torch::stack(policy_logits, 0),
       torch::stack(encoded_seq_stack, 0),
-      {torch::stack(value_logits_ext, 0), atom_support_ext_},
-      {torch::stack(value_logits_cur, 0), atom_support_cur_},
-      {torch::stack(value_logits_learn, 0), atom_support_learn_},
-      {torch::stack(value_logits_ctrl, 0), atom_support_ctrl_},
+      torch::stack(value_win_logits, 0),
+      torch::Tensor{},
       torch::stack(features, 0),
       std::move(state),
   };
 }
 
-torch::Tensor PPOActorImpl::value_support(const std::string& head_name) const {
-  auto it = atom_supports_.find(head_name);
-  if (it != atom_supports_.end()) {
-    return *(it->second);
-  }
-  return atom_support_ext_;
+torch::Tensor PPOActorImpl::value_win_support() const {
+  return atom_support_win_;
 }
 
-const ValueHeadOutput& PPOActorImpl::value_head_output(const std::string& head_name, const ActorStepOutput& output) const {
-  if (head_name == "extrinsic") return output.value_ext;
-  if (head_name == "curiosity") return output.value_cur;
-  if (head_name == "learning_progress") return output.value_learn;
-  if (head_name == "controllability") return output.value_ctrl;
-  return output.value_ext;
-}
-
-const ValueHeadOutput& PPOActorImpl::value_head_output(const std::string& head_name, const ActorSequenceOutput& output) const {
-  if (head_name == "extrinsic") return output.value_ext;
-  if (head_name == "curiosity") return output.value_cur;
-  if (head_name == "learning_progress") return output.value_learn;
-  if (head_name == "controllability") return output.value_ctrl;
-  return output.value_ext;
-}
-
-std::vector<std::string> PPOActorImpl::enabled_critic_heads() const {
-  return enabled_critic_heads_;
+torch::Tensor PPOActorImpl::goal_critic_support() const {
+  return atom_support_goal_;
 }
 
 int PPOActorImpl::feature_dim() const {
@@ -440,26 +431,41 @@ const ModelConfig& PPOActorImpl::config() const {
   return config_;
 }
 
-const CriticConfig& PPOActorImpl::critic_config() const {
-  return critic_config_;
+const GoalCriticConfig& PPOActorImpl::goal_critic_config() const {
+  return goal_critic_config_;
 }
 
-torch::Tensor PPOActorImpl::forward_predict_next(torch::Tensor encoded, torch::Tensor actions) {
-  torch::Tensor action_features = torch::nn::functional::one_hot(
-      actions.to(torch::kLong), config_.action_dim).to(encoded.device()).to(torch::kFloat32);
-  torch::Tensor combined = torch::cat({encoded, action_features}, -1);
-  return forward_head_->forward(combined);
+std::vector<torch::Tensor> PPOActorImpl::es_lora_parameters() const {
+  return policy_lora_->lora_parameters();
 }
 
-torch::Tensor PPOActorImpl::forward_predict_action(torch::Tensor encoded_t, torch::Tensor encoded_tp1) {
-  torch::Tensor combined = torch::cat({encoded_t, encoded_tp1}, -1);
-  return inverse_head_->forward(combined);
+std::vector<torch::Tensor> PPOActorImpl::es_lora_parameters_flat() const {
+  return policy_lora_->lora_parameters_flat();
 }
 
-torch::Tensor PPOActorImpl::compute_forward_prediction_error(
-    torch::Tensor encoded, torch::Tensor actions, torch::Tensor encoded_tp1) {
-  torch::Tensor predicted_next = forward_predict_next(encoded, actions);
-  return torch::mse_loss(predicted_next, encoded_tp1, torch::Reduction::None).mean(-1);
+void PPOActorImpl::restore_es_lora_parameters(const std::vector<torch::Tensor>& params) {
+  policy_lora_->restore_lora_parameters(params);
+}
+
+void PPOActorImpl::apply_lora_perturbation(
+    const std::vector<torch::Tensor>& perturbation, float sigma) {
+  torch::NoGradGuard no_grad;
+  auto params = es_lora_parameters();
+  for (std::size_t i = 0; i < params.size(); ++i) {
+    params[i].add_(perturbation[i], sigma);
+  }
+}
+
+const LoRALinear& PPOActorImpl::policy_lora() const {
+  return policy_lora_;
+}
+
+GoalCritic& PPOActorImpl::goal_critic() {
+  return goal_critic_;
+}
+
+std::vector<std::string> PPOActorImpl::enabled_critic_heads() const {
+  return {"extrinsic"};
 }
 
 PPOActor load_ppo_actor(const std::string& checkpoint_path, const std::string& device) {
@@ -468,12 +474,14 @@ PPOActor load_ppo_actor(const std::string& checkpoint_path, const std::string& d
   const ExperimentConfig config = load_experiment_config((base / "config.json").string());
   const CheckpointMetadata metadata = load_checkpoint_metadata((base / "metadata.json").string());
   validate_inference_checkpoint_metadata(metadata, config);
-  if (metadata.architecture_name != "ppo_continuum" && metadata.architecture_name != "dappo_continuum") {
-    throw std::runtime_error("Checkpoint is not a PPO actor checkpoint.");
+  if (metadata.architecture_name != "ppo_continuum"
+      && metadata.architecture_name != "dappo_continuum"
+      && metadata.architecture_name != "continuum_goal_conditioned") {
+    throw std::runtime_error("Checkpoint is not a continuum actor checkpoint.");
   }
 
   torch::Device torch_device(device);
-  auto model = PPOActor(config.model, config.critic);
+  auto model = PPOActor(config.model, config.goal_critic);
   torch::serialize::InputArchive archive;
   archive.load_from((base / "model.pt").string(), torch_device);
   model->load(archive);
@@ -486,7 +494,7 @@ PPOActor clone_ppo_actor(const PPOActor& source, const torch::Device& device) {
   if (!source) {
     return nullptr;
   }
-  auto clone = PPOActor(source->config(), source->critic_config());
+  auto clone = PPOActor(source->config(), source->goal_critic_config());
   torch::serialize::OutputArchive out;
   source->save(out);
   torch::serialize::InputArchive in;

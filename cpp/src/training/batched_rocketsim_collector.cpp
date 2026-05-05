@@ -2,7 +2,9 @@
 
 #ifdef PULSAR_HAS_TORCH
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <stdexcept>
 #include <utility>
 
@@ -30,6 +32,18 @@ std::vector<TransitionEnginePtr> make_default_engines(const ExperimentConfig& co
     engines.push_back(std::make_shared<RocketSimTransitionEngine>(env_config, reset_mutator));
   }
   return engines;
+}
+
+float compute_goal_distance(const EnvState& state, int car_idx, const GoalMappingConfig& cfg) {
+  const CarState& car = state.cars[static_cast<std::size_t>(car_idx)];
+  const BallState& ball = state.ball;
+
+  const float dx = car.position.x - ball.position.x;
+  const float dy = car.position.y - ball.position.y;
+  const float dz = car.position.z - ball.position.z;
+  const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+  return std::clamp(dist / cfg.arena_max_distance, 0.0F, 1.0F);
 }
 
 }  // namespace
@@ -122,6 +136,7 @@ void BatchedRocketSimCollector::initialize(
   host_terminal_outcome_labels_ = torch::full({static_cast<long>(total_agents_)}, 2, i64);
   host_terminal_observations_ =
       torch::zeros({static_cast<long>(total_agents_), obs_dim_}, f32);
+  host_goal_distances_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
 
   for (std::size_t env_idx = 0; env_idx < envs_.size(); ++env_idx) {
     assign_env(env_idx, envs_[env_idx].reset_seed);
@@ -249,12 +264,14 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
   float* truncated_ptr = host_truncated_.data_ptr<float>();
   std::int64_t* labels_ptr = host_terminal_outcome_labels_.data_ptr<std::int64_t>();
   float* terminal_obs_ptr = host_terminal_observations_.data_ptr<float>();
+  float* goal_dist_ptr = host_goal_distances_.data_ptr<float>();
   const std::size_t obs_stride = static_cast<std::size_t>(obs_dim_);
   host_dones_.zero_();
   host_terminated_.zero_();
   host_truncated_.zero_();
   host_terminal_outcome_labels_.fill_(2);
   host_terminal_observations_.zero_();
+  host_goal_distances_.zero_();
 
   executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
     for (std::size_t env_idx = begin; env_idx < end; ++env_idx) {
@@ -285,6 +302,11 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
               goal_scored ? (car.team == scoring_team ? 0 : 1) : 2;
         }
         reset_needed = reset_needed || done;
+      }
+
+      for (std::size_t idx = 0; idx < count; ++idx) {
+        goal_dist_ptr[agent_begin + idx] =
+            compute_goal_distance(current_state, static_cast<int>(idx), config_.goal_mapping);
       }
 
       if (reset_needed) {
@@ -397,6 +419,10 @@ const torch::Tensor& BatchedRocketSimCollector::host_terminal_outcome_labels() c
 
 const torch::Tensor& BatchedRocketSimCollector::host_terminal_observations() const {
   return host_terminal_observations_;
+}
+
+const torch::Tensor& BatchedRocketSimCollector::host_goal_distances() const {
+  return host_goal_distances_;
 }
 
 }  // namespace pulsar

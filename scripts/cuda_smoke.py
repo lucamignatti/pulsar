@@ -11,8 +11,6 @@ from pathlib import Path
 
 import torch
 
-from two_stage_smoke_common import run_bc_pretrain
-
 
 def skip(message: str) -> int:
     print(f"SKIP: {message}")
@@ -25,17 +23,14 @@ def cuda_device_name() -> str:
 
 
 def main() -> int:
-    if len(sys.argv) != 6:
+    if len(sys.argv) != 4:
         raise SystemExit(
-            "usage: cuda_smoke.py <repo_root> <pulsar_appo_train> <pulsar_bc_pretrain> "
-            "<appo_base_config> <bc_base_config>"
+            "usage: cuda_smoke.py <repo_root> <pulsar_appo_train> <appo_base_config>"
         )
 
     repo_root = Path(sys.argv[1]).resolve()
     train_binary = Path(sys.argv[2]).resolve()
-    pretrain_binary = Path(sys.argv[3]).resolve()
-    appo_base_config_path = Path(sys.argv[4]).resolve()
-    bc_base_config_path = Path(sys.argv[5]).resolve()
+    appo_base_config_path = Path(sys.argv[3]).resolve()
 
     if not torch.cuda.is_available():
         return skip("CUDA smoke requires an available CUDA device")
@@ -48,7 +43,12 @@ def main() -> int:
     tmp_dir = Path(tempfile.mkdtemp(prefix="pulsar_cuda_smoke_"))
     keep_tmp_dir = True
     try:
-        model_overrides = {
+        checkpoint_dir = tmp_dir / "checkpoints"
+        config_path = tmp_dir / "config.json"
+
+        config = json.loads(appo_base_config_path.read_text(encoding="utf-8"))
+        config["env"]["collision_meshes_path"] = str((repo_root / "collision_meshes").resolve())
+        config["model"].update({
             "encoder_dim": 64,
             "workspace_dim": 64,
             "stm_slots": 8,
@@ -61,21 +61,7 @@ def main() -> int:
             "value_num_atoms": 51,
             "value_v_min": -10.0,
             "value_v_max": 10.0,
-        }
-        bc_output_dir = run_bc_pretrain(
-            repo_root=repo_root,
-            pretrain_binary=pretrain_binary,
-            bc_base_config_path=bc_base_config_path,
-            work_dir=tmp_dir,
-            device="cuda:0",
-            model_overrides=model_overrides,
-        )
-        checkpoint_dir = tmp_dir / "checkpoints"
-        config_path = tmp_dir / "config.json"
-
-        config = json.loads(appo_base_config_path.read_text(encoding="utf-8"))
-        config["env"]["collision_meshes_path"] = str((repo_root / "collision_meshes").resolve())
-        config["model"].update(model_overrides)
+        })
         config["ppo"]["num_envs"] = 2
         config["ppo"]["rollout_length"] = 4
         config["ppo"]["minibatch_size"] = 8
@@ -85,7 +71,7 @@ def main() -> int:
         config["ppo"]["burn_in"] = 0
         config["ppo"]["collection_workers"] = 0
         config["ppo"]["device"] = "cuda:0"
-        config["ppo"]["init_checkpoint"] = str(bc_output_dir.resolve())
+        config["ppo"]["init_checkpoint"] = ""
         config["wandb"]["enabled"] = False
         config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 

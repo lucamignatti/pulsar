@@ -28,20 +28,30 @@ pulsar::ModelConfig small_model_config() {
   return config;
 }
 
+pulsar::GoalCriticConfig default_goal_critic_config() {
+  pulsar::GoalCriticConfig cfg;
+  cfg.num_atoms = 51;
+  cfg.v_min = 0.0F;
+  cfg.v_max = 25.0F;
+  return cfg;
+}
+
 }  // namespace
 
 int main() {
   try {
     const pulsar::ModelConfig model_config = small_model_config();
-    pulsar::PPOActor actor(model_config);
+    const pulsar::GoalCriticConfig gc_cfg = default_goal_critic_config();
+    pulsar::PPOActor actor(model_config, gc_cfg);
     auto state = actor->initial_state(4, torch::kCPU);
-    const auto output = actor->forward_step(torch::randn({4, model_config.observation_dim}), std::move(state));
+    const auto output = actor->forward_step(
+        torch::randn({4, model_config.observation_dim}), std::move(state));
 
     if (output.policy_logits.sizes() != torch::IntArrayRef({4, model_config.action_dim})) {
       throw std::runtime_error("policy logits shape mismatch");
     }
-    if (output.value_ext.logits.sizes() != torch::IntArrayRef({4, model_config.value_num_atoms})) {
-      throw std::runtime_error("value logits shape mismatch");
+    if (output.value_win_logits.sizes() != torch::IntArrayRef({4, model_config.value_num_atoms})) {
+      throw std::runtime_error("value win logits shape mismatch");
     }
     if (output.features.sizes() != torch::IntArrayRef({4, actor->feature_dim()})) {
       throw std::runtime_error("actor feature shape mismatch");
@@ -56,32 +66,63 @@ int main() {
       }
     }
 
-    const torch::Tensor value_support = actor->value_support("extrinsic");
+    const torch::Tensor value_support = actor->value_win_support();
     if (value_support.sizes() != torch::IntArrayRef({model_config.value_num_atoms})) {
       throw std::runtime_error("value support shape mismatch");
     }
 
-    // Smoke test: disabled critic heads must not crash forward pass.
-    {
-      pulsar::ModelConfig cfg = small_model_config();
-      pulsar::CriticConfig critic;
-      critic.controllability.enabled = false;
-      pulsar::PPOActor actor_with_disabled(cfg, critic);
-      auto s = actor_with_disabled->initial_state(2, torch::kCPU);
-      auto obs = torch::zeros({2, cfg.observation_dim});
-      auto starts = torch::zeros({2});
-      auto out = actor_with_disabled->forward_step(obs, std::move(s), starts);
+    const torch::Tensor goal_support = actor->goal_critic_support();
+    if (goal_support.sizes() != torch::IntArrayRef({gc_cfg.num_atoms})) {
+      throw std::runtime_error("goal critic support shape mismatch");
+    }
 
-      const auto enabled = actor_with_disabled->enabled_critic_heads();
-      bool found_ctrl = false;
-      for (const auto& h : enabled) {
-        if (h == "controllability") found_ctrl = true;
+    // Goal critic forward pass smoke test
+    {
+      auto s = actor->initial_state(2, torch::kCPU);
+      auto out = actor->forward_step(torch::zeros({2, model_config.observation_dim}), std::move(s));
+      torch::Tensor goal_logits = actor->goal_critic()->forward(
+          out.features,
+          torch::zeros({2}, torch::TensorOptions().dtype(torch::kLong)),
+          torch::zeros({2}));
+      if (goal_logits.sizes() != torch::IntArrayRef({2, gc_cfg.num_atoms})) {
+        throw std::runtime_error("goal critic output shape mismatch");
       }
-      if (found_ctrl) {
-        throw std::runtime_error("controllability should not appear in enabled_critic_heads when disabled");
+    }
+
+    // LoRA interface smoke test
+    {
+      auto lora_params = actor->es_lora_parameters();
+      if (lora_params.size() != 2) {
+        throw std::runtime_error("LoRA should have A and B parameters");
       }
-      if (out.value_ctrl.logits.defined() && out.value_ctrl.logits.numel() == 0) {
-        throw std::runtime_error("disabled value head should still produce output");
+      auto saved = actor->es_lora_parameters();
+      for (auto& p : saved) { p = p.detach().clone(); }
+
+      std::vector<torch::Tensor> perturbation;
+      for (const auto& p : lora_params) {
+        perturbation.push_back(torch::zeros_like(p));
+      }
+      actor->apply_lora_perturbation(perturbation, 0.01F);
+
+      actor->restore_es_lora_parameters(saved);
+
+      auto restored = actor->es_lora_parameters();
+      for (std::size_t i = 0; i < saved.size(); ++i) {
+        if (!torch::allclose(saved[i], restored[i])) {
+          throw std::runtime_error("LoRA restore failed");
+        }
+      }
+    }
+
+    // Sparse value head forward smoke test
+    {
+      auto s = actor->initial_state(2, torch::kCPU);
+      auto out = actor->forward_step(torch::zeros({2, model_config.observation_dim}), std::move(s));
+      const torch::Tensor win_support = actor->value_win_support();
+      const float v_min = win_support[0].item<float>();
+      const float v_max = win_support[-1].item<float>();
+      if (v_min != model_config.value_v_min || v_max != model_config.value_v_max) {
+        throw std::runtime_error("value win support range mismatch");
       }
     }
 
