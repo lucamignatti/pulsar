@@ -53,7 +53,7 @@ struct TrainerMetrics {
   double mean_goal_distance = 0.0;
   double min_goal_distance = 0.0;
   double goal_actor_loss_ratio = 0.0;
-  double ball_touch_rate = 0.0;
+  double ball_proximity_rate = 0.0;
   double goal_occupancy_correlation = 0.0;
   int64_t goals_scored = 0;
   int64_t goals_conceded = 0;
@@ -104,8 +104,7 @@ class APPOTrainer {
   ESFitness evaluate_es_fitness(
       const std::vector<torch::Tensor>& perturbation,
       float sigma_ES,
-      int eval_episodes,
-      bool no_gradient);
+      int eval_episodes);
 
   ExperimentConfig config_{};
   std::unique_ptr<BatchedRocketSimCollector> collector_{};

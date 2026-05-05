@@ -84,7 +84,7 @@ struct ESLoraConfig {
   int eval_episodes_per_member = 8;
   float alpha_g = 0.05F;
   float beta_KL = 0.01F;
-  bool antithetic_sampling = true;
+  bool antithetic_sampling = false;
   bool update_norm_clip = true;
 };
 

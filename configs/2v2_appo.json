@@ -55,7 +55,7 @@
     "gae_lambda": 0.95,
     "learning_rate": 0.0002,
     "max_grad_norm": 1.0,
-    "device": "cpu",
+    "device": "cuda",
     "checkpoint_interval": 10,
     "max_rolling_checkpoints": 5,
     "sequence_length": 16,
@@ -68,11 +68,11 @@
     "confidence_weight_type": "entropy",
     "confidence_weight_delta": 1.0e-6,
     "normalize_confidence_weights": false,
-    "synchronize_cuda_timing": false
+    "synchronize_cuda_timing": true
   },
   "goal_mapping": {
     "goal": 0.0,
-    "kernel_sigma": 0.05,
+    "kernel_sigma": 0.08,
     "arena_max_distance": 8192.0
   },
   "goal_critic": {
@@ -84,11 +84,11 @@
     "lambda_Zg": 1.0
   },
   "actor_goal": {
-    "lambda_g": 0.02
+    "lambda_g": 0.1
   },
   "es_lora": {
     "rank": 4,
-    "lora_alpha": 8.0,
+    "lora_alpha": 4.0,
     "population_size": 16,
     "sigma_ES": 0.01,
     "eta_ES": 0.003,
@@ -96,12 +96,12 @@
     "eval_episodes_per_member": 8,
     "alpha_g": 0.05,
     "beta_KL": 0.01,
-    "antithetic_sampling": true,
+    "antithetic_sampling": false,
     "update_norm_clip": true
   },
   "self_play_league": {
-    "enabled": false,
-    "opponent_probability": 0.0,
+    "enabled": true,
+    "opponent_probability": 0.5,
     "snapshot_interval_updates": 10,
     "max_snapshots": 8,
     "training_opponent_policy": "stochastic",
@@ -113,17 +113,17 @@
     "elo_k": 32.0
   },
   "wandb": {
-    "enabled": false,
+    "enabled": true,
     "project": "pulsar",
     "entity": "",
-    "run_name": "",
-    "group": "",
-    "job_type": "",
+    "run_name": "prod-run-001",
+    "group": "production",
+    "job_type": "train",
     "dir": "",
     "mode": "online",
     "python_executable": "python3",
     "script_path": "scripts/wandb_stream.py",
     "log_interval_seconds": 30.0,
-    "tags": []
+    "tags": ["production", "gcrl", "es-lora", "continuum", "2v2"]
   }
 }

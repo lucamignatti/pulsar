@@ -76,7 +76,7 @@ void append_metrics_line(
       {"min_goal_distance", metrics.min_goal_distance},
       {"goal_actor_loss_ratio", metrics.goal_actor_loss_ratio},
       {"goal_occupancy_correlation", metrics.goal_occupancy_correlation},
-      {"ball_touch_rate", metrics.ball_touch_rate},
+          {"ball_proximity_rate", metrics.ball_proximity_rate},
       {"goals_scored", metrics.goals_scored},
       {"goals_conceded", metrics.goals_conceded},
       {"obs_build_seconds", metrics.obs_build_seconds},
@@ -402,6 +402,8 @@ TrainerMetrics APPOTrainer::update_actor() {
         require_finite(policy_loss, "policy_loss");
         require_finite(value_loss, "value_loss");
         require_finite(entropy, "entropy");
+        require_finite(goal_critic_loss, "goal_critic_loss");
+        require_finite(goal_actor_loss, "goal_actor_loss");
 
         const auto active_samples = active_logits.size(0);
         accumulated_loss = accumulated_loss + loss * static_cast<double>(active_samples);
@@ -457,8 +459,7 @@ TrainerMetrics APPOTrainer::update_actor() {
 APPOTrainer::ESFitness APPOTrainer::evaluate_es_fitness(
     const std::vector<torch::Tensor>& perturbation,
     float sigma_ES,
-    int eval_episodes,
-    bool no_gradient) {
+    int eval_episodes) {
   torch::NoGradGuard no_grad_guard;
   std::vector<torch::Tensor> saved = actor_->es_lora_parameters();
   for (std::size_t i = 0; i < saved.size(); ++i) {
@@ -478,7 +479,6 @@ APPOTrainer::ESFitness APPOTrainer::evaluate_es_fitness(
   ContinuumState base_state = actor_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
 
   for (int ep = 0; ep < eval_episodes; ++ep) {
-    collector_->host_episode_starts().fill_(ep == 0 ? 1.0F : 0.0F);
     for (int step = 0; step < config_.ppo.rollout_length; ++step) {
       torch::Tensor raw_obs_host = collector_->host_observations();
       torch::Tensor raw_obs = raw_obs_host.to(device_, use_pinned_host_buffers_);
@@ -495,7 +495,6 @@ APPOTrainer::ESFitness APPOTrainer::evaluate_es_fitness(
 
       torch::Tensor base_actions;
       {
-        auto saved_pert = actor_->es_lora_parameters();
         actor_->restore_es_lora_parameters(saved);
         ActorStepOutput base_output = actor_->forward_step(normalized_obs, std::move(base_state), episode_starts);
         base_state = std::move(base_output.state);
@@ -563,6 +562,8 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
   const int pop = es_cfg.population_size;
   const int eval_eps = es_cfg.eval_episodes_per_member;
 
+  torch::Tensor saved_episode_starts = collector_->host_episode_starts().clone();
+
   auto base_params = actor_->es_lora_parameters();
   for (auto& p : base_params) {
     p = p.detach().clone();
@@ -581,7 +582,7 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
     }
     all_epsilons.push_back(epsilon);
 
-    auto fitness_result = evaluate_es_fitness(epsilon, es_cfg.sigma_ES, eval_eps, true);
+    auto fitness_result = evaluate_es_fitness(epsilon, es_cfg.sigma_ES, eval_eps);
     fitnesses.push_back(fitness_result.fitness);
     accumulated_es_winrate += static_cast<double>(fitness_result.winrate);
     accumulated_es_goal_pressure += static_cast<double>(fitness_result.goal_pressure);
@@ -593,7 +594,7 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
         anti_epsilon.push_back(-e);
       }
       all_epsilons.push_back(anti_epsilon);
-      auto anti_fitness_result = evaluate_es_fitness(anti_epsilon, es_cfg.sigma_ES, eval_eps, true);
+      auto anti_fitness_result = evaluate_es_fitness(anti_epsilon, es_cfg.sigma_ES, eval_eps);
       fitnesses.push_back(anti_fitness_result.fitness);
       accumulated_es_winrate += static_cast<double>(anti_fitness_result.winrate);
       accumulated_es_goal_pressure += static_cast<double>(anti_fitness_result.goal_pressure);
@@ -665,6 +666,8 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
 
   float best_fitness = *std::max_element(fitnesses.begin(), fitnesses.end());
 
+  collector_->host_episode_starts().copy_(saved_episode_starts);
+
   metrics.es_fitness_mean = mu;
   metrics.es_fitness_std = sigma;
   metrics.es_fitness_best = static_cast<double>(best_fitness);
@@ -700,8 +703,8 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   double min_goal_distance = 1.0;
   int64_t total_goals_scored = 0;
   int64_t total_goals_conceded = 0;
-  int64_t total_ball_touched_steps = 0;
-  int64_t total_ball_touch_steps = 0;
+  int64_t total_ball_proximity_steps = 0;
+  int64_t total_ball_proximity_denom = 0;
 
   for (int step = 0; step < config_.ppo.rollout_length; ++step) {
     torch::Tensor raw_obs_host = collector_->host_observations();
@@ -767,9 +770,9 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     torch::Tensor extrinsic_rewards = map_outcome_labels_to_rewards(terminal_labels);
     extrinsic_rewards = extrinsic_rewards.to(device_, use_pinned_host_buffers_) * dones;
 
-    torch::Tensor ball_touch_host = collector_->host_ball_touched();
-    total_ball_touched_steps += ball_touch_host.sum().item<int64_t>();
-    total_ball_touch_steps += ball_touch_host.numel();
+    torch::Tensor ball_prox_host = collector_->host_ball_proximity();
+    total_ball_proximity_steps += ball_prox_host.sum().item<int64_t>();
+    total_ball_proximity_denom += ball_prox_host.numel();
 
     torch::Tensor terminal_labels_cpu = terminal_labels.to(torch::kCPU);
     auto* tl_ptr = terminal_labels_cpu.data_ptr<std::int64_t>();
@@ -852,8 +855,8 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   metrics.min_goal_distance = min_goal_distance;
   metrics.goals_scored = total_goals_scored;
   metrics.goals_conceded = total_goals_conceded;
-  if (total_ball_touch_steps > 0) {
-    metrics.ball_touch_rate = static_cast<double>(total_ball_touched_steps) / static_cast<double>(total_ball_touch_steps);
+  if (total_ball_proximity_denom > 0) {
+    metrics.ball_proximity_rate = static_cast<double>(total_ball_proximity_steps) / static_cast<double>(total_ball_proximity_denom);
   }
   if (accumulated_value_stat_count > 0) {
     metrics.sampled_value_win_mean = accumulated_sampled_value
@@ -983,7 +986,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " goal_actor_loss=" << metrics.goal_actor_loss
               << " goal_actor_ratio=" << metrics.goal_actor_loss_ratio
               << " mean_goal_dist=" << metrics.mean_goal_distance
-              << " ball_touch=" << metrics.ball_touch_rate
+              << " ball_prox=" << metrics.ball_proximity_rate
               << " goals=" << metrics.goals_scored << "/" << metrics.goals_conceded
               << " goal_corr=" << metrics.goal_occupancy_correlation
               << " es_fitness=" << metrics.es_fitness_mean
@@ -1007,7 +1010,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"mean_actual_goal_occupancy", metrics.mean_actual_goal_occupancy},
           {"mean_goal_distance", metrics.mean_goal_distance},
           {"min_goal_distance", metrics.min_goal_distance},
-          {"ball_touch_rate", metrics.ball_touch_rate},
+      {"ball_proximity_rate", metrics.ball_proximity_rate},
           {"goals_scored", metrics.goals_scored},
           {"goals_conceded", metrics.goals_conceded},
           {"goal_occupancy_correlation", metrics.goal_occupancy_correlation},
