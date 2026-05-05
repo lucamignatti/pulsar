@@ -1007,7 +1007,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " es_fitness=" << metrics.es_fitness_mean
               << '\n';
     if (wandb.enabled()) {
-      wandb.log(nlohmann::json{
+      nlohmann::json payload{
           {"update", update_index},
           {"global_step", global_step},
           {"policy_loss", metrics.policy_loss},
@@ -1039,7 +1039,11 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"es_update_norm", metrics.es_update_norm},
           {"es_lora_a_norm", metrics.es_lora_a_norm},
           {"es_lora_b_norm", metrics.es_lora_b_norm},
-      });
+      };
+      for (const auto& [mode, rating] : metrics.elo_ratings) {
+        payload["elo_" + mode] = rating;
+      }
+      wandb.log(payload);
     }
     if (config_.ppo.checkpoint_interval > 0 && update_index % config_.ppo.checkpoint_interval == 0) {
       save_checkpoint(std::filesystem::path(checkpoint_dir) / ("update_" + std::to_string(update_index)), global_step, update_index);

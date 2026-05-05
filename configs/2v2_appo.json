@@ -42,7 +42,7 @@
     "value_v_max": 10.0
   },
   "ppo": {
-    "num_envs": 256,
+    "num_envs": 512,
     "collection_workers": 28,
     "init_checkpoint": "",
     "rollout_length": 256,
@@ -68,7 +68,7 @@
     "confidence_weight_type": "entropy",
     "confidence_weight_delta": 1.0e-6,
     "normalize_confidence_weights": true,
-    "synchronize_cuda_timing": true
+    "synchronize_cuda_timing": false
   },
   "goal_mapping": {
     "goal": 0.0,
@@ -92,7 +92,7 @@
     "population_size": 16,
     "sigma_ES": 0.01,
     "eta_ES": 0.003,
-    "es_interval": 100,
+    "es_interval": 25,
     "eval_episodes_per_member": 8,
     "alpha_g": 0.05,
     "beta_KL": 0.01,
