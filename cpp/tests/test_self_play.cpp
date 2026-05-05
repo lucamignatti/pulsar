@@ -189,6 +189,47 @@ void test_snapshot_reload_preserves_actor_config() {
   fs::remove_all(root);
 }
 
+void test_self_play_eval_runs_and_loaded_snapshots_are_bounded() {
+  namespace fs = std::filesystem;
+  pulsar::ExperimentConfig config = pulsar::test::make_test_config();
+  config.env.collision_meshes_path = pulsar::test::find_repo_collision_meshes().string();
+  config.env.max_episode_ticks = 16;
+  config.self_play_league.enabled = true;
+  config.self_play_league.opponent_probability = 1.0F;
+  config.self_play_league.snapshot_interval_updates = 1;
+  config.self_play_league.max_snapshots = 2;
+  config.self_play_league.eval_interval_updates = 1;
+  config.self_play_league.eval_num_envs = 1;
+  config.self_play_league.eval_matches_per_snapshot = 1;
+  config.ppo.device = "cpu";
+
+  const fs::path root = fs::temp_directory_path() / "pulsar_self_play_eval_test";
+  fs::remove_all(root);
+  auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
+  auto action_parser =
+      std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
+  pulsar::PPOActor model(config.model, config.goal_critic);
+  pulsar::ObservationNormalizer normalizer(config.model.observation_dim);
+  normalizer.update(torch::randn({16, config.model.observation_dim}));
+
+  {
+    pulsar::SelfPlayManager manager(config, root, obs_builder, action_parser, torch::kCPU);
+    manager.on_update(model, normalizer, 10, 1);
+    manager.on_update(model, normalizer, 20, 2);
+    manager.on_update(model, normalizer, 30, 3);
+  }
+
+  {
+    pulsar::SelfPlayManager reloaded(config, root, obs_builder, action_parser, torch::kCPU);
+    const auto metrics = reloaded.on_update(model, normalizer, 40, 4);
+    pulsar::test::require(metrics.snapshot_count == 2, "loaded snapshot pool should honor max_snapshots");
+    pulsar::test::require(metrics.eval_seconds >= 0.0, "self-play evaluation should run");
+    pulsar::test::require(!metrics.ratings.empty(), "self-play evaluation should report ELO ratings");
+  }
+
+  fs::remove_all(root);
+}
+
 void test_checkpoint_metadata_validation() {
   namespace fs = std::filesystem;
   const fs::path root = fs::temp_directory_path() / "pulsar_metadata_validation_test";
@@ -283,6 +324,7 @@ int main() {
     test_snapshot_save_load_trim_and_assignment();
     test_opponent_inference_and_elo_math();
     test_snapshot_reload_preserves_actor_config();
+    test_self_play_eval_runs_and_loaded_snapshots_are_bounded();
     test_checkpoint_metadata_validation();
     std::cout << "pulsar_self_play_tests passed\n" << std::flush;
     std::_Exit(EXIT_SUCCESS);

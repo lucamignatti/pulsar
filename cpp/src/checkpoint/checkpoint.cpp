@@ -12,7 +12,7 @@ namespace {
 
 void validate_critic_heads(const CheckpointMetadata& metadata) {
   if (metadata.critic_heads.empty()) {
-    return;
+    throw std::runtime_error("Checkpoint critic_heads metadata must not be empty.");
   }
 
   const bool has_extrinsic = std::find(

@@ -476,7 +476,8 @@ PPOActor load_ppo_actor(const std::string& checkpoint_path, const std::string& d
   validate_inference_checkpoint_metadata(metadata, config);
   if (metadata.architecture_name != "ppo_continuum"
       && metadata.architecture_name != "dappo_continuum"
-      && metadata.architecture_name != "continuum_goal_conditioned") {
+      && metadata.architecture_name != "continuum_goal_conditioned"
+      && metadata.architecture_name != "policy_snapshot") {
     throw std::runtime_error("Checkpoint is not a continuum actor checkpoint.");
   }
 

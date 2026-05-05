@@ -118,6 +118,7 @@ int main() {
         .device = "cpu",
         .global_step = 12,
         .update_index = 3,
+        .critic_heads = {"extrinsic"},
     };
     pulsar::save_checkpoint_metadata(metadata, tmp_dir.string());
     const auto loaded = pulsar::load_checkpoint_metadata(tmp_dir.string());

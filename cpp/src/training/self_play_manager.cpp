@@ -7,6 +7,7 @@
 #include <cmath>
 #include <fstream>
 #include <numeric>
+#include <optional>
 
 #include <nlohmann/json.hpp>
 
@@ -47,6 +48,14 @@ std::shared_ptr<MutatorSequence> make_eval_reset_mutator(const EnvConfig& config
           std::make_shared<FixedTeamSizeMutator>(config),
           std::make_shared<KickoffMutator>(config),
       });
+}
+
+std::optional<std::int64_t> parse_snapshot_step(const std::filesystem::path& path) {
+  try {
+    return std::stoll(path.filename().string());
+  } catch (...) {
+    return std::nullopt;
+  }
 }
 
 }  // namespace
@@ -201,7 +210,21 @@ void SelfPlayManager::load_existing_snapshots() {
       directories.push_back(entry.path());
     }
   }
-  std::sort(directories.begin(), directories.end());
+  std::sort(directories.begin(), directories.end(), [](const auto& lhs, const auto& rhs) {
+    const auto lhs_step = parse_snapshot_step(lhs);
+    const auto rhs_step = parse_snapshot_step(rhs);
+    if (lhs_step.has_value() && rhs_step.has_value()) {
+      return lhs_step.value() < rhs_step.value();
+    }
+    return lhs.filename().string() < rhs.filename().string();
+  });
+
+  const int max_snapshots = config_.self_play_league.max_snapshots;
+  if (max_snapshots > 0 && static_cast<int>(directories.size()) > max_snapshots) {
+    directories.erase(
+        directories.begin(),
+        directories.end() - static_cast<std::ptrdiff_t>(max_snapshots));
+  }
 
   for (const auto& directory : directories) {
     const ExperimentConfig snapshot_config = load_experiment_config((directory / "config.json").string());
@@ -232,6 +255,8 @@ void SelfPlayManager::load_existing_snapshots() {
     }
     snapshots_.push_back(std::move(snapshot));
   }
+
+  trim_snapshots();
 }
 
 void SelfPlayManager::save_snapshot(const Snapshot& snapshot) const {
