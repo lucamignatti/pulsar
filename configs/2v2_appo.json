@@ -67,7 +67,7 @@
     "use_confidence_weighting": true,
     "confidence_weight_type": "entropy",
     "confidence_weight_delta": 1.0e-6,
-    "normalize_confidence_weights": false,
+    "normalize_confidence_weights": true,
     "synchronize_cuda_timing": true
   },
   "goal_mapping": {
