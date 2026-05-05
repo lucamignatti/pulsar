@@ -225,6 +225,10 @@ TrainerMetrics APPOTrainer::update_actor() {
       const torch::Tensor agent_indices_device = agent_indices.to(device_);
       ContinuumState state = state_to_device(rollout_.initial_state_for_agents(agent_indices), device_);
 
+      torch::Tensor accumulated_loss = torch::zeros({}, device_);
+      double accumulated_chunks = 0.0;
+      std::int64_t agent_batch_steps = 0;
+
       for (int seq_start = 0; seq_start < rollout_.rollout_length(); seq_start += seq_len) {
         const int chunk_start = seq_start;
         const int chunk_end = std::min(rollout_.rollout_length(), chunk_start + seq_len);
@@ -284,16 +288,20 @@ TrainerMetrics APPOTrainer::update_actor() {
             torch::log_softmax(apply_action_mask_to_logits(active_logits, active_masks), -1);
         const torch::Tensor current_log_probs = log_probs.gather(1, active_actions.unsqueeze(1)).squeeze(1);
 
-        float epsilon = config_.ppo.clip_range;
+        float scalar_epsilon = config_.ppo.clip_range;
+        torch::Tensor epsilon = torch::full({active_advantages.size(0)}, config_.ppo.clip_range, active_advantages.options());
         torch::Tensor confidence_weights = torch::ones({active_advantages.size(0)}, active_advantages.options());
-        if (config_.ppo.use_adaptive_epsilon || config_.ppo.use_confidence_weighting) {
+
+        {
           torch::Tensor value_win_chunk = output.value_win_logits.narrow(0, burn, loss_steps);
           const int64_t win_atoms = atom_support_win.size(0);
           torch::Tensor flat_value_logits = value_win_chunk.reshape({samples, win_atoms});
           torch::Tensor active_value_logits = flat_value_logits.index({flat_active});
           const torch::Tensor critic_variance = compute_distribution_variance(active_value_logits, atom_support_win);
+          accumulated_variance += critic_variance.mean().item<double>() * static_cast<double>(active_logits.size(0));
+
           if (config_.ppo.use_adaptive_epsilon) {
-            epsilon = compute_adaptive_epsilon(
+            epsilon = compute_adaptive_epsilon_tensor(
                 critic_variance,
                 config_.ppo.clip_range,
                 config_.ppo.adaptive_epsilon_beta,
@@ -308,10 +316,9 @@ TrainerMetrics APPOTrainer::update_actor() {
                 config_.ppo.confidence_weight_delta,
                 config_.ppo.normalize_confidence_weights);
           }
-          accumulated_variance += critic_variance.mean().item<double>() * static_cast<double>(active_logits.size(0));
           accumulated_confidence += confidence_weights.mean().item<double>() * static_cast<double>(active_logits.size(0));
         }
-        accumulated_epsilon += static_cast<double>(epsilon) * static_cast<double>(active_logits.size(0));
+        accumulated_epsilon += static_cast<double>(scalar_epsilon) * static_cast<double>(active_logits.size(0));
 
         torch::Tensor policy_loss =
             clipped_ppo_policy_loss(current_log_probs, active_old_log_probs, active_advantages, epsilon);
@@ -396,21 +403,28 @@ TrainerMetrics APPOTrainer::update_actor() {
         require_finite(value_loss, "value_loss");
         require_finite(entropy, "entropy");
 
-        const auto optim_start = std::chrono::steady_clock::now();
-        actor_optimizer_.zero_grad();
-        loss.backward();
-        const auto grad_norm_value = torch::nn::utils::clip_grad_norm_(actor_->parameters(), config_.ppo.max_grad_norm);
-        double grad_norm = static_cast<double>(grad_norm_value);
-        actor_optimizer_.step();
-        metrics.optimizer_step_seconds +=
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - optim_start).count();
+        accumulated_loss = accumulated_loss + loss;
+        accumulated_chunks += 1.0;
 
         const auto active_samples = active_logits.size(0);
         metrics.policy_loss += policy_loss.item<double>() * static_cast<double>(active_samples);
         metrics.value_loss += value_loss.item<double>() * static_cast<double>(active_samples);
         metrics.entropy += entropy.item<double>() * static_cast<double>(active_samples);
-        metrics.grad_norm += grad_norm * static_cast<double>(active_samples);
         metric_steps += active_samples;
+        agent_batch_steps += active_samples;
+      }
+
+      if (accumulated_chunks > 0.0) {
+        const auto optim_start = std::chrono::steady_clock::now();
+        auto avg_loss = accumulated_loss / accumulated_chunks;
+        actor_optimizer_.zero_grad();
+        avg_loss.backward();
+        const auto grad_norm_value = torch::nn::utils::clip_grad_norm_(actor_->parameters(), config_.ppo.max_grad_norm);
+        double grad_norm = static_cast<double>(grad_norm_value);
+        actor_optimizer_.step();
+        metrics.optimizer_step_seconds +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - optim_start).count();
+        metrics.grad_norm += grad_norm * static_cast<double>(agent_batch_steps);
       }
     }
   }
@@ -678,6 +692,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
 
   double total_sparse_reward = 0.0;
   int64_t total_steps = 0;
+  int64_t total_learner_steps = 0;
   double accumulated_sampled_value = 0.0;
   double accumulated_value_entropy = 0.0;
   int64_t accumulated_value_stat_count = 0;
@@ -729,7 +744,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
       actions = torch::where(snapshot_ids >= 0, opponent_actions, actions);
     }
 
-    torch::Tensor sampled_value = sample_quantile_value(output.value_win_logits, atom_support_win);
+    torch::Tensor sampled_value = compute_mean_value(output.value_win_logits, atom_support_win);
     accumulated_sampled_value += sampled_value.sum().item<double>();
     {
       torch::Tensor entropy_tensor = compute_distribution_entropy(output.value_win_logits);
@@ -780,6 +795,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
 
     total_sparse_reward += extrinsic_rewards.sum().item<double>();
     total_steps += extrinsic_rewards.numel();
+    total_learner_steps += learner_active.to(torch::kCPU).sum().item<int64_t>();
 
     torch::Tensor episode_starts_cpu = episode_starts.to(torch::kCPU).to(torch::kBool);
     torch::Tensor learner_active_cpu = learner_active.to(torch::kCPU).to(torch::kBool);
@@ -829,8 +845,8 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   const double collection_seconds =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - collection_start).count();
 
-  if (total_steps > 0) {
-    metrics.sparse_reward_mean = total_sparse_reward / static_cast<double>(total_steps);
+  if (total_learner_steps > 0) {
+    metrics.sparse_reward_mean = total_sparse_reward / static_cast<double>(total_learner_steps);
     metrics.mean_goal_distance = total_goal_distance / static_cast<double>(config_.ppo.rollout_length);
   }
   metrics.min_goal_distance = min_goal_distance;

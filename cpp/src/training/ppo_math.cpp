@@ -112,6 +112,16 @@ torch::Tensor clipped_ppo_policy_loss(
   return -torch::min(ratio * advantages, clipped_ratio * advantages);
 }
 
+torch::Tensor clipped_ppo_policy_loss(
+    const torch::Tensor& current_log_probs,
+    const torch::Tensor& old_log_probs,
+    const torch::Tensor& advantages,
+    const torch::Tensor& clip_range) {
+  const torch::Tensor ratio = torch::exp(current_log_probs - old_log_probs);
+  const torch::Tensor clipped_ratio = torch::clamp(ratio, 1.0 - clip_range, 1.0 + clip_range);
+  return -torch::min(ratio * advantages, clipped_ratio * advantages);
+}
+
 torch::Tensor distributional_value_loss(
     const torch::Tensor& value_logits,
     const torch::Tensor& returns,
@@ -176,6 +186,16 @@ float compute_adaptive_epsilon(
   const float mean_variance = variance.mean().item<float>();
   float adaptive = epsilon_base / (1.0F + epsilon_beta * mean_variance);
   return std::clamp(adaptive, epsilon_min, epsilon_max);
+}
+
+torch::Tensor compute_adaptive_epsilon_tensor(
+    const torch::Tensor& variance,
+    float epsilon_base,
+    float epsilon_beta,
+    float epsilon_min,
+    float epsilon_max) {
+  torch::Tensor adaptive = epsilon_base / (1.0F + epsilon_beta * variance);
+  return adaptive.clamp(epsilon_min, epsilon_max);
 }
 
 torch::Tensor compute_confidence_weights(

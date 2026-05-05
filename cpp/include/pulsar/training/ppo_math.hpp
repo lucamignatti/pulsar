@@ -33,6 +33,11 @@ torch::Tensor clipped_ppo_policy_loss(
     const torch::Tensor& old_log_probs,
     const torch::Tensor& advantages,
     float clip_range);
+torch::Tensor clipped_ppo_policy_loss(
+    const torch::Tensor& current_log_probs,
+    const torch::Tensor& old_log_probs,
+    const torch::Tensor& advantages,
+    const torch::Tensor& clip_range);
 torch::Tensor distributional_value_loss(
     const torch::Tensor& value_logits,
     const torch::Tensor& returns,
@@ -51,6 +56,12 @@ torch::Tensor compute_distribution_variance(
 torch::Tensor compute_distribution_entropy(
     const torch::Tensor& value_logits);
 float compute_adaptive_epsilon(
+    const torch::Tensor& variance,
+    float epsilon_base,
+    float epsilon_beta,
+    float epsilon_min,
+    float epsilon_max);
+torch::Tensor compute_adaptive_epsilon_tensor(
     const torch::Tensor& variance,
     float epsilon_base,
     float epsilon_beta,
