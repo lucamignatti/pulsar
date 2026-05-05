@@ -223,11 +223,31 @@ TrainerMetrics APPOTrainer::update_actor() {
     for (int agent_offset = 0; agent_offset < total_agents; agent_offset += agents_per_batch) {
       const int count = std::min(agents_per_batch, total_agents - agent_offset);
       const torch::Tensor agent_indices = perm.narrow(0, agent_offset, count);
-      const torch::Tensor agent_indices_device = agent_indices.to(device_);
       ContinuumState state = state_to_device(rollout_.initial_state_for_agents(agent_indices), device_);
 
-      torch::Tensor accumulated_loss = torch::zeros({}, device_);
       double total_active_samples_agent = 0.0;
+
+      for (int seq_start = 0; seq_start < rollout_.rollout_length(); seq_start += seq_len) {
+        const int chunk_start = seq_start;
+        const int chunk_end = std::min(rollout_.rollout_length(), chunk_start + seq_len);
+        const int chunk_steps = chunk_end - chunk_start;
+        const int burn = seq_start == 0 ? std::min(std::max(0, config_.ppo.burn_in), chunk_steps) : 0;
+        const int loss_start = chunk_start + burn;
+        const int loss_steps = chunk_steps - burn;
+        if (loss_steps <= 0) {
+          continue;
+        }
+        total_active_samples_agent += rollout_.learner_active
+            .narrow(0, loss_start, loss_steps)
+            .index_select(1, agent_indices)
+            .sum()
+            .item<double>();
+      }
+      if (total_active_samples_agent <= 0.0) {
+        continue;
+      }
+
+      actor_optimizer_.zero_grad();
 
       for (int seq_start = 0; seq_start < rollout_.rollout_length(); seq_start += seq_len) {
         const int chunk_start = seq_start;
@@ -406,8 +426,8 @@ TrainerMetrics APPOTrainer::update_actor() {
         require_finite(goal_actor_loss, "goal_actor_loss");
 
         const auto active_samples = active_logits.size(0);
-        accumulated_loss = accumulated_loss + loss * static_cast<double>(active_samples);
-        total_active_samples_agent += static_cast<double>(active_samples);
+        const torch::Tensor weighted_loss = loss * (static_cast<double>(active_samples) / total_active_samples_agent);
+        weighted_loss.backward();
 
         metrics.policy_loss += policy_loss.item<double>() * static_cast<double>(active_samples);
         metrics.value_loss += value_loss.item<double>() * static_cast<double>(active_samples);
@@ -415,18 +435,13 @@ TrainerMetrics APPOTrainer::update_actor() {
         metric_steps += active_samples;
       }
 
-      if (total_active_samples_agent > 0.0) {
-        const auto optim_start = std::chrono::steady_clock::now();
-        auto avg_loss = accumulated_loss / total_active_samples_agent;
-        actor_optimizer_.zero_grad();
-        avg_loss.backward();
-        const auto grad_norm_value = torch::nn::utils::clip_grad_norm_(actor_->parameters(), config_.ppo.max_grad_norm);
-        double grad_norm = static_cast<double>(grad_norm_value);
-        actor_optimizer_.step();
-        metrics.optimizer_step_seconds +=
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - optim_start).count();
-        metrics.grad_norm += grad_norm * total_active_samples_agent;
-      }
+      const auto optim_start = std::chrono::steady_clock::now();
+      const auto grad_norm_value = torch::nn::utils::clip_grad_norm_(actor_->parameters(), config_.ppo.max_grad_norm);
+      double grad_norm = static_cast<double>(grad_norm_value);
+      actor_optimizer_.step();
+      metrics.optimizer_step_seconds +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - optim_start).count();
+      metrics.grad_norm += grad_norm * total_active_samples_agent;
     }
   }
 
