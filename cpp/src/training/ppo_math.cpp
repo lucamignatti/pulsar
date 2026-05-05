@@ -283,6 +283,25 @@ float compute_discrete_policy_kl(
   return kl.mean().item<float>();
 }
 
+float compute_goal_value_correlation(
+    const torch::Tensor& predicted_values,
+    const torch::Tensor& actual_values) {
+  const torch::Tensor pred = predicted_values.flatten();
+  const torch::Tensor act = actual_values.flatten();
+
+  const torch::Tensor pred_mean = pred.mean();
+  const torch::Tensor act_mean = act.mean();
+
+  const torch::Tensor numerator = ((pred - pred_mean) * (act - act_mean)).sum();
+  const torch::Tensor denominator = torch::sqrt(
+      (pred - pred_mean).square().sum() * (act - act_mean).square().sum());
+
+  if (denominator.item<float>() < 1.0e-8F) {
+    return 0.0F;
+  }
+  return (numerator / denominator).item<float>();
+}
+
 ContinuumState detach_state(ContinuumState state) {
   state.workspace = detach_tensor(state.workspace);
   state.stm_keys = detach_tensor(state.stm_keys);

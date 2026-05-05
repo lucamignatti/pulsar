@@ -75,6 +75,10 @@ void append_metrics_line(
       {"mean_goal_distance", metrics.mean_goal_distance},
       {"min_goal_distance", metrics.min_goal_distance},
       {"goal_actor_loss_ratio", metrics.goal_actor_loss_ratio},
+      {"goal_occupancy_correlation", metrics.goal_occupancy_correlation},
+      {"ball_touch_rate", metrics.ball_touch_rate},
+      {"goals_scored", metrics.goals_scored},
+      {"goals_conceded", metrics.goals_conceded},
       {"obs_build_seconds", metrics.obs_build_seconds},
       {"mask_build_seconds", metrics.mask_build_seconds},
       {"policy_forward_seconds", metrics.policy_forward_seconds},
@@ -85,11 +89,14 @@ void append_metrics_line(
       {"optimizer_step_seconds", metrics.optimizer_step_seconds},
       {"self_play_eval_seconds", metrics.self_play_eval_seconds},
       {"es_fitness_mean", metrics.es_fitness_mean},
+      {"es_fitness_std", metrics.es_fitness_std},
       {"es_fitness_best", metrics.es_fitness_best},
       {"es_winrate_mean", metrics.es_winrate_mean},
       {"es_goal_pressure_mean", metrics.es_goal_pressure_mean},
       {"es_kl_mean", metrics.es_kl_mean},
       {"es_update_norm", metrics.es_update_norm},
+      {"es_lora_a_norm", metrics.es_lora_a_norm},
+      {"es_lora_b_norm", metrics.es_lora_b_norm},
       {"es_seconds", metrics.es_seconds},
   };
   for (const auto& [mode, rating] : metrics.elo_ratings) {
@@ -192,6 +199,9 @@ TrainerMetrics APPOTrainer::update_actor() {
   double accumulated_goal_critic_loss = 0.0;
   double accumulated_goal_actor_loss = 0.0;
   double accumulated_predicted_goal_value = 0.0;
+  double accumulated_actual_goal_occupancy = 0.0;
+  std::vector<double> predicted_goal_values;
+  std::vector<double> actual_goal_occupancies;
 
   const auto& all_values = rollout_.all_values();
   const auto& all_rewards = rollout_.all_rewards();
@@ -360,6 +370,11 @@ TrainerMetrics APPOTrainer::update_actor() {
               active_logits, active_masks, goal_critic_logits.detach(), goal_support);
 
           chunk_goal_value = compute_mean_value(goal_critic_logits, goal_support).mean().item<double>();
+
+          double chunk_actual_occ = active_goal_occ.mean().item<double>();
+          accumulated_actual_goal_occupancy += chunk_actual_occ * static_cast<double>(active_logits.size(0));
+          predicted_goal_values.push_back(chunk_goal_value);
+          actual_goal_occupancies.push_back(chunk_actual_occ);
         }
 
         accumulated_goal_critic_loss += goal_critic_loss.item<double>() * static_cast<double>(active_logits.size(0));
@@ -411,14 +426,21 @@ TrainerMetrics APPOTrainer::update_actor() {
     metrics.goal_critic_loss = accumulated_goal_critic_loss / static_cast<double>(metric_steps);
     metrics.goal_actor_loss = accumulated_goal_actor_loss / static_cast<double>(metric_steps);
     metrics.mean_predicted_goal_value = accumulated_predicted_goal_value / static_cast<double>(metric_steps);
+    metrics.mean_actual_goal_occupancy = accumulated_actual_goal_occupancy / static_cast<double>(metric_steps);
     metrics.goal_actor_loss_ratio = std::abs(metrics.goal_actor_loss * static_cast<double>(config_.actor_goal.lambda_g))
         / std::max(std::abs(metrics.policy_loss), 1.0e-8);
+
+    if (!predicted_goal_values.empty() && predicted_goal_values.size() == actual_goal_occupancies.size()) {
+      auto pred_t = torch::tensor(predicted_goal_values, torch::kFloat32);
+      auto act_t = torch::tensor(actual_goal_occupancies, torch::kFloat32);
+      metrics.goal_occupancy_correlation = static_cast<double>(compute_goal_value_correlation(pred_t, act_t));
+    }
   }
   metrics.update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count();
   return metrics;
 }
 
-float APPOTrainer::evaluate_es_fitness(
+APPOTrainer::ESFitness APPOTrainer::evaluate_es_fitness(
     const std::vector<torch::Tensor>& perturbation,
     float sigma_ES,
     int eval_episodes,
@@ -511,9 +533,14 @@ float APPOTrainer::evaluate_es_fitness(
   double goal_pressure = total_steps > 0 ? total_goal_pressure / static_cast<double>(total_steps) : 0.0;
   double kl = total_kl > 0 ? total_kl / static_cast<double>(total_steps) : 0.0;
 
-  return winrate
+  ESFitness fitness;
+  fitness.winrate = winrate;
+  fitness.goal_pressure = static_cast<float>(goal_pressure);
+  fitness.kl = static_cast<float>(kl);
+  fitness.fitness = winrate
       + config_.es_lora.alpha_g * static_cast<float>(goal_pressure)
       - config_.es_lora.beta_KL * static_cast<float>(kl);
+  return fitness;
 }
 
 void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) {
@@ -529,6 +556,9 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
 
   std::vector<std::vector<torch::Tensor>> all_epsilons;
   std::vector<float> fitnesses;
+  double accumulated_es_winrate = 0.0;
+  double accumulated_es_goal_pressure = 0.0;
+  double accumulated_es_kl = 0.0;
 
   for (int i = 0; i < pop; ++i) {
     std::vector<torch::Tensor> epsilon;
@@ -537,8 +567,11 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
     }
     all_epsilons.push_back(epsilon);
 
-    float fitness = evaluate_es_fitness(epsilon, es_cfg.sigma_ES, eval_eps, true);
-    fitnesses.push_back(fitness);
+    auto fitness_result = evaluate_es_fitness(epsilon, es_cfg.sigma_ES, eval_eps, true);
+    fitnesses.push_back(fitness_result.fitness);
+    accumulated_es_winrate += static_cast<double>(fitness_result.winrate);
+    accumulated_es_goal_pressure += static_cast<double>(fitness_result.goal_pressure);
+    accumulated_es_kl += static_cast<double>(fitness_result.kl);
 
     if (es_cfg.antithetic_sampling) {
       std::vector<torch::Tensor> anti_epsilon;
@@ -546,8 +579,11 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
         anti_epsilon.push_back(-e);
       }
       all_epsilons.push_back(anti_epsilon);
-      float anti_fitness = evaluate_es_fitness(anti_epsilon, es_cfg.sigma_ES, eval_eps, true);
-      fitnesses.push_back(anti_fitness);
+      auto anti_fitness_result = evaluate_es_fitness(anti_epsilon, es_cfg.sigma_ES, eval_eps, true);
+      fitnesses.push_back(anti_fitness_result.fitness);
+      accumulated_es_winrate += static_cast<double>(anti_fitness_result.winrate);
+      accumulated_es_goal_pressure += static_cast<double>(anti_fitness_result.goal_pressure);
+      accumulated_es_kl += static_cast<double>(anti_fitness_result.kl);
     }
   }
 
@@ -619,6 +655,9 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
   metrics.es_fitness_std = sigma;
   metrics.es_fitness_best = static_cast<double>(best_fitness);
   metrics.es_update_norm = update_norm;
+  metrics.es_winrate_mean = accumulated_es_winrate / static_cast<double>(total_members);
+  metrics.es_goal_pressure_mean = accumulated_es_goal_pressure / static_cast<double>(total_members);
+  metrics.es_kl_mean = accumulated_es_kl / static_cast<double>(total_members);
 
   auto lora_params = actor_->es_lora_parameters();
   metrics.es_lora_a_norm = static_cast<double>(lora_params[0].norm().item<float>());
@@ -644,6 +683,10 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   int64_t accumulated_value_stat_count = 0;
   double total_goal_distance = 0.0;
   double min_goal_distance = 1.0;
+  int64_t total_goals_scored = 0;
+  int64_t total_goals_conceded = 0;
+  int64_t total_ball_touched_steps = 0;
+  int64_t total_ball_touch_steps = 0;
 
   for (int step = 0; step < config_.ppo.rollout_length; ++step) {
     torch::Tensor raw_obs_host = collector_->host_observations();
@@ -709,6 +752,24 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     torch::Tensor extrinsic_rewards = map_outcome_labels_to_rewards(terminal_labels);
     extrinsic_rewards = extrinsic_rewards.to(device_, use_pinned_host_buffers_) * dones;
 
+    torch::Tensor ball_touch_host = collector_->host_ball_touched();
+    total_ball_touched_steps += ball_touch_host.sum().item<int64_t>();
+    total_ball_touch_steps += ball_touch_host.numel();
+
+    torch::Tensor terminal_labels_cpu = terminal_labels.to(torch::kCPU);
+    auto* tl_ptr = terminal_labels_cpu.data_ptr<std::int64_t>();
+    torch::Tensor learner_active_cpu_early = learner_active.to(torch::kCPU);
+    auto* la_ptr = learner_active_cpu_early.data_ptr<float>();
+    for (int64_t i = 0; i < terminal_labels_cpu.numel(); ++i) {
+      if (la_ptr[i] > 0.5F && dones.to(torch::kCPU)[i].item<float>() > 0.5F) {
+        if (tl_ptr[i] == 0) {
+          total_goals_scored++;
+        } else if (tl_ptr[i] == 1) {
+          total_goals_conceded++;
+        }
+      }
+    }
+
     torch::Tensor goal_dist_host = collector_->host_goal_distances();
     float gd_min = goal_dist_host.min().item<float>();
     float gd_mean = goal_dist_host.mean().item<float>();
@@ -773,6 +834,11 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     metrics.mean_goal_distance = total_goal_distance / static_cast<double>(config_.ppo.rollout_length);
   }
   metrics.min_goal_distance = min_goal_distance;
+  metrics.goals_scored = total_goals_scored;
+  metrics.goals_conceded = total_goals_conceded;
+  if (total_ball_touch_steps > 0) {
+    metrics.ball_touch_rate = static_cast<double>(total_ball_touched_steps) / static_cast<double>(total_ball_touch_steps);
+  }
   if (accumulated_value_stat_count > 0) {
     metrics.sampled_value_win_mean = accumulated_sampled_value
         / static_cast<double>(accumulated_value_stat_count);
@@ -795,6 +861,8 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   metrics.goal_actor_loss = update_metrics.goal_actor_loss;
   metrics.mean_predicted_goal_value = update_metrics.mean_predicted_goal_value;
   metrics.goal_actor_loss_ratio = update_metrics.goal_actor_loss_ratio;
+  metrics.mean_actual_goal_occupancy = update_metrics.mean_actual_goal_occupancy;
+  metrics.goal_occupancy_correlation = update_metrics.goal_occupancy_correlation;
 
   metrics.obs_build_seconds = collector_timings.obs_build_seconds;
   metrics.mask_build_seconds = collector_timings.mask_build_seconds;
@@ -899,6 +967,9 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " goal_actor_loss=" << metrics.goal_actor_loss
               << " goal_actor_ratio=" << metrics.goal_actor_loss_ratio
               << " mean_goal_dist=" << metrics.mean_goal_distance
+              << " ball_touch=" << metrics.ball_touch_rate
+              << " goals=" << metrics.goals_scored << "/" << metrics.goals_conceded
+              << " goal_corr=" << metrics.goal_occupancy_correlation
               << " es_fitness=" << metrics.es_fitness_mean
               << '\n';
     if (wandb.enabled()) {
@@ -917,12 +988,23 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"goal_critic_loss", metrics.goal_critic_loss},
           {"goal_actor_loss", metrics.goal_actor_loss},
           {"mean_predicted_goal_value", metrics.mean_predicted_goal_value},
+          {"mean_actual_goal_occupancy", metrics.mean_actual_goal_occupancy},
           {"mean_goal_distance", metrics.mean_goal_distance},
           {"min_goal_distance", metrics.min_goal_distance},
+          {"ball_touch_rate", metrics.ball_touch_rate},
+          {"goals_scored", metrics.goals_scored},
+          {"goals_conceded", metrics.goals_conceded},
+          {"goal_occupancy_correlation", metrics.goal_occupancy_correlation},
           {"goal_actor_loss_ratio", metrics.goal_actor_loss_ratio},
           {"es_fitness_mean", metrics.es_fitness_mean},
+          {"es_fitness_std", metrics.es_fitness_std},
           {"es_fitness_best", metrics.es_fitness_best},
+          {"es_winrate_mean", metrics.es_winrate_mean},
+          {"es_goal_pressure_mean", metrics.es_goal_pressure_mean},
+          {"es_kl_mean", metrics.es_kl_mean},
           {"es_update_norm", metrics.es_update_norm},
+          {"es_lora_a_norm", metrics.es_lora_a_norm},
+          {"es_lora_b_norm", metrics.es_lora_b_norm},
       });
     }
     if (config_.ppo.checkpoint_interval > 0 && update_index % config_.ppo.checkpoint_interval == 0) {

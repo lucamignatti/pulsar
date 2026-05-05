@@ -57,7 +57,7 @@ struct ModelConfig {
 
 struct GoalMappingConfig {
   float goal = 0.0F;
-  float kernel_sigma = 0.05F;
+  float kernel_sigma = 0.08F;
   float arena_max_distance = 8192.0F;
 };
 
@@ -71,7 +71,7 @@ struct GoalCriticConfig {
 };
 
 struct ActorGoalConfig {
-  float lambda_g = 0.02F;
+  float lambda_g = 0.1F;
 };
 
 struct ESLoraConfig {

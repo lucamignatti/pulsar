@@ -84,6 +84,10 @@ float compute_discrete_policy_kl(
     const torch::Tensor& perturbed_logits,
     const torch::Tensor& action_masks);
 
+float compute_goal_value_correlation(
+    const torch::Tensor& predicted_values,
+    const torch::Tensor& actual_values);
+
 ContinuumState detach_state(ContinuumState state);
 ContinuumState clone_state(const ContinuumState& state);
 ContinuumState state_to_device(ContinuumState state, const torch::Device& device);

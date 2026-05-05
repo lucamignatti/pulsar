@@ -137,6 +137,7 @@ void BatchedRocketSimCollector::initialize(
   host_terminal_observations_ =
       torch::zeros({static_cast<long>(total_agents_), obs_dim_}, f32);
   host_goal_distances_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
+  host_ball_touched_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
 
   for (std::size_t env_idx = 0; env_idx < envs_.size(); ++env_idx) {
     assign_env(env_idx, envs_[env_idx].reset_seed);
@@ -265,6 +266,7 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
   std::int64_t* labels_ptr = host_terminal_outcome_labels_.data_ptr<std::int64_t>();
   float* terminal_obs_ptr = host_terminal_observations_.data_ptr<float>();
   float* goal_dist_ptr = host_goal_distances_.data_ptr<float>();
+  float* ball_touch_ptr = host_ball_touched_.data_ptr<float>();
   const std::size_t obs_stride = static_cast<std::size_t>(obs_dim_);
   host_dones_.zero_();
   host_terminated_.zero_();
@@ -272,6 +274,7 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
   host_terminal_outcome_labels_.fill_(2);
   host_terminal_observations_.zero_();
   host_goal_distances_.zero_();
+  host_ball_touched_.zero_();
 
   executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
     for (std::size_t env_idx = begin; env_idx < end; ++env_idx) {
@@ -305,8 +308,9 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
       }
 
       for (std::size_t idx = 0; idx < count; ++idx) {
-        goal_dist_ptr[agent_begin + idx] =
-            compute_goal_distance(current_state, static_cast<int>(idx), config_.goal_mapping);
+        float dist = compute_goal_distance(current_state, static_cast<int>(idx), config_.goal_mapping);
+        goal_dist_ptr[agent_begin + idx] = dist;
+        ball_touch_ptr[agent_begin + idx] = (dist * config_.goal_mapping.arena_max_distance < 300.0F) ? 1.0F : 0.0F;
       }
 
       if (reset_needed) {
@@ -423,6 +427,10 @@ const torch::Tensor& BatchedRocketSimCollector::host_terminal_observations() con
 
 const torch::Tensor& BatchedRocketSimCollector::host_goal_distances() const {
   return host_goal_distances_;
+}
+
+const torch::Tensor& BatchedRocketSimCollector::host_ball_touched() const {
+  return host_ball_touched_;
 }
 
 }  // namespace pulsar

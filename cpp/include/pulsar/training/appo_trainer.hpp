@@ -53,6 +53,10 @@ struct TrainerMetrics {
   double mean_goal_distance = 0.0;
   double min_goal_distance = 0.0;
   double goal_actor_loss_ratio = 0.0;
+  double ball_touch_rate = 0.0;
+  double goal_occupancy_correlation = 0.0;
+  int64_t goals_scored = 0;
+  int64_t goals_conceded = 0;
 
   double es_fitness_mean = 0.0;
   double es_fitness_std = 0.0;
@@ -90,7 +94,14 @@ class APPOTrainer {
 
   void run_es_lora_update(int update_index, TrainerMetrics& metrics);
 
-  float evaluate_es_fitness(
+  struct ESFitness {
+    float fitness = 0.0F;
+    float winrate = 0.0F;
+    float goal_pressure = 0.0F;
+    float kl = 0.0F;
+  };
+
+  ESFitness evaluate_es_fitness(
       const std::vector<torch::Tensor>& perturbation,
       float sigma_ES,
       int eval_episodes,
