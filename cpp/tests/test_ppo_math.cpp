@@ -241,15 +241,16 @@ int main() {
               "far from goal step should have low occupancy");
     }
 
-    // 13. Goal actor loss with discrete actions
+    // 13. Goal actor loss with discrete actions (REINFORCE-style)
     {
       auto policy_logits = torch::randn({4, 4}, torch::TensorOptions().dtype(torch::kFloat32).requires_grad(true));
       auto action_masks = torch::ones({4, 4}, torch::kBool);
-      auto goal_critic_logits = torch::zeros({4, 4, 21}, torch::kFloat32);
+      auto actions = torch::randint(0, 4, {4}, torch::kLong);
+      auto goal_critic_logits = torch::zeros({4, 21}, torch::kFloat32);
       auto goal_support = torch::linspace(0.0F, 25.0F, 21, torch::kFloat32);
 
       auto loss = pulsar::compute_goal_actor_loss_discrete(
-          policy_logits, action_masks, goal_critic_logits, goal_support);
+          policy_logits, action_masks, goal_critic_logits, goal_support, actions);
       require_finite(loss, "goal actor loss");
       require(loss.sizes() == torch::IntArrayRef({}), "goal actor loss should be scalar");
       require(loss.detach().requires_grad() == false || loss.requires_grad(), "goal actor loss should pass through");

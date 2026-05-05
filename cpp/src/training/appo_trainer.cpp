@@ -202,6 +202,7 @@ TrainerMetrics APPOTrainer::update_actor() {
   double accumulated_actual_goal_occupancy = 0.0;
   std::vector<double> predicted_goal_values;
   std::vector<double> actual_goal_occupancies;
+  std::vector<double> correlation_weights;
 
   const auto& all_values = rollout_.all_values();
   const auto& all_rewards = rollout_.all_rewards();
@@ -226,8 +227,7 @@ TrainerMetrics APPOTrainer::update_actor() {
       ContinuumState state = state_to_device(rollout_.initial_state_for_agents(agent_indices), device_);
 
       torch::Tensor accumulated_loss = torch::zeros({}, device_);
-      double accumulated_chunks = 0.0;
-      std::int64_t agent_batch_steps = 0;
+      double total_active_samples_agent = 0.0;
 
       for (int seq_start = 0; seq_start < rollout_.rollout_length(); seq_start += seq_len) {
         const int chunk_start = seq_start;
@@ -288,7 +288,6 @@ TrainerMetrics APPOTrainer::update_actor() {
             torch::log_softmax(apply_action_mask_to_logits(active_logits, active_masks), -1);
         const torch::Tensor current_log_probs = log_probs.gather(1, active_actions.unsqueeze(1)).squeeze(1);
 
-        float scalar_epsilon = config_.ppo.clip_range;
         torch::Tensor epsilon = torch::full({active_advantages.size(0)}, config_.ppo.clip_range, active_advantages.options());
         torch::Tensor confidence_weights = torch::ones({active_advantages.size(0)}, active_advantages.options());
 
@@ -318,7 +317,7 @@ TrainerMetrics APPOTrainer::update_actor() {
           }
           accumulated_confidence += confidence_weights.mean().item<double>() * static_cast<double>(active_logits.size(0));
         }
-        accumulated_epsilon += static_cast<double>(scalar_epsilon) * static_cast<double>(active_logits.size(0));
+        accumulated_epsilon += static_cast<double>(epsilon.mean().item<float>()) * static_cast<double>(active_logits.size(0));
 
         torch::Tensor policy_loss =
             clipped_ppo_policy_loss(current_log_probs, active_old_log_probs, active_advantages, epsilon);
@@ -374,7 +373,7 @@ TrainerMetrics APPOTrainer::update_actor() {
               goal_critic_logits, active_goal_occ, g_v_min, g_v_max, g_num_atoms);
 
           goal_actor_loss = compute_goal_actor_loss_discrete(
-              active_logits, active_masks, goal_critic_logits.detach(), goal_support);
+              active_logits, active_masks, goal_critic_logits.detach(), goal_support, active_actions);
 
           chunk_goal_value = compute_mean_value(goal_critic_logits, goal_support).mean().item<double>();
 
@@ -382,6 +381,7 @@ TrainerMetrics APPOTrainer::update_actor() {
           accumulated_actual_goal_occupancy += chunk_actual_occ * static_cast<double>(active_logits.size(0));
           predicted_goal_values.push_back(chunk_goal_value);
           actual_goal_occupancies.push_back(chunk_actual_occ);
+          correlation_weights.push_back(static_cast<double>(active_logits.size(0)));
         }
 
         accumulated_goal_critic_loss += goal_critic_loss.item<double>() * static_cast<double>(active_logits.size(0));
@@ -403,20 +403,19 @@ TrainerMetrics APPOTrainer::update_actor() {
         require_finite(value_loss, "value_loss");
         require_finite(entropy, "entropy");
 
-        accumulated_loss = accumulated_loss + loss;
-        accumulated_chunks += 1.0;
-
         const auto active_samples = active_logits.size(0);
+        accumulated_loss = accumulated_loss + loss * static_cast<double>(active_samples);
+        total_active_samples_agent += static_cast<double>(active_samples);
+
         metrics.policy_loss += policy_loss.item<double>() * static_cast<double>(active_samples);
         metrics.value_loss += value_loss.item<double>() * static_cast<double>(active_samples);
         metrics.entropy += entropy.item<double>() * static_cast<double>(active_samples);
         metric_steps += active_samples;
-        agent_batch_steps += active_samples;
       }
 
-      if (accumulated_chunks > 0.0) {
+      if (total_active_samples_agent > 0.0) {
         const auto optim_start = std::chrono::steady_clock::now();
-        auto avg_loss = accumulated_loss / accumulated_chunks;
+        auto avg_loss = accumulated_loss / total_active_samples_agent;
         actor_optimizer_.zero_grad();
         avg_loss.backward();
         const auto grad_norm_value = torch::nn::utils::clip_grad_norm_(actor_->parameters(), config_.ppo.max_grad_norm);
@@ -424,7 +423,7 @@ TrainerMetrics APPOTrainer::update_actor() {
         actor_optimizer_.step();
         metrics.optimizer_step_seconds +=
             std::chrono::duration<double>(std::chrono::steady_clock::now() - optim_start).count();
-        metrics.grad_norm += grad_norm * static_cast<double>(agent_batch_steps);
+        metrics.grad_norm += grad_norm * total_active_samples_agent;
       }
     }
   }
@@ -447,7 +446,8 @@ TrainerMetrics APPOTrainer::update_actor() {
     if (!predicted_goal_values.empty() && predicted_goal_values.size() == actual_goal_occupancies.size()) {
       auto pred_t = torch::tensor(predicted_goal_values, torch::kFloat32);
       auto act_t = torch::tensor(actual_goal_occupancies, torch::kFloat32);
-      metrics.goal_occupancy_correlation = static_cast<double>(compute_goal_value_correlation(pred_t, act_t));
+      auto weights_t = torch::tensor(correlation_weights, torch::kFloat32);
+      metrics.goal_occupancy_correlation = static_cast<double>(compute_goal_value_correlation(pred_t, act_t, weights_t));
     }
   }
   metrics.update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count();
@@ -475,6 +475,7 @@ APPOTrainer::ESFitness APPOTrainer::evaluate_es_fitness(
 
   const torch::Tensor goal_support = actor_->goal_critic_support().to(device_);
   ContinuumState eval_state = actor_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
+  ContinuumState base_state = actor_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
 
   for (int ep = 0; ep < eval_episodes; ++ep) {
     collector_->host_episode_starts().fill_(ep == 0 ? 1.0F : 0.0F);
@@ -496,11 +497,10 @@ APPOTrainer::ESFitness APPOTrainer::evaluate_es_fitness(
       {
         auto saved_pert = actor_->es_lora_parameters();
         actor_->restore_es_lora_parameters(saved);
-        ActorStepOutput base_output = actor_->forward_step(normalized_obs,
-            std::move(actor_->initial_state(static_cast<std::int64_t>(total_agents_), device_)), episode_starts);
+        ActorStepOutput base_output = actor_->forward_step(normalized_obs, std::move(base_state), episode_starts);
+        base_state = std::move(base_output.state);
         actor_->apply_lora_perturbation(perturbation, sigma_ES);
         base_actions = base_output.policy_logits;
-        base_output.state = ContinuumState{};
       }
 
       float local_kl = compute_discrete_policy_kl(
@@ -632,7 +632,7 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
   }
 
   for (auto& u : es_update) {
-    u.div_(static_cast<float>(total_members));
+    u.div_(static_cast<float>(total_members) * es_cfg.sigma_ES);
     u.mul_(es_cfg.eta_ES);
   }
 

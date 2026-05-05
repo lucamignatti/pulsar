@@ -88,7 +88,8 @@ torch::Tensor compute_goal_actor_loss_discrete(
     const torch::Tensor& policy_logits,
     const torch::Tensor& action_masks,
     const torch::Tensor& goal_critic_logits,
-    const torch::Tensor& goal_atom_support);
+    const torch::Tensor& goal_atom_support,
+    const torch::Tensor& actions);
 
 float compute_discrete_policy_kl(
     const torch::Tensor& base_logits,
@@ -97,7 +98,8 @@ float compute_discrete_policy_kl(
 
 float compute_goal_value_correlation(
     const torch::Tensor& predicted_values,
-    const torch::Tensor& actual_values);
+    const torch::Tensor& actual_values,
+    const torch::Tensor& weights);
 
 ContinuumState detach_state(ContinuumState state);
 ContinuumState clone_state(const ContinuumState& state);

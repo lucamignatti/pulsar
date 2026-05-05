@@ -249,24 +249,14 @@ torch::Tensor compute_finite_horizon_goal_occupancy(
 
   for (int64_t t = 0; t < steps; ++t) {
     torch::Tensor G = torch::zeros({agents}, goal_distances.options());
-    bool any_done = false;
+    torch::Tensor cum_done = torch::zeros({agents}, dones.options());
+
     for (int k = 0; k < horizon_H && (t + k) < steps; ++k) {
       float weight = std::pow(static_cast<double>(gamma_g), static_cast<double>(k));
       torch::Tensor m = goal_distances[t + k];
       torch::Tensor K = torch::exp(-(m - goal_value).square() / two_sigma2);
-      G = G + static_cast<float>(weight) * K;
-      if (!any_done) {
-        any_done = dones[t + k].any().item<bool>();
-      }
-    }
-    if (any_done) {
-      torch::Tensor cum_done = torch::zeros({agents}, dones.options());
-      cum_done.copy_(dones[t]);
-      for (int k = 1; k < horizon_H && (t + k) < steps; ++k) {
-        G = G * (1.0F - cum_done);
-        cum_done = cum_done + dones[t + k];
-        cum_done = cum_done.clamp_max(1.0F);
-      }
+      G = G + static_cast<float>(weight) * K * (1.0F - cum_done);
+      cum_done = (cum_done + dones[t + k]).clamp_max(1.0F);
     }
     occupancy[t] = G;
   }
@@ -277,16 +267,16 @@ torch::Tensor compute_goal_actor_loss_discrete(
     const torch::Tensor& policy_logits,
     const torch::Tensor& action_masks,
     const torch::Tensor& goal_critic_logits,
-    const torch::Tensor& goal_atom_support) {
+    const torch::Tensor& goal_atom_support,
+    const torch::Tensor& actions) {
   const torch::Tensor masked = apply_action_mask_to_logits(policy_logits, action_masks);
-  const torch::Tensor probs = torch::softmax(masked, -1);
+  const torch::Tensor log_probs = torch::log_softmax(masked, -1);
+  const torch::Tensor action_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1);
 
   const torch::Tensor goal_probs = torch::softmax(goal_critic_logits, -1);
   const torch::Tensor goal_q_values = (goal_probs * goal_atom_support).sum(-1);
 
-  const torch::Tensor expected_goal_value = (probs * goal_q_values.detach()).sum(-1);
-
-  return -expected_goal_value.mean();
+  return -(action_log_probs * goal_q_values.detach()).mean();
 }
 
 float compute_discrete_policy_kl(
@@ -305,16 +295,20 @@ float compute_discrete_policy_kl(
 
 float compute_goal_value_correlation(
     const torch::Tensor& predicted_values,
-    const torch::Tensor& actual_values) {
+    const torch::Tensor& actual_values,
+    const torch::Tensor& weights) {
   const torch::Tensor pred = predicted_values.flatten();
   const torch::Tensor act = actual_values.flatten();
+  const torch::Tensor w = weights.flatten();
 
-  const torch::Tensor pred_mean = pred.mean();
-  const torch::Tensor act_mean = act.mean();
+  const torch::Tensor w_sum = w.sum().clamp_min(1.0e-8F);
+  const torch::Tensor pred_mean = (pred * w).sum() / w_sum;
+  const torch::Tensor act_mean = (act * w).sum() / w_sum;
 
-  const torch::Tensor numerator = ((pred - pred_mean) * (act - act_mean)).sum();
-  const torch::Tensor denominator = torch::sqrt(
-      (pred - pred_mean).square().sum() * (act - act_mean).square().sum());
+  const torch::Tensor numerator = ((pred - pred_mean) * (act - act_mean) * w).sum();
+  const torch::Tensor denom_pred = ((pred - pred_mean).square() * w).sum();
+  const torch::Tensor denom_act = ((act - act_mean).square() * w).sum();
+  const torch::Tensor denominator = torch::sqrt(denom_pred * denom_act);
 
   if (denominator.item<float>() < 1.0e-8F) {
     return 0.0F;
