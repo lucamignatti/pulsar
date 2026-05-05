@@ -43,7 +43,7 @@
   },
   "ppo": {
     "num_envs": 1024,
-    "collection_workers": 28,
+    "collection_workers": 56,
     "init_checkpoint": "",
     "rollout_length": 256,
     "minibatch_size": 65536,
