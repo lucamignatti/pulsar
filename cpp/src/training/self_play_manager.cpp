@@ -277,9 +277,12 @@ void SelfPlayManager::save_snapshot(const Snapshot& snapshot) const {
       },
       (directory / "metadata.json").string());
 
+  PPOActor model_cpu = clone_ppo_actor(snapshot.model, torch::Device(torch::kCPU));
+  ObservationNormalizer normalizer_cpu = snapshot.normalizer.clone();
+  normalizer_cpu.to(torch::Device(torch::kCPU));
   torch::serialize::OutputArchive archive;
-  snapshot.model->save(archive);
-  snapshot.normalizer.save(archive);
+  model_cpu->save(archive);
+  normalizer_cpu.save(archive);
   archive.save_to((directory / "model.pt").string());
 
   std::ofstream output(directory / "ratings.json");

@@ -8,7 +8,6 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <limits>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -30,6 +29,42 @@ torch::Device resolve_runtime_device(const std::string& device_name) {
     return torch::Device(torch::kCUDA, 0);
   }
   return device;
+}
+
+void synchronize_cuda_if_needed(const torch::Device& device, const char* context) noexcept {
+  if (!device.is_cuda()) {
+    return;
+  }
+  try {
+    torch::cuda::synchronize();
+  } catch (const std::exception& exc) {
+    std::cerr << "cuda synchronize failed during " << context << ": " << exc.what() << '\n';
+  }
+}
+
+PPOActor copy_actor_to_cpu(const PPOActor& source) {
+  auto copy = PPOActor(source->config(), source->goal_critic_config());
+  const auto source_params = source->named_parameters(true);
+  auto copy_params = copy->named_parameters(true);
+  for (const auto& item : source_params) {
+    torch::Tensor* target = copy_params.find(item.key());
+    if (target == nullptr) {
+      throw std::runtime_error("CPU checkpoint copy missing parameter: " + std::string(item.key()));
+    }
+    target->copy_(item.value().detach().to(torch::Device(torch::kCPU)));
+  }
+
+  const auto source_buffers = source->named_buffers(true);
+  auto copy_buffers = copy->named_buffers(true);
+  for (const auto& item : source_buffers) {
+    torch::Tensor* target = copy_buffers.find(item.key());
+    if (target == nullptr) {
+      throw std::runtime_error("CPU checkpoint copy missing buffer: " + std::string(item.key()));
+    }
+    target->copy_(item.value().detach().to(torch::Device(torch::kCPU)));
+  }
+  copy->eval();
+  return copy;
 }
 
 RolloutStorage make_rollout_storage(
@@ -194,6 +229,10 @@ APPOTrainer::APPOTrainer(
           return self_play_manager_->sample_assignment(env_idx, seed);
         });
   }
+}
+
+APPOTrainer::~APPOTrainer() {
+  synchronize_cuda_if_needed(device_, "trainer shutdown");
 }
 
 torch::Tensor APPOTrainer::map_outcome_labels_to_rewards(const torch::Tensor& labels) const {
@@ -971,16 +1010,21 @@ CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
 }
 
 void APPOTrainer::save_checkpoint(const std::filesystem::path& directory, std::int64_t global_step, int update_index) const {
+  synchronize_cuda_if_needed(device_, "checkpoint save start");
   std::filesystem::create_directories(directory);
   save_experiment_config(config_, (directory / "config.json").string());
   save_checkpoint_metadata(make_checkpoint_metadata(global_step, update_index), (directory / "metadata.json").string());
+
+  torch::NoGradGuard no_grad;
+  PPOActor actor_cpu = device_.is_cuda() ? copy_actor_to_cpu(actor_) : actor_;
+  ObservationNormalizer normalizer_cpu = actor_normalizer_.clone();
+  normalizer_cpu.to(torch::Device(torch::kCPU));
   torch::serialize::OutputArchive actor_archive;
-  actor_->save(actor_archive);
-  actor_normalizer_.save(actor_archive);
+  actor_cpu->save(actor_archive);
+  normalizer_cpu.save(actor_archive);
   actor_archive.save_to((directory / "model.pt").string());
-  torch::serialize::OutputArchive actor_optimizer_archive;
-  actor_optimizer_.save(actor_optimizer_archive);
-  actor_optimizer_archive.save_to((directory / "actor_optimizer.pt").string());
+  std::filesystem::remove(directory / "actor_optimizer.pt");
+  synchronize_cuda_if_needed(device_, "checkpoint save end");
 }
 
 void APPOTrainer::prune_old_checkpoints(const std::filesystem::path& checkpoint_dir) const {
@@ -1011,8 +1055,8 @@ void APPOTrainer::prune_old_checkpoints(const std::filesystem::path& checkpoint_
 void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const std::string& config_path) {
   WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "dappo_train");
   std::int64_t global_step = resumed_global_step_;
-  const int max_updates = updates <= 0 ? std::numeric_limits<int>::max() : updates;
-  for (int index = 0; index < max_updates; ++index) {
+  const bool train_forever = updates <= 0;
+  for (int index = 0; train_forever || index < updates; ++index) {
     const int update_index = static_cast<int>(resumed_update_index_) + index + 1;
     TrainerMetrics metrics = run_update(&global_step, update_index);
     append_metrics_line(checkpoint_dir, update_index, global_step, metrics);
@@ -1073,11 +1117,13 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       wandb.log(payload);
     }
     if (config_.ppo.checkpoint_interval > 0 && update_index % config_.ppo.checkpoint_interval == 0) {
+      std::cout << "checkpoint_start update=" << update_index << std::endl;
       save_checkpoint(std::filesystem::path(checkpoint_dir) / ("update_" + std::to_string(update_index)), global_step, update_index);
       prune_old_checkpoints(checkpoint_dir);
+      std::cout << "checkpoint_done update=" << update_index << std::endl;
     }
   }
-  save_checkpoint(std::filesystem::path(checkpoint_dir) / "final", global_step, static_cast<int>(resumed_update_index_) + max_updates);
+  save_checkpoint(std::filesystem::path(checkpoint_dir) / "final", global_step, static_cast<int>(resumed_update_index_) + updates);
   wandb.finish();
 }
 

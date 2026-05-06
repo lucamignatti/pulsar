@@ -72,7 +72,7 @@ def main() -> int:
         mode=args.mode,
         tags=args.tag or None,
         config=_load_config(args.config_path) if args.config_path else None,
-        reinit=True,
+        reinit="finish_previous",
     )
     if run is None:
         return 0

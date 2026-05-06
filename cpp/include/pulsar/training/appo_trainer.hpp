@@ -80,6 +80,7 @@ class APPOTrainer {
       std::unique_ptr<SelfPlayManager> self_play_manager,
       std::filesystem::path run_output_root = {},
       bool log_initialization = true);
+  ~APPOTrainer();
 
   void train(int updates, const std::string& checkpoint_dir, const std::string& config_path = "");
 

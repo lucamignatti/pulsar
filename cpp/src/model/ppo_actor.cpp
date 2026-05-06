@@ -4,7 +4,6 @@
 
 #include <cmath>
 #include <filesystem>
-#include <sstream>
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
@@ -24,6 +23,30 @@ torch::Tensor maybe_zero_mask(torch::Tensor tensor, const torch::Tensor& mask) {
     expanded_mask = expanded_mask.unsqueeze(-1);
   }
   return tensor * (1.0 - expanded_mask);
+}
+
+void copy_module_tensors_to(const PPOActor& source, PPOActor& target, const torch::Device& device) {
+  torch::NoGradGuard no_grad;
+
+  const auto source_params = source->named_parameters(true);
+  auto target_params = target->named_parameters(true);
+  for (const auto& item : source_params) {
+    torch::Tensor* target_tensor = target_params.find(item.key());
+    if (target_tensor == nullptr) {
+      throw std::runtime_error("Missing cloned actor parameter: " + std::string(item.key()));
+    }
+    target_tensor->copy_(item.value().detach().to(device));
+  }
+
+  const auto source_buffers = source->named_buffers(true);
+  auto target_buffers = target->named_buffers(true);
+  for (const auto& item : source_buffers) {
+    torch::Tensor* target_tensor = target_buffers.find(item.key());
+    if (target_tensor == nullptr) {
+      throw std::runtime_error("Missing cloned actor buffer: " + std::string(item.key()));
+    }
+    target_tensor->copy_(item.value().detach().to(device));
+  }
 }
 
 torch::Tensor masked_softmax(torch::Tensor logits, const torch::Tensor& strengths) {
@@ -536,14 +559,8 @@ PPOActor clone_ppo_actor(const PPOActor& source, const torch::Device& device) {
     return nullptr;
   }
   auto clone = PPOActor(source->config(), source->goal_critic_config());
-  torch::serialize::OutputArchive out;
-  source->save(out);
-  torch::serialize::InputArchive in;
-  std::stringstream buffer(std::ios::in | std::ios::out | std::ios::binary);
-  out.save_to(buffer);
-  in.load_from(buffer, device);
-  clone->load(in);
   clone->to(device);
+  copy_module_tensors_to(source, clone, device);
   return clone;
 }
 
