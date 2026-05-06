@@ -114,6 +114,28 @@ int main() {
       }
     }
 
+    // Policy-head EGGROLL helper smoke test
+    {
+      auto s = actor->initial_state(4, torch::kCPU);
+      auto out = actor->forward_step(torch::randn({4, model_config.observation_dim}), std::move(s));
+      const int population = 2;
+      const int rank = 4;
+      const int in_features = actor->policy_lora()->in_features();
+      const int out_features = actor->policy_lora()->out_features();
+      torch::Tensor A_stack = torch::randn({population, rank, in_features});
+      torch::Tensor B_stack = torch::randn({population, out_features, rank});
+      torch::Tensor logits = actor->policy_eggroll_logits(out.features, A_stack, B_stack, 0.01F);
+      if (logits.sizes() != torch::IntArrayRef({4, model_config.action_dim})) {
+        throw std::runtime_error("EGGROLL policy logits shape mismatch");
+      }
+
+      torch::Tensor before = actor->policy_lora()->base->weight.detach().clone();
+      actor->apply_policy_eggroll_update(torch::ones_like(before) * 0.001F);
+      if (torch::allclose(before, actor->policy_lora()->base->weight)) {
+        throw std::runtime_error("EGGROLL policy update did not modify base weight");
+      }
+    }
+
     // Sparse value head forward smoke test
     {
       auto s = actor->initial_state(2, torch::kCPU);

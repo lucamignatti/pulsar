@@ -48,6 +48,11 @@ class LoRALinearImpl : public torch::nn::Module {
   LoRALinearImpl(int in_features, int out_features, int rank, float lora_alpha = 4.0F);
 
   torch::Tensor forward(torch::Tensor x);
+  torch::Tensor forward_eggroll_population(
+      torch::Tensor x,
+      const torch::Tensor& A_stack,
+      const torch::Tensor& B_stack,
+      float sigma);
   void reset_lora_parameters();
 
   torch::nn::Linear base{nullptr};
@@ -57,6 +62,7 @@ class LoRALinearImpl : public torch::nn::Module {
   [[nodiscard]] std::vector<torch::Tensor> lora_parameters() const;
   [[nodiscard]] std::vector<torch::Tensor> lora_parameters_flat() const;
   void restore_lora_parameters(const std::vector<torch::Tensor>& params);
+  void apply_base_weight_update(const torch::Tensor& delta_weight);
   [[nodiscard]] int in_features() const;
   [[nodiscard]] int out_features() const;
   [[nodiscard]] int rank() const;
@@ -105,6 +111,12 @@ class PPOActorImpl : public torch::nn::Module {
   [[nodiscard]] std::vector<torch::Tensor> es_lora_parameters_flat() const;
   void restore_es_lora_parameters(const std::vector<torch::Tensor>& params);
   void apply_lora_perturbation(const std::vector<torch::Tensor>& perturbation, float sigma);
+  [[nodiscard]] torch::Tensor policy_eggroll_logits(
+      const torch::Tensor& features,
+      const torch::Tensor& A_stack,
+      const torch::Tensor& B_stack,
+      float sigma);
+  void apply_policy_eggroll_update(const torch::Tensor& delta_weight);
   [[nodiscard]] const LoRALinear& policy_lora() const;
   [[nodiscard]] GoalCritic& goal_critic();
 

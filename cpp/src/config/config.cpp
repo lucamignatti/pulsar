@@ -198,6 +198,8 @@ void to_json(json& j, const ESLoraConfig& value) {
       {"eta_ES", value.eta_ES},
       {"es_interval", value.es_interval},
       {"eval_episodes_per_member", value.eval_episodes_per_member},
+      {"eval_num_envs", value.eval_num_envs},
+      {"eval_rollout_length", value.eval_rollout_length},
       {"alpha_g", value.alpha_g},
       {"beta_KL", value.beta_KL},
       {"antithetic_sampling", value.antithetic_sampling},
@@ -213,9 +215,11 @@ void from_json(const json& j, ESLoraConfig& value) {
   value.eta_ES = j.value("eta_ES", 0.003F);
   value.es_interval = j.value("es_interval", 100);
   value.eval_episodes_per_member = j.value("eval_episodes_per_member", 8);
+  value.eval_num_envs = j.value("eval_num_envs", 16);
+  value.eval_rollout_length = j.value("eval_rollout_length", 64);
   value.alpha_g = j.value("alpha_g", 0.05F);
   value.beta_KL = j.value("beta_KL", 0.01F);
-  value.antithetic_sampling = j.value("antithetic_sampling", true);
+  value.antithetic_sampling = j.value("antithetic_sampling", false);
   value.update_norm_clip = j.value("update_norm_clip", true);
 }
 
@@ -454,6 +458,21 @@ void validate_experiment_config(const ExperimentConfig& config) {
   }
   if (config.es_lora.rank <= 0) {
     throw std::invalid_argument("es_lora.rank must be positive.");
+  }
+  if (config.es_lora.sigma_ES <= 0.0F) {
+    throw std::invalid_argument("es_lora.sigma_ES must be positive.");
+  }
+  if (config.es_lora.population_size <= 0) {
+    throw std::invalid_argument("es_lora.population_size must be positive.");
+  }
+  if (config.es_lora.eval_episodes_per_member <= 0) {
+    throw std::invalid_argument("es_lora.eval_episodes_per_member must be positive.");
+  }
+  if (config.es_lora.eval_num_envs <= 0) {
+    throw std::invalid_argument("es_lora.eval_num_envs must be positive.");
+  }
+  if (config.es_lora.eval_rollout_length <= 0) {
+    throw std::invalid_argument("es_lora.eval_rollout_length must be positive.");
   }
 }
 

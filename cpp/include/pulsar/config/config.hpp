@@ -82,6 +82,8 @@ struct ESLoraConfig {
   float eta_ES = 0.003F;
   int es_interval = 100;
   int eval_episodes_per_member = 8;
+  int eval_num_envs = 16;
+  int eval_rollout_length = 64;
   float alpha_g = 0.05F;
   float beta_KL = 0.01F;
   bool antithetic_sampling = false;

@@ -94,17 +94,17 @@ class APPOTrainer {
 
   void run_es_lora_update(int update_index, TrainerMetrics& metrics);
 
-  struct ESFitness {
-    float fitness = 0.0F;
-    float winrate = 0.0F;
-    float goal_pressure = 0.0F;
-    float kl = 0.0F;
+  struct ESPopulationFitness {
+    std::vector<float> fitness{};
+    std::vector<float> winrate{};
+    std::vector<float> goal_pressure{};
+    std::vector<float> kl{};
   };
 
-  ESFitness evaluate_es_fitness(
-      const std::vector<torch::Tensor>& perturbation,
-      float sigma_ES,
-      int eval_episodes);
+  ESPopulationFitness evaluate_es_population(
+      const torch::Tensor& A_stack,
+      const torch::Tensor& B_stack,
+      int update_index);
 
   ExperimentConfig config_{};
   std::unique_ptr<BatchedRocketSimCollector> collector_{};

@@ -94,6 +94,24 @@ torch::Tensor LoRALinearImpl::forward(torch::Tensor x) {
   return base_out + lora_out;
 }
 
+torch::Tensor LoRALinearImpl::forward_eggroll_population(
+    torch::Tensor x,
+    const torch::Tensor& A_stack,
+    const torch::Tensor& B_stack,
+    float sigma) {
+  const auto population = A_stack.size(0);
+  if (population <= 0 || x.size(0) % population != 0) {
+    throw std::invalid_argument("LoRALinearImpl::forward_eggroll_population received incompatible population dimensions.");
+  }
+  const auto member_batch = x.size(0) / population;
+  torch::Tensor base_out = forward(x).view({population, member_batch, out_features()});
+  torch::Tensor x_view = x.view({population, member_batch, in_features()});
+  torch::Tensor low_rank = torch::bmm(
+      torch::bmm(x_view, A_stack.transpose(1, 2)),
+      B_stack.transpose(1, 2));
+  return (base_out + low_rank * sigma).view({x.size(0), out_features()});
+}
+
 void LoRALinearImpl::reset_lora_parameters() {
   A.normal_(0.0, 0.02);
   B.zero_();
@@ -111,6 +129,11 @@ void LoRALinearImpl::restore_lora_parameters(const std::vector<torch::Tensor>& p
   torch::NoGradGuard no_grad;
   A.copy_(params[0].view_as(A));
   B.copy_(params[1].view_as(B));
+}
+
+void LoRALinearImpl::apply_base_weight_update(const torch::Tensor& delta_weight) {
+  torch::NoGradGuard no_grad;
+  base->weight.add_(delta_weight.to(base->weight.device()).to(base->weight.dtype()));
 }
 
 int LoRALinearImpl::in_features() const {
@@ -454,6 +477,22 @@ void PPOActorImpl::apply_lora_perturbation(
   for (std::size_t i = 0; i < params.size(); ++i) {
     params[i].add_(perturbation[i], sigma);
   }
+}
+
+torch::Tensor PPOActorImpl::policy_eggroll_logits(
+    const torch::Tensor& features,
+    const torch::Tensor& A_stack,
+    const torch::Tensor& B_stack,
+    float sigma) {
+  torch::Tensor policy_input = features;
+  if (!policy_hidden_.is_empty()) {
+    policy_input = policy_hidden_->forward(policy_input);
+  }
+  return policy_lora_->forward_eggroll_population(policy_input, A_stack, B_stack, sigma);
+}
+
+void PPOActorImpl::apply_policy_eggroll_update(const torch::Tensor& delta_weight) {
+  policy_lora_->apply_base_weight_update(delta_weight);
 }
 
 const LoRALinear& PPOActorImpl::policy_lora() const {
