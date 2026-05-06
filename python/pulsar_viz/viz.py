@@ -88,7 +88,8 @@ def _select_actions(
 ) -> dict[Any, np.ndarray]:
     agent_ids = _ordered_agent_ids(observations)
     batch_obs = [observations[agent_id].tolist() for agent_id in agent_ids]
-    batch_logits = model.forward_batch(batch_obs)
+    batch_agent_ids = [i for i in range(len(agent_ids))]
+    batch_logits = model.forward_batch(batch_obs, batch_agent_ids)
     action_mask_fields = _action_mask_fields(config)
     action_map: dict[Any, np.ndarray] = {}
     for agent_id, logits in zip(agent_ids, batch_logits, strict=False):
