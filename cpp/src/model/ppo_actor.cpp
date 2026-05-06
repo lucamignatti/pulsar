@@ -113,6 +113,7 @@ torch::Tensor LoRALinearImpl::forward_eggroll_population(
 }
 
 void LoRALinearImpl::reset_lora_parameters() {
+  torch::NoGradGuard no_grad;
   A.normal_(0.0, 0.02);
   B.zero_();
 }
