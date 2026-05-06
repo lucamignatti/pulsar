@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <system_error>
 #include <unordered_set>
 
 #include <nlohmann/json.hpp>
@@ -40,31 +41,6 @@ void synchronize_cuda_if_needed(const torch::Device& device, const char* context
   } catch (const std::exception& exc) {
     std::cerr << "cuda synchronize failed during " << context << ": " << exc.what() << '\n';
   }
-}
-
-PPOActor copy_actor_to_cpu(const PPOActor& source) {
-  auto copy = PPOActor(source->config(), source->goal_critic_config());
-  const auto source_params = source->named_parameters(true);
-  auto copy_params = copy->named_parameters(true);
-  for (const auto& item : source_params) {
-    torch::Tensor* target = copy_params.find(item.key());
-    if (target == nullptr) {
-      throw std::runtime_error("CPU checkpoint copy missing parameter: " + std::string(item.key()));
-    }
-    target->copy_(item.value().detach().to(torch::Device(torch::kCPU)));
-  }
-
-  const auto source_buffers = source->named_buffers(true);
-  auto copy_buffers = copy->named_buffers(true);
-  for (const auto& item : source_buffers) {
-    torch::Tensor* target = copy_buffers.find(item.key());
-    if (target == nullptr) {
-      throw std::runtime_error("CPU checkpoint copy missing buffer: " + std::string(item.key()));
-    }
-    target->copy_(item.value().detach().to(torch::Device(torch::kCPU)));
-  }
-  copy->eval();
-  return copy;
 }
 
 RolloutStorage make_rollout_storage(
@@ -1011,30 +987,38 @@ CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
 
 void APPOTrainer::save_checkpoint(const std::filesystem::path& directory, std::int64_t global_step, int update_index) const {
   synchronize_cuda_if_needed(device_, "checkpoint save start");
-  std::filesystem::create_directories(directory);
+  std::error_code ec;
+  std::filesystem::create_directories(directory, ec);
   save_experiment_config(config_, (directory / "config.json").string());
   save_checkpoint_metadata(make_checkpoint_metadata(global_step, update_index), (directory / "metadata.json").string());
 
   torch::NoGradGuard no_grad;
-  PPOActor actor_cpu = device_.is_cuda() ? copy_actor_to_cpu(actor_) : actor_;
+  PPOActor actor_cpu = device_.is_cuda() ? clone_ppo_actor(actor_, torch::Device(torch::kCPU)) : actor_;
   ObservationNormalizer normalizer_cpu = actor_normalizer_.clone();
   normalizer_cpu.to(torch::Device(torch::kCPU));
+  
   torch::serialize::OutputArchive actor_archive;
   actor_cpu->save(actor_archive);
   normalizer_cpu.save(actor_archive);
   actor_archive.save_to((directory / "model.pt").string());
-  std::filesystem::remove(directory / "actor_optimizer.pt");
+  
+  std::filesystem::remove(directory / "actor_optimizer.pt", ec);
   synchronize_cuda_if_needed(device_, "checkpoint save end");
 }
 
 void APPOTrainer::prune_old_checkpoints(const std::filesystem::path& checkpoint_dir) const {
   const int max_checkpoints = config_.ppo.max_rolling_checkpoints;
-  if (max_checkpoints <= 0 || !std::filesystem::exists(checkpoint_dir)) {
+  if (max_checkpoints <= 0) {
+    return;
+  }
+  std::error_code ec;
+  if (!std::filesystem::exists(checkpoint_dir, ec)) {
     return;
   }
   std::vector<std::pair<int, std::filesystem::path>> updates;
-  for (const auto& entry : std::filesystem::directory_iterator(checkpoint_dir)) {
-    if (!entry.is_directory()) {
+  for (const auto& entry : std::filesystem::directory_iterator(checkpoint_dir, ec)) {
+    if (ec) break;
+    if (!entry.is_directory(ec)) {
       continue;
     }
     const std::string name = entry.path().filename().string();
@@ -1048,7 +1032,7 @@ void APPOTrainer::prune_old_checkpoints(const std::filesystem::path& checkpoint_
   }
   std::sort(updates.begin(), updates.end(), [](const auto& lhs, const auto& rhs) { return lhs.first > rhs.first; });
   for (std::size_t i = static_cast<std::size_t>(max_checkpoints); i < updates.size(); ++i) {
-    std::filesystem::remove_all(updates[i].second);
+    std::filesystem::remove_all(updates[i].second, ec);
   }
 }
 

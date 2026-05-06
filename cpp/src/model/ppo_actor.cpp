@@ -35,7 +35,7 @@ void copy_module_tensors_to(const PPOActor& source, PPOActor& target, const torc
     if (target_tensor == nullptr) {
       throw std::runtime_error("Missing cloned actor parameter: " + std::string(item.key()));
     }
-    target_tensor->copy_(item.value().detach().to(device));
+    target_tensor->copy_(item.value().to(device, /*non_blocking=*/false, /*copy=*/true));
   }
 
   const auto source_buffers = source->named_buffers(true);
@@ -45,7 +45,7 @@ void copy_module_tensors_to(const PPOActor& source, PPOActor& target, const torc
     if (target_tensor == nullptr) {
       throw std::runtime_error("Missing cloned actor buffer: " + std::string(item.key()));
     }
-    target_tensor->copy_(item.value().detach().to(device));
+    target_tensor->copy_(item.value().to(device, /*non_blocking=*/false, /*copy=*/true));
   }
 }
 

@@ -11,9 +11,9 @@ ObservationNormalizer::ObservationNormalizer(int obs_dim) {
 }
 
 void ObservationNormalizer::to(const torch::Device& device) {
-  mean_ = mean_.to(device);
-  var_ = var_.to(device);
-  count_ = count_.to(device);
+  mean_ = mean_.to(device, /*non_blocking=*/false, /*copy=*/true);
+  var_ = var_.to(device, /*non_blocking=*/false, /*copy=*/true);
+  count_ = count_.to(device, /*non_blocking=*/false, /*copy=*/true);
 }
 
 void ObservationNormalizer::update(const torch::Tensor& obs) {
