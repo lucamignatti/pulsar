@@ -1101,16 +1101,18 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"goals_conceded", metrics.goals_conceded},
           {"goal_occupancy_correlation", metrics.goal_occupancy_correlation},
           {"goal_actor_loss_ratio", metrics.goal_actor_loss_ratio},
-          {"es_fitness_mean", metrics.es_fitness_mean},
-          {"es_fitness_std", metrics.es_fitness_std},
-          {"es_fitness_best", metrics.es_fitness_best},
-          {"es_winrate_mean", metrics.es_winrate_mean},
-          {"es_goal_pressure_mean", metrics.es_goal_pressure_mean},
-          {"es_kl_mean", metrics.es_kl_mean},
-          {"es_update_norm", metrics.es_update_norm},
-          {"es_lora_a_norm", metrics.es_lora_a_norm},
-          {"es_lora_b_norm", metrics.es_lora_b_norm},
       };
+      if (update_index % config_.es_lora.es_interval == 0) {
+        payload["es_fitness_mean"] = metrics.es_fitness_mean;
+        payload["es_fitness_std"] = metrics.es_fitness_std;
+        payload["es_fitness_best"] = metrics.es_fitness_best;
+        payload["es_winrate_mean"] = metrics.es_winrate_mean;
+        payload["es_goal_pressure_mean"] = metrics.es_goal_pressure_mean;
+        payload["es_kl_mean"] = metrics.es_kl_mean;
+        payload["es_update_norm"] = metrics.es_update_norm;
+        payload["es_lora_a_norm"] = metrics.es_lora_a_norm;
+        payload["es_lora_b_norm"] = metrics.es_lora_b_norm;
+      }
       for (const auto& [mode, rating] : metrics.elo_ratings) {
         payload["elo_" + mode] = rating;
       }
