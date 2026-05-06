@@ -987,23 +987,31 @@ CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
 
 void APPOTrainer::save_checkpoint(const std::filesystem::path& directory, std::int64_t global_step, int update_index) const {
   synchronize_cuda_if_needed(device_, "checkpoint save start");
-  std::error_code ec;
-  std::filesystem::create_directories(directory, ec);
-  save_experiment_config(config_, (directory / "config.json").string());
-  save_checkpoint_metadata(make_checkpoint_metadata(global_step, update_index), (directory / "metadata.json").string());
+  const std::filesystem::path staging = make_checkpoint_staging_directory(directory);
+  remove_checkpoint_directory(staging);
+  try {
+    std::filesystem::create_directories(staging);
+    save_experiment_config(config_, (staging / "config.json").string());
+    save_checkpoint_metadata(make_checkpoint_metadata(global_step, update_index), (staging / "metadata.json").string());
 
-  torch::NoGradGuard no_grad;
-  PPOActor actor_cpu = device_.is_cuda() ? clone_ppo_actor(actor_, torch::Device(torch::kCPU)) : actor_;
-  ObservationNormalizer normalizer_cpu = actor_normalizer_.clone();
-  normalizer_cpu.to(torch::Device(torch::kCPU));
-  
-  torch::serialize::OutputArchive actor_archive;
-  actor_cpu->save(actor_archive);
-  normalizer_cpu.save(actor_archive);
-  actor_archive.save_to((directory / "model.pt").string());
-  
-  std::filesystem::remove(directory / "actor_optimizer.pt", ec);
-  synchronize_cuda_if_needed(device_, "checkpoint save end");
+    torch::NoGradGuard no_grad;
+    PPOActor actor_cpu = clone_ppo_actor(actor_, torch::Device(torch::kCPU));
+    ObservationNormalizer normalizer_cpu = actor_normalizer_.clone();
+    normalizer_cpu.to(torch::Device(torch::kCPU));
+
+    torch::serialize::OutputArchive actor_archive;
+    actor_cpu->save(actor_archive);
+    normalizer_cpu.save(actor_archive);
+    actor_archive.save_to((staging / "model.pt").string());
+
+    std::error_code ec;
+    std::filesystem::remove(staging / "actor_optimizer.pt", ec);
+    commit_checkpoint_directory(staging, directory);
+    synchronize_cuda_if_needed(device_, "checkpoint save end");
+  } catch (...) {
+    remove_checkpoint_directory(staging);
+    throw;
+  }
 }
 
 void APPOTrainer::prune_old_checkpoints(const std::filesystem::path& checkpoint_dir) const {
@@ -1025,14 +1033,18 @@ void APPOTrainer::prune_old_checkpoints(const std::filesystem::path& checkpoint_
     if (name.rfind("update_", 0) != 0) {
       continue;
     }
+    const std::string suffix = name.substr(7);
+    if (suffix.empty() || !std::all_of(suffix.begin(), suffix.end(), [](char ch) { return ch >= '0' && ch <= '9'; })) {
+      continue;
+    }
     try {
-      updates.emplace_back(std::stoi(name.substr(7)), entry.path());
+      updates.emplace_back(std::stoi(suffix), entry.path());
     } catch (...) {
     }
   }
   std::sort(updates.begin(), updates.end(), [](const auto& lhs, const auto& rhs) { return lhs.first > rhs.first; });
   for (std::size_t i = static_cast<std::size_t>(max_checkpoints); i < updates.size(); ++i) {
-    std::filesystem::remove_all(updates[i].second, ec);
+    remove_checkpoint_directory(updates[i].second);
   }
 }
 

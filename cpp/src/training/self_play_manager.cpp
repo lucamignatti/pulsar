@@ -8,6 +8,7 @@
 #include <fstream>
 #include <numeric>
 #include <optional>
+#include <stdexcept>
 
 #include <nlohmann/json.hpp>
 
@@ -51,8 +52,12 @@ std::shared_ptr<MutatorSequence> make_eval_reset_mutator(const EnvConfig& config
 }
 
 std::optional<std::int64_t> parse_snapshot_step(const std::filesystem::path& path) {
+  const std::string name = path.filename().string();
+  if (name.empty() || !std::all_of(name.begin(), name.end(), [](char ch) { return ch >= '0' && ch <= '9'; })) {
+    return std::nullopt;
+  }
   try {
-    return std::stoll(path.filename().string());
+    return std::stoll(name);
   } catch (...) {
     return std::nullopt;
   }
@@ -206,7 +211,7 @@ void SelfPlayManager::load_existing_snapshots() {
 
   std::vector<std::filesystem::path> directories;
   for (const auto& entry : std::filesystem::directory_iterator(snapshot_root_)) {
-    if (entry.is_directory()) {
+    if (entry.is_directory() && parse_snapshot_step(entry.path()).has_value()) {
       directories.push_back(entry.path());
     }
   }
@@ -261,39 +266,52 @@ void SelfPlayManager::load_existing_snapshots() {
 
 void SelfPlayManager::save_snapshot(const Snapshot& snapshot) const {
   const std::filesystem::path directory = snapshot_root_ / std::to_string(snapshot.global_step);
-  std::filesystem::create_directories(directory);
-  save_experiment_config(config_, (directory / "config.json").string());
-  save_checkpoint_metadata(
-      CheckpointMetadata{
-          .schema_version = config_.schema_version,
-          .obs_schema_version = config_.obs_schema_version,
-          .config_hash = config_hash(config_),
-          .action_table_hash = action_table_hash(config_.action_table),
-          .architecture_name = "policy_snapshot",
-          .device = device_.str(),
-          .global_step = snapshot.global_step,
-          .update_index = snapshot.update_index,
-          .critic_heads = snapshot.model->enabled_critic_heads(),
-      },
-      (directory / "metadata.json").string());
+  const std::filesystem::path staging = make_checkpoint_staging_directory(directory);
+  remove_checkpoint_directory(staging);
+  try {
+    std::filesystem::create_directories(staging);
+    save_experiment_config(config_, (staging / "config.json").string());
+    save_checkpoint_metadata(
+        CheckpointMetadata{
+            .schema_version = config_.schema_version,
+            .obs_schema_version = config_.obs_schema_version,
+            .config_hash = config_hash(config_),
+            .action_table_hash = action_table_hash(config_.action_table),
+            .architecture_name = "policy_snapshot",
+            .device = device_.str(),
+            .global_step = snapshot.global_step,
+            .update_index = snapshot.update_index,
+            .critic_heads = snapshot.model->enabled_critic_heads(),
+        },
+        (staging / "metadata.json").string());
 
-  PPOActor model_cpu = clone_ppo_actor(snapshot.model, torch::Device(torch::kCPU));
-  ObservationNormalizer normalizer_cpu = snapshot.normalizer.clone();
-  normalizer_cpu.to(torch::Device(torch::kCPU));
-  torch::serialize::OutputArchive archive;
-  model_cpu->save(archive);
-  normalizer_cpu.save(archive);
-  archive.save_to((directory / "model.pt").string());
+    PPOActor model_cpu = clone_ppo_actor(snapshot.model, torch::Device(torch::kCPU));
+    ObservationNormalizer normalizer_cpu = snapshot.normalizer.clone();
+    normalizer_cpu.to(torch::Device(torch::kCPU));
+    torch::serialize::OutputArchive archive;
+    model_cpu->save(archive);
+    normalizer_cpu.save(archive);
+    archive.save_to((staging / "model.pt").string());
 
-  std::ofstream output(directory / "ratings.json");
-  output << nlohmann::json(snapshot.ratings).dump(2) << '\n';
+    {
+      std::ofstream output(staging / "ratings.json");
+      if (!output) {
+        throw std::runtime_error("Failed to write snapshot ratings: " + (staging / "ratings.json").string());
+      }
+      output << nlohmann::json(snapshot.ratings).dump(2) << '\n';
+    }
+    commit_checkpoint_directory(staging, directory);
+  } catch (...) {
+    remove_checkpoint_directory(staging);
+    throw;
+  }
 }
 
 void SelfPlayManager::trim_snapshots() {
   while (static_cast<int>(snapshots_.size()) > config_.self_play_league.max_snapshots) {
     const auto global_step = snapshots_.front().global_step;
     snapshots_.erase(snapshots_.begin());
-    std::filesystem::remove_all(snapshot_root_ / std::to_string(global_step));
+    remove_checkpoint_directory(snapshot_root_ / std::to_string(global_step));
   }
 }
 
