@@ -75,6 +75,51 @@ void RolloutStorage::append(
   filled_length_ = std::max(filled_length_, step + 1);
 }
 
+void RolloutStorage::append_slice(
+    int step,
+    int agent_offset,
+    const torch::Tensor& obs_in,
+    const torch::Tensor& episode_starts_in,
+    const torch::Tensor& action_masks_in,
+    const torch::Tensor& learner_active_in,
+    const torch::Tensor& actions_in,
+    const torch::Tensor& action_log_probs_in,
+    const std::unordered_map<std::string, torch::Tensor>& values_in,
+    const std::unordered_map<std::string, torch::Tensor>& rewards_in,
+    const torch::Tensor& dones_in,
+    const torch::Tensor& goal_distances_in) {
+  if (step < 0 || step >= rollout_length_) {
+    throw std::out_of_range("RolloutStorage::append_slice step is outside rollout capacity.");
+  }
+  const int agent_count = static_cast<int>(obs_in.size(0));
+  if (agent_offset < 0 || agent_count < 0 || agent_offset + agent_count > num_agents_) {
+    throw std::out_of_range("RolloutStorage::append_slice agent range is outside rollout capacity.");
+  }
+
+  obs[step].narrow(0, agent_offset, agent_count).copy_(obs_in.detach());
+  episode_starts[step].narrow(0, agent_offset, agent_count).copy_(episode_starts_in.detach());
+  action_masks[step].narrow(0, agent_offset, agent_count).copy_(action_masks_in.detach());
+  learner_active[step].narrow(0, agent_offset, agent_count).copy_(learner_active_in.detach());
+  actions[step].narrow(0, agent_offset, agent_count).copy_(actions_in.detach());
+  action_log_probs[step].narrow(0, agent_offset, agent_count).copy_(action_log_probs_in.detach());
+  dones[step].narrow(0, agent_offset, agent_count).copy_(dones_in.detach());
+  goal_distances[step].narrow(0, agent_offset, agent_count).copy_(goal_distances_in.detach());
+
+  for (const auto& [name, tensor] : values_in) {
+    auto it = values_.find(name);
+    if (it != values_.end()) {
+      it->second[step].narrow(0, agent_offset, agent_count).copy_(tensor.detach());
+    }
+  }
+  for (const auto& [name, tensor] : rewards_in) {
+    auto it = rewards_.find(name);
+    if (it != rewards_.end()) {
+      it->second[step].narrow(0, agent_offset, agent_count).copy_(tensor.detach());
+    }
+  }
+  filled_length_ = std::max(filled_length_, step + 1);
+}
+
 void RolloutStorage::set_final_values(
     const std::unordered_map<std::string, torch::Tensor>& final_values) {
   for (const auto& [name, tensor] : final_values) {

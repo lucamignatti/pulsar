@@ -88,6 +88,7 @@ struct ESLoraConfig {
 struct PPOConfig {
   int num_envs = 64;
   int collection_workers = 0;
+  int collection_shards = 1;
   std::string init_checkpoint{};
   int rollout_length = 256;
   int minibatch_size = 32768;

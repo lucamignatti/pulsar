@@ -7,6 +7,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <stdexcept>
 #include <system_error>
@@ -77,7 +78,8 @@ struct OutcomeFilterStats {
 };
 
 void zero_active_segment(
-    RolloutStorage& rollout,
+    float* learner_active,
+    int total_agents,
     int start_step,
     int end_step,
     int agent_begin,
@@ -85,10 +87,10 @@ void zero_active_segment(
   if (end_step < start_step || agent_count <= 0) {
     return;
   }
-  rollout.learner_active
-      .narrow(0, start_step, end_step - start_step + 1)
-      .narrow(1, agent_begin, agent_count)
-      .zero_();
+  for (int step = start_step; step <= end_step; ++step) {
+    float* row = learner_active + static_cast<std::ptrdiff_t>(step * total_agents + agent_begin);
+    std::fill(row, row + agent_count, 0.0F);
+  }
 }
 
 OutcomeFilterStats keep_only_scored_episode_segments(RolloutStorage& rollout, int agents_per_env) {
@@ -99,32 +101,37 @@ OutcomeFilterStats keep_only_scored_episode_segments(RolloutStorage& rollout, in
   }
   const int total_agents = rollout.num_agents();
   const torch::Tensor rewards = rollout.reward("extrinsic");
+  float* learner_active = rollout.learner_active.data_ptr<float>();
+  const float* starts = rollout.episode_starts.data_ptr<float>();
+  const float* dones = rollout.dones.data_ptr<float>();
+  const float* reward_values = rewards.data_ptr<float>();
   for (int agent_begin = 0; agent_begin < total_agents; agent_begin += agents_per_env) {
     const int agent_count = std::min(agents_per_env, total_agents - agent_begin);
     int segment_start = 0;
     for (int step = 0; step < steps; ++step) {
-      if (step > segment_start && rollout.episode_starts[step][agent_begin].item<float>() > 0.5F) {
-        zero_active_segment(rollout, segment_start, step - 1, agent_begin, agent_count);
+      const int row_offset = step * total_agents + agent_begin;
+      if (step > segment_start && starts[row_offset] > 0.5F) {
+        zero_active_segment(learner_active, total_agents, segment_start, step - 1, agent_begin, agent_count);
         stats.unfinished_segments++;
         segment_start = step;
       }
-      if (rollout.dones[step][agent_begin].item<float>() <= 0.5F) {
+      if (dones[row_offset] <= 0.5F) {
         continue;
       }
       bool scored = false;
       for (int local = 0; local < agent_count; ++local) {
-        scored = scored || std::abs(rewards[step][agent_begin + local].item<float>()) > 0.5F;
+        scored = scored || std::abs(reward_values[row_offset + local]) > 0.5F;
       }
       if (scored) {
         stats.scored_episodes++;
       } else {
-        zero_active_segment(rollout, segment_start, step, agent_begin, agent_count);
+        zero_active_segment(learner_active, total_agents, segment_start, step, agent_begin, agent_count);
         stats.neutral_episodes++;
       }
       segment_start = step + 1;
     }
     if (segment_start < steps) {
-      zero_active_segment(rollout, segment_start, steps - 1, agent_begin, agent_count);
+      zero_active_segment(learner_active, total_agents, segment_start, steps - 1, agent_begin, agent_count);
       stats.unfinished_segments++;
     }
   }
@@ -232,6 +239,82 @@ std::unique_ptr<BatchedRocketSimCollector> make_es_eval_collector(
       pin_host_memory);
 }
 
+std::vector<std::unique_ptr<BatchedRocketSimCollector>> make_collector_vector(
+    std::unique_ptr<BatchedRocketSimCollector> collector) {
+  std::vector<std::unique_ptr<BatchedRocketSimCollector>> collectors;
+  collectors.push_back(std::move(collector));
+  return collectors;
+}
+
+std::size_t total_agents_for_collectors(
+    const std::vector<std::unique_ptr<BatchedRocketSimCollector>>& collectors) {
+  std::size_t total = 0;
+  for (const auto& collector : collectors) {
+    if (collector) {
+      total += collector->total_agents();
+    }
+  }
+  return total;
+}
+
+int action_dim_for_collectors(
+    const std::vector<std::unique_ptr<BatchedRocketSimCollector>>& collectors) {
+  for (const auto& collector : collectors) {
+    if (collector) {
+      return collector->action_dim();
+    }
+  }
+  return 0;
+}
+
+ContinuumState concatenate_states(const std::vector<ContinuumState>& states) {
+  if (states.empty()) {
+    return {};
+  }
+  if (states.size() == 1) {
+    return clone_state(states.front());
+  }
+  std::vector<torch::Tensor> workspaces;
+  std::vector<torch::Tensor> stm_keys;
+  std::vector<torch::Tensor> stm_values;
+  std::vector<torch::Tensor> stm_strengths;
+  std::vector<torch::Tensor> stm_write_indices;
+  std::vector<torch::Tensor> ltm_coeffs;
+  std::vector<torch::Tensor> timesteps;
+  workspaces.reserve(states.size());
+  stm_keys.reserve(states.size());
+  stm_values.reserve(states.size());
+  stm_strengths.reserve(states.size());
+  stm_write_indices.reserve(states.size());
+  ltm_coeffs.reserve(states.size());
+  timesteps.reserve(states.size());
+  for (const auto& state : states) {
+    workspaces.push_back(state.workspace);
+    stm_keys.push_back(state.stm_keys);
+    stm_values.push_back(state.stm_values);
+    stm_strengths.push_back(state.stm_strengths);
+    stm_write_indices.push_back(state.stm_write_index);
+    ltm_coeffs.push_back(state.ltm_coeffs);
+    timesteps.push_back(state.timestep);
+  }
+  return {
+      torch::cat(workspaces, 0),
+      torch::cat(stm_keys, 0),
+      torch::cat(stm_values, 0),
+      torch::cat(stm_strengths, 0),
+      torch::cat(stm_write_indices, 0),
+      torch::cat(ltm_coeffs, 0),
+      torch::cat(timesteps, 0),
+  };
+}
+
+void accumulate_timings(CollectorTimings& dst, const CollectorTimings& src) {
+  dst.obs_build_seconds += src.obs_build_seconds;
+  dst.mask_build_seconds += src.mask_build_seconds;
+  dst.env_step_seconds += src.env_step_seconds;
+  dst.done_reset_seconds += src.done_reset_seconds;
+}
+
 }  // namespace
 
 APPOTrainer::APPOTrainer(
@@ -240,8 +323,21 @@ APPOTrainer::APPOTrainer(
     std::unique_ptr<SelfPlayManager> self_play_manager,
     std::filesystem::path run_output_root,
     bool log_initialization)
+    : APPOTrainer(
+          std::move(config),
+          make_collector_vector(std::move(collector)),
+          std::move(self_play_manager),
+          std::move(run_output_root),
+          log_initialization) {}
+
+APPOTrainer::APPOTrainer(
+    ExperimentConfig config,
+    std::vector<std::unique_ptr<BatchedRocketSimCollector>> collectors,
+    std::unique_ptr<SelfPlayManager> self_play_manager,
+    std::filesystem::path run_output_root,
+    bool log_initialization)
     : config_(std::move(config)),
-      collector_(std::move(collector)),
+      collectors_(std::move(collectors)),
       self_play_manager_(std::move(self_play_manager)),
       action_table_(config_.action_table),
       actor_(PPOActor(config_.model, config_.goal_critic)),
@@ -249,16 +345,19 @@ APPOTrainer::APPOTrainer(
       actor_optimizer_(actor_->parameters(), torch::optim::AdamOptions(config_.ppo.learning_rate)),
       rollout_(make_rollout_storage(
           config_,
-          static_cast<int>(collector_->total_agents()),
-          collector_->action_dim())),
+          static_cast<int>(total_agents_for_collectors(collectors_)),
+          action_dim_for_collectors(collectors_))),
       device_(resolve_runtime_device(config_.ppo.device)),
       run_output_root_(std::move(run_output_root)),
       log_initialization_(log_initialization) {
   validate_experiment_config(config_);
-  if (!collector_) {
-    throw std::invalid_argument("APPOTrainer requires a collector.");
+  if (collectors_.empty()) {
+    throw std::invalid_argument("APPOTrainer requires at least one collector.");
   }
-  total_agents_ = collector_->total_agents();
+  total_agents_ = total_agents_for_collectors(collectors_);
+  if (total_agents_ == 0) {
+    throw std::invalid_argument("APPOTrainer collectors must contain agents.");
+  }
   seed_everything(config_.env.seed);
   collection_state_ = actor_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
   opponent_collection_state_ = actor_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
@@ -269,11 +368,31 @@ APPOTrainer::APPOTrainer(
 
   maybe_initialize_from_checkpoint();
 
+  shard_agent_offsets_.clear();
+  shard_collection_states_.clear();
+  shard_opponent_collection_states_.clear();
+  std::int64_t agent_offset = 0;
+  for (const auto& collector : collectors_) {
+    if (!collector) {
+      throw std::invalid_argument("APPOTrainer collectors must be non-null.");
+    }
+    shard_agent_offsets_.push_back(agent_offset);
+    const auto shard_agents = static_cast<std::int64_t>(collector->total_agents());
+    shard_collection_states_.push_back(actor_->initial_state(shard_agents, device_));
+    shard_opponent_collection_states_.push_back(actor_->initial_state(shard_agents, device_));
+    agent_offset += shard_agents;
+  }
+
   if (self_play_manager_ && self_play_manager_->enabled()) {
-    collector_->set_self_play_assignment_fn(
-        [this](std::size_t env_idx, std::uint64_t seed) {
-          return self_play_manager_->sample_assignment(env_idx, seed);
-        });
+    std::size_t env_offset = 0;
+    for (auto& collector : collectors_) {
+      const std::size_t shard_env_offset = env_offset;
+      collector->set_self_play_assignment_fn(
+          [this, shard_env_offset](std::size_t env_idx, std::uint64_t seed) {
+            return self_play_manager_->sample_assignment(shard_env_offset + env_idx, seed);
+          });
+      env_offset += collector->num_envs();
+    }
   }
 }
 
@@ -816,15 +935,26 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   const auto update_start = std::chrono::steady_clock::now();
   TrainerMetrics metrics{};
   CollectorTimings collector_timings{};
+  BatchedRocketSimCollector* collector_ = collectors_.front().get();
   std::int64_t collected_agent_steps = 0;
 
   const auto collection_start = std::chrono::steady_clock::now();
   if (config_.ppo.train_only_scored_episodes) {
-    collector_->reset_all(&collector_timings);
-    collection_state_ = actor_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
-    opponent_collection_state_ = actor_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
+    if (collectors_.size() > 1) {
+      for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
+        collectors_[shard]->reset_all(&collector_timings);
+        const auto shard_agents = static_cast<std::int64_t>(collectors_[shard]->total_agents());
+        shard_collection_states_[shard] = actor_->initial_state(shard_agents, device_);
+        shard_opponent_collection_states_[shard] = actor_->initial_state(shard_agents, device_);
+      }
+    } else {
+      collector_->reset_all(&collector_timings);
+      collection_state_ = actor_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
+      opponent_collection_state_ = actor_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
+    }
   }
-  rollout_.set_initial_state(collection_state_);
+  rollout_.set_initial_state(
+      collectors_.size() > 1 ? concatenate_states(shard_collection_states_) : collection_state_);
   const torch::Tensor atom_support_win = actor_->value_win_support().to(device_);
 
   double total_sparse_reward = 0.0;
@@ -847,7 +977,221 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
       : config_.ppo.rollout_length;
   const int early_update_completed_episodes = config_.ppo.early_update_completed_episodes;
 
-  {
+  if (collectors_.size() > 1) {
+    PULSAR_TRACE_SCOPE_CAT("trainer", "collect_loop_sharded");
+    struct PendingShardStep {
+      int agent_offset = 0;
+      std::size_t shard = 0;
+      torch::Tensor normalized_obs{};
+      torch::Tensor episode_starts_host{};
+      torch::Tensor action_masks_host{};
+      torch::Tensor learner_active_host{};
+      torch::Tensor action_indices_cpu{};
+      torch::Tensor action_log_probs{};
+      torch::Tensor sampled_value{};
+      torch::Tensor entropy_tensor{};
+      CollectorTimings timings{};
+      std::future<void> step_future{};
+    };
+
+    for (int step = 0; step < config_.ppo.rollout_length; ++step) {
+      PULSAR_TRACE_SCOPE_CAT("trainer", "collect_step_sharded");
+      std::vector<PendingShardStep> pending;
+      pending.reserve(collectors_.size());
+
+      for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
+        auto& collector = *collectors_[shard];
+        torch::Tensor raw_obs_host = collector.host_observations();
+        torch::Tensor episode_starts_host = collector.host_episode_starts();
+        torch::Tensor action_masks_host = collector.host_action_masks();
+        torch::Tensor learner_active_host = collector.host_learner_active();
+        torch::Tensor raw_obs = raw_obs_host.to(device_, use_pinned_host_buffers_);
+        torch::Tensor episode_starts = episode_starts_host.to(device_, use_pinned_host_buffers_);
+        torch::Tensor action_masks = action_masks_host.to(device_, use_pinned_host_buffers_).to(torch::kBool);
+
+        torch::Tensor normalized_obs;
+        torch::Tensor actions;
+        torch::Tensor action_log_probs;
+        ActorStepOutput output;
+        const auto policy_start = std::chrono::steady_clock::now();
+        {
+          PULSAR_TRACE_SCOPE_CAT("trainer", "policy_forward_shard");
+          torch::NoGradGuard no_grad;
+          actor_normalizer_.update(raw_obs);
+          normalized_obs = actor_normalizer_.normalize(raw_obs);
+          const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_mapping.target_distance);
+          output = actor_->forward_step(normalized_obs, std::move(shard_collection_states_[shard]), episode_starts, goal_values);
+          shard_collection_states_[shard] = std::move(output.state);
+          actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
+        }
+        if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
+          torch::cuda::synchronize();
+        }
+        metrics.policy_forward_seconds +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - policy_start).count();
+
+        if (self_play_manager_ && self_play_manager_->has_snapshots()) {
+          torch::Tensor opponent_actions;
+          torch::Tensor snapshot_ids = collector.host_snapshot_ids().to(device_, use_pinned_host_buffers_);
+          self_play_manager_->infer_opponent_actions(
+              actor_,
+              raw_obs,
+              action_masks,
+              episode_starts,
+              snapshot_ids,
+              shard_opponent_collection_states_[shard],
+              &opponent_actions,
+              &metrics.policy_forward_seconds);
+          actions = torch::where(snapshot_ids >= 0, opponent_actions, actions);
+        }
+
+        pending.emplace_back();
+        PendingShardStep& shard_step = pending.back();
+        shard_step.agent_offset = static_cast<int>(shard_agent_offsets_[shard]);
+        shard_step.shard = shard;
+        shard_step.normalized_obs = normalized_obs;
+        shard_step.episode_starts_host = episode_starts_host;
+        shard_step.action_masks_host = action_masks_host;
+        shard_step.learner_active_host = learner_active_host;
+        shard_step.action_log_probs = action_log_probs;
+        shard_step.sampled_value = compute_mean_value(output.value_win_logits, atom_support_win);
+        shard_step.entropy_tensor = compute_distribution_entropy(output.value_win_logits);
+
+        const auto decode_start = std::chrono::steady_clock::now();
+        {
+          PULSAR_TRACE_SCOPE_CAT("trainer", "action_decode_shard");
+          shard_step.action_indices_cpu = actions.contiguous().to(torch::kCPU);
+          BatchedRocketSimCollector* collector_ptr = &collector;
+          torch::Tensor action_indices_cpu = shard_step.action_indices_cpu;
+          CollectorTimings* shard_timings = &shard_step.timings;
+          shard_step.step_future = std::async(
+              std::launch::async,
+              [collector_ptr, action_indices_cpu, shard_timings]() mutable {
+                PULSAR_TRACE_SCOPE_CAT("trainer", "async_step_shard");
+                collector_ptr->step(
+                    std::span<const std::int64_t>(
+                        action_indices_cpu.data_ptr<std::int64_t>(),
+                        static_cast<std::size_t>(action_indices_cpu.numel())),
+                    shard_timings);
+              });
+        }
+        metrics.action_decode_seconds +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
+      }
+
+      for (PendingShardStep& shard_step : pending) {
+        shard_step.step_future.get();
+        accumulate_timings(collector_timings, shard_step.timings);
+
+        auto& collector = *collectors_[shard_step.shard];
+        torch::Tensor dones_host = collector.host_dones();
+        torch::Tensor terminal_labels = collector.host_terminal_outcome_labels();
+        torch::Tensor extrinsic_rewards_host = map_outcome_labels_to_rewards(terminal_labels) * dones_host;
+        const auto* dones_ptr = dones_host.data_ptr<float>();
+
+        torch::Tensor ball_prox_host = collector.host_ball_proximity();
+        total_ball_proximity_steps += ball_prox_host.sum().item<int64_t>();
+        total_ball_proximity_denom += ball_prox_host.numel();
+
+        const auto* tl_ptr = terminal_labels.data_ptr<std::int64_t>();
+        const auto* la_ptr = shard_step.learner_active_host.data_ptr<float>();
+        for (int64_t i = 0; i < terminal_labels.numel(); ++i) {
+          if (la_ptr[i] > 0.5F && dones_ptr[i] > 0.5F) {
+            if (tl_ptr[i] == 0) {
+              total_goals_scored++;
+            } else if (tl_ptr[i] == 1) {
+              total_goals_conceded++;
+            }
+          }
+        }
+        for (int64_t env_agent_begin = 0; env_agent_begin < dones_host.numel(); env_agent_begin += agents_per_env) {
+          bool env_done = false;
+          bool env_scored = false;
+          const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + agents_per_env, dones_host.numel());
+          for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
+            env_done = env_done || dones_ptr[i] > 0.5F;
+            env_scored = env_scored || (dones_ptr[i] > 0.5F && tl_ptr[i] != 2);
+          }
+          if (env_done) {
+            completed_episodes++;
+            if (env_scored) {
+              scored_episodes++;
+            }
+          }
+        }
+
+        const torch::Tensor sampled_value_cpu = shard_step.sampled_value.to(torch::kCPU);
+        accumulated_sampled_value += sampled_value_cpu.sum().item<double>();
+        const torch::Tensor entropy_cpu = shard_step.entropy_tensor.to(torch::kCPU);
+        accumulated_value_entropy += entropy_cpu.sum().item<double>();
+        accumulated_value_stat_count += static_cast<int64_t>(sampled_value_cpu.numel());
+
+        torch::Tensor goal_dist_host = collector.host_goal_distances();
+        float gd_min = goal_dist_host.min().item<float>();
+        float gd_mean = goal_dist_host.mean().item<float>();
+        total_goal_distance += static_cast<double>(gd_mean)
+            * static_cast<double>(goal_dist_host.numel())
+            / static_cast<double>(total_agents_);
+        if (gd_min < min_goal_distance) {
+          min_goal_distance = static_cast<double>(gd_min);
+        }
+
+        const auto learner_step_count = static_cast<std::int64_t>(shard_step.learner_active_host.sum().item<float>());
+        total_sparse_reward += extrinsic_rewards_host.sum().item<double>();
+        total_steps += extrinsic_rewards_host.numel();
+        total_learner_steps += learner_step_count;
+
+        std::unordered_map<std::string, torch::Tensor> all_values;
+        all_values["extrinsic"] = sampled_value_cpu;
+
+        std::unordered_map<std::string, torch::Tensor> all_rewards;
+        all_rewards["extrinsic"] = extrinsic_rewards_host;
+
+        rollout_.append_slice(
+            step,
+            shard_step.agent_offset,
+            shard_step.normalized_obs.to(torch::kCPU),
+            shard_step.episode_starts_host.to(torch::kBool),
+            shard_step.action_masks_host,
+            shard_step.learner_active_host,
+            shard_step.action_indices_cpu,
+            shard_step.action_log_probs.to(torch::kCPU),
+            all_values,
+            all_rewards,
+            dones_host,
+            goal_dist_host);
+
+        collected_agent_steps += learner_step_count;
+      }
+
+      if (early_update_completed_episodes > 0
+          && step + 1 >= min_rollout_steps
+          && (config_.ppo.train_only_scored_episodes ? scored_episodes : completed_episodes) >= early_update_completed_episodes) {
+        break;
+      }
+    }
+
+    {
+      PULSAR_TRACE_SCOPE_CAT("trainer", "bootstrap_forward_sharded");
+      torch::NoGradGuard no_grad;
+      std::vector<torch::Tensor> final_values;
+      final_values.reserve(collectors_.size());
+      for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
+        auto& collector = *collectors_[shard];
+        torch::Tensor final_raw_obs = collector.host_observations().to(device_, use_pinned_host_buffers_);
+        torch::Tensor final_normalized = actor_normalizer_.normalize(final_raw_obs);
+        torch::Tensor final_starts = collector.host_episode_starts().to(device_, use_pinned_host_buffers_);
+        ContinuumState bootstrap_state = clone_state(shard_collection_states_[shard]);
+        const torch::Tensor final_goal_values = policy_goal_values_like(final_normalized, config_.goal_mapping.target_distance);
+        ActorStepOutput final_output = actor_->forward_step(
+            final_normalized, std::move(bootstrap_state), final_starts, final_goal_values);
+        final_values.push_back(compute_mean_value(final_output.value_win_logits, atom_support_win).to(torch::kCPU));
+      }
+      std::unordered_map<std::string, torch::Tensor> bootstrap_values;
+      bootstrap_values["extrinsic"] = torch::cat(final_values, 0);
+      rollout_.set_final_values(bootstrap_values);
+    }
+  } else {
     PULSAR_TRACE_SCOPE_CAT("trainer", "collect_loop");
     for (int step = 0; step < config_.ppo.rollout_length; ++step) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "collect_step");

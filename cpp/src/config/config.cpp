@@ -223,6 +223,7 @@ void to_json(json& j, const PPOConfig& value) {
   j = json{
       {"num_envs", value.num_envs},
       {"collection_workers", value.collection_workers},
+      {"collection_shards", value.collection_shards},
       {"init_checkpoint", value.init_checkpoint},
       {"rollout_length", value.rollout_length},
       {"minibatch_size", value.minibatch_size},
@@ -257,6 +258,7 @@ void to_json(json& j, const PPOConfig& value) {
 void from_json(const json& j, PPOConfig& value) {
   value.num_envs = j.value("num_envs", 64);
   value.collection_workers = j.value("collection_workers", 0);
+  value.collection_shards = j.value("collection_shards", 1);
   value.init_checkpoint = j.value("init_checkpoint", std::string{});
   value.rollout_length = j.value("rollout_length", 256);
   value.minibatch_size = j.value("minibatch_size", 32768);
@@ -428,6 +430,15 @@ void from_json(const json& j, CheckpointMetadata& value) {
 void validate_experiment_config(const ExperimentConfig& config) {
   if (config.ppo.rollout_length <= 1) {
     throw std::invalid_argument("ppo.rollout_length must be > 1.");
+  }
+  if (config.ppo.num_envs <= 0) {
+    throw std::invalid_argument("ppo.num_envs must be positive.");
+  }
+  if (config.ppo.collection_shards <= 0) {
+    throw std::invalid_argument("ppo.collection_shards must be positive.");
+  }
+  if (config.ppo.collection_shards > config.ppo.num_envs) {
+    throw std::invalid_argument("ppo.collection_shards must be <= ppo.num_envs.");
   }
   if (config.ppo.sequence_length <= 0) {
     throw std::invalid_argument("ppo.sequence_length must be positive.");

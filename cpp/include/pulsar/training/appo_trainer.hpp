@@ -81,6 +81,12 @@ class APPOTrainer {
       std::unique_ptr<SelfPlayManager> self_play_manager,
       std::filesystem::path run_output_root = {},
       bool log_initialization = true);
+  APPOTrainer(
+      ExperimentConfig config,
+      std::vector<std::unique_ptr<BatchedRocketSimCollector>> collectors,
+      std::unique_ptr<SelfPlayManager> self_play_manager,
+      std::filesystem::path run_output_root = {},
+      bool log_initialization = true);
   ~APPOTrainer();
 
   void train(int updates, const std::string& checkpoint_dir, const std::string& config_path = "");
@@ -108,7 +114,7 @@ class APPOTrainer {
       int update_index);
 
   ExperimentConfig config_{};
-  std::unique_ptr<BatchedRocketSimCollector> collector_{};
+  std::vector<std::unique_ptr<BatchedRocketSimCollector>> collectors_{};
   std::unique_ptr<SelfPlayManager> self_play_manager_{};
   ControllerActionTable action_table_{};
   PPOActor actor_{nullptr};
@@ -123,6 +129,9 @@ class APPOTrainer {
   std::size_t total_agents_ = 0;
   ContinuumState collection_state_{};
   ContinuumState opponent_collection_state_{};
+  std::vector<ContinuumState> shard_collection_states_{};
+  std::vector<ContinuumState> shard_opponent_collection_states_{};
+  std::vector<std::int64_t> shard_agent_offsets_{};
   bool use_pinned_host_buffers_ = false;
 };
 
