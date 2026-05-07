@@ -42,8 +42,8 @@
     "value_v_max": 10.0
   },
   "ppo": {
-    "num_envs": 64,
-    "collection_workers": 64,
+    "num_envs": 32,
+    "collection_workers": 32,
     "init_checkpoint": "",
     "rollout_length": 288,
     "minibatch_size": 32768,
