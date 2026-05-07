@@ -14,17 +14,12 @@ RolloutStorage::RolloutStorage(
     int num_agents,
     int obs_dim,
     int action_dim,
-    int encoder_dim,
     torch::Device device,
     std::vector<std::string> head_names)
     : rollout_length_(rollout_length),
       num_agents_(num_agents),
       device_(device) {
-  raw_obs = torch::zeros({rollout_length, num_agents, obs_dim}, device);
-  final_raw_obs = torch::zeros({num_agents, obs_dim}, device);
   obs = torch::zeros({rollout_length, num_agents, obs_dim}, device);
-  encoded = torch::zeros({rollout_length, num_agents, encoder_dim}, device);
-  final_encoded = torch::zeros({num_agents, encoder_dim}, device);
   episode_starts = torch::zeros({rollout_length, num_agents}, device);
   action_masks = torch::zeros(
       {rollout_length, num_agents, action_dim},
@@ -43,9 +38,7 @@ RolloutStorage::RolloutStorage(
 
 void RolloutStorage::append(
     int step,
-    const torch::Tensor& raw_obs_in,
     const torch::Tensor& obs_in,
-    const torch::Tensor& encoded_in,
     const torch::Tensor& episode_starts_in,
     const torch::Tensor& action_masks_in,
     const torch::Tensor& learner_active_in,
@@ -58,9 +51,7 @@ void RolloutStorage::append(
   if (step < 0 || step >= rollout_length_) {
     throw std::out_of_range("RolloutStorage::append step is outside rollout capacity.");
   }
-  raw_obs[step].copy_(raw_obs_in.detach());
   obs[step].copy_(obs_in.detach());
-  encoded[step].copy_(encoded_in.detach());
   episode_starts[step].copy_(episode_starts_in.detach());
   action_masks[step].copy_(action_masks_in.detach());
   learner_active[step].copy_(learner_active_in.detach());
@@ -82,14 +73,6 @@ void RolloutStorage::append(
     }
   }
   filled_length_ = std::max(filled_length_, step + 1);
-}
-
-void RolloutStorage::set_final_observation(const torch::Tensor& raw_obs_in) {
-  final_raw_obs.copy_(raw_obs_in.detach());
-}
-
-void RolloutStorage::set_final_encoded(const torch::Tensor& encoded_in) {
-  final_encoded.copy_(encoded_in.detach());
 }
 
 void RolloutStorage::set_final_values(

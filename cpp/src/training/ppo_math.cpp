@@ -1,5 +1,6 @@
-#include <limits>
+#include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include "pulsar/training/ppo_math.hpp"
 
@@ -242,41 +243,82 @@ torch::Tensor sample_future_goal_distances(
     int horizon_H) {
   const int64_t steps = goal_distances.size(0);
   const int64_t agents = goal_distances.size(1);
-  torch::Tensor sampled = torch::zeros_like(goal_distances);
+  torch::Tensor goal_cpu = goal_distances.to(torch::kCPU).to(torch::kFloat32).contiguous();
+  torch::Tensor dones_cpu = dones.defined()
+      ? dones.to(torch::kCPU).to(torch::kFloat32).contiguous()
+      : torch::Tensor{};
+  torch::Tensor starts_cpu = episode_starts.defined()
+      ? episode_starts.to(torch::kCPU).to(torch::kFloat32).contiguous()
+      : torch::Tensor{};
+  torch::Tensor sampled_cpu = torch::empty_like(goal_cpu);
+  torch::Tensor uniforms = torch::rand({steps, agents}, goal_cpu.options());
 
   const float gamma = std::clamp(gamma_g, 0.0F, 0.999999F);
+  const int64_t horizon = std::max<int64_t>(1, horizon_H);
+  const float* goal_ptr = goal_cpu.data_ptr<float>();
+  const float* dones_ptr = dones_cpu.defined() ? dones_cpu.data_ptr<float>() : nullptr;
+  const float* starts_ptr = starts_cpu.defined() ? starts_cpu.data_ptr<float>() : nullptr;
+  const float* uniform_ptr = uniforms.data_ptr<float>();
+  float* sampled_ptr = sampled_cpu.data_ptr<float>();
+
   for (int64_t t = 0; t < steps; ++t) {
     for (int64_t a = 0; a < agents; ++a) {
+      const int64_t idx = t * agents + a;
       int64_t end_idx = steps;
       for (int64_t j = t; j < steps; ++j) {
-        if (dones.defined() && dones[j][a].item<float>() > 0.5F) {
+        const int64_t ja = j * agents + a;
+        if (dones_ptr != nullptr && dones_ptr[ja] > 0.5F) {
           end_idx = j + 1;
           break;
         }
-        if (episode_starts.defined() && episode_starts[j][a].item<float>() > 0.5F && j > t) {
+        if (starts_ptr != nullptr && starts_ptr[ja] > 0.5F && j > t) {
           end_idx = j;
           break;
         }
       }
 
-      const int64_t max_future = std::min<int64_t>(end_idx - t - 1, std::max<int64_t>(1, horizon_H));
+      const int64_t max_future = std::min<int64_t>(end_idx - t - 1, horizon);
       if (max_future <= 0) {
-        sampled[t][a] = goal_distances[t][a];
+        sampled_ptr[idx] = goal_ptr[idx];
         continue;
       }
 
-      torch::Tensor weights = torch::zeros({max_future}, goal_distances.options());
-      for (int64_t k = 0; k < max_future; ++k) {
-        weights[k] = std::pow(static_cast<double>(gamma), static_cast<double>(k));
-      }
-      weights = weights / weights.sum().clamp_min(1.0e-8F);
+      int64_t chosen_offset = 0;
+      if (gamma > 1.0e-8F) {
+        double total_weight = 0.0;
+        double weight = 1.0;
+        for (int64_t k = 0; k < max_future; ++k) {
+          total_weight += weight;
+          weight *= static_cast<double>(gamma);
+        }
 
-      int64_t chosen = t + 1 + torch::multinomial(weights, 1, true).item<int64_t>();
+        const double threshold = static_cast<double>(uniform_ptr[idx]) * total_weight;
+        double cumulative = 0.0;
+        weight = 1.0;
+        for (int64_t k = 0; k < max_future; ++k) {
+          cumulative += weight;
+          if (threshold <= cumulative) {
+            chosen_offset = k;
+            break;
+          }
+          weight *= static_cast<double>(gamma);
+        }
+      }
+
+      int64_t chosen = t + 1 + chosen_offset;
       if (chosen >= end_idx) {
         chosen = end_idx - 1;
       }
-      sampled[t][a] = goal_distances[chosen][a];
+      sampled_ptr[idx] = goal_ptr[chosen * agents + a];
     }
+  }
+
+  torch::Tensor sampled = sampled_cpu;
+  if (goal_distances.scalar_type() != torch::kFloat32) {
+    sampled = sampled.to(goal_distances.scalar_type());
+  }
+  if (!goal_distances.device().is_cpu()) {
+    sampled = sampled.to(goal_distances.device());
   }
   return sampled;
 }

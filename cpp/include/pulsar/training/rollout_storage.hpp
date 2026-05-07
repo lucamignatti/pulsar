@@ -19,15 +19,12 @@ class RolloutStorage {
       int num_agents,
       int obs_dim,
       int action_dim,
-      int encoder_dim,
       torch::Device device,
       std::vector<std::string> head_names = {"extrinsic"});
 
   void append(
       int step,
-      const torch::Tensor& raw_obs,
       const torch::Tensor& obs,
-      const torch::Tensor& encoded,
       const torch::Tensor& episode_starts,
       const torch::Tensor& action_masks,
       const torch::Tensor& learner_active,
@@ -38,8 +35,6 @@ class RolloutStorage {
       const torch::Tensor& dones,
       const torch::Tensor& goal_distances);
 
-  void set_final_observation(const torch::Tensor& raw_obs);
-  void set_final_encoded(const torch::Tensor& encoded);
   void set_final_values(const std::unordered_map<std::string, torch::Tensor>& final_values);
   void set_rewards_at(int step, const std::unordered_map<std::string, torch::Tensor>& rewards_in);
   [[nodiscard]] const std::unordered_map<std::string, torch::Tensor>& final_values() const;
@@ -56,11 +51,7 @@ class RolloutStorage {
   [[nodiscard]] const std::unordered_map<std::string, torch::Tensor>& all_rewards() const;
 
   ContinuumState initial_state{};
-  torch::Tensor raw_obs;
-  torch::Tensor final_raw_obs;
   torch::Tensor obs;
-  torch::Tensor encoded;
-  torch::Tensor final_encoded;
   torch::Tensor episode_starts;
   torch::Tensor action_masks;
   torch::Tensor learner_active;
