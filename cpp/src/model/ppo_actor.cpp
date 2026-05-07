@@ -10,6 +10,7 @@
 
 #include "pulsar/checkpoint/checkpoint.hpp"
 #include "pulsar/config/config.hpp"
+#include "pulsar/tracing/tracing.hpp"
 
 namespace pulsar {
 namespace {
@@ -197,11 +198,13 @@ torch::Tensor GoalCriticImpl::forward(
     const torch::Tensor& features,
     const torch::Tensor& action_inputs,
     const torch::Tensor& goal_value) {
+  PULSAR_TRACE_SCOPE_CAT("actor", "goal_forward");
   return -torch::sqrt(
       (sa_embedding(features, action_inputs) - goal_embedding(goal_value)).square().sum(-1).clamp_min(1.0e-8F));
 }
 
 torch::Tensor GoalCriticImpl::sa_embedding(const torch::Tensor& features, const torch::Tensor& action_inputs) {
+  PULSAR_TRACE_SCOPE_CAT("actor", "sa_embedding");
   const torch::Tensor action_tensor = action_inputs.dim() == 1
       ? torch::nn::functional::one_hot(action_inputs.to(torch::kLong), action_dim_).to(features.device()).to(torch::kFloat32)
       : action_inputs.to(features.device()).to(torch::kFloat32);
@@ -209,6 +212,7 @@ torch::Tensor GoalCriticImpl::sa_embedding(const torch::Tensor& features, const 
 }
 
 torch::Tensor GoalCriticImpl::goal_embedding(const torch::Tensor& goal_values) {
+  PULSAR_TRACE_SCOPE_CAT("actor", "goal_embedding");
   return goal_encoder_->forward(goal_values.unsqueeze(-1).to(torch::kFloat32));
 }
 
@@ -382,6 +386,7 @@ ActorStepOutput PPOActorImpl::forward_encoded_step(
     ContinuumState state,
     torch::Tensor episode_starts,
     torch::Tensor goal_values) {
+  PULSAR_TRACE_SCOPE_CAT("actor", "forward_encoded_step");
   state = apply_episode_starts(std::move(state), std::move(episode_starts));
   const auto [stm_ctx, ltm_ctx, query_input] = read_memories(encoded, state);
   const torch::Tensor gate_input = torch::cat({encoded, state.workspace, stm_ctx, ltm_ctx}, -1);
@@ -425,6 +430,7 @@ ActorStepOutput PPOActorImpl::forward_step(
     ContinuumState state,
     torch::Tensor episode_starts,
     torch::Tensor goal_values) {
+  PULSAR_TRACE_SCOPE_CAT("actor", "forward_step");
   return forward_encoded_step(
       encoder_->forward(obs), std::move(state), std::move(episode_starts), std::move(goal_values));
 }
@@ -434,6 +440,7 @@ ActorSequenceOutput PPOActorImpl::forward_sequence(
     ContinuumState state,
     torch::Tensor episode_starts,
     torch::Tensor goal_values) {
+  PULSAR_TRACE_SCOPE_CAT("actor", "forward_sequence");
   const auto time = obs_seq.size(0);
   const auto batch = obs_seq.size(1);
   const torch::Tensor encoded_seq =

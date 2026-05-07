@@ -3,6 +3,7 @@
 #include <limits>
 
 #include "pulsar/training/ppo_math.hpp"
+#include "pulsar/tracing/tracing.hpp"
 
 #ifdef PULSAR_HAS_TORCH
 
@@ -68,6 +69,7 @@ torch::Tensor sample_masked_actions(
 }
 
 torch::Tensor masked_action_entropy(const torch::Tensor& logits, const torch::Tensor& action_masks) {
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "entropy");
   const torch::Tensor masked = apply_action_mask_to_logits(logits, action_masks);
   const torch::Tensor probs = torch::softmax(masked, -1);
   const torch::Tensor valid_counts = action_masks.to(torch::kFloat32).sum(-1);
@@ -84,6 +86,7 @@ torch::Tensor compute_gae(
     float gamma,
     float gae_lambda,
     const torch::Tensor& next_values) {
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "compute_gae");
   const int64_t steps = values.size(0);
   const int64_t agents = values.size(1);
   torch::Tensor advantages = torch::zeros({steps, agents}, values.options());
@@ -108,6 +111,7 @@ torch::Tensor clipped_ppo_policy_loss(
     const torch::Tensor& old_log_probs,
     const torch::Tensor& advantages,
     float clip_range) {
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "clipped_ppo_loss");
   const torch::Tensor ratio = torch::exp(current_log_probs - old_log_probs);
   const torch::Tensor clipped_ratio = torch::clamp(ratio, 1.0 - clip_range, 1.0 + clip_range);
   return -torch::min(ratio * advantages, clipped_ratio * advantages);
@@ -129,6 +133,7 @@ torch::Tensor distributional_value_loss(
     float v_min,
     float v_max,
     int num_atoms) {
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "distributional_value_loss");
   const float delta_z = (v_max - v_min) / static_cast<float>(num_atoms - 1);
   const torch::Tensor clamped_returns = returns.clamp(v_min, v_max);
   const torch::Tensor b = (clamped_returns - v_min) / delta_z;
@@ -157,6 +162,7 @@ torch::Tensor sample_quantile_value(
 torch::Tensor compute_mean_value(
     const torch::Tensor& value_logits,
     const torch::Tensor& atom_support) {
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "compute_mean_value");
   const torch::Tensor probs = torch::softmax(value_logits, -1);
   return (probs * atom_support).sum(-1);
 }
@@ -164,6 +170,7 @@ torch::Tensor compute_mean_value(
 torch::Tensor compute_distribution_variance(
     const torch::Tensor& value_logits,
     const torch::Tensor& atom_support) {
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "distribution_variance");
   const torch::Tensor probs = torch::softmax(value_logits, -1);
   const torch::Tensor expected = (probs * atom_support).sum(-1, true);
   const torch::Tensor shifted_support = atom_support.unsqueeze(0) - expected;
@@ -173,6 +180,7 @@ torch::Tensor compute_distribution_variance(
 
 torch::Tensor compute_distribution_entropy(
     const torch::Tensor& value_logits) {
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "distribution_entropy");
   const torch::Tensor probs = torch::softmax(value_logits, -1);
   const float eps = 1.0e-8F;
   return -(probs * torch::log(probs + eps)).sum(-1);
@@ -184,6 +192,7 @@ float compute_adaptive_epsilon(
     float epsilon_beta,
     float epsilon_min,
     float epsilon_max) {
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "adaptive_epsilon");
   const float mean_variance = variance.mean().item<float>();
   float adaptive = epsilon_base / (1.0F + epsilon_beta * mean_variance);
   return std::clamp(adaptive, epsilon_min, epsilon_max);
@@ -195,6 +204,7 @@ torch::Tensor compute_adaptive_epsilon_tensor(
     float epsilon_beta,
     float epsilon_min,
     float epsilon_max) {
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "adaptive_epsilon_tensor");
   torch::Tensor adaptive = epsilon_base / (1.0F + epsilon_beta * variance);
   return adaptive.clamp(epsilon_min, epsilon_max);
 }
@@ -205,6 +215,7 @@ torch::Tensor compute_confidence_weights(
     const std::string& weight_type,
     float weight_delta,
     bool normalize) {
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "confidence_weights");
   torch::Tensor raw_weights;
   if (weight_type == "entropy") {
     const torch::Tensor entropy = compute_distribution_entropy(value_logits);
@@ -222,6 +233,7 @@ torch::Tensor compute_confidence_weights(
 }
 
 torch::Tensor normalize_advantage(const torch::Tensor& advantages, const torch::Tensor& active_mask) {
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "normalize_advantage");
   const int64_t active_count = active_mask.sum().item<int64_t>();
   if (active_count <= 0) {
     return advantages;
@@ -241,6 +253,7 @@ torch::Tensor sample_future_goal_distances(
     const torch::Tensor& episode_starts,
     float gamma_g,
     int horizon_H) {
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "sample_future_goals");
   const int64_t steps = goal_distances.size(0);
   const int64_t agents = goal_distances.size(1);
   torch::Tensor goal_cpu = goal_distances.to(torch::kCPU).to(torch::kFloat32).contiguous();
@@ -326,6 +339,7 @@ torch::Tensor sample_future_goal_distances(
 torch::Tensor compute_pairwise_negative_l2_logits(
     const torch::Tensor& lhs_embeddings,
     const torch::Tensor& rhs_embeddings) {
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "infonce_logits");
   const torch::Tensor diff = lhs_embeddings.unsqueeze(1) - rhs_embeddings.unsqueeze(0);
   return -torch::sqrt(diff.square().sum(-1).clamp_min(1.0e-8F));
 }
@@ -333,6 +347,7 @@ torch::Tensor compute_pairwise_negative_l2_logits(
 torch::Tensor compute_symmetric_infonce_loss(
     const torch::Tensor& logits,
     float logsumexp_penalty_coeff) {
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "infonce_loss");
   const torch::Tensor diag = logits.diagonal();
   const torch::Tensor row_lse = torch::logsumexp(logits, 1);
   const torch::Tensor col_lse = torch::logsumexp(logits, 0);

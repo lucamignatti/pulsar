@@ -20,6 +20,7 @@
 #include "pulsar/env/rocketsim_engine.hpp"
 #include "pulsar/training/cuda_utils.hpp"
 #include "pulsar/training/ppo_math.hpp"
+#include "pulsar/tracing/tracing.hpp"
 
 namespace pulsar {
 namespace {
@@ -315,6 +316,7 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
 }
 
 TrainerMetrics APPOTrainer::update_actor() {
+  PULSAR_TRACE_SCOPE_CAT("trainer", "update_actor");
   const auto update_start = std::chrono::steady_clock::now();
   TrainerMetrics metrics{};
   const int seq_len = std::max(1, config_.ppo.sequence_length);
@@ -338,23 +340,29 @@ TrainerMetrics APPOTrainer::update_actor() {
   const torch::Tensor extrinsic_rewards = all_rewards.at("extrinsic").narrow(0, 0, rollout_steps);
   const torch::Tensor rollout_dones = rollout_.dones.narrow(0, 0, rollout_steps);
 
-  torch::Tensor sparse_advantages = compute_gae(
+  torch::Tensor active_mask = rollout_.learner_active.narrow(0, 0, rollout_steps) > 0.5F;
+  torch::Tensor sparse_advantages;
+  torch::Tensor normalized_advantages;
+  {
+    PULSAR_TRACE_SCOPE_CAT("trainer", "update_gae");
+    sparse_advantages = compute_gae(
       extrinsic_values,
       extrinsic_rewards,
       rollout_dones,
       config_.ppo.gamma,
       config_.ppo.gae_lambda,
       rollout_.final_values().count("extrinsic") ? rollout_.final_values().at("extrinsic") : torch::Tensor{});
-
-  torch::Tensor active_mask = rollout_.learner_active.narrow(0, 0, rollout_steps) > 0.5F;
-  torch::Tensor normalized_advantages = normalize_advantage(sparse_advantages, active_mask);
+    normalized_advantages = normalize_advantage(sparse_advantages, active_mask);
+  }
   torch::Tensor sparse_returns = sparse_advantages + extrinsic_values.detach();
 
   const torch::Tensor atom_support_win = actor_->value_win_support().to(device_);
 
   for (int epoch = 0; epoch < config_.ppo.update_epochs; ++epoch) {
+    PULSAR_TRACE_SCOPE_CAT("trainer", "update_epoch");
     const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
     for (int agent_offset = 0; agent_offset < total_agents; agent_offset += agents_per_batch) {
+      PULSAR_TRACE_SCOPE_CAT("trainer", "update_minibatch");
       const int count = std::min(agents_per_batch, total_agents - agent_offset);
       const torch::Tensor agent_indices = perm.narrow(0, agent_offset, count);
       ContinuumState state = state_to_device(rollout_.initial_state_for_agents(agent_indices), device_);
@@ -397,8 +405,12 @@ TrainerMetrics APPOTrainer::update_actor() {
             rollout_.episode_starts.narrow(0, chunk_start, chunk_steps).index_select(1, agent_indices).to(device_);
 
         const auto forward_start = std::chrono::steady_clock::now();
-        const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_mapping.target_distance);
-        ActorSequenceOutput output = actor_->forward_sequence(obs, std::move(state), episode_starts, goal_values);
+        ActorSequenceOutput output;
+        {
+          PULSAR_TRACE_SCOPE_CAT("trainer", "update_forward_sequence");
+          const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_mapping.target_distance);
+          output = actor_->forward_sequence(obs, std::move(state), episode_starts, goal_values);
+        }
         state = detach_state(std::move(output.final_state));
 
         if (loss_steps <= 0) {
@@ -563,7 +575,10 @@ TrainerMetrics APPOTrainer::update_actor() {
 
         const auto active_samples = active_logits.size(0);
         const torch::Tensor weighted_loss = loss * (static_cast<double>(active_samples) / total_active_samples_agent);
-        weighted_loss.backward();
+        {
+          PULSAR_TRACE_SCOPE_CAT("trainer", "update_backward");
+          weighted_loss.backward();
+        }
 
         metrics.policy_loss += policy_loss.item<double>() * static_cast<double>(active_samples);
         metrics.value_loss += value_loss.item<double>() * static_cast<double>(active_samples);
@@ -572,9 +587,13 @@ TrainerMetrics APPOTrainer::update_actor() {
       }
 
       const auto optim_start = std::chrono::steady_clock::now();
-      const auto grad_norm_value = torch::nn::utils::clip_grad_norm_(actor_->parameters(), config_.ppo.max_grad_norm);
-      double grad_norm = static_cast<double>(grad_norm_value);
-      actor_optimizer_.step();
+      double grad_norm = 0.0;
+      {
+        PULSAR_TRACE_SCOPE_CAT("trainer", "update_optimizer");
+        const auto grad_norm_value = torch::nn::utils::clip_grad_norm_(actor_->parameters(), config_.ppo.max_grad_norm);
+        grad_norm = static_cast<double>(grad_norm_value);
+        actor_optimizer_.step();
+      }
       metrics.optimizer_step_seconds +=
           std::chrono::duration<double>(std::chrono::steady_clock::now() - optim_start).count();
       metrics.grad_norm += grad_norm * total_active_samples_agent;
@@ -601,6 +620,7 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
     const torch::Tensor& A_stack,
     const torch::Tensor& B_stack,
     int update_index) {
+  PULSAR_TRACE_SCOPE_CAT("trainer", "es_evaluate");
   torch::NoGradGuard no_grad_guard;
   const auto& es_cfg = config_.es_lora;
   const int pop = es_cfg.population_size;
@@ -711,6 +731,7 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
 }
 
 void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) {
+  PULSAR_TRACE_SCOPE_CAT("trainer", "es_update");
   const auto es_start = std::chrono::steady_clock::now();
   const auto& es_cfg = config_.es_lora;
   const int pop = es_cfg.population_size;
@@ -791,6 +812,7 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
 }
 
 TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_index) {
+  PULSAR_TRACE_SCOPE_CAT("trainer", "run_update");
   const auto update_start = std::chrono::steady_clock::now();
   TrainerMetrics metrics{};
   CollectorTimings collector_timings{};
@@ -825,8 +847,11 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
       : config_.ppo.rollout_length;
   const int early_update_completed_episodes = config_.ppo.early_update_completed_episodes;
 
-  for (int step = 0; step < config_.ppo.rollout_length; ++step) {
-    torch::Tensor raw_obs_host = collector_->host_observations();
+  {
+    PULSAR_TRACE_SCOPE_CAT("trainer", "collect_loop");
+    for (int step = 0; step < config_.ppo.rollout_length; ++step) {
+      PULSAR_TRACE_SCOPE_CAT("trainer", "collect_step");
+      torch::Tensor raw_obs_host = collector_->host_observations();
     torch::Tensor episode_starts_host = collector_->host_episode_starts();
     torch::Tensor action_masks_host = collector_->host_action_masks();
     torch::Tensor learner_active_host = collector_->host_learner_active();
@@ -840,6 +865,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     ActorStepOutput output;
     const auto policy_start = std::chrono::steady_clock::now();
     {
+      PULSAR_TRACE_SCOPE_CAT("trainer", "policy_forward");
       torch::NoGradGuard no_grad;
       actor_normalizer_.update(raw_obs);
       normalized_obs = actor_normalizer_.normalize(raw_obs);
@@ -873,16 +899,22 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     torch::Tensor entropy_tensor = compute_distribution_entropy(output.value_win_logits);
 
     const auto decode_start = std::chrono::steady_clock::now();
-    const torch::Tensor action_indices_cpu = actions.contiguous().to(torch::kCPU);
-    collector_->step(
-        std::span<const std::int64_t>(
-            action_indices_cpu.data_ptr<std::int64_t>(),
-            static_cast<std::size_t>(action_indices_cpu.numel())),
-        &collector_timings);
+    torch::Tensor action_indices_cpu;
+    {
+      PULSAR_TRACE_SCOPE_CAT("trainer", "action_decode");
+      action_indices_cpu = actions.contiguous().to(torch::kCPU);
+      collector_->step(
+          std::span<const std::int64_t>(
+              action_indices_cpu.data_ptr<std::int64_t>(),
+              static_cast<std::size_t>(action_indices_cpu.numel())),
+          &collector_timings);
+    }
     metrics.action_decode_seconds +=
         std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
 
-    torch::Tensor dones_host = collector_->host_dones();
+    {
+      PULSAR_TRACE_SCOPE_CAT("trainer", "collect_post_step");
+      torch::Tensor dones_host = collector_->host_dones();
     torch::Tensor terminal_labels = collector_->host_terminal_outcome_labels();
     torch::Tensor extrinsic_rewards_host = map_outcome_labels_to_rewards(terminal_labels) * dones_host;
     const auto* dones_ptr = dones_host.data_ptr<float>();
@@ -962,8 +994,10 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
         && (config_.ppo.train_only_scored_episodes ? scored_episodes : completed_episodes) >= early_update_completed_episodes) {
       break;
     }
+    }
   }
   {
+    PULSAR_TRACE_SCOPE_CAT("trainer", "bootstrap_forward");
     torch::NoGradGuard no_grad;
     torch::Tensor final_raw_obs = collector_->host_observations().to(device_, use_pinned_host_buffers_);
     torch::Tensor final_normalized = actor_normalizer_.normalize(final_raw_obs);
@@ -977,15 +1011,19 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     bootstrap_values["extrinsic"] = compute_mean_value(
         final_output.value_win_logits, atom_support_win).to(torch::kCPU);
     rollout_.set_final_values(bootstrap_values);
+    }
   }
 
   OutcomeFilterStats outcome_filter_stats{};
+  {
+    PULSAR_TRACE_SCOPE_CAT("trainer", "scored_filter");
   if (config_.ppo.train_only_scored_episodes) {
     outcome_filter_stats = keep_only_scored_episode_segments(rollout_, agents_per_env);
     const torch::Tensor active_train_mask = rollout_.learner_active.narrow(0, 0, rollout_.rollout_length());
     const torch::Tensor reward_train = rollout_.reward("extrinsic").narrow(0, 0, rollout_.rollout_length());
     total_learner_steps = active_train_mask.sum().item<int64_t>();
     total_sparse_reward = (reward_train * active_train_mask).sum().item<double>();
+  }
   }
 
   const double collection_seconds =
@@ -1074,6 +1112,7 @@ CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
 }
 
 void APPOTrainer::save_checkpoint(const std::filesystem::path& directory, std::int64_t global_step, int update_index) const {
+  PULSAR_TRACE_SCOPE_CAT("trainer", "checkpoint_save");
   synchronize_cuda_if_needed(device_, "checkpoint save start");
   const std::filesystem::path staging = make_checkpoint_staging_directory(directory);
   remove_checkpoint_directory(staging);
@@ -1141,6 +1180,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
   std::int64_t global_step = resumed_global_step_;
   const bool train_forever = updates <= 0;
   for (int index = 0; train_forever || index < updates; ++index) {
+    PULSAR_TRACE_SCOPE_CAT("trainer", "train_iteration");
     const int update_index = static_cast<int>(resumed_update_index_) + index + 1;
     TrainerMetrics metrics = run_update(&global_step, update_index);
     append_metrics_line(checkpoint_dir, update_index, global_step, metrics);

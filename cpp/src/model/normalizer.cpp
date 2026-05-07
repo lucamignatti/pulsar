@@ -2,6 +2,8 @@
 
 #ifdef PULSAR_HAS_TORCH
 
+#include "pulsar/tracing/tracing.hpp"
+
 namespace pulsar {
 
 ObservationNormalizer::ObservationNormalizer(int obs_dim) {
@@ -17,6 +19,7 @@ void ObservationNormalizer::to(const torch::Device& device) {
 }
 
 void ObservationNormalizer::update(const torch::Tensor& obs) {
+  PULSAR_TRACE_SCOPE_CAT("normalizer", "update");
   const torch::Tensor batch_mean = obs.mean(0);
   const torch::Tensor batch_var = obs.var(0, false);
   const torch::Tensor batch_count =
@@ -37,6 +40,7 @@ void ObservationNormalizer::update(const torch::Tensor& obs) {
 }
 
 torch::Tensor ObservationNormalizer::normalize(const torch::Tensor& obs) const {
+  PULSAR_TRACE_SCOPE_CAT("normalizer", "normalize");
   return (obs - mean_) / torch::sqrt(var_ + 1.0e-6);
 }
 
