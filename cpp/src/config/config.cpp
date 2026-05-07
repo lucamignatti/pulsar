@@ -241,6 +241,7 @@ void to_json(json& j, const PPOConfig& value) {
       {"burn_in", value.burn_in},
       {"min_rollout_length", value.min_rollout_length},
       {"early_update_completed_episodes", value.early_update_completed_episodes},
+      {"train_only_scored_episodes", value.train_only_scored_episodes},
       {"use_adaptive_epsilon", value.use_adaptive_epsilon},
       {"adaptive_epsilon_beta", value.adaptive_epsilon_beta},
       {"epsilon_min", value.epsilon_min},
@@ -274,6 +275,7 @@ void from_json(const json& j, PPOConfig& value) {
   value.burn_in = j.value("burn_in", 0);
   value.min_rollout_length = j.value("min_rollout_length", 0);
   value.early_update_completed_episodes = j.value("early_update_completed_episodes", 0);
+  value.train_only_scored_episodes = j.value("train_only_scored_episodes", false);
   value.use_adaptive_epsilon = j.value("use_adaptive_epsilon", true);
   value.adaptive_epsilon_beta = j.value("adaptive_epsilon_beta", 1.0F);
   value.epsilon_min = j.value("epsilon_min", 0.05F);
