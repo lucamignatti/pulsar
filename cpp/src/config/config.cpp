@@ -243,6 +243,9 @@ void to_json(json& j, const PPOConfig& value) {
       {"min_rollout_length", value.min_rollout_length},
       {"early_update_completed_episodes", value.early_update_completed_episodes},
       {"train_only_scored_episodes", value.train_only_scored_episodes},
+      {"use_balanced_training", value.use_balanced_training},
+      {"scored_episode_train_fraction", value.scored_episode_train_fraction},
+      {"min_training_episodes", value.min_training_episodes},
       {"use_adaptive_epsilon", value.use_adaptive_epsilon},
       {"adaptive_epsilon_beta", value.adaptive_epsilon_beta},
       {"epsilon_min", value.epsilon_min},
@@ -278,6 +281,9 @@ void from_json(const json& j, PPOConfig& value) {
   value.min_rollout_length = j.value("min_rollout_length", 0);
   value.early_update_completed_episodes = j.value("early_update_completed_episodes", 0);
   value.train_only_scored_episodes = j.value("train_only_scored_episodes", false);
+  value.use_balanced_training = j.value("use_balanced_training", false);
+  value.scored_episode_train_fraction = j.value("scored_episode_train_fraction", 0.25F);
+  value.min_training_episodes = j.value("min_training_episodes", 1);
   value.use_adaptive_epsilon = j.value("use_adaptive_epsilon", true);
   value.adaptive_epsilon_beta = j.value("adaptive_epsilon_beta", 1.0F);
   value.epsilon_min = j.value("epsilon_min", 0.05F);
@@ -457,6 +463,12 @@ void validate_experiment_config(const ExperimentConfig& config) {
   }
   if (config.ppo.early_update_completed_episodes < 0) {
     throw std::invalid_argument("ppo.early_update_completed_episodes must be non-negative.");
+  }
+  if (config.ppo.scored_episode_train_fraction <= 0.0F || config.ppo.scored_episode_train_fraction > 1.0F) {
+    throw std::invalid_argument("ppo.scored_episode_train_fraction must be in (0, 1].");
+  }
+  if (config.ppo.min_training_episodes < 0) {
+    throw std::invalid_argument("ppo.min_training_episodes must be non-negative.");
   }
   if (config.model.encoder_dim <= 0) {
     throw std::invalid_argument("model.encoder_dim must be positive.");

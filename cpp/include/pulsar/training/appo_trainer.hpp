@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <random>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -50,6 +51,9 @@ struct TrainerMetrics {
   int64_t scored_episodes = 0;
   int64_t discarded_neutral_episodes = 0;
   int64_t discarded_unfinished_segments = 0;
+  int64_t kept_neutral_episodes = 0;
+  int64_t kept_unfinished_segments = 0;
+  double training_scored_fraction = 0.0;
 
   double goal_critic_loss = 0.0;
   double mean_goal_score = 0.0;
@@ -133,6 +137,7 @@ class APPOTrainer {
   std::vector<ContinuumState> shard_opponent_collection_states_{};
   std::vector<std::int64_t> shard_agent_offsets_{};
   bool use_pinned_host_buffers_ = false;
+  std::mt19937 rng_;
 };
 
 }  // namespace pulsar

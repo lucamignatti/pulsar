@@ -75,6 +75,8 @@ struct OutcomeFilterStats {
   int64_t scored_episodes = 0;
   int64_t neutral_episodes = 0;
   int64_t unfinished_segments = 0;
+  int64_t kept_neutral_episodes = 0;
+  int64_t kept_unfinished_segments = 0;
 };
 
 void zero_active_segment(
@@ -138,6 +140,112 @@ OutcomeFilterStats keep_only_scored_episode_segments(RolloutStorage& rollout, in
   return stats;
 }
 
+struct ScoredSegment {
+  int agent_begin;
+  int agent_count;
+  int start_step;
+  int end_step;
+};
+
+struct NonScoredSegment {
+  int agent_begin;
+  int agent_count;
+  int start_step;
+  int end_step;
+  bool is_neutral;
+};
+
+OutcomeFilterStats keep_balanced_episode_segments(
+    RolloutStorage& rollout,
+    int agents_per_env,
+    float scored_fraction_target,
+    int min_episodes,
+    std::mt19937& rng) {
+  OutcomeFilterStats stats{};
+  const int steps = rollout.rollout_length();
+  if (steps <= 0) {
+    return stats;
+  }
+  const int total_agents = rollout.num_agents();
+  const torch::Tensor rewards = rollout.reward("extrinsic");
+  float* learner_active = rollout.learner_active.data_ptr<float>();
+  const float* starts = rollout.episode_starts.data_ptr<float>();
+  const float* dones = rollout.dones.data_ptr<float>();
+  const float* reward_values = rewards.data_ptr<float>();
+
+  std::vector<ScoredSegment> scored_segments;
+  std::vector<NonScoredSegment> non_scored_segments;
+
+  for (int agent_begin = 0; agent_begin < total_agents; agent_begin += agents_per_env) {
+    const int agent_count = std::min(agents_per_env, total_agents - agent_begin);
+    int segment_start = 0;
+    for (int step = 0; step < steps; ++step) {
+      const int row_offset = step * total_agents + agent_begin;
+      if (step > segment_start && starts[row_offset] > 0.5F) {
+        non_scored_segments.push_back({agent_begin, agent_count, segment_start, step - 1, false});
+        stats.unfinished_segments++;
+        segment_start = step;
+      }
+      if (dones[row_offset] <= 0.5F) {
+        continue;
+      }
+      bool scored = false;
+      for (int local = 0; local < agent_count; ++local) {
+        scored = scored || std::abs(reward_values[row_offset + local]) > 0.5F;
+      }
+      if (scored) {
+        scored_segments.push_back({agent_begin, agent_count, segment_start, step});
+        stats.scored_episodes++;
+      } else {
+        non_scored_segments.push_back({agent_begin, agent_count, segment_start, step, true});
+        stats.neutral_episodes++;
+      }
+      segment_start = step + 1;
+    }
+    if (segment_start < steps) {
+      non_scored_segments.push_back({agent_begin, agent_count, segment_start, steps - 1, false});
+      stats.unfinished_segments++;
+    }
+  }
+
+  const int S = static_cast<int>(scored_segments.size());
+  const int N = static_cast<int>(non_scored_segments.size());
+
+  stats.kept_neutral_episodes = stats.neutral_episodes;
+  stats.kept_unfinished_segments = stats.unfinished_segments;
+
+  if (S > 0 && S + N > 0) {
+    const float current_fraction = static_cast<float>(S) / static_cast<float>(S + N);
+    if (current_fraction < scored_fraction_target) {
+      int N_keep = static_cast<int>(std::ceil(
+          static_cast<float>(S) * (1.0F / scored_fraction_target - 1.0F)));
+      N_keep = std::max(N_keep, min_episodes - S);
+      if (N_keep < N) {
+        std::shuffle(non_scored_segments.begin(), non_scored_segments.end(), rng);
+        int kept_neutral = 0;
+        int kept_unfinished = 0;
+        for (int i = 0; i < N_keep; ++i) {
+          if (non_scored_segments[static_cast<std::size_t>(i)].is_neutral) {
+            kept_neutral++;
+          } else {
+            kept_unfinished++;
+          }
+        }
+        for (int i = N_keep; i < N; ++i) {
+          const auto& seg = non_scored_segments[static_cast<std::size_t>(i)];
+          zero_active_segment(
+              learner_active, total_agents, seg.start_step, seg.end_step,
+              seg.agent_begin, seg.agent_count);
+        }
+        stats.kept_neutral_episodes = kept_neutral;
+        stats.kept_unfinished_segments = kept_unfinished;
+      }
+    }
+  }
+
+  return stats;
+}
+
 void append_metrics_line(
     const std::filesystem::path& checkpoint_dir,
     int update_index,
@@ -165,6 +273,9 @@ void append_metrics_line(
       {"scored_episodes", metrics.scored_episodes},
       {"discarded_neutral_episodes", metrics.discarded_neutral_episodes},
       {"discarded_unfinished_segments", metrics.discarded_unfinished_segments},
+      {"kept_neutral_episodes", metrics.kept_neutral_episodes},
+      {"kept_unfinished_segments", metrics.kept_unfinished_segments},
+      {"training_scored_fraction", metrics.training_scored_fraction},
       {"goal_critic_loss", metrics.goal_critic_loss},
       {"mean_goal_score", metrics.mean_goal_score},
       {"mean_sampled_goal_distance", metrics.mean_sampled_goal_distance},
@@ -349,7 +460,8 @@ APPOTrainer::APPOTrainer(
           action_dim_for_collectors(collectors_))),
       device_(resolve_runtime_device(config_.ppo.device)),
       run_output_root_(std::move(run_output_root)),
-      log_initialization_(log_initialization) {
+      log_initialization_(log_initialization),
+      rng_(static_cast<std::mt19937::result_type>(config_.env.seed)) {
   validate_experiment_config(config_);
   if (collectors_.empty()) {
     throw std::invalid_argument("APPOTrainer requires at least one collector.");
@@ -939,7 +1051,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   std::int64_t collected_agent_steps = 0;
 
   const auto collection_start = std::chrono::steady_clock::now();
-  if (config_.ppo.train_only_scored_episodes) {
+  if (config_.ppo.train_only_scored_episodes && !config_.ppo.use_balanced_training) {
     if (collectors_.size() > 1) {
       for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
         collectors_[shard]->reset_all(&collector_timings);
@@ -993,6 +1105,9 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
       CollectorTimings timings{};
       std::future<void> step_future{};
     };
+
+    const bool use_completed_for_break =
+        config_.ppo.use_balanced_training || !config_.ppo.train_only_scored_episodes;
 
     for (int step = 0; step < config_.ppo.rollout_length; ++step) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "collect_step_sharded");
@@ -1166,7 +1281,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
 
       if (early_update_completed_episodes > 0
           && step + 1 >= min_rollout_steps
-          && (config_.ppo.train_only_scored_episodes ? scored_episodes : completed_episodes) >= early_update_completed_episodes) {
+          && (use_completed_for_break ? completed_episodes : scored_episodes) >= early_update_completed_episodes) {
         break;
       }
     }
@@ -1193,6 +1308,8 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     }
   } else {
     PULSAR_TRACE_SCOPE_CAT("trainer", "collect_loop");
+    const bool use_completed_for_break =
+        config_.ppo.use_balanced_training || !config_.ppo.train_only_scored_episodes;
     for (int step = 0; step < config_.ppo.rollout_length; ++step) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "collect_step");
       torch::Tensor raw_obs_host = collector_->host_observations();
@@ -1335,7 +1452,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     collected_agent_steps += learner_step_count;
     if (early_update_completed_episodes > 0
         && step + 1 >= min_rollout_steps
-        && (config_.ppo.train_only_scored_episodes ? scored_episodes : completed_episodes) >= early_update_completed_episodes) {
+        && (use_completed_for_break ? completed_episodes : scored_episodes) >= early_update_completed_episodes) {
       break;
     }
     }
@@ -1361,7 +1478,17 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   OutcomeFilterStats outcome_filter_stats{};
   {
     PULSAR_TRACE_SCOPE_CAT("trainer", "scored_filter");
-  if (config_.ppo.train_only_scored_episodes) {
+  if (config_.ppo.use_balanced_training) {
+    outcome_filter_stats = keep_balanced_episode_segments(
+        rollout_, agents_per_env,
+        config_.ppo.scored_episode_train_fraction,
+        config_.ppo.min_training_episodes,
+        rng_);
+    const torch::Tensor active_train_mask = rollout_.learner_active.narrow(0, 0, rollout_.rollout_length());
+    const torch::Tensor reward_train = rollout_.reward("extrinsic").narrow(0, 0, rollout_.rollout_length());
+    total_learner_steps = active_train_mask.sum().item<int64_t>();
+    total_sparse_reward = (reward_train * active_train_mask).sum().item<double>();
+  } else if (config_.ppo.train_only_scored_episodes) {
     outcome_filter_stats = keep_only_scored_episode_segments(rollout_, agents_per_env);
     const torch::Tensor active_train_mask = rollout_.learner_active.narrow(0, 0, rollout_.rollout_length());
     const torch::Tensor reward_train = rollout_.reward("extrinsic").narrow(0, 0, rollout_.rollout_length());
@@ -1382,9 +1509,24 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   metrics.goals_conceded = total_goals_conceded;
   metrics.rollout_steps = rollout_.rollout_length();
   metrics.completed_episodes = completed_episodes;
-  metrics.scored_episodes = config_.ppo.train_only_scored_episodes ? outcome_filter_stats.scored_episodes : scored_episodes;
-  metrics.discarded_neutral_episodes = outcome_filter_stats.neutral_episodes;
-  metrics.discarded_unfinished_segments = outcome_filter_stats.unfinished_segments;
+  const bool filtered = config_.ppo.use_balanced_training || config_.ppo.train_only_scored_episodes;
+  metrics.scored_episodes = filtered ? outcome_filter_stats.scored_episodes : scored_episodes;
+  if (config_.ppo.use_balanced_training) {
+    metrics.discarded_neutral_episodes = outcome_filter_stats.neutral_episodes - outcome_filter_stats.kept_neutral_episodes;
+    metrics.discarded_unfinished_segments = outcome_filter_stats.unfinished_segments - outcome_filter_stats.kept_unfinished_segments;
+    metrics.kept_neutral_episodes = outcome_filter_stats.kept_neutral_episodes;
+    metrics.kept_unfinished_segments = outcome_filter_stats.kept_unfinished_segments;
+    const auto total_kept = outcome_filter_stats.scored_episodes
+        + outcome_filter_stats.kept_neutral_episodes
+        + outcome_filter_stats.kept_unfinished_segments;
+    if (total_kept > 0) {
+      metrics.training_scored_fraction = static_cast<double>(outcome_filter_stats.scored_episodes)
+          / static_cast<double>(total_kept);
+    }
+  } else {
+    metrics.discarded_neutral_episodes = outcome_filter_stats.neutral_episodes;
+    metrics.discarded_unfinished_segments = outcome_filter_stats.unfinished_segments;
+  }
   if (total_ball_proximity_denom > 0) {
     metrics.ball_proximity_rate = static_cast<double>(total_ball_proximity_steps) / static_cast<double>(total_ball_proximity_denom);
   }
@@ -1541,6 +1683,9 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " scored_eps=" << metrics.scored_episodes
               << " discarded_neutral=" << metrics.discarded_neutral_episodes
               << " discarded_unfinished=" << metrics.discarded_unfinished_segments
+              << " kept_neutral=" << metrics.kept_neutral_episodes
+              << " kept_unfinished=" << metrics.kept_unfinished_segments
+              << " train_scored_frac=" << metrics.training_scored_fraction
               << " goal_critic_loss=" << metrics.goal_critic_loss
               << " goal_score=" << metrics.mean_goal_score
               << " sampled_goal_dist=" << metrics.mean_sampled_goal_distance
@@ -1566,8 +1711,11 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"completed_episodes", metrics.completed_episodes},
           {"scored_episodes", metrics.scored_episodes},
           {"discarded_neutral_episodes", metrics.discarded_neutral_episodes},
-          {"discarded_unfinished_segments", metrics.discarded_unfinished_segments},
-          {"goal_critic_loss", metrics.goal_critic_loss},
+           {"discarded_unfinished_segments", metrics.discarded_unfinished_segments},
+           {"kept_neutral_episodes", metrics.kept_neutral_episodes},
+           {"kept_unfinished_segments", metrics.kept_unfinished_segments},
+           {"training_scored_fraction", metrics.training_scored_fraction},
+           {"goal_critic_loss", metrics.goal_critic_loss},
           {"mean_goal_score", metrics.mean_goal_score},
           {"mean_sampled_goal_distance", metrics.mean_sampled_goal_distance},
           {"mean_goal_distance", metrics.mean_goal_distance},

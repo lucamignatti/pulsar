@@ -108,6 +108,9 @@ struct PPOConfig {
   int min_rollout_length = 0;
   int early_update_completed_episodes = 0;
   bool train_only_scored_episodes = false;
+  bool use_balanced_training = false;
+  float scored_episode_train_fraction = 0.25F;
+  int min_training_episodes = 1;
   bool use_adaptive_epsilon = true;
   float adaptive_epsilon_beta = 1.0F;
   float epsilon_min = 0.05F;
