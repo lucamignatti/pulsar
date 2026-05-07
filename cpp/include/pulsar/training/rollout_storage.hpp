@@ -47,6 +47,7 @@ class RolloutStorage {
   [[nodiscard]] ContinuumState initial_state_for_agents(const torch::Tensor& agent_indices) const;
 
   [[nodiscard]] int rollout_length() const;
+  [[nodiscard]] int capacity() const;
   [[nodiscard]] int num_agents() const;
 
   [[nodiscard]] torch::Tensor value(const std::string& head_name) const;
@@ -71,6 +72,7 @@ class RolloutStorage {
 
  private:
   int rollout_length_ = 0;
+  int filled_length_ = 0;
   int num_agents_ = 0;
   torch::Device device_{torch::kCPU};
   std::unordered_map<std::string, torch::Tensor> values_;

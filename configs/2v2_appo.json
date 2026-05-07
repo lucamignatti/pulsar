@@ -60,6 +60,8 @@
     "max_rolling_checkpoints": 5,
     "sequence_length": 64,
     "burn_in": 0,
+    "min_rollout_length": 64,
+    "early_update_completed_episodes": 4,
     "use_adaptive_epsilon": true,
     "adaptive_epsilon_beta": 1.0,
     "epsilon_min": 0.05,

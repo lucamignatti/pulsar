@@ -2,6 +2,9 @@
 
 #ifdef PULSAR_HAS_TORCH
 
+#include <algorithm>
+#include <stdexcept>
+
 #include "pulsar/training/ppo_math.hpp"
 
 namespace pulsar {
@@ -52,6 +55,9 @@ void RolloutStorage::append(
     const std::unordered_map<std::string, torch::Tensor>& rewards_in,
     const torch::Tensor& dones_in,
     const torch::Tensor& goal_distances_in) {
+  if (step < 0 || step >= rollout_length_) {
+    throw std::out_of_range("RolloutStorage::append step is outside rollout capacity.");
+  }
   raw_obs[step].copy_(raw_obs_in.detach());
   obs[step].copy_(obs_in.detach());
   encoded[step].copy_(encoded_in.detach());
@@ -75,6 +81,7 @@ void RolloutStorage::append(
       it->second[step].copy_(tensor.detach());
     }
   }
+  filled_length_ = std::max(filled_length_, step + 1);
 }
 
 void RolloutStorage::set_final_observation(const torch::Tensor& raw_obs_in) {
@@ -98,6 +105,8 @@ const std::unordered_map<std::string, torch::Tensor>& RolloutStorage::final_valu
 
 void RolloutStorage::set_initial_state(const ContinuumState& state) {
   initial_state = state_to_device(clone_state(state), device_);
+  filled_length_ = 0;
+  final_values_.clear();
 }
 
 ContinuumState RolloutStorage::initial_state_for_agents(const torch::Tensor& agent_indices) const {
@@ -105,6 +114,10 @@ ContinuumState RolloutStorage::initial_state_for_agents(const torch::Tensor& age
 }
 
 int RolloutStorage::rollout_length() const {
+  return filled_length_;
+}
+
+int RolloutStorage::capacity() const {
   return rollout_length_;
 }
 

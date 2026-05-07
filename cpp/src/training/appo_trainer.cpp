@@ -92,6 +92,8 @@ void append_metrics_line(
       {"sparse_reward_mean", metrics.sparse_reward_mean},
       {"sampled_value_win_mean", metrics.sampled_value_win_mean},
       {"value_win_entropy", metrics.value_win_entropy},
+      {"rollout_steps", metrics.rollout_steps},
+      {"completed_episodes", metrics.completed_episodes},
       {"goal_critic_loss", metrics.goal_critic_loss},
       {"mean_goal_score", metrics.mean_goal_score},
       {"mean_sampled_goal_distance", metrics.mean_sampled_goal_distance},
@@ -255,6 +257,7 @@ TrainerMetrics APPOTrainer::update_actor() {
   const int seq_len = std::max(1, config_.ppo.sequence_length);
   const int agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
   const int total_agents = rollout_.num_agents();
+  const int rollout_steps = rollout_.rollout_length();
   std::int64_t metric_steps = 0;
   double accumulated_variance = 0.0;
   double accumulated_epsilon = 0.0;
@@ -265,15 +268,24 @@ TrainerMetrics APPOTrainer::update_actor() {
 
   const auto& all_values = rollout_.all_values();
   const auto& all_rewards = rollout_.all_rewards();
+  if (rollout_steps <= 0) {
+    return metrics;
+  }
+  const torch::Tensor extrinsic_values = all_values.at("extrinsic").narrow(0, 0, rollout_steps);
+  const torch::Tensor extrinsic_rewards = all_rewards.at("extrinsic").narrow(0, 0, rollout_steps);
+  const torch::Tensor rollout_dones = rollout_.dones.narrow(0, 0, rollout_steps);
 
   torch::Tensor sparse_advantages = compute_gae(
-      all_values.at("extrinsic"), all_rewards.at("extrinsic"),
-      rollout_.dones, config_.ppo.gamma, config_.ppo.gae_lambda,
+      extrinsic_values,
+      extrinsic_rewards,
+      rollout_dones,
+      config_.ppo.gamma,
+      config_.ppo.gae_lambda,
       rollout_.final_values().count("extrinsic") ? rollout_.final_values().at("extrinsic") : torch::Tensor{});
 
-  torch::Tensor active_mask = rollout_.learner_active > 0.5F;
+  torch::Tensor active_mask = rollout_.learner_active.narrow(0, 0, rollout_steps) > 0.5F;
   torch::Tensor normalized_advantages = normalize_advantage(sparse_advantages, active_mask);
-  torch::Tensor sparse_returns = sparse_advantages + all_values.at("extrinsic").detach();
+  torch::Tensor sparse_returns = sparse_advantages + extrinsic_values.detach();
 
   const torch::Tensor atom_support_win = actor_->value_win_support().to(device_);
 
@@ -737,6 +749,12 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   int64_t total_goals_conceded = 0;
   int64_t total_ball_proximity_steps = 0;
   int64_t total_ball_proximity_denom = 0;
+  int completed_episodes = 0;
+  const int agents_per_env = std::max(1, config_.env.team_size * 2);
+  const int min_rollout_steps = config_.ppo.min_rollout_length > 0
+      ? config_.ppo.min_rollout_length
+      : config_.ppo.rollout_length;
+  const int early_update_completed_episodes = config_.ppo.early_update_completed_episodes;
 
   for (int step = 0; step < config_.ppo.rollout_length; ++step) {
     torch::Tensor raw_obs_host = collector_->host_observations();
@@ -802,6 +820,8 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     torch::Tensor terminal_labels = collector_->host_terminal_outcome_labels();
     torch::Tensor extrinsic_rewards = map_outcome_labels_to_rewards(terminal_labels);
     extrinsic_rewards = extrinsic_rewards.to(device_, use_pinned_host_buffers_) * dones;
+    torch::Tensor dones_cpu_float = dones.to(torch::kCPU);
+    const auto* dones_ptr = dones_cpu_float.data_ptr<float>();
 
     torch::Tensor ball_prox_host = collector_->host_ball_proximity();
     total_ball_proximity_steps += ball_prox_host.sum().item<int64_t>();
@@ -812,12 +832,22 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     torch::Tensor learner_active_cpu_early = learner_active.to(torch::kCPU);
     auto* la_ptr = learner_active_cpu_early.data_ptr<float>();
     for (int64_t i = 0; i < terminal_labels_cpu.numel(); ++i) {
-      if (la_ptr[i] > 0.5F && dones.to(torch::kCPU)[i].item<float>() > 0.5F) {
+      if (la_ptr[i] > 0.5F && dones_ptr[i] > 0.5F) {
         if (tl_ptr[i] == 0) {
           total_goals_scored++;
         } else if (tl_ptr[i] == 1) {
           total_goals_conceded++;
         }
+      }
+    }
+    for (int64_t env_agent_begin = 0; env_agent_begin < dones_cpu_float.numel(); env_agent_begin += agents_per_env) {
+      bool env_done = false;
+      const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + agents_per_env, dones_cpu_float.numel());
+      for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
+        env_done = env_done || dones_ptr[i] > 0.5F;
+      }
+      if (env_done) {
+        completed_episodes++;
       }
     }
 
@@ -859,6 +889,11 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
         goal_dist_host);
 
     collected_agent_steps += learner_active.sum().item<std::int64_t>();
+    if (early_update_completed_episodes > 0
+        && step + 1 >= min_rollout_steps
+        && completed_episodes >= early_update_completed_episodes) {
+      break;
+    }
   }
   rollout_.set_final_observation(collector_->host_observations());
 
@@ -884,11 +919,13 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
 
   if (total_learner_steps > 0) {
     metrics.sparse_reward_mean = total_sparse_reward / static_cast<double>(total_learner_steps);
-    metrics.mean_goal_distance = total_goal_distance / static_cast<double>(config_.ppo.rollout_length);
+    metrics.mean_goal_distance = total_goal_distance / static_cast<double>(std::max(rollout_.rollout_length(), 1));
   }
   metrics.min_goal_distance = min_goal_distance;
   metrics.goals_scored = total_goals_scored;
   metrics.goals_conceded = total_goals_conceded;
+  metrics.rollout_steps = rollout_.rollout_length();
+  metrics.completed_episodes = completed_episodes;
   if (total_ball_proximity_denom > 0) {
     metrics.ball_proximity_rate = static_cast<double>(total_ball_proximity_steps) / static_cast<double>(total_ball_proximity_denom);
   }
@@ -1038,6 +1075,8 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " grad_norm=" << metrics.grad_norm
               << " epsilon=" << metrics.adaptive_epsilon
               << " sparse_reward=" << metrics.sparse_reward_mean
+              << " rollout_steps=" << metrics.rollout_steps
+              << " completed_eps=" << metrics.completed_episodes
               << " goal_critic_loss=" << metrics.goal_critic_loss
               << " goal_score=" << metrics.mean_goal_score
               << " sampled_goal_dist=" << metrics.mean_sampled_goal_distance
@@ -1059,6 +1098,8 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"sparse_reward_mean", metrics.sparse_reward_mean},
           {"sampled_value_win_mean", metrics.sampled_value_win_mean},
           {"value_win_entropy", metrics.value_win_entropy},
+          {"rollout_steps", metrics.rollout_steps},
+          {"completed_episodes", metrics.completed_episodes},
           {"goal_critic_loss", metrics.goal_critic_loss},
           {"mean_goal_score", metrics.mean_goal_score},
           {"mean_sampled_goal_distance", metrics.mean_sampled_goal_distance},

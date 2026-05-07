@@ -104,6 +104,8 @@ struct PPOConfig {
   int max_rolling_checkpoints = 5;
   int sequence_length = 16;
   int burn_in = 0;
+  int min_rollout_length = 0;
+  int early_update_completed_episodes = 0;
   bool use_adaptive_epsilon = true;
   float adaptive_epsilon_beta = 1.0F;
   float epsilon_min = 0.05F;

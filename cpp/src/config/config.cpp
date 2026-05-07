@@ -239,6 +239,8 @@ void to_json(json& j, const PPOConfig& value) {
       {"max_rolling_checkpoints", value.max_rolling_checkpoints},
       {"sequence_length", value.sequence_length},
       {"burn_in", value.burn_in},
+      {"min_rollout_length", value.min_rollout_length},
+      {"early_update_completed_episodes", value.early_update_completed_episodes},
       {"use_adaptive_epsilon", value.use_adaptive_epsilon},
       {"adaptive_epsilon_beta", value.adaptive_epsilon_beta},
       {"epsilon_min", value.epsilon_min},
@@ -270,6 +272,8 @@ void from_json(const json& j, PPOConfig& value) {
   value.max_rolling_checkpoints = j.value("max_rolling_checkpoints", 5);
   value.sequence_length = j.value("sequence_length", 16);
   value.burn_in = j.value("burn_in", 0);
+  value.min_rollout_length = j.value("min_rollout_length", 0);
+  value.early_update_completed_episodes = j.value("early_update_completed_episodes", 0);
   value.use_adaptive_epsilon = j.value("use_adaptive_epsilon", true);
   value.adaptive_epsilon_beta = j.value("adaptive_epsilon_beta", 1.0F);
   value.epsilon_min = j.value("epsilon_min", 0.05F);
@@ -434,6 +438,12 @@ void validate_experiment_config(const ExperimentConfig& config) {
   }
   if (config.ppo.burn_in < 0 || config.ppo.burn_in >= config.ppo.sequence_length) {
     throw std::invalid_argument("ppo.burn_in must satisfy 0 <= burn_in < sequence_length.");
+  }
+  if (config.ppo.min_rollout_length < 0 || config.ppo.min_rollout_length > config.ppo.rollout_length) {
+    throw std::invalid_argument("ppo.min_rollout_length must satisfy 0 <= min_rollout_length <= rollout_length.");
+  }
+  if (config.ppo.early_update_completed_episodes < 0) {
+    throw std::invalid_argument("ppo.early_update_completed_episodes must be non-negative.");
   }
   if (config.model.encoder_dim <= 0) {
     throw std::invalid_argument("model.encoder_dim must be positive.");
