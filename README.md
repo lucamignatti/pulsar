@@ -68,7 +68,7 @@ ctest --test-dir build/release --output-on-failure
 
 ## Core Binary
 
-- `pulsar_appo_train`: online sparse APPO + contrastive goal auxiliary + ES-LoRA self-play training
+- `pulsar_appo_train`: online sparse APPO + goal conditioned auxiliary + ES-LoRA self-play training
 
 ## Training
 
