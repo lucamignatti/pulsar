@@ -30,9 +30,8 @@ pulsar::ModelConfig small_model_config() {
 
 pulsar::GoalCriticConfig default_goal_critic_config() {
   pulsar::GoalCriticConfig cfg;
-  cfg.num_atoms = 51;
-  cfg.v_min = 0.0F;
-  cfg.v_max = 25.0F;
+  cfg.embedding_dim = 64;
+  cfg.hidden_dim = 256;
   return cfg;
 }
 
@@ -71,20 +70,20 @@ int main() {
       throw std::runtime_error("value support shape mismatch");
     }
 
-    const torch::Tensor goal_support = actor->goal_critic_support();
-    if (goal_support.sizes() != torch::IntArrayRef({gc_cfg.num_atoms})) {
-      throw std::runtime_error("goal critic support shape mismatch");
+    torch::Tensor goal_emb = actor->goal_critic()->goal_embedding(torch::zeros({2}));
+    if (goal_emb.sizes() != torch::IntArrayRef({2, gc_cfg.embedding_dim})) {
+      throw std::runtime_error("goal embedding shape mismatch");
     }
 
     // Goal critic forward pass smoke test
     {
       auto s = actor->initial_state(2, torch::kCPU);
       auto out = actor->forward_step(torch::zeros({2, model_config.observation_dim}), std::move(s));
-      torch::Tensor goal_logits = actor->goal_critic()->forward(
+      torch::Tensor goal_score = actor->goal_critic()->forward(
           out.features,
           torch::zeros({2}, torch::TensorOptions().dtype(torch::kLong)),
           torch::zeros({2}));
-      if (goal_logits.sizes() != torch::IntArrayRef({2, gc_cfg.num_atoms})) {
+      if (goal_score.sizes() != torch::IntArrayRef({2})) {
         throw std::runtime_error("goal critic output shape mismatch");
       }
     }

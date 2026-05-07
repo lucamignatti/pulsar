@@ -165,9 +165,9 @@ void to_json(json& j, const GoalCriticConfig& value) {
   j = json{
       {"horizon_H", value.horizon_H},
       {"gamma_g", value.gamma_g},
-      {"num_atoms", value.num_atoms},
-      {"v_min", value.v_min},
-      {"v_max", value.v_max},
+      {"hidden_dim", value.hidden_dim},
+      {"embedding_dim", value.embedding_dim},
+      {"logsumexp_penalty_coeff", value.logsumexp_penalty_coeff},
       {"lambda_Zg", value.lambda_Zg},
   };
 }
@@ -175,9 +175,9 @@ void to_json(json& j, const GoalCriticConfig& value) {
 void from_json(const json& j, GoalCriticConfig& value) {
   value.horizon_H = j.value("horizon_H", 256);
   value.gamma_g = j.value("gamma_g", 0.99F);
-  value.num_atoms = j.value("num_atoms", 51);
-  value.v_min = j.value("v_min", 0.0F);
-  value.v_max = j.value("v_max", 0.0F);
+  value.hidden_dim = j.value("hidden_dim", 256);
+  value.embedding_dim = j.value("embedding_dim", 64);
+  value.logsumexp_penalty_coeff = j.value("logsumexp_penalty_coeff", 0.01F);
   value.lambda_Zg = j.value("lambda_Zg", 1.0F);
 }
 
@@ -424,16 +424,6 @@ void from_json(const json& j, CheckpointMetadata& value) {
   value.critic_heads = j.value("critic_heads", std::vector<std::string>{});
 }
 
-float compute_goal_critic_v_max(const GoalCriticConfig& cfg) {
-  float v_max = cfg.v_max;
-  if (v_max <= 0.0F) {
-    double gamma = static_cast<double>(cfg.gamma_g);
-    int H = cfg.horizon_H;
-    v_max = static_cast<float>((1.0 - std::pow(gamma, H)) / (1.0 - gamma));
-  }
-  return v_max;
-}
-
 void validate_experiment_config(const ExperimentConfig& config) {
   if (config.ppo.rollout_length <= 1) {
     throw std::invalid_argument("ppo.rollout_length must be > 1.");
@@ -453,8 +443,14 @@ void validate_experiment_config(const ExperimentConfig& config) {
   if (config.goal_critic.horizon_H <= 0) {
     throw std::invalid_argument("goal_critic.horizon_H must be positive.");
   }
-  if (config.goal_critic.num_atoms < 2) {
-    throw std::invalid_argument("goal_critic.num_atoms must be >= 2.");
+  if (config.goal_critic.hidden_dim <= 0) {
+    throw std::invalid_argument("goal_critic.hidden_dim must be positive.");
+  }
+  if (config.goal_critic.embedding_dim <= 0) {
+    throw std::invalid_argument("goal_critic.embedding_dim must be positive.");
+  }
+  if (config.goal_critic.logsumexp_penalty_coeff < 0.0F) {
+    throw std::invalid_argument("goal_critic.logsumexp_penalty_coeff must be non-negative.");
   }
   if (config.es_lora.rank <= 0) {
     throw std::invalid_argument("es_lora.rank must be positive.");

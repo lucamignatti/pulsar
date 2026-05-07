@@ -64,9 +64,9 @@ struct GoalMappingConfig {
 struct GoalCriticConfig {
   int horizon_H = 256;
   float gamma_g = 0.99F;
-  int num_atoms = 51;
-  float v_min = 0.0F;
-  float v_max = 0.0F;
+  int hidden_dim = 256;
+  int embedding_dim = 64;
+  float logsumexp_penalty_coeff = 0.01F;
   float lambda_Zg = 1.0F;
 };
 
@@ -150,7 +150,7 @@ struct WandbConfig {
 };
 
 struct ExperimentConfig {
-  int schema_version = 5;
+  int schema_version = 6;
   int obs_schema_version = 2;
   EnvConfig env{};
   OutcomeConfig outcome{};
@@ -166,11 +166,11 @@ struct ExperimentConfig {
 };
 
 struct CheckpointMetadata {
-  int schema_version = 5;
+  int schema_version = 6;
   int obs_schema_version = 2;
   std::string config_hash{};
   std::string action_table_hash{};
-  std::string architecture_name = "continuum_goal_conditioned";
+  std::string architecture_name = "continuum_contrastive_goal_appo";
   std::string device = "cpu";
   std::int64_t global_step = 0;
   std::int64_t update_index = 0;
@@ -216,7 +216,5 @@ std::string stable_json(const CheckpointMetadata& metadata);
 std::string hash_string(const std::string& value);
 std::string config_hash(const ExperimentConfig& config);
 std::string action_table_hash(const ActionTableConfig& config);
-
-float compute_goal_critic_v_max(const GoalCriticConfig& cfg);
 
 }  // namespace pulsar

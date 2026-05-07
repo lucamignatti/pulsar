@@ -201,22 +201,9 @@ int main() {
       require(caught, "rollout_length <= 1 should throw");
     }
 
-    // 11. Goal critic v_max auto-computation
+    // 11. Future goal sampling
     {
-      pulsar::GoalCriticConfig cfg;
-      cfg.horizon_H = 256;
-      cfg.gamma_g = 0.99F;
-      float v_max = pulsar::compute_goal_critic_v_max(cfg);
-      require(v_max > 0.0F, "auto-computed v_max should be positive");
-      require(v_max < 300.0F, "auto-computed v_max should be bounded");
-
-      cfg.v_max = 50.0F;
-      float explicit_vmax = pulsar::compute_goal_critic_v_max(cfg);
-      require_close(explicit_vmax, 50.0F, "explicit v_max should be preserved");
-    }
-
-    // 12. Goal occupancy computation
-    {
+      torch::manual_seed(42);
       const int steps = 5;
       const int agents = 2;
       auto goal_dist = torch::zeros({steps, agents}, torch::kFloat32);
@@ -229,34 +216,30 @@ int main() {
         goal_dist[k][1] = 1.0F;
       }
       auto dones = torch::zeros({steps, agents}, torch::kFloat32);
+      const float gamma_g = 0.99F;
+      const int horizon_H = 64;
 
-      auto occupancy = pulsar::compute_finite_horizon_goal_occupancy(
-          goal_dist, dones, 0.99F, 0.0F, 0.05F, 4);
+      auto future_goals = pulsar::sample_future_goal_distances(
+          goal_dist, dones, gamma_g, horizon_H);
 
-      require(occupancy.sizes() == torch::IntArrayRef({steps, agents}), "goal occupancy shape");
-      require_finite(occupancy, "goal occupancy");
-      require(occupancy[4][0].item<float>() > 0.5F,
-              "close-to-goal step should have high occupancy");
-      require(occupancy[0][1].item<float>() < 0.1F,
-              "far from goal step should have low occupancy");
+      require(future_goals.sizes() == torch::IntArrayRef({steps, agents}), "future goals shape");
+      require_finite(future_goals, "future goals finite");
     }
 
-    // 13. Goal actor loss with discrete actions (REINFORCE-style)
+    // 12. Contrastive loss
     {
-      auto policy_logits = torch::randn({4, 4}, torch::TensorOptions().dtype(torch::kFloat32).requires_grad(true));
-      auto action_masks = torch::ones({4, 4}, torch::kBool);
-      auto actions = torch::randint(0, 4, {4}, torch::kLong);
-      auto goal_critic_logits = torch::zeros({4, 21}, torch::kFloat32);
-      auto goal_support = torch::linspace(0.0F, 25.0F, 21, torch::kFloat32);
+      torch::manual_seed(42);
+      auto lhs = torch::randn({8, 64}, torch::kFloat32);
+      auto rhs = torch::randn({8, 64}, torch::kFloat32);
+      auto logits = pulsar::compute_pairwise_negative_l2_logits(lhs, rhs);
+      require(logits.sizes() == torch::IntArrayRef({8, 8}), "contrastive logits shape");
 
-      auto loss = pulsar::compute_goal_actor_loss_discrete(
-          policy_logits, action_masks, goal_critic_logits, goal_support, actions);
-      require_finite(loss, "goal actor loss");
-      require(loss.sizes() == torch::IntArrayRef({}), "goal actor loss should be scalar");
-      require(loss.detach().requires_grad() == false || loss.requires_grad(), "goal actor loss should pass through");
+      auto loss = pulsar::compute_symmetric_infonce_loss(logits, 0.01F);
+      require(loss.sizes() == torch::IntArrayRef({}), "contrastive loss scalar");
+      require_finite(loss, "contrastive loss finite");
     }
 
-    // 14. KL divergence computation
+    // 13. KL divergence computation
     {
       auto base_logits = torch::full({2, 4}, 0.01F, torch::kFloat32);
       auto perturbed_logits = torch::full({2, 4}, 0.01F, torch::kFloat32);
@@ -270,7 +253,7 @@ int main() {
       require(kl_diff > 0.0F, "KL between different distributions should be positive");
     }
 
-    // 15. Adaptive epsilon bounds
+    // 14. Adaptive epsilon bounds
     {
       const auto tiny_variance = torch::tensor({0.01F}, torch::kFloat32);
       const float eps = pulsar::compute_adaptive_epsilon(tiny_variance, 0.2F, 1.0F, 0.05F, 0.3F);
@@ -281,7 +264,7 @@ int main() {
       require_close(small_eps, 0.05F, "adaptive epsilon clamps to min");
     }
 
-    // 16. compute_mean_value and compute_distribution_variance
+    // 15. compute_mean_value and compute_distribution_variance
     {
       const auto atom_support = torch::linspace(-5.0F, 5.0F, 21, torch::kFloat32);
       const auto logits = torch::zeros({4, 21}, torch::kFloat32);
@@ -293,18 +276,6 @@ int main() {
       require(variance.sizes() == torch::IntArrayRef({4}), "variance shape");
       require_finite(variance, "variance finite");
     }
-
-    // 17. Goal critic loss uses C51 projection
-    {
-      const auto logits = torch::zeros({1, 21}, torch::kFloat32);
-      const float v_min = 0.0F;
-      const float v_max = 25.0F;
-      const int num_atoms = 21;
-      const auto goal_occ_target = torch::tensor({12.5F}, torch::kFloat32);
-      const auto loss = pulsar::distributional_value_loss(logits, goal_occ_target, v_min, v_max, num_atoms);
-      require_finite(loss, "goal critic C51 loss");
-    }
-
     std::cout << "pulsar_ppo_math_tests passed\n";
     return EXIT_SUCCESS;
   } catch (const std::exception& exc) {

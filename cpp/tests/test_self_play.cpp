@@ -142,7 +142,8 @@ void test_snapshot_reload_preserves_actor_config() {
   config.self_play_league.eval_interval_updates = 0;
   config.ppo.device = "cpu";
 
-  config.goal_critic.num_atoms = 31;
+  config.goal_critic.embedding_dim = 64;
+  config.goal_critic.hidden_dim = 256;
 
   const fs::path root = fs::temp_directory_path() / "pulsar_self_play_actor_test";
   fs::remove_all(root);
@@ -182,8 +183,8 @@ void test_snapshot_reload_preserves_actor_config() {
             torch::IntArrayRef({2, config.model.value_num_atoms}),
         "snapshot value win head shape matches model config");
     pulsar::test::require(
-        snapshot_model->goal_critic_support().size(0) == config.goal_critic.num_atoms,
-        "snapshot goal critic should have saved atom count");
+        snapshot_model->goal_critic()->goal_embedding(torch::zeros({1})).size(1) == config.goal_critic.embedding_dim,
+        "snapshot goal critic should have matching embedding dim");
   }
 
   fs::remove_all(root);

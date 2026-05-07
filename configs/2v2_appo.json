@@ -1,5 +1,5 @@
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "obs_schema_version": 2,
   "env": {
     "mode": "soccar",
@@ -78,9 +78,9 @@
   "goal_critic": {
     "horizon_H": 256,
     "gamma_g": 0.99,
-    "num_atoms": 51,
-    "v_min": 0.0,
-    "v_max": 0.0,
+    "hidden_dim": 256,
+    "embedding_dim": 64,
+    "logsumexp_penalty_coeff": 0.01,
     "lambda_Zg": 1.0
   },
   "actor_goal": {

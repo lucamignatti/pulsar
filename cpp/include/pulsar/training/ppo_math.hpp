@@ -76,20 +76,19 @@ torch::Tensor compute_confidence_weights(
 
 torch::Tensor normalize_advantage(const torch::Tensor& advantages, const torch::Tensor& active_mask);
 
-torch::Tensor compute_finite_horizon_goal_occupancy(
+torch::Tensor sample_future_goal_distances(
     const torch::Tensor& goal_distances,
     const torch::Tensor& dones,
     float gamma_g,
-    float goal_value,
-    float kernel_sigma,
     int horizon_H);
 
-torch::Tensor compute_goal_actor_loss_discrete(
-    const torch::Tensor& policy_logits,
-    const torch::Tensor& action_masks,
-    const torch::Tensor& goal_critic_logits,
-    const torch::Tensor& goal_atom_support,
-    const torch::Tensor& actions);
+torch::Tensor compute_pairwise_negative_l2_logits(
+    const torch::Tensor& lhs_embeddings,
+    const torch::Tensor& rhs_embeddings);
+
+torch::Tensor compute_symmetric_infonce_loss(
+    const torch::Tensor& logits,
+    float logsumexp_penalty_coeff);
 
 float compute_discrete_policy_kl(
     const torch::Tensor& base_logits,

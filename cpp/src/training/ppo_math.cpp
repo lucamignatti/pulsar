@@ -234,49 +234,57 @@ torch::Tensor normalize_advantage(const torch::Tensor& advantages, const torch::
   return (advantages - mean) / std;
 }
 
-torch::Tensor compute_finite_horizon_goal_occupancy(
+torch::Tensor sample_future_goal_distances(
     const torch::Tensor& goal_distances,
     const torch::Tensor& dones,
     float gamma_g,
-    float goal_value,
-    float kernel_sigma,
     int horizon_H) {
   const int64_t steps = goal_distances.size(0);
   const int64_t agents = goal_distances.size(1);
-  float two_sigma2 = 2.0F * kernel_sigma * kernel_sigma;
+  torch::Tensor sampled = torch::zeros_like(goal_distances);
 
-  torch::Tensor occupancy = torch::zeros({steps, agents}, goal_distances.options());
-
+  const float gamma = std::clamp(gamma_g, 0.0F, 0.999999F);
   for (int64_t t = 0; t < steps; ++t) {
-    torch::Tensor G = torch::zeros({agents}, goal_distances.options());
-    torch::Tensor cum_done = torch::zeros({agents}, dones.options());
-
-    for (int k = 0; k < horizon_H && (t + k) < steps; ++k) {
-      float weight = std::pow(static_cast<double>(gamma_g), static_cast<double>(k));
-      torch::Tensor m = goal_distances[t + k];
-      torch::Tensor K = torch::exp(-(m - goal_value).square() / two_sigma2);
-      G = G + static_cast<float>(weight) * K * (1.0F - cum_done);
-      cum_done = (cum_done + dones[t + k]).clamp_max(1.0F);
+    const int64_t max_future = std::min<int64_t>(steps - t - 1, std::max<int64_t>(1, horizon_H));
+    if (max_future <= 0) {
+      sampled[t].copy_(goal_distances[t]);
+      continue;
     }
-    occupancy[t] = G;
+
+    torch::Tensor weights = torch::zeros({max_future}, goal_distances.options());
+    for (int64_t k = 0; k < max_future; ++k) {
+      weights[k] = std::pow(static_cast<double>(gamma), static_cast<double>(k));
+    }
+    weights = weights / weights.sum().clamp_min(1.0e-8F);
+
+    for (int64_t a = 0; a < agents; ++a) {
+      int64_t chosen = t + 1 + torch::multinomial(weights, 1, true).item<int64_t>();
+      if (chosen >= steps) {
+        chosen = steps - 1;
+      }
+      sampled[t][a] = goal_distances[chosen][a];
+    }
   }
-  return occupancy;
+  return sampled;
 }
 
-torch::Tensor compute_goal_actor_loss_discrete(
-    const torch::Tensor& policy_logits,
-    const torch::Tensor& action_masks,
-    const torch::Tensor& goal_critic_logits,
-    const torch::Tensor& goal_atom_support,
-    const torch::Tensor& actions) {
-  const torch::Tensor masked = apply_action_mask_to_logits(policy_logits, action_masks);
-  const torch::Tensor log_probs = torch::log_softmax(masked, -1);
-  const torch::Tensor action_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1);
+torch::Tensor compute_pairwise_negative_l2_logits(
+    const torch::Tensor& lhs_embeddings,
+    const torch::Tensor& rhs_embeddings) {
+  const torch::Tensor diff = lhs_embeddings.unsqueeze(1) - rhs_embeddings.unsqueeze(0);
+  return -torch::sqrt(diff.square().sum(-1).clamp_min(1.0e-8F));
+}
 
-  const torch::Tensor goal_probs = torch::softmax(goal_critic_logits, -1);
-  const torch::Tensor goal_q_values = (goal_probs * goal_atom_support).sum(-1);
-
-  return -(action_log_probs * goal_q_values.detach()).mean();
+torch::Tensor compute_symmetric_infonce_loss(
+    const torch::Tensor& logits,
+    float logsumexp_penalty_coeff) {
+  const torch::Tensor diag = logits.diagonal();
+  const torch::Tensor row_lse = torch::logsumexp(logits, 1);
+  const torch::Tensor col_lse = torch::logsumexp(logits, 0);
+  const torch::Tensor row_loss = -(diag - row_lse).mean();
+  const torch::Tensor col_loss = -(diag - col_lse).mean();
+  const torch::Tensor penalty = logsumexp_penalty_coeff * (row_lse.square().mean() + col_lse.square().mean());
+  return row_loss + col_loss + penalty;
 }
 
 float compute_discrete_policy_kl(

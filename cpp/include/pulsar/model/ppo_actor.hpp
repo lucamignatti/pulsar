@@ -77,18 +77,21 @@ TORCH_MODULE(LoRALinear);
 
 class GoalCriticImpl : public torch::nn::Module {
  public:
-  GoalCriticImpl(int feature_dim, int action_dim, int num_atoms, int hidden_dim = 256);
+  GoalCriticImpl(int feature_dim, int action_dim, int embedding_dim = 64, int hidden_dim = 256);
 
+  torch::Tensor sa_embedding(const torch::Tensor& features, const torch::Tensor& action_inputs);
+  torch::Tensor goal_embedding(const torch::Tensor& goal_values);
   torch::Tensor forward(
       const torch::Tensor& features,
-      const torch::Tensor& action_ids,
-      const torch::Tensor& goal_value);
+      const torch::Tensor& action_inputs,
+      const torch::Tensor& goal_values);
 
  private:
-  torch::nn::Linear input_proj_{nullptr};
-  torch::nn::Linear output_proj_{nullptr};
+  torch::nn::Sequential sa_encoder_{nullptr};
+  torch::nn::Sequential goal_encoder_{nullptr};
   int action_dim_;
   int hidden_dim_;
+  int embedding_dim_;
 };
 
 TORCH_MODULE(GoalCritic);
@@ -98,13 +101,21 @@ class PPOActorImpl : public torch::nn::Module {
   explicit PPOActorImpl(ModelConfig config, const GoalCriticConfig& goal_critic_config = {});
 
   [[nodiscard]] ContinuumState initial_state(std::int64_t batch_size, const torch::Device& device) const;
-  ActorStepOutput forward_step(torch::Tensor obs, ContinuumState state, torch::Tensor episode_starts = {});
-  ActorSequenceOutput forward_sequence(torch::Tensor obs_seq, ContinuumState state, torch::Tensor episode_starts = {});
+  ActorStepOutput forward_step(
+      torch::Tensor obs,
+      ContinuumState state,
+      torch::Tensor episode_starts = {},
+      torch::Tensor goal_values = {});
+  ActorSequenceOutput forward_sequence(
+      torch::Tensor obs_seq,
+      ContinuumState state,
+      torch::Tensor episode_starts = {},
+      torch::Tensor goal_values = {});
   [[nodiscard]] torch::Tensor value_win_support() const;
-  [[nodiscard]] torch::Tensor goal_critic_support() const;
   [[nodiscard]] int feature_dim() const;
   [[nodiscard]] const ModelConfig& config() const;
   [[nodiscard]] const GoalCriticConfig& goal_critic_config() const;
+  [[nodiscard]] torch::Tensor policy_goal_logits(const torch::Tensor& features, const torch::Tensor& goal_values);
   [[nodiscard]] std::vector<std::string> enabled_critic_heads() const;
 
   [[nodiscard]] std::vector<torch::Tensor> es_lora_parameters() const;
@@ -115,13 +126,14 @@ class PPOActorImpl : public torch::nn::Module {
       const torch::Tensor& features,
       const torch::Tensor& A_stack,
       const torch::Tensor& B_stack,
-      float sigma);
+      float sigma,
+      torch::Tensor goal_values = {});
   void apply_policy_eggroll_update(const torch::Tensor& delta_weight);
   [[nodiscard]] const LoRALinear& policy_lora() const;
   [[nodiscard]] GoalCritic& goal_critic();
 
  private:
-  ActorStepOutput forward_encoded_step(torch::Tensor encoded, ContinuumState state, torch::Tensor episode_starts = {});
+  ActorStepOutput forward_encoded_step(torch::Tensor encoded, ContinuumState state, torch::Tensor episode_starts = {}, torch::Tensor goal_values = {});
   [[nodiscard]] ContinuumState apply_episode_starts(ContinuumState state, torch::Tensor episode_starts) const;
   [[nodiscard]] std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> read_memories(
       const torch::Tensor& encoded,
@@ -157,7 +169,6 @@ class PPOActorImpl : public torch::nn::Module {
   torch::nn::Sequential value_head_win_{nullptr};
   torch::Tensor atom_support_win_;
   GoalCritic goal_critic_{nullptr};
-  torch::Tensor atom_support_goal_;
 
   torch::Tensor ltm_basis_keys_;
   torch::Tensor ltm_basis_values_;

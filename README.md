@@ -1,20 +1,20 @@
 # Pulsar
 
-Sparse-reward Rocket League bot training with **Continuous Goal-Conditioned Distributional APPO** and **Slow ES-LoRA**.
+Sparse-reward Rocket League bot training with **Contrastive Goal-Conditioned APPO** and **Slow ES-LoRA**.
 
-Three mechanisms work together:
+Two mechanisms work together:
 
 1. **Sparse Distributional APPO** — the main local optimizer, trained from terminal win/loss outcomes only.
-2. **Continuous goal-conditioned distributional critic** — an auxiliary 51-bin categorical critic that predicts future discounted car-to-ball proximity. Provides an immediate controllability gradient via a small goal actor loss.
-3. **Slow Rank-4 ES-LoRA** — periodic global parameter-space search over a LoRA adapter on the final policy layer, driven by true sparse winrate plus goal pressure.
+2. **Contrastive goal-conditioned auxiliary** — self-supervised future-goal encoders (state-action and goal) trained with symmetric InfoNCE. Provides a representation-learning signal without shaping the environment reward.
+3. **Slow Rank-4 ES-LoRA** — periodic global parameter-space search over a LoRA adapter on the final policy layer, driven by true sparse winrate with KL penalty.
 
-The real environment reward remains strictly sparse terminal win/loss. The goal-distance machinery is an auxiliary critic target, never the environment reward.
+The real environment reward remains strictly sparse terminal win/loss. The goal-conditioning machinery is an auxiliary self-supervised target, never the environment reward.
 
 ## Architecture
 
 - **Continuum** recurrent actor with policy and distributional value heads
 - **51-bin categorical distributional sparse value critic** for terminal win/loss
-- **51-bin goal-conditioned distributional critic** `Z_g(h_t, a_t, g)` predicting car-to-ball proximity
+- **Contrastive goal-conditioned encoder pair** — state-action encoder and goal encoder trained with symmetric InfoNCE
 - **Rank-4 LoRA adapter** on the final policy layer — mutated by ES, also trainable by APPO
 - **ES-LoRA** periodic global optimizer: population sampling, antithetic evaluation, sparse-outcome fitness
 
@@ -88,7 +88,7 @@ To run a bounded number of updates:
 {
   "outcome":       { "score": 1.0, "concede": -1.0, "neutral": 0.0 },
   "goal_mapping":  { "goal": 0.0, "kernel_sigma": 0.08, "arena_max_distance": 8192.0 },
-  "goal_critic":   { "horizon_H": 256, "gamma_g": 0.99, "num_atoms": 51, "lambda_Zg": 1.0 },
+  "goal_critic":   { "horizon_H": 256, "gamma_g": 0.99, "hidden_dim": 256, "embedding_dim": 64, "logsumexp_penalty_coeff": 0.01, "lambda_Zg": 1.0 },
   "actor_goal":    { "lambda_g": 0.1 },
   "es_lora":       { "rank": 4, "population_size": 16, "es_interval": 100 },
   "self_play_league": { "enabled": false, ... }
