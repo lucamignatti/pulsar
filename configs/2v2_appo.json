@@ -42,11 +42,11 @@
     "value_v_max": 10.0
   },
   "ppo": {
-    "num_envs": 1024,
-    "collection_workers": 128,
+    "num_envs": 2048,
+    "collection_workers": 24,
     "init_checkpoint": "",
     "rollout_length": 288,
-    "minibatch_size": 131072,
+    "minibatch_size": 524288,
     "update_epochs": 1,
     "clip_range": 0.2,
     "entropy_coef": 0.01,
@@ -61,7 +61,7 @@
     "sequence_length": 64,
     "burn_in": 0,
     "min_rollout_length": 64,
-    "early_update_completed_episodes": 4,
+    "early_update_completed_episodes": 1,
     "train_only_scored_episodes": true,
     "use_adaptive_epsilon": true,
     "adaptive_epsilon_beta": 1.0,
