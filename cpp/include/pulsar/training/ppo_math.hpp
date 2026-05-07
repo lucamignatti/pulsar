@@ -79,6 +79,7 @@ torch::Tensor normalize_advantage(const torch::Tensor& advantages, const torch::
 torch::Tensor sample_future_goal_distances(
     const torch::Tensor& goal_distances,
     const torch::Tensor& dones,
+    const torch::Tensor& episode_starts,
     float gamma_g,
     int horizon_H);
 
@@ -94,11 +95,6 @@ float compute_discrete_policy_kl(
     const torch::Tensor& base_logits,
     const torch::Tensor& perturbed_logits,
     const torch::Tensor& action_masks);
-
-float compute_goal_value_correlation(
-    const torch::Tensor& predicted_values,
-    const torch::Tensor& actual_values,
-    const torch::Tensor& weights);
 
 ContinuumState detach_state(ContinuumState state);
 ContinuumState clone_state(const ContinuumState& state);

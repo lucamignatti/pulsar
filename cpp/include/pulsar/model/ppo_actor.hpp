@@ -115,7 +115,6 @@ class PPOActorImpl : public torch::nn::Module {
   [[nodiscard]] int feature_dim() const;
   [[nodiscard]] const ModelConfig& config() const;
   [[nodiscard]] const GoalCriticConfig& goal_critic_config() const;
-  [[nodiscard]] torch::Tensor policy_goal_logits(const torch::Tensor& features, const torch::Tensor& goal_values);
   [[nodiscard]] std::vector<std::string> enabled_critic_heads() const;
 
   [[nodiscard]] std::vector<torch::Tensor> es_lora_parameters() const;

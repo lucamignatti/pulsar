@@ -62,6 +62,14 @@ void require_finite(const torch::Tensor& tensor, const std::string& name) {
   }
 }
 
+torch::Tensor policy_goal_values_like(const torch::Tensor& obs, float target_distance) {
+  const auto options = obs.options().dtype(torch::kFloat32);
+  if (obs.dim() == 3) {
+    return torch::full({obs.size(0), obs.size(1)}, target_distance, options);
+  }
+  return torch::full({obs.size(0)}, target_distance, options);
+}
+
 void append_metrics_line(
     const std::filesystem::path& checkpoint_dir,
     int update_index,
@@ -85,14 +93,11 @@ void append_metrics_line(
       {"sampled_value_win_mean", metrics.sampled_value_win_mean},
       {"value_win_entropy", metrics.value_win_entropy},
       {"goal_critic_loss", metrics.goal_critic_loss},
-      {"goal_actor_loss", metrics.goal_actor_loss},
-      {"mean_predicted_goal_value", metrics.mean_predicted_goal_value},
-      {"mean_actual_goal_occupancy", metrics.mean_actual_goal_occupancy},
+      {"mean_goal_score", metrics.mean_goal_score},
+      {"mean_sampled_goal_distance", metrics.mean_sampled_goal_distance},
       {"mean_goal_distance", metrics.mean_goal_distance},
       {"min_goal_distance", metrics.min_goal_distance},
-      {"goal_actor_loss_ratio", metrics.goal_actor_loss_ratio},
-      {"goal_occupancy_correlation", metrics.goal_occupancy_correlation},
-          {"ball_proximity_rate", metrics.ball_proximity_rate},
+      {"ball_proximity_rate", metrics.ball_proximity_rate},
       {"goals_scored", metrics.goals_scored},
       {"goals_conceded", metrics.goals_conceded},
       {"obs_build_seconds", metrics.obs_build_seconds},
@@ -108,7 +113,6 @@ void append_metrics_line(
       {"es_fitness_std", metrics.es_fitness_std},
       {"es_fitness_best", metrics.es_fitness_best},
       {"es_winrate_mean", metrics.es_winrate_mean},
-      {"es_goal_pressure_mean", metrics.es_goal_pressure_mean},
       {"es_kl_mean", metrics.es_kl_mean},
       {"es_update_norm", metrics.es_update_norm},
       {"es_lora_a_norm", metrics.es_lora_a_norm},
@@ -256,9 +260,8 @@ TrainerMetrics APPOTrainer::update_actor() {
   double accumulated_epsilon = 0.0;
   double accumulated_confidence = 0.0;
   double accumulated_goal_critic_loss = 0.0;
-  double accumulated_goal_actor_loss = 0.0;
-  double accumulated_predicted_goal_value = 0.0;
-  double accumulated_actual_goal_occupancy = 0.0;
+  double accumulated_goal_score = 0.0;
+  double accumulated_sampled_goal_distance = 0.0;
 
   const auto& all_values = rollout_.all_values();
   const auto& all_rewards = rollout_.all_rewards();
@@ -319,7 +322,8 @@ TrainerMetrics APPOTrainer::update_actor() {
             rollout_.episode_starts.narrow(0, chunk_start, chunk_steps).index_select(1, agent_indices).to(device_);
 
         const auto forward_start = std::chrono::steady_clock::now();
-        ActorSequenceOutput output = actor_->forward_sequence(obs, std::move(state), episode_starts);
+        const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_mapping.target_distance);
+        ActorSequenceOutput output = actor_->forward_sequence(obs, std::move(state), episode_starts, goal_values);
         state = detach_state(std::move(output.final_state));
 
         if (loss_steps <= 0) {
@@ -424,32 +428,47 @@ TrainerMetrics APPOTrainer::update_actor() {
               rollout_.goal_distances.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
           torch::Tensor chunk_dones =
               rollout_.dones.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
+          torch::Tensor chunk_ep_starts =
+              rollout_.episode_starts.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
           torch::Tensor future_goal_dist = sample_future_goal_distances(
               chunk_goal_dist,
               chunk_dones,
+              chunk_ep_starts,
               config_.goal_critic.gamma_g,
               config_.goal_critic.horizon_H);
 
           torch::Tensor flat_future_goal_dist = future_goal_dist.reshape({samples});
           torch::Tensor active_future_goal_dist = flat_future_goal_dist.index({flat_active});
 
-          const torch::Tensor sa_logits = compute_pairwise_negative_l2_logits(
-              actor_->goal_critic()->sa_embedding(active_features, active_actions),
-              actor_->goal_critic()->goal_embedding(active_future_goal_dist));
+          const auto active_count = active_features.size(0);
+          const int cb_size = config_.goal_critic.contrastive_batch_size;
+          torch::Tensor sa_emb, g_emb;
+          if (active_count > static_cast<c10::IntArrayRef::value_type>(cb_size)) {
+            const torch::Tensor idx = torch::randperm(active_count, active_actions.options())
+                .narrow(0, 0, cb_size);
+            sa_emb = actor_->goal_critic()->sa_embedding(
+                active_features.index({idx}), active_actions.index({idx}));
+            g_emb = actor_->goal_critic()->goal_embedding(active_future_goal_dist.index({idx}));
+          } else {
+            sa_emb = actor_->goal_critic()->sa_embedding(active_features, active_actions);
+            g_emb = actor_->goal_critic()->goal_embedding(active_future_goal_dist);
+          }
+          const torch::Tensor sa_logits = compute_pairwise_negative_l2_logits(sa_emb, g_emb);
           goal_loss = compute_symmetric_infonce_loss(sa_logits, config_.goal_critic.logsumexp_penalty_coeff);
 
-          const torch::Tensor goal_scores = actor_->goal_critic()->forward(
-              active_features,
-              active_actions,
-              active_future_goal_dist);
+          {
+            torch::NoGradGuard no_grad;
+            const torch::Tensor goal_scores = actor_->goal_critic()->forward(
+                active_features.detach(),
+                active_actions,
+                active_future_goal_dist);
+            chunk_goal_score = goal_scores.mean().item<double>();
+          }
 
-          chunk_goal_score = goal_scores.mean().item<double>();
-
-          double chunk_actual_goal = active_future_goal_dist.mean().item<double>();
-          accumulated_actual_goal_occupancy += chunk_actual_goal * static_cast<double>(active_logits.size(0));
+          const double chunk_sampled_goal_distance = active_future_goal_dist.mean().item<double>();
+          accumulated_sampled_goal_distance += chunk_sampled_goal_distance * static_cast<double>(active_logits.size(0));
           accumulated_goal_critic_loss += goal_loss.item<double>() * static_cast<double>(active_logits.size(0));
-          accumulated_goal_actor_loss += (-chunk_goal_score) * static_cast<double>(active_logits.size(0));
-          accumulated_predicted_goal_value += chunk_goal_score * static_cast<double>(active_logits.size(0));
+          accumulated_goal_score += chunk_goal_score * static_cast<double>(active_logits.size(0));
         }
 
         const torch::Tensor loss =
@@ -496,12 +515,8 @@ TrainerMetrics APPOTrainer::update_actor() {
     metrics.critic_variance = accumulated_variance / static_cast<double>(metric_steps);
     metrics.mean_confidence_weight = accumulated_confidence / static_cast<double>(metric_steps);
     metrics.goal_critic_loss = accumulated_goal_critic_loss / static_cast<double>(metric_steps);
-    metrics.goal_actor_loss = accumulated_goal_actor_loss / static_cast<double>(metric_steps);
-    metrics.mean_predicted_goal_value = accumulated_predicted_goal_value / static_cast<double>(metric_steps);
-    metrics.mean_actual_goal_occupancy = accumulated_actual_goal_occupancy / static_cast<double>(metric_steps);
-    metrics.goal_actor_loss_ratio = std::abs(metrics.goal_actor_loss)
-        / std::max(std::abs(metrics.policy_loss), 1.0e-8);
-    metrics.goal_occupancy_correlation = 0.0;
+    metrics.mean_goal_score = accumulated_goal_score / static_cast<double>(metric_steps);
+    metrics.mean_sampled_goal_distance = accumulated_sampled_goal_distance / static_cast<double>(metric_steps);
   }
   metrics.update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count();
   return metrics;
@@ -523,7 +538,6 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
   ESPopulationFitness result;
   result.fitness.assign(static_cast<std::size_t>(pop), 0.0F);
   result.winrate.assign(static_cast<std::size_t>(pop), 0.0F);
-  result.goal_pressure.assign(static_cast<std::size_t>(pop), 0.0F);
   result.kl.assign(static_cast<std::size_t>(pop), 0.0F);
 
   std::vector<int> episode_counts(static_cast<std::size_t>(pop), 0);
@@ -563,10 +577,11 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
       torch::Tensor action_masks = eval_collector->host_action_masks().to(device_, use_pinned_host_buffers_).to(torch::kBool);
       torch::Tensor normalized_obs = actor_normalizer_.normalize(raw_obs);
 
-      ActorStepOutput output = actor_->forward_step(normalized_obs, std::move(eval_state), episode_starts);
+      const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_mapping.target_distance);
+      ActorStepOutput output = actor_->forward_step(normalized_obs, std::move(eval_state), episode_starts, goal_values);
       eval_state = std::move(output.state);
       torch::Tensor perturbed_logits = actor_->policy_eggroll_logits(
-          output.features, A_stack, B_stack, es_cfg.sigma_ES);
+          output.features, A_stack, B_stack, es_cfg.sigma_ES, goal_values);
 
       torch::Tensor base_actions = sample_masked_actions(output.policy_logits, action_masks, true, nullptr);
       torch::Tensor perturbed_actions = sample_masked_actions(perturbed_logits, action_masks, true, nullptr);
@@ -612,7 +627,6 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
     const int denom = std::max(episode_counts[static_cast<std::size_t>(i)], 1);
     result.winrate[static_cast<std::size_t>(i)] =
         static_cast<float>(win_counts[static_cast<std::size_t>(i)]) / static_cast<float>(denom);
-    result.goal_pressure[static_cast<std::size_t>(i)] = 0.0F;
     result.kl[static_cast<std::size_t>(i)] = kl_ptr[i];
     result.fitness[static_cast<std::size_t>(i)] =
         result.winrate[static_cast<std::size_t>(i)]
@@ -689,11 +703,9 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
   metrics.es_update_norm = update_norm;
   for (uint64_t i = 0; i < total_members; ++i) {
     metrics.es_winrate_mean += population.winrate[i];
-    metrics.es_goal_pressure_mean += population.goal_pressure[i];
     metrics.es_kl_mean += population.kl[i];
   }
   metrics.es_winrate_mean /= static_cast<double>(total_members);
-  metrics.es_goal_pressure_mean = 0.0;
   metrics.es_kl_mean /= static_cast<double>(total_members);
 
   auto lora_params = actor_->es_lora_parameters();
@@ -743,7 +755,8 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
       torch::NoGradGuard no_grad;
       actor_normalizer_.update(raw_obs);
       normalized_obs = actor_normalizer_.normalize(raw_obs);
-      output = actor_->forward_step(normalized_obs, std::move(collection_state_), episode_starts);
+      const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_mapping.target_distance);
+      output = actor_->forward_step(normalized_obs, std::move(collection_state_), episode_starts, goal_values);
       collection_state_ = std::move(output.state);
       actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
     }
@@ -855,8 +868,9 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     torch::Tensor final_normalized = actor_normalizer_.normalize(final_raw_obs);
     torch::Tensor final_starts = collector_->host_episode_starts().to(device_, use_pinned_host_buffers_);
     ContinuumState bootstrap_state = clone_state(collection_state_);
+    const torch::Tensor final_goal_values = policy_goal_values_like(final_normalized, config_.goal_mapping.target_distance);
     ActorStepOutput final_output = actor_->forward_step(
-        final_normalized, std::move(bootstrap_state), final_starts);
+        final_normalized, std::move(bootstrap_state), final_starts, final_goal_values);
 
     std::unordered_map<std::string, torch::Tensor> bootstrap_values;
     bootstrap_values["extrinsic"] = compute_mean_value(
@@ -897,11 +911,8 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   metrics.critic_variance = update_metrics.critic_variance;
   metrics.mean_confidence_weight = update_metrics.mean_confidence_weight;
   metrics.goal_critic_loss = update_metrics.goal_critic_loss;
-  metrics.goal_actor_loss = update_metrics.goal_actor_loss;
-  metrics.mean_predicted_goal_value = update_metrics.mean_predicted_goal_value;
-  metrics.goal_actor_loss_ratio = update_metrics.goal_actor_loss_ratio;
-  metrics.mean_actual_goal_occupancy = update_metrics.mean_actual_goal_occupancy;
-  metrics.goal_occupancy_correlation = update_metrics.goal_occupancy_correlation;
+  metrics.mean_goal_score = update_metrics.mean_goal_score;
+  metrics.mean_sampled_goal_distance = update_metrics.mean_sampled_goal_distance;
 
   metrics.obs_build_seconds = collector_timings.obs_build_seconds;
   metrics.mask_build_seconds = collector_timings.mask_build_seconds;
@@ -940,7 +951,7 @@ CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
       .obs_schema_version = config_.obs_schema_version,
       .config_hash = config_hash(config_),
       .action_table_hash = action_table_hash(config_.action_table),
-      .architecture_name = "continuum_goal_conditioned",
+      .architecture_name = "continuum_contrastive_goal_appo",
       .device = config_.ppo.device,
       .global_step = global_step,
       .update_index = update_index,
@@ -1028,12 +1039,11 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " epsilon=" << metrics.adaptive_epsilon
               << " sparse_reward=" << metrics.sparse_reward_mean
               << " goal_critic_loss=" << metrics.goal_critic_loss
-              << " goal_actor_loss=" << metrics.goal_actor_loss
-              << " goal_actor_ratio=" << metrics.goal_actor_loss_ratio
+              << " goal_score=" << metrics.mean_goal_score
+              << " sampled_goal_dist=" << metrics.mean_sampled_goal_distance
               << " mean_goal_dist=" << metrics.mean_goal_distance
               << " ball_prox=" << metrics.ball_proximity_rate
               << " goals=" << metrics.goals_scored << "/" << metrics.goals_conceded
-              << " goal_corr=" << metrics.goal_occupancy_correlation
               << " es_fitness=" << metrics.es_fitness_mean
               << '\n';
     if (wandb.enabled()) {
@@ -1050,23 +1060,19 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"sampled_value_win_mean", metrics.sampled_value_win_mean},
           {"value_win_entropy", metrics.value_win_entropy},
           {"goal_critic_loss", metrics.goal_critic_loss},
-          {"goal_actor_loss", metrics.goal_actor_loss},
-          {"mean_predicted_goal_value", metrics.mean_predicted_goal_value},
-          {"mean_actual_goal_occupancy", metrics.mean_actual_goal_occupancy},
+          {"mean_goal_score", metrics.mean_goal_score},
+          {"mean_sampled_goal_distance", metrics.mean_sampled_goal_distance},
           {"mean_goal_distance", metrics.mean_goal_distance},
           {"min_goal_distance", metrics.min_goal_distance},
-      {"ball_proximity_rate", metrics.ball_proximity_rate},
+          {"ball_proximity_rate", metrics.ball_proximity_rate},
           {"goals_scored", metrics.goals_scored},
           {"goals_conceded", metrics.goals_conceded},
-          {"goal_occupancy_correlation", metrics.goal_occupancy_correlation},
-          {"goal_actor_loss_ratio", metrics.goal_actor_loss_ratio},
       };
       if (update_index % config_.es_lora.es_interval == 0) {
         payload["es_fitness_mean"] = metrics.es_fitness_mean;
         payload["es_fitness_std"] = metrics.es_fitness_std;
         payload["es_fitness_best"] = metrics.es_fitness_best;
         payload["es_winrate_mean"] = metrics.es_winrate_mean;
-        payload["es_goal_pressure_mean"] = metrics.es_goal_pressure_mean;
         payload["es_kl_mean"] = metrics.es_kl_mean;
         payload["es_update_norm"] = metrics.es_update_norm;
         payload["es_lora_a_norm"] = metrics.es_lora_a_norm;

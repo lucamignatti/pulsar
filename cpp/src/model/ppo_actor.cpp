@@ -403,7 +403,7 @@ ActorStepOutput PPOActorImpl::forward_encoded_step(
   torch::Tensor policy_logits;
   torch::Tensor goal_embed = goal_values.defined()
       ? goal_critic_->goal_embedding(goal_values.to(encoded.device()))
-      : torch::zeros({encoded.size(0), goal_critic_config_.embedding_dim}, encoded.options());
+      : goal_critic_->goal_embedding(torch::zeros({encoded.size(0)}, encoded.options()));
   if (!policy_hidden_.is_empty()) {
     policy_logits = policy_lora_->forward(torch::cat({policy_hidden_->forward(features), goal_embed}, -1));
   } else {
@@ -491,13 +491,6 @@ const GoalCriticConfig& PPOActorImpl::goal_critic_config() const {
   return goal_critic_config_;
 }
 
-torch::Tensor PPOActorImpl::policy_goal_logits(const torch::Tensor& features, const torch::Tensor& goal_values) {
-  return goal_critic_->forward(
-      features,
-      torch::zeros({features.size(0)}, torch::TensorOptions().dtype(torch::kLong).device(features.device())),
-      goal_values);
-}
-
 std::vector<torch::Tensor> PPOActorImpl::es_lora_parameters() const {
   return policy_lora_->lora_parameters();
 }
@@ -524,13 +517,14 @@ torch::Tensor PPOActorImpl::policy_eggroll_logits(
     const torch::Tensor& A_stack,
     const torch::Tensor& B_stack,
     float sigma,
-    torch::Tensor) {
+    torch::Tensor goal_values) {
   torch::Tensor policy_input = features;
   if (!policy_hidden_.is_empty()) {
     policy_input = policy_hidden_->forward(policy_input);
   }
-  const torch::Tensor goal_embed = torch::zeros(
-      {policy_input.size(0), goal_critic_config_.embedding_dim}, policy_input.options());
+  const torch::Tensor goal_embed = goal_values.defined()
+      ? goal_critic_->goal_embedding(goal_values.to(features.device()))
+      : goal_critic_->goal_embedding(torch::zeros({features.size(0)}, features.options()));
   return policy_lora_->forward_eggroll_population(torch::cat({policy_input, goal_embed}, -1), A_stack, B_stack, sigma);
 }
 
@@ -556,10 +550,7 @@ PPOActor load_ppo_actor(const std::string& checkpoint_path, const std::string& d
   const ExperimentConfig config = load_experiment_config((base / "config.json").string());
   const CheckpointMetadata metadata = load_checkpoint_metadata((base / "metadata.json").string());
   validate_inference_checkpoint_metadata(metadata, config);
-  if (metadata.architecture_name != "ppo_continuum"
-      && metadata.architecture_name != "dappo_continuum"
-      && metadata.architecture_name != "continuum_goal_conditioned"
-      && metadata.architecture_name != "continuum_contrastive_goal_appo"
+  if (metadata.architecture_name != "continuum_contrastive_goal_appo"
       && metadata.architecture_name != "policy_snapshot") {
     throw std::runtime_error("Checkpoint is not a continuum actor checkpoint.");
   }

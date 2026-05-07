@@ -68,7 +68,7 @@ ctest --test-dir build/release --output-on-failure
 
 ## Core Binary
 
-- `pulsar_appo_train`: online APPO + GCRL + ES-LoRA self-play training
+- `pulsar_appo_train`: online sparse APPO + contrastive goal auxiliary + ES-LoRA self-play training
 
 ## Training
 
@@ -87,9 +87,8 @@ To run a bounded number of updates:
 ```json
 {
   "outcome":       { "score": 1.0, "concede": -1.0, "neutral": 0.0 },
-  "goal_mapping":  { "goal": 0.0, "kernel_sigma": 0.08, "arena_max_distance": 8192.0 },
-  "goal_critic":   { "horizon_H": 256, "gamma_g": 0.99, "hidden_dim": 256, "embedding_dim": 64, "logsumexp_penalty_coeff": 0.01, "lambda_Zg": 1.0 },
-  "actor_goal":    { "lambda_g": 0.1 },
+  "goal_mapping":  { "target_distance": 0.0, "arena_max_distance": 8192.0 },
+  "goal_critic":   { "horizon_H": 288, "gamma_g": 0.99, "hidden_dim": 256, "embedding_dim": 64, "logsumexp_penalty_coeff": 0.01, "lambda_Zg": 1.0, "contrastive_batch_size": 2048 },
   "es_lora":       { "rank": 4, "population_size": 16, "es_interval": 100 },
   "self_play_league": { "enabled": false, ... }
 }

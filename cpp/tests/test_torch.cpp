@@ -56,6 +56,18 @@ int main() {
       throw std::runtime_error("actor feature shape mismatch");
     }
 
+    {
+      const torch::Tensor obs = torch::randn({2, model_config.observation_dim});
+      auto default_state = actor->initial_state(2, torch::kCPU);
+      auto explicit_state = actor->initial_state(2, torch::kCPU);
+      const auto default_out = actor->forward_step(obs, std::move(default_state));
+      const auto explicit_out = actor->forward_step(
+          obs, std::move(explicit_state), {}, torch::zeros({2}));
+      if (!torch::allclose(default_out.policy_logits, explicit_out.policy_logits)) {
+        throw std::runtime_error("default policy goal should match explicit zero goal");
+      }
+    }
+
     const auto actor_clone = pulsar::clone_ppo_actor(actor, torch::kCPU);
     const auto source_params = actor->named_parameters(true);
     const auto clone_params = actor_clone->named_parameters(true);

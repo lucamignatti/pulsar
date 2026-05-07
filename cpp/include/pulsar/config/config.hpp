@@ -56,8 +56,7 @@ struct ModelConfig {
 };
 
 struct GoalMappingConfig {
-  float goal = 0.0F;
-  float kernel_sigma = 0.08F;
+  float target_distance = 0.0F;
   float arena_max_distance = 8192.0F;
 };
 
@@ -68,10 +67,7 @@ struct GoalCriticConfig {
   int embedding_dim = 64;
   float logsumexp_penalty_coeff = 0.01F;
   float lambda_Zg = 1.0F;
-};
-
-struct ActorGoalConfig {
-  float lambda_g = 0.1F;
+  int contrastive_batch_size = 2048;
 };
 
 struct ESLoraConfig {
@@ -84,7 +80,6 @@ struct ESLoraConfig {
   int eval_episodes_per_member = 8;
   int eval_num_envs = 16;
   int eval_rollout_length = 64;
-  float alpha_g = 0.05F;
   float beta_KL = 0.01F;
   bool antithetic_sampling = false;
   bool update_norm_clip = true;
@@ -159,7 +154,6 @@ struct ExperimentConfig {
   PPOConfig ppo{};
   GoalMappingConfig goal_mapping{};
   GoalCriticConfig goal_critic{};
-  ActorGoalConfig actor_goal{};
   ESLoraConfig es_lora{};
   SelfPlayLeagueConfig self_play_league{};
   WandbConfig wandb{};
@@ -192,8 +186,6 @@ void to_json(nlohmann::json& j, const GoalMappingConfig& value);
 void from_json(const nlohmann::json& j, GoalMappingConfig& value);
 void to_json(nlohmann::json& j, const GoalCriticConfig& value);
 void from_json(const nlohmann::json& j, GoalCriticConfig& value);
-void to_json(nlohmann::json& j, const ActorGoalConfig& value);
-void from_json(const nlohmann::json& j, ActorGoalConfig& value);
 void to_json(nlohmann::json& j, const ESLoraConfig& value);
 void from_json(const nlohmann::json& j, ESLoraConfig& value);
 void to_json(nlohmann::json& j, const PPOConfig& value);

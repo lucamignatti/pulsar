@@ -9,6 +9,7 @@
 #include "pulsar/env/mutators.hpp"
 #include "pulsar/env/obs_builder.hpp"
 #include "pulsar/rl/action_table.hpp"
+#include "test_utils.hpp"
 
 namespace {
 
@@ -114,7 +115,7 @@ int main() {
         .obs_schema_version = config.obs_schema_version,
         .config_hash = pulsar::config_hash(config),
         .action_table_hash = pulsar::action_table_hash(config.action_table),
-        .architecture_name = "ppo_continuum",
+        .architecture_name = "continuum_contrastive_goal_appo",
         .device = "cpu",
         .global_step = 12,
         .update_index = 3,
@@ -132,6 +133,11 @@ int main() {
     const auto roundtripped = pulsar::load_experiment_config(config_path.string());
     require(roundtripped.self_play_league.enabled, "self-play config should round-trip");
     std::filesystem::remove(config_path);
+
+    const auto production_config_path = pulsar::test::find_repo_path("configs/2v2_appo.json");
+    const auto production_config = pulsar::load_experiment_config(production_config_path.string());
+    pulsar::validate_experiment_config(production_config);
+    require(production_config.schema_version == 6, "production config schema should be v6");
 
     std::cout << "pulsar_core_tests passed\n";
     return EXIT_SUCCESS;

@@ -47,14 +47,11 @@ struct TrainerMetrics {
   double value_win_entropy = 0.0;
 
   double goal_critic_loss = 0.0;
-  double goal_actor_loss = 0.0;
-  double mean_predicted_goal_value = 0.0;
-  double mean_actual_goal_occupancy = 0.0;
+  double mean_goal_score = 0.0;
+  double mean_sampled_goal_distance = 0.0;
   double mean_goal_distance = 0.0;
   double min_goal_distance = 0.0;
-  double goal_actor_loss_ratio = 0.0;
   double ball_proximity_rate = 0.0;
-  double goal_occupancy_correlation = 0.0;
   int64_t goals_scored = 0;
   int64_t goals_conceded = 0;
 
@@ -62,7 +59,6 @@ struct TrainerMetrics {
   double es_fitness_std = 0.0;
   double es_fitness_best = 0.0;
   double es_winrate_mean = 0.0;
-  double es_goal_pressure_mean = 0.0;
   double es_kl_mean = 0.0;
   double es_update_norm = 0.0;
   double es_lora_a_norm = 0.0;
@@ -98,7 +94,6 @@ class APPOTrainer {
   struct ESPopulationFitness {
     std::vector<float> fitness{};
     std::vector<float> winrate{};
-    std::vector<float> goal_pressure{};
     std::vector<float> kl{};
   };
 

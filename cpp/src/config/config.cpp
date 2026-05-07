@@ -149,15 +149,16 @@ void from_json(const json& j, ModelConfig& value) {
 
 void to_json(json& j, const GoalMappingConfig& value) {
   j = json{
-      {"goal", value.goal},
-      {"kernel_sigma", value.kernel_sigma},
+      {"target_distance", value.target_distance},
       {"arena_max_distance", value.arena_max_distance},
   };
 }
 
 void from_json(const json& j, GoalMappingConfig& value) {
-  value.goal = j.value("goal", 0.0F);
-  value.kernel_sigma = j.value("kernel_sigma", 0.05F);
+  if (j.contains("goal") || j.contains("kernel_sigma")) {
+    throw std::invalid_argument("goal_mapping.goal/kernel_sigma were removed; use goal_mapping.target_distance.");
+  }
+  value.target_distance = j.value("target_distance", 0.0F);
   value.arena_max_distance = j.value("arena_max_distance", 8192.0F);
 }
 
@@ -169,6 +170,7 @@ void to_json(json& j, const GoalCriticConfig& value) {
       {"embedding_dim", value.embedding_dim},
       {"logsumexp_penalty_coeff", value.logsumexp_penalty_coeff},
       {"lambda_Zg", value.lambda_Zg},
+      {"contrastive_batch_size", value.contrastive_batch_size},
   };
 }
 
@@ -179,14 +181,7 @@ void from_json(const json& j, GoalCriticConfig& value) {
   value.embedding_dim = j.value("embedding_dim", 64);
   value.logsumexp_penalty_coeff = j.value("logsumexp_penalty_coeff", 0.01F);
   value.lambda_Zg = j.value("lambda_Zg", 1.0F);
-}
-
-void to_json(json& j, const ActorGoalConfig& value) {
-  j = json{{"lambda_g", value.lambda_g}};
-}
-
-void from_json(const json& j, ActorGoalConfig& value) {
-  value.lambda_g = j.value("lambda_g", 0.02F);
+  value.contrastive_batch_size = j.value("contrastive_batch_size", 2048);
 }
 
 void to_json(json& j, const ESLoraConfig& value) {
@@ -200,7 +195,6 @@ void to_json(json& j, const ESLoraConfig& value) {
       {"eval_episodes_per_member", value.eval_episodes_per_member},
       {"eval_num_envs", value.eval_num_envs},
       {"eval_rollout_length", value.eval_rollout_length},
-      {"alpha_g", value.alpha_g},
       {"beta_KL", value.beta_KL},
       {"antithetic_sampling", value.antithetic_sampling},
       {"update_norm_clip", value.update_norm_clip},
@@ -208,6 +202,9 @@ void to_json(json& j, const ESLoraConfig& value) {
 }
 
 void from_json(const json& j, ESLoraConfig& value) {
+  if (j.contains("alpha_g")) {
+    throw std::invalid_argument("es_lora.alpha_g was removed; ES fitness is sparse winrate minus KL only.");
+  }
   value.rank = j.value("rank", 4);
   value.lora_alpha = j.value("lora_alpha", 4.0F);
   value.population_size = j.value("population_size", 16);
@@ -217,7 +214,6 @@ void from_json(const json& j, ESLoraConfig& value) {
   value.eval_episodes_per_member = j.value("eval_episodes_per_member", 8);
   value.eval_num_envs = j.value("eval_num_envs", 16);
   value.eval_rollout_length = j.value("eval_rollout_length", 64);
-  value.alpha_g = j.value("alpha_g", 0.05F);
   value.beta_KL = j.value("beta_KL", 0.01F);
   value.antithetic_sampling = j.value("antithetic_sampling", false);
   value.update_norm_clip = j.value("update_norm_clip", true);
@@ -358,7 +354,6 @@ void to_json(json& j, const ExperimentConfig& value) {
       {"ppo", value.ppo},
       {"goal_mapping", value.goal_mapping},
       {"goal_critic", value.goal_critic},
-      {"actor_goal", value.actor_goal},
       {"es_lora", value.es_lora},
       {"self_play_league", value.self_play_league},
       {"wandb", value.wandb},
@@ -383,7 +378,8 @@ void from_json(const json& j, ExperimentConfig& value) {
   reject_removed_section(j, "offline_optimization");
   reject_removed_section(j, "reward");
   reject_removed_section(j, "value_pretraining");
-  value.schema_version = j.value("schema_version", 5);
+  reject_removed_section(j, "actor_goal");
+  value.schema_version = j.value("schema_version", 6);
   value.obs_schema_version = j.value("obs_schema_version", 2);
   value.env = j.value("env", EnvConfig{});
   value.outcome = j.value("outcome", OutcomeConfig{});
@@ -392,7 +388,6 @@ void from_json(const json& j, ExperimentConfig& value) {
   value.ppo = j.value("ppo", PPOConfig{});
   value.goal_mapping = j.value("goal_mapping", GoalMappingConfig{});
   value.goal_critic = j.value("goal_critic", GoalCriticConfig{});
-  value.actor_goal = j.value("actor_goal", ActorGoalConfig{});
   value.es_lora = j.value("es_lora", ESLoraConfig{});
   value.self_play_league = j.value("self_play_league", SelfPlayLeagueConfig{});
   value.wandb = j.value("wandb", WandbConfig{});
@@ -434,11 +429,20 @@ void validate_experiment_config(const ExperimentConfig& config) {
   if (config.ppo.minibatch_size < config.ppo.sequence_length) {
     throw std::invalid_argument("ppo.minibatch_size must be >= ppo.sequence_length.");
   }
+  if (config.ppo.sequence_length > config.ppo.rollout_length) {
+    throw std::invalid_argument("ppo.sequence_length must be <= ppo.rollout_length.");
+  }
   if (config.ppo.burn_in < 0 || config.ppo.burn_in >= config.ppo.sequence_length) {
     throw std::invalid_argument("ppo.burn_in must satisfy 0 <= burn_in < sequence_length.");
   }
   if (config.model.encoder_dim <= 0) {
     throw std::invalid_argument("model.encoder_dim must be positive.");
+  }
+  if (config.goal_mapping.target_distance < 0.0F || config.goal_mapping.target_distance > 1.0F) {
+    throw std::invalid_argument("goal_mapping.target_distance must be in [0, 1].");
+  }
+  if (config.goal_mapping.arena_max_distance <= 0.0F) {
+    throw std::invalid_argument("goal_mapping.arena_max_distance must be positive.");
   }
   if (config.goal_critic.horizon_H <= 0) {
     throw std::invalid_argument("goal_critic.horizon_H must be positive.");
@@ -451,6 +455,12 @@ void validate_experiment_config(const ExperimentConfig& config) {
   }
   if (config.goal_critic.logsumexp_penalty_coeff < 0.0F) {
     throw std::invalid_argument("goal_critic.logsumexp_penalty_coeff must be non-negative.");
+  }
+  if (config.goal_critic.lambda_Zg < 0.0F) {
+    throw std::invalid_argument("goal_critic.lambda_Zg must be non-negative.");
+  }
+  if (config.goal_critic.contrastive_batch_size <= 0) {
+    throw std::invalid_argument("goal_critic.contrastive_batch_size must be positive.");
   }
   if (config.es_lora.rank <= 0) {
     throw std::invalid_argument("es_lora.rank must be positive.");

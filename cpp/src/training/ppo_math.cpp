@@ -237,6 +237,7 @@ torch::Tensor normalize_advantage(const torch::Tensor& advantages, const torch::
 torch::Tensor sample_future_goal_distances(
     const torch::Tensor& goal_distances,
     const torch::Tensor& dones,
+    const torch::Tensor& episode_starts,
     float gamma_g,
     int horizon_H) {
   const int64_t steps = goal_distances.size(0);
@@ -245,22 +246,34 @@ torch::Tensor sample_future_goal_distances(
 
   const float gamma = std::clamp(gamma_g, 0.0F, 0.999999F);
   for (int64_t t = 0; t < steps; ++t) {
-    const int64_t max_future = std::min<int64_t>(steps - t - 1, std::max<int64_t>(1, horizon_H));
-    if (max_future <= 0) {
-      sampled[t].copy_(goal_distances[t]);
-      continue;
-    }
-
-    torch::Tensor weights = torch::zeros({max_future}, goal_distances.options());
-    for (int64_t k = 0; k < max_future; ++k) {
-      weights[k] = std::pow(static_cast<double>(gamma), static_cast<double>(k));
-    }
-    weights = weights / weights.sum().clamp_min(1.0e-8F);
-
     for (int64_t a = 0; a < agents; ++a) {
+      int64_t end_idx = steps;
+      for (int64_t j = t; j < steps; ++j) {
+        if (dones.defined() && dones[j][a].item<float>() > 0.5F) {
+          end_idx = j + 1;
+          break;
+        }
+        if (episode_starts.defined() && episode_starts[j][a].item<float>() > 0.5F && j > t) {
+          end_idx = j;
+          break;
+        }
+      }
+
+      const int64_t max_future = std::min<int64_t>(end_idx - t - 1, std::max<int64_t>(1, horizon_H));
+      if (max_future <= 0) {
+        sampled[t][a] = goal_distances[t][a];
+        continue;
+      }
+
+      torch::Tensor weights = torch::zeros({max_future}, goal_distances.options());
+      for (int64_t k = 0; k < max_future; ++k) {
+        weights[k] = std::pow(static_cast<double>(gamma), static_cast<double>(k));
+      }
+      weights = weights / weights.sum().clamp_min(1.0e-8F);
+
       int64_t chosen = t + 1 + torch::multinomial(weights, 1, true).item<int64_t>();
-      if (chosen >= steps) {
-        chosen = steps - 1;
+      if (chosen >= end_idx) {
+        chosen = end_idx - 1;
       }
       sampled[t][a] = goal_distances[chosen][a];
     }
@@ -299,29 +312,6 @@ float compute_discrete_policy_kl(
 
   const torch::Tensor kl = (perturbed_probs * (torch::log(perturbed_probs + 1.0e-8) - torch::log(base_probs + 1.0e-8))).sum(-1);
   return kl.mean().item<float>();
-}
-
-float compute_goal_value_correlation(
-    const torch::Tensor& predicted_values,
-    const torch::Tensor& actual_values,
-    const torch::Tensor& weights) {
-  const torch::Tensor pred = predicted_values.flatten();
-  const torch::Tensor act = actual_values.flatten();
-  const torch::Tensor w = weights.flatten();
-
-  const torch::Tensor w_sum = w.sum().clamp_min(1.0e-8F);
-  const torch::Tensor pred_mean = (pred * w).sum() / w_sum;
-  const torch::Tensor act_mean = (act * w).sum() / w_sum;
-
-  const torch::Tensor numerator = ((pred - pred_mean) * (act - act_mean) * w).sum();
-  const torch::Tensor denom_pred = ((pred - pred_mean).square() * w).sum();
-  const torch::Tensor denom_act = ((act - act_mean).square() * w).sum();
-  const torch::Tensor denominator = torch::sqrt(denom_pred * denom_act);
-
-  if (denominator.item<float>() < 1.0e-8F) {
-    return 0.0F;
-  }
-  return (numerator / denominator).item<float>();
 }
 
 ContinuumState detach_state(ContinuumState state) {

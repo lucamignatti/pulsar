@@ -216,11 +216,12 @@ int main() {
         goal_dist[k][1] = 1.0F;
       }
       auto dones = torch::zeros({steps, agents}, torch::kFloat32);
+      auto ep_starts = torch::zeros({steps, agents}, torch::kFloat32);
       const float gamma_g = 0.99F;
       const int horizon_H = 64;
 
       auto future_goals = pulsar::sample_future_goal_distances(
-          goal_dist, dones, gamma_g, horizon_H);
+          goal_dist, dones, ep_starts, gamma_g, horizon_H);
 
       require(future_goals.sizes() == torch::IntArrayRef({steps, agents}), "future goals shape");
       require_finite(future_goals, "future goals finite");

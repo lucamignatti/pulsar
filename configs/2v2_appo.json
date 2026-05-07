@@ -42,10 +42,10 @@
     "value_v_max": 10.0
   },
   "ppo": {
-    "num_envs": 1024,
-    "collection_workers": 56,
+    "num_envs": 256,
+    "collection_workers": 16,
     "init_checkpoint": "",
-    "rollout_length": 64,
+    "rollout_length": 288,
     "minibatch_size": 65536,
     "update_epochs": 3,
     "clip_range": 0.2,
@@ -53,13 +53,13 @@
     "value_coef": 1.0,
     "gamma": 0.99,
     "gae_lambda": 0.95,
-    "learning_rate": 0.0002,
+    "learning_rate": 0.0003,
     "max_grad_norm": 1.0,
     "device": "cuda",
     "checkpoint_interval": 50,
     "max_rolling_checkpoints": 5,
-    "sequence_length": 16,
-    "burn_in": 4,
+    "sequence_length": 288,
+    "burn_in": 0,
     "use_adaptive_epsilon": true,
     "adaptive_epsilon_beta": 1.0,
     "epsilon_min": 0.05,
@@ -71,20 +71,17 @@
     "synchronize_cuda_timing": false
   },
   "goal_mapping": {
-    "goal": 0.0,
-    "kernel_sigma": 0.08,
+    "target_distance": 0.0,
     "arena_max_distance": 8192.0
   },
   "goal_critic": {
-    "horizon_H": 256,
+    "horizon_H": 288,
     "gamma_g": 0.99,
     "hidden_dim": 256,
     "embedding_dim": 64,
     "logsumexp_penalty_coeff": 0.01,
-    "lambda_Zg": 1.0
-  },
-  "actor_goal": {
-    "lambda_g": 0.1
+    "lambda_Zg": 1.0,
+    "contrastive_batch_size": 2048
   },
   "es_lora": {
     "rank": 4,
@@ -92,11 +89,10 @@
     "population_size": 16,
     "sigma_ES": 0.01,
     "eta_ES": 0.003,
-    "es_interval": 25,
+    "es_interval": 50,
     "eval_episodes_per_member": 2,
     "eval_num_envs": 16,
     "eval_rollout_length": 64,
-    "alpha_g": 0.05,
     "beta_KL": 0.01,
     "antithetic_sampling": false,
     "update_norm_clip": true
@@ -126,6 +122,6 @@
     "python_executable": "python3",
     "script_path": "scripts/wandb_stream.py",
     "log_interval_seconds": 30.0,
-    "tags": ["production", "gcrl", "es-lora", "continuum", "2v2"]
+    "tags": ["production", "contrastive-goal", "es-lora", "continuum", "2v2"]
   }
 }

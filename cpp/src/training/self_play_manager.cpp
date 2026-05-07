@@ -31,6 +31,13 @@ torch::Tensor masked_sample(const torch::Tensor& logits, const torch::Tensor& ac
   return sample_masked_actions(logits, action_masks, false, nullptr);
 }
 
+torch::Tensor policy_goal_values_like(const torch::Tensor& obs, float target_distance) {
+  return torch::full(
+      {obs.size(0)},
+      target_distance,
+      obs.options().dtype(torch::kFloat32));
+}
+
 void update_elo_impl(double& winner, double& loser, double k_factor) {
   const double expected = 1.0 / (1.0 + std::pow(10.0, (loser - winner) / 400.0));
   winner += k_factor * (1.0 - expected);
@@ -159,7 +166,8 @@ void SelfPlayManager::infer_opponent_actions(
     const torch::Tensor starts = episode_starts.index_select(0, indices);
     const torch::Tensor normalized_obs = snapshot.normalizer.normalize(obs);
     ContinuumState state = gather_state(opponent_state, indices);
-    const ActorStepOutput output = snapshot.model->forward_step(normalized_obs, std::move(state), starts);
+    const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_mapping.target_distance);
+    const ActorStepOutput output = snapshot.model->forward_step(normalized_obs, std::move(state), starts, goal_values);
     const torch::Tensor sampled_actions =
         deterministic ? masked_argmax(output.policy_logits, masks) : masked_sample(output.policy_logits, masks);
     actions.index_copy_(0, indices, sampled_actions);
@@ -400,10 +408,13 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
         obs.copy_(torch::from_blob(host_obs.data(), {static_cast<long>(total_agents), static_cast<long>(obs_builder_->obs_dim())}, torch::kFloat32).clone().to(device_));
         masks.copy_(torch::from_blob(host_masks.data(), {static_cast<long>(total_agents), static_cast<long>(discrete->action_table().size())}, torch::kUInt8).clone().to(device_));
 
+        const torch::Tensor current_obs = current_normalizer.normalize(obs);
+        const torch::Tensor snapshot_obs = snapshot.normalizer.normalize(obs);
+        const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_mapping.target_distance);
         const ActorStepOutput current_out =
-            current_model->forward_step(current_normalizer.normalize(obs), std::move(current_state), episode_starts);
+            current_model->forward_step(current_obs, std::move(current_state), episode_starts, goal_values);
         const ActorStepOutput snapshot_out =
-            snapshot.model->forward_step(snapshot.normalizer.normalize(obs), std::move(snapshot_state), episode_starts);
+            snapshot.model->forward_step(snapshot_obs, std::move(snapshot_state), episode_starts, goal_values);
         current_state = std::move(current_out.state);
         snapshot_state = std::move(snapshot_out.state);
         const torch::Tensor action_masks = masks.to(torch::kBool);
