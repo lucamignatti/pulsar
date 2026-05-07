@@ -155,6 +155,33 @@ void BatchedRocketSimCollector::set_self_play_assignment_fn(AssignmentFn assignm
   rebuild_host_buffers(current_buffers_, nullptr);
 }
 
+void BatchedRocketSimCollector::reset_all(CollectorTimings* timings) {
+  PULSAR_TRACE_SCOPE_CAT("collector", "reset_all");
+  const auto reset_start = std::chrono::steady_clock::now();
+  executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
+    for (std::size_t env_idx = begin; env_idx < end; ++env_idx) {
+      envs_[env_idx].reset_seed += static_cast<std::uint64_t>(envs_.size());
+      envs_[env_idx].engine->reset(envs_[env_idx].reset_seed);
+    }
+  });
+  for (std::size_t env_idx = 0; env_idx < envs_.size(); ++env_idx) {
+    assign_env(env_idx, envs_[env_idx].reset_seed);
+  }
+  host_dones_.zero_();
+  host_terminated_.zero_();
+  host_truncated_.zero_();
+  host_terminal_outcome_labels_.fill_(2);
+  host_terminal_observations_.zero_();
+  host_goal_distances_.zero_();
+  host_ball_proximity_.zero_();
+  current_buffers_.episode_starts.fill_(1.0F);
+  rebuild_host_buffers(current_buffers_, timings);
+  if (timings != nullptr) {
+    timings->done_reset_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - reset_start).count();
+  }
+}
+
 std::size_t BatchedRocketSimCollector::num_envs() const {
   return envs_.size();
 }

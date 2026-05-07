@@ -42,8 +42,8 @@
     "value_v_max": 10.0
   },
   "ppo": {
-    "num_envs": 32,
-    "collection_workers": 32,
+    "num_envs": 128,
+    "collection_workers": 64,
     "init_checkpoint": "",
     "rollout_length": 288,
     "minibatch_size": 32768,
@@ -61,7 +61,7 @@
     "sequence_length": 64,
     "burn_in": 0,
     "min_rollout_length": 64,
-    "early_update_completed_episodes": 4,
+    "early_update_completed_episodes": 8,
     "train_only_scored_episodes": true,
     "use_adaptive_epsilon": true,
     "adaptive_epsilon_beta": 1.0,

@@ -52,6 +52,7 @@ class BatchedRocketSimCollector {
       bool pin_host_memory);
 
   void set_self_play_assignment_fn(AssignmentFn assignment_fn);
+  void reset_all(CollectorTimings* timings = nullptr);
 
   [[nodiscard]] std::size_t num_envs() const;
   [[nodiscard]] std::size_t total_agents() const;

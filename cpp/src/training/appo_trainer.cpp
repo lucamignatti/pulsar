@@ -798,6 +798,11 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   std::int64_t collected_agent_steps = 0;
 
   const auto collection_start = std::chrono::steady_clock::now();
+  if (config_.ppo.train_only_scored_episodes) {
+    collector_->reset_all(&collector_timings);
+    collection_state_ = actor_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
+    opponent_collection_state_ = actor_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
+  }
   rollout_.set_initial_state(collection_state_);
   const torch::Tensor atom_support_win = actor_->value_win_support().to(device_);
 
