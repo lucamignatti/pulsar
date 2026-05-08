@@ -149,39 +149,36 @@ void from_json(const json& j, ModelConfig& value) {
 
 void to_json(json& j, const GoalMappingConfig& value) {
   j = json{
-      {"target_distance", value.target_distance},
       {"arena_max_distance", value.arena_max_distance},
   };
 }
 
 void from_json(const json& j, GoalMappingConfig& value) {
-  if (j.contains("goal") || j.contains("kernel_sigma")) {
-    throw std::invalid_argument("goal_mapping.goal/kernel_sigma were removed; use goal_mapping.target_distance.");
-  }
-  value.target_distance = j.value("target_distance", 0.0F);
   value.arena_max_distance = j.value("arena_max_distance", 8192.0F);
 }
 
 void to_json(json& j, const GoalCriticConfig& value) {
   j = json{
-      {"horizon_H", value.horizon_H},
-      {"gamma_g", value.gamma_g},
+      {"goal_dim", value.goal_dim},
       {"hidden_dim", value.hidden_dim},
       {"embedding_dim", value.embedding_dim},
       {"logsumexp_penalty_coeff", value.logsumexp_penalty_coeff},
       {"lambda_Zg", value.lambda_Zg},
+      {"lambda_goal_actor", value.lambda_goal_actor},
       {"contrastive_batch_size", value.contrastive_batch_size},
+      {"max_future_horizon", value.max_future_horizon},
   };
 }
 
 void from_json(const json& j, GoalCriticConfig& value) {
-  value.horizon_H = j.value("horizon_H", 256);
-  value.gamma_g = j.value("gamma_g", 0.99F);
+  value.goal_dim = j.value("goal_dim", 3);
   value.hidden_dim = j.value("hidden_dim", 256);
   value.embedding_dim = j.value("embedding_dim", 64);
   value.logsumexp_penalty_coeff = j.value("logsumexp_penalty_coeff", 0.01F);
   value.lambda_Zg = j.value("lambda_Zg", 1.0F);
-  value.contrastive_batch_size = j.value("contrastive_batch_size", 2048);
+  value.lambda_goal_actor = j.value("lambda_goal_actor", 0.1F);
+  value.contrastive_batch_size = j.value("contrastive_batch_size", 4096);
+  value.max_future_horizon = j.value("max_future_horizon", 256);
 }
 
 void to_json(json& j, const ESLoraConfig& value) {
@@ -207,15 +204,15 @@ void from_json(const json& j, ESLoraConfig& value) {
   }
   value.rank = j.value("rank", 4);
   value.lora_alpha = j.value("lora_alpha", 4.0F);
-  value.population_size = j.value("population_size", 16);
-  value.sigma_ES = j.value("sigma_ES", 0.01F);
+  value.population_size = j.value("population_size", 8);
+  value.sigma_ES = j.value("sigma_ES", 0.05F);
   value.eta_ES = j.value("eta_ES", 0.003F);
-  value.es_interval = j.value("es_interval", 100);
-  value.eval_episodes_per_member = j.value("eval_episodes_per_member", 8);
-  value.eval_num_envs = j.value("eval_num_envs", 16);
-  value.eval_rollout_length = j.value("eval_rollout_length", 64);
+  value.es_interval = j.value("es_interval", 25);
+  value.eval_episodes_per_member = j.value("eval_episodes_per_member", 2);
+  value.eval_num_envs = j.value("eval_num_envs", 8);
+  value.eval_rollout_length = j.value("eval_rollout_length", 450);
   value.beta_KL = j.value("beta_KL", 0.01F);
-  value.antithetic_sampling = j.value("antithetic_sampling", false);
+  value.antithetic_sampling = j.value("antithetic_sampling", true);
   value.update_norm_clip = j.value("update_norm_clip", true);
 }
 
@@ -243,9 +240,6 @@ void to_json(json& j, const PPOConfig& value) {
       {"min_rollout_length", value.min_rollout_length},
       {"early_update_completed_episodes", value.early_update_completed_episodes},
       {"train_only_scored_episodes", value.train_only_scored_episodes},
-      {"use_balanced_training", value.use_balanced_training},
-      {"scored_episode_train_fraction", value.scored_episode_train_fraction},
-      {"min_training_episodes", value.min_training_episodes},
       {"use_adaptive_epsilon", value.use_adaptive_epsilon},
       {"adaptive_epsilon_beta", value.adaptive_epsilon_beta},
       {"epsilon_min", value.epsilon_min},
@@ -281,9 +275,6 @@ void from_json(const json& j, PPOConfig& value) {
   value.min_rollout_length = j.value("min_rollout_length", 0);
   value.early_update_completed_episodes = j.value("early_update_completed_episodes", 0);
   value.train_only_scored_episodes = j.value("train_only_scored_episodes", false);
-  value.use_balanced_training = j.value("use_balanced_training", false);
-  value.scored_episode_train_fraction = j.value("scored_episode_train_fraction", 0.25F);
-  value.min_training_episodes = j.value("min_training_episodes", 1);
   value.use_adaptive_epsilon = j.value("use_adaptive_epsilon", true);
   value.adaptive_epsilon_beta = j.value("adaptive_epsilon_beta", 1.0F);
   value.epsilon_min = j.value("epsilon_min", 0.05F);
@@ -464,23 +455,14 @@ void validate_experiment_config(const ExperimentConfig& config) {
   if (config.ppo.early_update_completed_episodes < 0) {
     throw std::invalid_argument("ppo.early_update_completed_episodes must be non-negative.");
   }
-  if (config.ppo.scored_episode_train_fraction <= 0.0F || config.ppo.scored_episode_train_fraction > 1.0F) {
-    throw std::invalid_argument("ppo.scored_episode_train_fraction must be in (0, 1].");
-  }
-  if (config.ppo.min_training_episodes < 0) {
-    throw std::invalid_argument("ppo.min_training_episodes must be non-negative.");
-  }
   if (config.model.encoder_dim <= 0) {
     throw std::invalid_argument("model.encoder_dim must be positive.");
-  }
-  if (config.goal_mapping.target_distance < 0.0F || config.goal_mapping.target_distance > 1.0F) {
-    throw std::invalid_argument("goal_mapping.target_distance must be in [0, 1].");
   }
   if (config.goal_mapping.arena_max_distance <= 0.0F) {
     throw std::invalid_argument("goal_mapping.arena_max_distance must be positive.");
   }
-  if (config.goal_critic.horizon_H <= 0) {
-    throw std::invalid_argument("goal_critic.horizon_H must be positive.");
+  if (config.goal_critic.goal_dim <= 0) {
+    throw std::invalid_argument("goal_critic.goal_dim must be positive.");
   }
   if (config.goal_critic.hidden_dim <= 0) {
     throw std::invalid_argument("goal_critic.hidden_dim must be positive.");

@@ -177,8 +177,8 @@ float LoRALinearImpl::scale() const {
   return scale_;
 }
 
-GoalCriticImpl::GoalCriticImpl(int feature_dim, int action_dim, int embedding_dim, int hidden_dim)
-    : action_dim_(action_dim), hidden_dim_(hidden_dim), embedding_dim_(embedding_dim) {
+GoalCriticImpl::GoalCriticImpl(int feature_dim, int action_dim, int embedding_dim, int hidden_dim, int goal_dim)
+    : action_dim_(action_dim), hidden_dim_(hidden_dim), embedding_dim_(embedding_dim), goal_dim_(goal_dim) {
   sa_encoder_ = torch::nn::Sequential();
   sa_encoder_->push_back(torch::nn::Linear(feature_dim + action_dim, hidden_dim));
   sa_encoder_->push_back(torch::nn::Functional(torch::relu));
@@ -187,7 +187,7 @@ GoalCriticImpl::GoalCriticImpl(int feature_dim, int action_dim, int embedding_di
   register_module("sa_encoder", sa_encoder_);
 
   goal_encoder_ = torch::nn::Sequential();
-  goal_encoder_->push_back(torch::nn::Linear(1, hidden_dim));
+  goal_encoder_->push_back(torch::nn::Linear(goal_dim, hidden_dim));
   goal_encoder_->push_back(torch::nn::Functional(torch::relu));
   goal_encoder_->push_back(torch::nn::Linear(hidden_dim, embedding_dim));
   goal_encoder_->push_back(torch::nn::Functional(torch::relu));
@@ -213,7 +213,7 @@ torch::Tensor GoalCriticImpl::sa_embedding(const torch::Tensor& features, const 
 
 torch::Tensor GoalCriticImpl::goal_embedding(const torch::Tensor& goal_values) {
   PULSAR_TRACE_SCOPE_CAT("actor", "goal_embedding");
-  return goal_encoder_->forward(goal_values.unsqueeze(-1).to(torch::kFloat32));
+  return goal_encoder_->forward(goal_values.to(torch::kFloat32));
 }
 
 torch::nn::Sequential PPOActorImpl::make_value_win_head(int input_dim) const {
@@ -288,7 +288,7 @@ PPOActorImpl::PPOActorImpl(ModelConfig config, const GoalCriticConfig& goal_crit
             .add_(config_.value_v_min));
   }
 
-  goal_critic_ = GoalCritic(feature_dim_, config_.action_dim, goal_critic_config_.embedding_dim, goal_critic_config_.hidden_dim);
+  goal_critic_ = GoalCritic(feature_dim_, config_.action_dim, goal_critic_config_.embedding_dim, goal_critic_config_.hidden_dim, goal_critic_config_.goal_dim);
   register_module("goal_critic", goal_critic_);
 
   ltm_basis_keys_ = register_parameter(
@@ -408,7 +408,7 @@ ActorStepOutput PPOActorImpl::forward_encoded_step(
   torch::Tensor policy_logits;
   torch::Tensor goal_embed = goal_values.defined()
       ? goal_critic_->goal_embedding(goal_values.to(encoded.device()))
-      : goal_critic_->goal_embedding(torch::zeros({encoded.size(0)}, encoded.options()));
+      : goal_critic_->goal_embedding(torch::zeros({encoded.size(0), goal_critic_->goal_dim()}, encoded.options()));
   if (!policy_hidden_.is_empty()) {
     policy_logits = policy_lora_->forward(torch::cat({policy_hidden_->forward(features), goal_embed}, -1));
   } else {
@@ -531,7 +531,7 @@ torch::Tensor PPOActorImpl::policy_eggroll_logits(
   }
   const torch::Tensor goal_embed = goal_values.defined()
       ? goal_critic_->goal_embedding(goal_values.to(features.device()))
-      : goal_critic_->goal_embedding(torch::zeros({features.size(0)}, features.options()));
+      : goal_critic_->goal_embedding(torch::zeros({features.size(0), goal_critic_->goal_dim()}, features.options()));
   return policy_lora_->forward_eggroll_population(torch::cat({policy_input, goal_embed}, -1), A_stack, B_stack, sigma);
 }
 

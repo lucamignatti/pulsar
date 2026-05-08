@@ -77,7 +77,7 @@ TORCH_MODULE(LoRALinear);
 
 class GoalCriticImpl : public torch::nn::Module {
  public:
-  GoalCriticImpl(int feature_dim, int action_dim, int embedding_dim = 64, int hidden_dim = 256);
+  GoalCriticImpl(int feature_dim, int action_dim, int embedding_dim = 64, int hidden_dim = 256, int goal_dim = 3);
 
   torch::Tensor sa_embedding(const torch::Tensor& features, const torch::Tensor& action_inputs);
   torch::Tensor goal_embedding(const torch::Tensor& goal_values);
@@ -86,12 +86,15 @@ class GoalCriticImpl : public torch::nn::Module {
       const torch::Tensor& action_inputs,
       const torch::Tensor& goal_values);
 
+  int goal_dim() const { return goal_dim_; }
+
  private:
   torch::nn::Sequential sa_encoder_{nullptr};
   torch::nn::Sequential goal_encoder_{nullptr};
   int action_dim_;
   int hidden_dim_;
   int embedding_dim_;
+  int goal_dim_;
 };
 
 TORCH_MODULE(GoalCritic);

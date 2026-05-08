@@ -62,7 +62,7 @@ int main() {
       auto explicit_state = actor->initial_state(2, torch::kCPU);
       const auto default_out = actor->forward_step(obs, std::move(default_state));
       const auto explicit_out = actor->forward_step(
-          obs, std::move(explicit_state), {}, torch::zeros({2}));
+          obs, std::move(explicit_state), {}, torch::zeros({2, gc_cfg.goal_dim}));
       if (!torch::allclose(default_out.policy_logits, explicit_out.policy_logits)) {
         throw std::runtime_error("default policy goal should match explicit zero goal");
       }
@@ -82,7 +82,7 @@ int main() {
       throw std::runtime_error("value support shape mismatch");
     }
 
-    torch::Tensor goal_emb = actor->goal_critic()->goal_embedding(torch::zeros({2}));
+    torch::Tensor goal_emb = actor->goal_critic()->goal_embedding(torch::zeros({2, gc_cfg.goal_dim}));
     if (goal_emb.sizes() != torch::IntArrayRef({2, gc_cfg.embedding_dim})) {
       throw std::runtime_error("goal embedding shape mismatch");
     }
@@ -94,7 +94,7 @@ int main() {
       torch::Tensor goal_score = actor->goal_critic()->forward(
           out.features,
           torch::zeros({2}, torch::TensorOptions().dtype(torch::kLong)),
-          torch::zeros({2}));
+          torch::zeros({2, gc_cfg.goal_dim}));
       if (goal_score.sizes() != torch::IntArrayRef({2})) {
         throw std::runtime_error("goal critic output shape mismatch");
       }

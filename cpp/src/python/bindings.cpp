@@ -147,9 +147,8 @@ class PyPPOActor {
 
     torch::NoGradGuard no_grad;
     const torch::Tensor normalized = normalizer_.normalize(input);
-    const torch::Tensor goal_values = torch::full(
-        {max_batch_size_},
-        config_.goal_mapping.target_distance,
+    const torch::Tensor goal_values = torch::zeros(
+        {max_batch_size_, config_.goal_critic.goal_dim},
         torch::TensorOptions().dtype(torch::kFloat32).device(torch_device_));
     ActorStepOutput output = model_->forward_step(
         normalized, std::move(batched_state_), starts, goal_values);

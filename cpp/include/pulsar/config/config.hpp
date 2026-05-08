@@ -56,32 +56,32 @@ struct ModelConfig {
 };
 
 struct GoalMappingConfig {
-  float target_distance = 0.0F;
   float arena_max_distance = 8192.0F;
 };
 
 struct GoalCriticConfig {
-  int horizon_H = 256;
-  float gamma_g = 0.99F;
+  int goal_dim = 3;
   int hidden_dim = 256;
   int embedding_dim = 64;
   float logsumexp_penalty_coeff = 0.01F;
   float lambda_Zg = 1.0F;
-  int contrastive_batch_size = 2048;
+  float lambda_goal_actor = 0.1F;
+  int contrastive_batch_size = 4096;
+  int max_future_horizon = 256;
 };
 
 struct ESLoraConfig {
   int rank = 4;
   float lora_alpha = 4.0F;
-  int population_size = 16;
-  float sigma_ES = 0.01F;
+  int population_size = 8;
+  float sigma_ES = 0.05F;
   float eta_ES = 0.003F;
-  int es_interval = 100;
-  int eval_episodes_per_member = 8;
-  int eval_num_envs = 16;
-  int eval_rollout_length = 64;
+  int es_interval = 25;
+  int eval_episodes_per_member = 2;
+  int eval_num_envs = 8;
+  int eval_rollout_length = 450;
   float beta_KL = 0.01F;
-  bool antithetic_sampling = false;
+  bool antithetic_sampling = true;
   bool update_norm_clip = true;
 };
 
@@ -108,9 +108,6 @@ struct PPOConfig {
   int min_rollout_length = 0;
   int early_update_completed_episodes = 0;
   bool train_only_scored_episodes = false;
-  bool use_balanced_training = false;
-  float scored_episode_train_fraction = 0.25F;
-  int min_training_episodes = 1;
   bool use_adaptive_epsilon = true;
   float adaptive_epsilon_beta = 1.0F;
   float epsilon_min = 0.05F;

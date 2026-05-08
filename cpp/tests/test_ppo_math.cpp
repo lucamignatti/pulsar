@@ -206,24 +206,23 @@ int main() {
       torch::manual_seed(42);
       const int steps = 5;
       const int agents = 2;
-      auto goal_dist = torch::zeros({steps, agents}, torch::kFloat32);
-      goal_dist[0][0] = 0.9F;
-      goal_dist[1][0] = 0.5F;
-      goal_dist[2][0] = 0.1F;
-      goal_dist[3][0] = 0.05F;
-      goal_dist[4][0] = 0.0F;
-      for (int k = 0; k < 5; ++k) {
-        goal_dist[k][1] = 1.0F;
+      const int goal_dim = 3;
+      auto goal_pos = torch::zeros({steps, agents, goal_dim}, torch::kFloat32);
+      for (int s = 0; s < steps; ++s) {
+        for (int a = 0; a < agents; ++a) {
+          goal_pos[s][a][0] = 0.1F * static_cast<float>(s);
+          goal_pos[s][a][1] = 0.2F * static_cast<float>(s);
+          goal_pos[s][a][2] = 0.3F;
+        }
       }
       auto dones = torch::zeros({steps, agents}, torch::kFloat32);
       auto ep_starts = torch::zeros({steps, agents}, torch::kFloat32);
-      const float gamma_g = 0.99F;
-      const int horizon_H = 64;
+      const int max_future = 64;
 
-      auto future_goals = pulsar::sample_future_goal_distances(
-          goal_dist, dones, ep_starts, gamma_g, horizon_H);
+      auto future_goals = pulsar::sample_future_goal_positions(
+          goal_pos, dones, ep_starts, max_future);
 
-      require(future_goals.sizes() == torch::IntArrayRef({steps, agents}), "future goals shape");
+      require(future_goals.sizes() == torch::IntArrayRef({steps, agents, goal_dim}), "future goals shape");
       require_finite(future_goals, "future goals finite");
     }
 

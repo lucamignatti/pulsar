@@ -76,12 +76,11 @@ torch::Tensor compute_confidence_weights(
 
 torch::Tensor normalize_advantage(const torch::Tensor& advantages, const torch::Tensor& active_mask);
 
-torch::Tensor sample_future_goal_distances(
-    const torch::Tensor& goal_distances,
+torch::Tensor sample_future_goal_positions(
+    const torch::Tensor& goal_positions,
     const torch::Tensor& dones,
     const torch::Tensor& episode_starts,
-    float gamma_g,
-    int horizon_H);
+    int max_future);
 
 torch::Tensor compute_pairwise_negative_l2_logits(
     const torch::Tensor& lhs_embeddings,

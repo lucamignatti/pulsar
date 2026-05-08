@@ -31,10 +31,9 @@ torch::Tensor masked_sample(const torch::Tensor& logits, const torch::Tensor& ac
   return sample_masked_actions(logits, action_masks, false, nullptr);
 }
 
-torch::Tensor policy_goal_values_like(const torch::Tensor& obs, float target_distance) {
-  return torch::full(
-      {obs.size(0)},
-      target_distance,
+torch::Tensor policy_goal_values_like(const torch::Tensor& obs, int goal_dim) {
+  return torch::zeros(
+      {obs.size(0), goal_dim},
       obs.options().dtype(torch::kFloat32));
 }
 
@@ -166,7 +165,7 @@ void SelfPlayManager::infer_opponent_actions(
     const torch::Tensor starts = episode_starts.index_select(0, indices);
     const torch::Tensor normalized_obs = snapshot.normalizer.normalize(obs);
     ContinuumState state = gather_state(opponent_state, indices);
-    const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_mapping.target_distance);
+    const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
     const ActorStepOutput output = snapshot.model->forward_step(normalized_obs, std::move(state), starts, goal_values);
     const torch::Tensor sampled_actions =
         deterministic ? masked_argmax(output.policy_logits, masks) : masked_sample(output.policy_logits, masks);
@@ -410,7 +409,7 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
 
         const torch::Tensor current_obs = current_normalizer.normalize(obs);
         const torch::Tensor snapshot_obs = snapshot.normalizer.normalize(obs);
-        const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_mapping.target_distance);
+        const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_critic.goal_dim);
         const ActorStepOutput current_out =
             current_model->forward_step(current_obs, std::move(current_state), episode_starts, goal_values);
         const ActorStepOutput snapshot_out =

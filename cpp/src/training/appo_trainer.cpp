@@ -63,20 +63,17 @@ void require_finite(const torch::Tensor& tensor, const std::string& name) {
   }
 }
 
-torch::Tensor policy_goal_values_like(const torch::Tensor& obs, float target_distance) {
+torch::Tensor policy_goal_values_like(const torch::Tensor& obs, int goal_dim) {
   const auto options = obs.options().dtype(torch::kFloat32);
   if (obs.dim() == 3) {
-    return torch::full({obs.size(0), obs.size(1)}, target_distance, options);
+    return torch::zeros({obs.size(0), obs.size(1), goal_dim}, options);
   }
-  return torch::full({obs.size(0)}, target_distance, options);
+  return torch::zeros({obs.size(0), goal_dim}, options);
 }
-
 struct OutcomeFilterStats {
   int64_t scored_episodes = 0;
   int64_t neutral_episodes = 0;
   int64_t unfinished_segments = 0;
-  int64_t kept_neutral_episodes = 0;
-  int64_t kept_unfinished_segments = 0;
 };
 
 void zero_active_segment(
@@ -140,112 +137,6 @@ OutcomeFilterStats keep_only_scored_episode_segments(RolloutStorage& rollout, in
   return stats;
 }
 
-struct ScoredSegment {
-  int agent_begin;
-  int agent_count;
-  int start_step;
-  int end_step;
-};
-
-struct NonScoredSegment {
-  int agent_begin;
-  int agent_count;
-  int start_step;
-  int end_step;
-  bool is_neutral;
-};
-
-OutcomeFilterStats keep_balanced_episode_segments(
-    RolloutStorage& rollout,
-    int agents_per_env,
-    float scored_fraction_target,
-    int min_episodes,
-    std::mt19937& rng) {
-  OutcomeFilterStats stats{};
-  const int steps = rollout.rollout_length();
-  if (steps <= 0) {
-    return stats;
-  }
-  const int total_agents = rollout.num_agents();
-  const torch::Tensor rewards = rollout.reward("extrinsic");
-  float* learner_active = rollout.learner_active.data_ptr<float>();
-  const float* starts = rollout.episode_starts.data_ptr<float>();
-  const float* dones = rollout.dones.data_ptr<float>();
-  const float* reward_values = rewards.data_ptr<float>();
-
-  std::vector<ScoredSegment> scored_segments;
-  std::vector<NonScoredSegment> non_scored_segments;
-
-  for (int agent_begin = 0; agent_begin < total_agents; agent_begin += agents_per_env) {
-    const int agent_count = std::min(agents_per_env, total_agents - agent_begin);
-    int segment_start = 0;
-    for (int step = 0; step < steps; ++step) {
-      const int row_offset = step * total_agents + agent_begin;
-      if (step > segment_start && starts[row_offset] > 0.5F) {
-        non_scored_segments.push_back({agent_begin, agent_count, segment_start, step - 1, false});
-        stats.unfinished_segments++;
-        segment_start = step;
-      }
-      if (dones[row_offset] <= 0.5F) {
-        continue;
-      }
-      bool scored = false;
-      for (int local = 0; local < agent_count; ++local) {
-        scored = scored || std::abs(reward_values[row_offset + local]) > 0.5F;
-      }
-      if (scored) {
-        scored_segments.push_back({agent_begin, agent_count, segment_start, step});
-        stats.scored_episodes++;
-      } else {
-        non_scored_segments.push_back({agent_begin, agent_count, segment_start, step, true});
-        stats.neutral_episodes++;
-      }
-      segment_start = step + 1;
-    }
-    if (segment_start < steps) {
-      non_scored_segments.push_back({agent_begin, agent_count, segment_start, steps - 1, false});
-      stats.unfinished_segments++;
-    }
-  }
-
-  const int S = static_cast<int>(scored_segments.size());
-  const int N = static_cast<int>(non_scored_segments.size());
-
-  stats.kept_neutral_episodes = stats.neutral_episodes;
-  stats.kept_unfinished_segments = stats.unfinished_segments;
-
-  if (S > 0 && S + N > 0) {
-    const float current_fraction = static_cast<float>(S) / static_cast<float>(S + N);
-    if (current_fraction < scored_fraction_target) {
-      int N_keep = static_cast<int>(std::ceil(
-          static_cast<float>(S) * (1.0F / scored_fraction_target - 1.0F)));
-      N_keep = std::max(N_keep, min_episodes - S);
-      if (N_keep < N) {
-        std::shuffle(non_scored_segments.begin(), non_scored_segments.end(), rng);
-        int kept_neutral = 0;
-        int kept_unfinished = 0;
-        for (int i = 0; i < N_keep; ++i) {
-          if (non_scored_segments[static_cast<std::size_t>(i)].is_neutral) {
-            kept_neutral++;
-          } else {
-            kept_unfinished++;
-          }
-        }
-        for (int i = N_keep; i < N; ++i) {
-          const auto& seg = non_scored_segments[static_cast<std::size_t>(i)];
-          zero_active_segment(
-              learner_active, total_agents, seg.start_step, seg.end_step,
-              seg.agent_begin, seg.agent_count);
-        }
-        stats.kept_neutral_episodes = kept_neutral;
-        stats.kept_unfinished_segments = kept_unfinished;
-      }
-    }
-  }
-
-  return stats;
-}
-
 void append_metrics_line(
     const std::filesystem::path& checkpoint_dir,
     int update_index,
@@ -271,11 +162,6 @@ void append_metrics_line(
       {"rollout_steps", metrics.rollout_steps},
       {"completed_episodes", metrics.completed_episodes},
       {"scored_episodes", metrics.scored_episodes},
-      {"discarded_neutral_episodes", metrics.discarded_neutral_episodes},
-      {"discarded_unfinished_segments", metrics.discarded_unfinished_segments},
-      {"kept_neutral_episodes", metrics.kept_neutral_episodes},
-      {"kept_unfinished_segments", metrics.kept_unfinished_segments},
-      {"training_scored_fraction", metrics.training_scored_fraction},
       {"goal_critic_loss", metrics.goal_critic_loss},
       {"mean_goal_score", metrics.mean_goal_score},
       {"mean_sampled_goal_distance", metrics.mean_sampled_goal_distance},
@@ -460,8 +346,7 @@ APPOTrainer::APPOTrainer(
           action_dim_for_collectors(collectors_))),
       device_(resolve_runtime_device(config_.ppo.device)),
       run_output_root_(std::move(run_output_root)),
-      log_initialization_(log_initialization),
-      rng_(static_cast<std::mt19937::result_type>(config_.env.seed)) {
+      log_initialization_(log_initialization) {
   validate_experiment_config(config_);
   if (collectors_.empty()) {
     throw std::invalid_argument("APPOTrainer requires at least one collector.");
@@ -639,7 +524,7 @@ TrainerMetrics APPOTrainer::update_actor() {
         ActorSequenceOutput output;
         {
           PULSAR_TRACE_SCOPE_CAT("trainer", "update_forward_sequence");
-          const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_mapping.target_distance);
+          const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_critic.goal_dim);
           output = actor_->forward_sequence(obs, std::move(state), episode_starts, goal_values);
         }
         state = detach_state(std::move(output.final_state));
@@ -739,24 +624,25 @@ TrainerMetrics APPOTrainer::update_actor() {
             active_value_win_logits, active_returns, v_min, v_max, num_atoms);
 
         torch::Tensor goal_loss = torch::zeros({}, active_advantages.options());
+        torch::Tensor actor_goal_loss = torch::zeros({}, active_advantages.options());
         double chunk_goal_score = 0.0;
 
         {
-          torch::Tensor chunk_goal_dist =
-              rollout_.goal_distances.narrow(0, loss_start, loss_steps).index_select(1, agent_indices);
+          torch::Tensor chunk_goal_pos =
+              rollout_.goal_positions.narrow(0, loss_start, loss_steps).index_select(1, agent_indices);
           torch::Tensor chunk_dones =
               rollout_.dones.narrow(0, loss_start, loss_steps).index_select(1, agent_indices);
           torch::Tensor chunk_ep_starts =
               rollout_.episode_starts.narrow(0, loss_start, loss_steps).index_select(1, agent_indices);
-          torch::Tensor future_goal_dist = sample_future_goal_distances(
-              chunk_goal_dist,
+          torch::Tensor future_goal_pos = sample_future_goal_positions(
+              chunk_goal_pos,
               chunk_dones,
               chunk_ep_starts,
-              config_.goal_critic.gamma_g,
-              config_.goal_critic.horizon_H);
+              config_.goal_critic.max_future_horizon);
+          const int goal_dim = config_.goal_critic.goal_dim;
 
-          torch::Tensor flat_future_goal_dist = future_goal_dist.to(device_).reshape({samples});
-          torch::Tensor active_future_goal_dist = flat_future_goal_dist.index({flat_active});
+          torch::Tensor flat_future_goal_pos = future_goal_pos.to(device_).reshape({samples, goal_dim});
+          torch::Tensor active_future_goal_pos = flat_future_goal_pos.index({flat_active});
 
           const auto active_count = active_features.size(0);
           const int cb_size = config_.goal_critic.contrastive_batch_size;
@@ -766,10 +652,10 @@ TrainerMetrics APPOTrainer::update_actor() {
                 .narrow(0, 0, cb_size);
             sa_emb = actor_->goal_critic()->sa_embedding(
                 active_features.index({idx}), active_actions.index({idx}));
-            g_emb = actor_->goal_critic()->goal_embedding(active_future_goal_dist.index({idx}));
+            g_emb = actor_->goal_critic()->goal_embedding(active_future_goal_pos.index({idx}));
           } else {
             sa_emb = actor_->goal_critic()->sa_embedding(active_features, active_actions);
-            g_emb = actor_->goal_critic()->goal_embedding(active_future_goal_dist);
+            g_emb = actor_->goal_critic()->goal_embedding(active_future_goal_pos);
           }
           const torch::Tensor sa_logits = compute_pairwise_negative_l2_logits(sa_emb, g_emb);
           goal_loss = compute_symmetric_infonce_loss(sa_logits, config_.goal_critic.logsumexp_penalty_coeff);
@@ -779,20 +665,26 @@ TrainerMetrics APPOTrainer::update_actor() {
             const torch::Tensor goal_scores = actor_->goal_critic()->forward(
                 active_features.detach(),
                 active_actions,
-                active_future_goal_dist);
+                active_future_goal_pos);
             chunk_goal_score = goal_scores.mean().item<double>();
           }
 
-          const double chunk_sampled_goal_distance = active_future_goal_dist.mean().item<double>();
-          accumulated_sampled_goal_distance += chunk_sampled_goal_distance * static_cast<double>(active_logits.size(0));
+          const double chunk_sampled_goal_norm = active_future_goal_pos.norm(2, -1).mean().item<double>();
+          accumulated_sampled_goal_distance += chunk_sampled_goal_norm * static_cast<double>(active_logits.size(0));
           accumulated_goal_critic_loss += goal_loss.item<double>() * static_cast<double>(active_logits.size(0));
           accumulated_goal_score += chunk_goal_score * static_cast<double>(active_logits.size(0));
+
+          const torch::Tensor g_emb_all = actor_->goal_critic()->goal_embedding(active_future_goal_pos);
+          const torch::Tensor actor_probs = torch::softmax(active_logits, -1);
+          const torch::Tensor sa_emb_actor = actor_->goal_critic()->sa_embedding(active_features, actor_probs);
+          actor_goal_loss = (sa_emb_actor - g_emb_all).square().sum(-1).mean();
         }
 
         const torch::Tensor loss =
             policy_loss
             + config_.ppo.value_coef * value_loss
             + config_.goal_critic.lambda_Zg * goal_loss
+            + config_.goal_critic.lambda_goal_actor * actor_goal_loss
             - config_.ppo.entropy_coef * entropy;
 
         metrics.forward_backward_seconds +=
@@ -903,7 +795,7 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
       torch::Tensor action_masks = eval_collector->host_action_masks().to(device_, use_pinned_host_buffers_).to(torch::kBool);
       torch::Tensor normalized_obs = actor_normalizer_.normalize(raw_obs);
 
-      const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_mapping.target_distance);
+      const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
       ActorStepOutput output = actor_->forward_step(normalized_obs, std::move(eval_state), episode_starts, goal_values);
       eval_state = std::move(output.state);
       torch::Tensor perturbed_logits = actor_->policy_eggroll_logits(
@@ -1051,7 +943,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   std::int64_t collected_agent_steps = 0;
 
   const auto collection_start = std::chrono::steady_clock::now();
-  if (config_.ppo.train_only_scored_episodes && !config_.ppo.use_balanced_training) {
+  if (config_.ppo.train_only_scored_episodes) {
     if (collectors_.size() > 1) {
       for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
         collectors_[shard]->reset_all(&collector_timings);
@@ -1107,7 +999,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     };
 
     const bool use_completed_for_break =
-        config_.ppo.use_balanced_training || !config_.ppo.train_only_scored_episodes;
+        !config_.ppo.train_only_scored_episodes;
 
     for (int step = 0; step < config_.ppo.rollout_length; ++step) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "collect_step_sharded");
@@ -1134,7 +1026,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
           torch::NoGradGuard no_grad;
           actor_normalizer_.update(raw_obs);
           normalized_obs = actor_normalizer_.normalize(raw_obs);
-          const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_mapping.target_distance);
+          const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
           output = actor_->forward_step(normalized_obs, std::move(shard_collection_states_[shard]), episode_starts, goal_values);
           shard_collection_states_[shard] = std::move(output.state);
           actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
@@ -1241,11 +1133,12 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
         accumulated_value_entropy += entropy_cpu.sum().item<double>();
         accumulated_value_stat_count += static_cast<int64_t>(sampled_value_cpu.numel());
 
-        torch::Tensor goal_dist_host = collector.host_goal_distances();
-        float gd_min = goal_dist_host.min().item<float>();
-        float gd_mean = goal_dist_host.mean().item<float>();
+        torch::Tensor goal_pos_host = collector.host_goal_positions();
+        torch::Tensor goal_norms = goal_pos_host.norm(2, 1);
+        float gd_min = goal_norms.min().item<float>();
+        float gd_mean = goal_norms.mean().item<float>();
         total_goal_distance += static_cast<double>(gd_mean)
-            * static_cast<double>(goal_dist_host.numel())
+            * static_cast<double>(goal_pos_host.size(0))
             / static_cast<double>(total_agents_);
         if (gd_min < min_goal_distance) {
           min_goal_distance = static_cast<double>(gd_min);
@@ -1274,7 +1167,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
             all_values,
             all_rewards,
             dones_host,
-            goal_dist_host);
+            goal_pos_host);
 
         collected_agent_steps += learner_step_count;
       }
@@ -1297,7 +1190,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
         torch::Tensor final_normalized = actor_normalizer_.normalize(final_raw_obs);
         torch::Tensor final_starts = collector.host_episode_starts().to(device_, use_pinned_host_buffers_);
         ContinuumState bootstrap_state = clone_state(shard_collection_states_[shard]);
-        const torch::Tensor final_goal_values = policy_goal_values_like(final_normalized, config_.goal_mapping.target_distance);
+        const torch::Tensor final_goal_values = policy_goal_values_like(final_normalized, config_.goal_critic.goal_dim);
         ActorStepOutput final_output = actor_->forward_step(
             final_normalized, std::move(bootstrap_state), final_starts, final_goal_values);
         final_values.push_back(compute_mean_value(final_output.value_win_logits, atom_support_win).to(torch::kCPU));
@@ -1309,7 +1202,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   } else {
     PULSAR_TRACE_SCOPE_CAT("trainer", "collect_loop");
     const bool use_completed_for_break =
-        config_.ppo.use_balanced_training || !config_.ppo.train_only_scored_episodes;
+        !config_.ppo.train_only_scored_episodes;
     for (int step = 0; step < config_.ppo.rollout_length; ++step) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "collect_step");
       torch::Tensor raw_obs_host = collector_->host_observations();
@@ -1330,7 +1223,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
       torch::NoGradGuard no_grad;
       actor_normalizer_.update(raw_obs);
       normalized_obs = actor_normalizer_.normalize(raw_obs);
-      const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_mapping.target_distance);
+      const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
       output = actor_->forward_step(normalized_obs, std::move(collection_state_), episode_starts, goal_values);
       collection_state_ = std::move(output.state);
       actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
@@ -1417,9 +1310,10 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     accumulated_value_entropy += entropy_cpu.sum().item<double>();
     accumulated_value_stat_count += static_cast<int64_t>(sampled_value_cpu.numel());
 
-    torch::Tensor goal_dist_host = collector_->host_goal_distances();
-    float gd_min = goal_dist_host.min().item<float>();
-    float gd_mean = goal_dist_host.mean().item<float>();
+    torch::Tensor goal_pos_host = collector_->host_goal_positions();
+    torch::Tensor goal_norms = goal_pos_host.norm(2, 1);
+    float gd_min = goal_norms.min().item<float>();
+    float gd_mean = goal_norms.mean().item<float>();
     total_goal_distance += static_cast<double>(gd_mean);
     if (gd_min < min_goal_distance) {
       min_goal_distance = static_cast<double>(gd_min);
@@ -1447,7 +1341,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
         all_values,
         all_rewards,
         dones_host,
-        goal_dist_host);
+        goal_pos_host);
 
     collected_agent_steps += learner_step_count;
     if (early_update_completed_episodes > 0
@@ -1464,7 +1358,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     torch::Tensor final_normalized = actor_normalizer_.normalize(final_raw_obs);
     torch::Tensor final_starts = collector_->host_episode_starts().to(device_, use_pinned_host_buffers_);
     ContinuumState bootstrap_state = clone_state(collection_state_);
-    const torch::Tensor final_goal_values = policy_goal_values_like(final_normalized, config_.goal_mapping.target_distance);
+    const torch::Tensor final_goal_values = policy_goal_values_like(final_normalized, config_.goal_critic.goal_dim);
     ActorStepOutput final_output = actor_->forward_step(
         final_normalized, std::move(bootstrap_state), final_starts, final_goal_values);
 
@@ -1478,23 +1372,13 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   OutcomeFilterStats outcome_filter_stats{};
   {
     PULSAR_TRACE_SCOPE_CAT("trainer", "scored_filter");
-  if (config_.ppo.use_balanced_training) {
-    outcome_filter_stats = keep_balanced_episode_segments(
-        rollout_, agents_per_env,
-        config_.ppo.scored_episode_train_fraction,
-        config_.ppo.min_training_episodes,
-        rng_);
-    const torch::Tensor active_train_mask = rollout_.learner_active.narrow(0, 0, rollout_.rollout_length());
-    const torch::Tensor reward_train = rollout_.reward("extrinsic").narrow(0, 0, rollout_.rollout_length());
-    total_learner_steps = active_train_mask.sum().item<int64_t>();
-    total_sparse_reward = (reward_train * active_train_mask).sum().item<double>();
-  } else if (config_.ppo.train_only_scored_episodes) {
-    outcome_filter_stats = keep_only_scored_episode_segments(rollout_, agents_per_env);
-    const torch::Tensor active_train_mask = rollout_.learner_active.narrow(0, 0, rollout_.rollout_length());
-    const torch::Tensor reward_train = rollout_.reward("extrinsic").narrow(0, 0, rollout_.rollout_length());
-    total_learner_steps = active_train_mask.sum().item<int64_t>();
-    total_sparse_reward = (reward_train * active_train_mask).sum().item<double>();
-  }
+    if (config_.ppo.train_only_scored_episodes) {
+      outcome_filter_stats = keep_only_scored_episode_segments(rollout_, agents_per_env);
+      const torch::Tensor active_train_mask = rollout_.learner_active.narrow(0, 0, rollout_.rollout_length());
+      const torch::Tensor reward_train = rollout_.reward("extrinsic").narrow(0, 0, rollout_.rollout_length());
+      total_learner_steps = active_train_mask.sum().item<int64_t>();
+      total_sparse_reward = (reward_train * active_train_mask).sum().item<double>();
+    }
   }
 
   const double collection_seconds =
@@ -1509,24 +1393,8 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   metrics.goals_conceded = total_goals_conceded;
   metrics.rollout_steps = rollout_.rollout_length();
   metrics.completed_episodes = completed_episodes;
-  const bool filtered = config_.ppo.use_balanced_training || config_.ppo.train_only_scored_episodes;
+  const bool filtered = config_.ppo.train_only_scored_episodes;
   metrics.scored_episodes = filtered ? outcome_filter_stats.scored_episodes : scored_episodes;
-  if (config_.ppo.use_balanced_training) {
-    metrics.discarded_neutral_episodes = outcome_filter_stats.neutral_episodes - outcome_filter_stats.kept_neutral_episodes;
-    metrics.discarded_unfinished_segments = outcome_filter_stats.unfinished_segments - outcome_filter_stats.kept_unfinished_segments;
-    metrics.kept_neutral_episodes = outcome_filter_stats.kept_neutral_episodes;
-    metrics.kept_unfinished_segments = outcome_filter_stats.kept_unfinished_segments;
-    const auto total_kept = outcome_filter_stats.scored_episodes
-        + outcome_filter_stats.kept_neutral_episodes
-        + outcome_filter_stats.kept_unfinished_segments;
-    if (total_kept > 0) {
-      metrics.training_scored_fraction = static_cast<double>(outcome_filter_stats.scored_episodes)
-          / static_cast<double>(total_kept);
-    }
-  } else {
-    metrics.discarded_neutral_episodes = outcome_filter_stats.neutral_episodes;
-    metrics.discarded_unfinished_segments = outcome_filter_stats.unfinished_segments;
-  }
   if (total_ball_proximity_denom > 0) {
     metrics.ball_proximity_rate = static_cast<double>(total_ball_proximity_steps) / static_cast<double>(total_ball_proximity_denom);
   }
@@ -1681,13 +1549,6 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " rollout_steps=" << metrics.rollout_steps
               << " completed_eps=" << metrics.completed_episodes
               << " scored_eps=" << metrics.scored_episodes
-              << " discarded_neutral=" << metrics.discarded_neutral_episodes
-              << " discarded_unfinished=" << metrics.discarded_unfinished_segments
-              << " kept_neutral=" << metrics.kept_neutral_episodes
-              << " kept_unfinished=" << metrics.kept_unfinished_segments
-              << " train_scored_frac=" << metrics.training_scored_fraction
-              << " goal_critic_loss=" << metrics.goal_critic_loss
-              << " goal_score=" << metrics.mean_goal_score
               << " sampled_goal_dist=" << metrics.mean_sampled_goal_distance
               << " mean_goal_dist=" << metrics.mean_goal_distance
               << " ball_prox=" << metrics.ball_proximity_rate
@@ -1710,12 +1571,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"rollout_steps", metrics.rollout_steps},
           {"completed_episodes", metrics.completed_episodes},
           {"scored_episodes", metrics.scored_episodes},
-          {"discarded_neutral_episodes", metrics.discarded_neutral_episodes},
-           {"discarded_unfinished_segments", metrics.discarded_unfinished_segments},
-           {"kept_neutral_episodes", metrics.kept_neutral_episodes},
-           {"kept_unfinished_segments", metrics.kept_unfinished_segments},
-           {"training_scored_fraction", metrics.training_scored_fraction},
-           {"goal_critic_loss", metrics.goal_critic_loss},
+          {"goal_critic_loss", metrics.goal_critic_loss},
           {"mean_goal_score", metrics.mean_goal_score},
           {"mean_sampled_goal_distance", metrics.mean_sampled_goal_distance},
           {"mean_goal_distance", metrics.mean_goal_distance},

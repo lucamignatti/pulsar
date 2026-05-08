@@ -34,16 +34,11 @@ std::vector<TransitionEnginePtr> make_default_engines(const ExperimentConfig& co
   return engines;
 }
 
-float compute_goal_distance(const EnvState& state, int car_idx, const GoalMappingConfig& cfg) {
-  const CarState& car = state.cars[static_cast<std::size_t>(car_idx)];
+void compute_goal_position(const EnvState& state, const GoalMappingConfig& cfg, float* out) {
   const BallState& ball = state.ball;
-
-  const float dx = car.position.x - ball.position.x;
-  const float dy = car.position.y - ball.position.y;
-  const float dz = car.position.z - ball.position.z;
-  const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-
-  return std::clamp(dist / cfg.arena_max_distance, 0.0F, 1.0F);
+  out[0] = ball.position.x / cfg.arena_max_distance;
+  out[1] = ball.position.y / cfg.arena_max_distance;
+  out[2] = ball.position.z / cfg.arena_max_distance;
 }
 
 }  // namespace
@@ -136,7 +131,7 @@ void BatchedRocketSimCollector::initialize(
   host_terminal_outcome_labels_ = torch::full({static_cast<long>(total_agents_)}, 2, i64);
   host_terminal_observations_ =
       torch::zeros({static_cast<long>(total_agents_), obs_dim_}, f32);
-  host_goal_distances_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
+  host_goal_positions_ = torch::zeros({static_cast<long>(total_agents_), 3}, f32);
   host_ball_proximity_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
 
   for (std::size_t env_idx = 0; env_idx < envs_.size(); ++env_idx) {
@@ -172,7 +167,7 @@ void BatchedRocketSimCollector::reset_all(CollectorTimings* timings) {
   host_truncated_.zero_();
   host_terminal_outcome_labels_.fill_(2);
   host_terminal_observations_.zero_();
-  host_goal_distances_.zero_();
+  host_goal_positions_.zero_();
   host_ball_proximity_.zero_();
   current_buffers_.episode_starts.fill_(1.0F);
   rebuild_host_buffers(current_buffers_, timings);
@@ -292,7 +287,7 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
   float* truncated_ptr = host_truncated_.data_ptr<float>();
   std::int64_t* labels_ptr = host_terminal_outcome_labels_.data_ptr<std::int64_t>();
   float* terminal_obs_ptr = host_terminal_observations_.data_ptr<float>();
-  float* goal_dist_ptr = host_goal_distances_.data_ptr<float>();
+  float* goal_pos_ptr = host_goal_positions_.data_ptr<float>();
   float* ball_touch_ptr = host_ball_proximity_.data_ptr<float>();
   const std::size_t obs_stride = static_cast<std::size_t>(obs_dim_);
   host_dones_.zero_();
@@ -300,7 +295,7 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
   host_truncated_.zero_();
   host_terminal_outcome_labels_.fill_(2);
   host_terminal_observations_.zero_();
-  host_goal_distances_.zero_();
+  host_goal_positions_.zero_();
   host_ball_proximity_.zero_();
 
   executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
@@ -335,9 +330,21 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
       }
 
       for (std::size_t idx = 0; idx < count; ++idx) {
-        float dist = compute_goal_distance(current_state, static_cast<int>(idx), config_.goal_mapping);
-        goal_dist_ptr[agent_begin + idx] = dist;
-        ball_touch_ptr[agent_begin + idx] = (dist * config_.goal_mapping.arena_max_distance < 300.0F) ? 1.0F : 0.0F;
+        const CarState& car = current_state.cars[idx];
+        const BallState& ball = current_state.ball;
+        const float dx = car.position.x - ball.position.x;
+        const float dy = car.position.y - ball.position.y;
+        const float dz = car.position.z - ball.position.z;
+        const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+        float goal_pos[3];
+        compute_goal_position(current_state, config_.goal_mapping, goal_pos);
+        const int pos_offset = static_cast<int>(agent_begin + idx) * 3;
+        goal_pos_ptr[pos_offset + 0] = goal_pos[0];
+        goal_pos_ptr[pos_offset + 1] = goal_pos[1];
+        goal_pos_ptr[pos_offset + 2] = goal_pos[2];
+
+        ball_touch_ptr[agent_begin + idx] = (dist < 300.0F) ? 1.0F : 0.0F;
       }
 
       if (reset_needed) {
@@ -452,8 +459,8 @@ const torch::Tensor& BatchedRocketSimCollector::host_terminal_observations() con
   return host_terminal_observations_;
 }
 
-const torch::Tensor& BatchedRocketSimCollector::host_goal_distances() const {
-  return host_goal_distances_;
+const torch::Tensor& BatchedRocketSimCollector::host_goal_positions() const {
+  return host_goal_positions_;
 }
 
 const torch::Tensor& BatchedRocketSimCollector::host_ball_proximity() const {
