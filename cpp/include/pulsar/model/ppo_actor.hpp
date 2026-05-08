@@ -114,6 +114,7 @@ class PPOActorImpl : public torch::nn::Module {
       ContinuumState state,
       torch::Tensor episode_starts = {},
       torch::Tensor goal_values = {});
+  [[nodiscard]] int feature_dim() const;
   [[nodiscard]] const ModelConfig& config() const;
   [[nodiscard]] const GoalCriticConfig& goal_critic_config() const;
   [[nodiscard]] std::vector<std::string> enabled_critic_heads() const;
