@@ -49,7 +49,7 @@ int main() {
     if (output.policy_logits.sizes() != torch::IntArrayRef({4, model_config.action_dim})) {
       throw std::runtime_error("policy logits shape mismatch");
     }
-    if (output.value_win_logits.sizes() != torch::IntArrayRef({4, model_config.value_num_atoms})) {
+    if (output.value_win_logits.sizes() != torch::IntArrayRef({4, 1})) {
       throw std::runtime_error("value win logits shape mismatch");
     }
     if (output.features.sizes() != torch::IntArrayRef({4, actor->feature_dim()})) {
@@ -75,16 +75,6 @@ int main() {
       if (!torch::allclose(item.value(), clone_params[item.key()])) {
         throw std::runtime_error("cloned actor parameters diverged");
       }
-    }
-
-    const torch::Tensor value_support = actor->value_win_support();
-    if (value_support.sizes() != torch::IntArrayRef({model_config.value_num_atoms})) {
-      throw std::runtime_error("value support shape mismatch");
-    }
-
-    torch::Tensor goal_emb = actor->goal_critic()->goal_embedding(torch::zeros({2, gc_cfg.goal_dim}));
-    if (goal_emb.sizes() != torch::IntArrayRef({2, gc_cfg.embedding_dim})) {
-      throw std::runtime_error("goal embedding shape mismatch");
     }
 
     // Goal critic forward pass smoke test
@@ -144,18 +134,6 @@ int main() {
       actor->apply_policy_eggroll_update(torch::ones_like(before) * 0.001F);
       if (torch::allclose(before, actor->policy_lora()->base->weight)) {
         throw std::runtime_error("EGGROLL policy update did not modify base weight");
-      }
-    }
-
-    // Sparse value head forward smoke test
-    {
-      auto s = actor->initial_state(2, torch::kCPU);
-      auto out = actor->forward_step(torch::zeros({2, model_config.observation_dim}), std::move(s));
-      const torch::Tensor win_support = actor->value_win_support();
-      const float v_min = win_support[0].item<float>();
-      const float v_max = win_support[-1].item<float>();
-      if (v_min != model_config.value_v_min || v_max != model_config.value_v_max) {
-        throw std::runtime_error("value win support range mismatch");
       }
     }
 

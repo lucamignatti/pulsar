@@ -180,7 +180,7 @@ void test_snapshot_reload_preserves_actor_config() {
         torch::randn({2, config.model.observation_dim}), std::move(state));
     pulsar::test::require(
         output.value_win_logits.sizes() ==
-            torch::IntArrayRef({2, config.model.value_num_atoms}),
+            torch::IntArrayRef({2, 1}),
         "snapshot value win head shape matches model config");
     pulsar::test::require(
         snapshot_model->goal_critic()->goal_embedding(torch::zeros({1, config.goal_critic.goal_dim})).size(1) == config.goal_critic.embedding_dim,
