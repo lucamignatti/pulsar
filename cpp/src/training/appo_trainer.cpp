@@ -569,6 +569,11 @@ TrainerMetrics APPOTrainer::update_actor() {
         policy_loss = policy_loss.mean();
 
         const torch::Tensor entropy = masked_action_entropy(active_logits, active_masks).mean();
+        torch::Tensor entropy_floor_loss = torch::zeros({}, active_advantages.options());
+        if (config_.ppo.entropy_floor > 0.0F && config_.ppo.entropy_floor_coef > 0.0F) {
+          const torch::Tensor entropy_floor = torch::full_like(entropy, config_.ppo.entropy_floor);
+          entropy_floor_loss = config_.ppo.entropy_floor_coef * torch::relu(entropy_floor - entropy).square();
+        }
 
         torch::Tensor chunk_returns =
             sparse_returns.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_).reshape({samples});
@@ -653,6 +658,7 @@ TrainerMetrics APPOTrainer::update_actor() {
             + config_.ppo.value_coef * value_loss
             + config_.goal_critic.lambda_Zg * goal_loss
             + config_.goal_critic.lambda_goal_actor * actor_goal_loss
+            + entropy_floor_loss
             - config_.ppo.entropy_coef * entropy;
 
         metrics.forward_backward_seconds +=
@@ -662,6 +668,7 @@ TrainerMetrics APPOTrainer::update_actor() {
         require_finite(policy_loss, "policy_loss");
         require_finite(value_loss, "value_loss");
         require_finite(entropy, "entropy");
+        require_finite(entropy_floor_loss, "entropy_floor_loss");
         require_finite(goal_loss, "goal_loss");
 
         const auto active_samples = active_logits.size(0);
@@ -827,12 +834,19 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
   const int in_features = actor_->policy_lora()->in_features();
   const int out_features = actor_->policy_lora()->out_features();
 
-  torch::Tensor A_stack = torch::randn(
-      {pop, rank, in_features},
-      torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-  torch::Tensor B_stack = torch::randn(
-      {pop, out_features, rank},
-      torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+  const auto tensor_options = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
+  torch::Tensor A_stack;
+  torch::Tensor B_stack;
+  if (es_cfg.antithetic_sampling) {
+    const int half_pop = pop / 2;
+    torch::Tensor A_half = torch::randn({half_pop, rank, in_features}, tensor_options);
+    torch::Tensor B_half = torch::randn({half_pop, out_features, rank}, tensor_options);
+    A_stack = torch::cat({A_half, -A_half}, 0);
+    B_stack = torch::cat({B_half, -B_half}, 0);
+  } else {
+    A_stack = torch::randn({pop, rank, in_features}, tensor_options);
+    B_stack = torch::randn({pop, out_features, rank}, tensor_options);
+  }
 
   ESPopulationFitness population = evaluate_es_population(A_stack, B_stack, update_index);
   std::vector<float>& fitnesses = population.fitness;
@@ -854,6 +868,15 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
     normalized_f.push_back((f - mu) / (sigma + 1.0e-8F));
   }
 
+  double winrate_mean = 0.0;
+  double kl_mean = 0.0;
+  for (uint64_t i = 0; i < total_members; ++i) {
+    winrate_mean += population.winrate[i];
+    kl_mean += population.kl[i];
+  }
+  winrate_mean /= static_cast<double>(total_members);
+  kl_mean /= static_cast<double>(total_members);
+
   torch::Tensor grad_A = torch::zeros(
       {rank, in_features},
       torch::TensorOptions().dtype(torch::kFloat32).device(device_));
@@ -868,16 +891,31 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
   grad_B.div_(static_cast<float>(total_members));
 
   const float step = es_cfg.eta_ES * es_cfg.sigma_ES;
+  torch::Tensor delta_A = grad_A * step;
+  torch::Tensor delta_B = grad_B * step;
+
+  double update_norm = std::sqrt(
+      std::pow(static_cast<double>(delta_A.norm().item<float>()), 2) +
+      std::pow(static_cast<double>(delta_B.norm().item<float>()), 2));
+  double update_scale = 1.0;
+  if (es_cfg.max_kl_mean > 0.0F && kl_mean > static_cast<double>(es_cfg.max_kl_mean)) {
+    update_scale = std::min(update_scale, static_cast<double>(es_cfg.max_kl_mean) / std::max(kl_mean, 1.0e-12));
+  }
+  if (es_cfg.update_norm_clip && es_cfg.max_update_norm > 0.0F && update_norm > static_cast<double>(es_cfg.max_update_norm)) {
+    update_scale = std::min(update_scale, static_cast<double>(es_cfg.max_update_norm) / std::max(update_norm, 1.0e-12));
+  }
+  if (update_scale < 1.0) {
+    delta_A.mul_(update_scale);
+    delta_B.mul_(update_scale);
+    update_norm *= update_scale;
+  }
+
   {
     torch::NoGradGuard no_grad;
     auto lora_params = actor_->es_lora_parameters();
-    lora_params[0].add_(grad_A, step);
-    lora_params[1].add_(grad_B, step);
+    lora_params[0].add_(delta_A);
+    lora_params[1].add_(delta_B);
   }
-
-  double update_norm = std::sqrt(
-      std::pow(static_cast<double>(grad_A.norm().item<float>()) * static_cast<double>(step), 2) +
-      std::pow(static_cast<double>(grad_B.norm().item<float>()) * static_cast<double>(step), 2));
 
   float best_fitness = *std::max_element(fitnesses.begin(), fitnesses.end());
 
@@ -885,12 +923,8 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
   metrics.es_fitness_std = sigma;
   metrics.es_fitness_best = static_cast<double>(best_fitness);
   metrics.es_update_norm = update_norm;
-  for (uint64_t i = 0; i < total_members; ++i) {
-    metrics.es_winrate_mean += population.winrate[i];
-    metrics.es_kl_mean += population.kl[i];
-  }
-  metrics.es_winrate_mean /= static_cast<double>(total_members);
-  metrics.es_kl_mean /= static_cast<double>(total_members);
+  metrics.es_winrate_mean = winrate_mean;
+  metrics.es_kl_mean = kl_mean;
 
   auto lora_params = actor_->es_lora_parameters();
   metrics.es_lora_a_norm = static_cast<double>(lora_params[0].norm().item<float>());

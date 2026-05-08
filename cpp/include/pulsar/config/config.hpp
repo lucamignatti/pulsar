@@ -80,6 +80,8 @@ struct ESLoraConfig {
   float beta_KL = 0.01F;
   bool antithetic_sampling = true;
   bool update_norm_clip = true;
+  float max_update_norm = 0.002F;
+  float max_kl_mean = 0.01F;
 };
 
 struct PPOConfig {
@@ -92,6 +94,8 @@ struct PPOConfig {
   int update_epochs = 3;
   float clip_range = 0.2F;
   float entropy_coef = 0.01F;
+  float entropy_floor = 0.0F;
+  float entropy_floor_coef = 0.0F;
   float value_coef = 1.0F;
   float gamma = 0.99F;
   float gae_lambda = 0.95F;

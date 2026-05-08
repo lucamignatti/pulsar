@@ -189,6 +189,8 @@ void to_json(json& j, const ESLoraConfig& value) {
       {"beta_KL", value.beta_KL},
       {"antithetic_sampling", value.antithetic_sampling},
       {"update_norm_clip", value.update_norm_clip},
+      {"max_update_norm", value.max_update_norm},
+      {"max_kl_mean", value.max_kl_mean},
   };
 }
 
@@ -208,6 +210,8 @@ void from_json(const json& j, ESLoraConfig& value) {
   value.beta_KL = j.value("beta_KL", 0.01F);
   value.antithetic_sampling = j.value("antithetic_sampling", true);
   value.update_norm_clip = j.value("update_norm_clip", true);
+  value.max_update_norm = j.value("max_update_norm", 0.002F);
+  value.max_kl_mean = j.value("max_kl_mean", 0.01F);
 }
 
 void to_json(json& j, const PPOConfig& value) {
@@ -221,6 +225,8 @@ void to_json(json& j, const PPOConfig& value) {
       {"update_epochs", value.update_epochs},
       {"clip_range", value.clip_range},
       {"entropy_coef", value.entropy_coef},
+      {"entropy_floor", value.entropy_floor},
+      {"entropy_floor_coef", value.entropy_floor_coef},
       {"value_coef", value.value_coef},
       {"gamma", value.gamma},
       {"gae_lambda", value.gae_lambda},
@@ -250,6 +256,8 @@ void from_json(const json& j, PPOConfig& value) {
   value.update_epochs = j.value("update_epochs", 3);
   value.clip_range = j.value("clip_range", 0.2F);
   value.entropy_coef = j.value("entropy_coef", 0.01F);
+  value.entropy_floor = j.value("entropy_floor", 0.0F);
+  value.entropy_floor_coef = j.value("entropy_floor_coef", 0.0F);
   value.value_coef = j.value("value_coef", 1.0F);
   value.gamma = j.value("gamma", 0.99F);
   value.gae_lambda = j.value("gae_lambda", 0.95F);
@@ -470,6 +478,21 @@ void validate_experiment_config(const ExperimentConfig& config) {
   if (config.es_lora.population_size <= 0) {
     throw std::invalid_argument("es_lora.population_size must be positive.");
   }
+  if (config.es_lora.antithetic_sampling && (config.es_lora.population_size % 2) != 0) {
+    throw std::invalid_argument("es_lora.population_size must be even when antithetic_sampling is enabled.");
+  }
+  if (config.es_lora.eta_ES <= 0.0F) {
+    throw std::invalid_argument("es_lora.eta_ES must be positive.");
+  }
+  if (config.es_lora.beta_KL < 0.0F) {
+    throw std::invalid_argument("es_lora.beta_KL must be non-negative.");
+  }
+  if (config.es_lora.max_update_norm < 0.0F) {
+    throw std::invalid_argument("es_lora.max_update_norm must be non-negative.");
+  }
+  if (config.es_lora.max_kl_mean < 0.0F) {
+    throw std::invalid_argument("es_lora.max_kl_mean must be non-negative.");
+  }
   if (config.es_lora.eval_episodes_per_member <= 0) {
     throw std::invalid_argument("es_lora.eval_episodes_per_member must be positive.");
   }
@@ -478,6 +501,12 @@ void validate_experiment_config(const ExperimentConfig& config) {
   }
   if (config.es_lora.eval_rollout_length <= 0) {
     throw std::invalid_argument("es_lora.eval_rollout_length must be positive.");
+  }
+  if (config.ppo.entropy_floor < 0.0F) {
+    throw std::invalid_argument("ppo.entropy_floor must be non-negative.");
+  }
+  if (config.ppo.entropy_floor_coef < 0.0F) {
+    throw std::invalid_argument("ppo.entropy_floor_coef must be non-negative.");
   }
 }
 
