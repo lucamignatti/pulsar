@@ -315,7 +315,7 @@ torch::Tensor compute_pairwise_negative_l2_logits(
     const torch::Tensor& rhs_embeddings) {
   PULSAR_TRACE_SCOPE_CAT("ppo_math", "infonce_logits");
   const torch::Tensor diff = lhs_embeddings.unsqueeze(1) - rhs_embeddings.unsqueeze(0);
-  return -torch::sqrt(diff.square().sum(-1).clamp_min(1.0e-8F));
+  return -diff.square().sum(-1).clamp_min(1.0e-8F);
 }
 
 torch::Tensor compute_symmetric_infonce_loss(
@@ -327,7 +327,7 @@ torch::Tensor compute_symmetric_infonce_loss(
   const torch::Tensor col_lse = torch::logsumexp(logits, 0);
   const torch::Tensor row_loss = -(diag - row_lse).mean();
   const torch::Tensor col_loss = -(diag - col_lse).mean();
-  const torch::Tensor penalty = logsumexp_penalty_coeff * (row_lse.square().mean() + col_lse.square().mean());
+  const torch::Tensor penalty = logsumexp_penalty_coeff * (row_lse.mean() + col_lse.mean());
   return row_loss + col_loss + penalty;
 }
 

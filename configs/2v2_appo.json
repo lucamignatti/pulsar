@@ -16,7 +16,7 @@
   "outcome": {
     "score": 1.0,
     "concede": -1.0,
-    "neutral": 0.0
+    "neutral": -1.0
   },
   "action_table": {
     "builtin": "rlgym_lookup_v1",
@@ -85,7 +85,7 @@
     "lambda_Zg": 1.0,
     "lambda_goal_actor": 0.1,
     "contrastive_batch_size": 2048,
-    "max_future_horizon": 256
+    "max_future_horizon": 10000000
   },
   "es_lora": {
     "rank": 4,
@@ -98,8 +98,7 @@
     "eval_num_envs": 8,
     "eval_rollout_length": 450,
     "beta_KL": 0.01,
-    "antithetic_sampling": true,
-    "update_norm_clip": true
+    "antithetic_sampling": true
   },
   "self_play_league": {
     "enabled": true,

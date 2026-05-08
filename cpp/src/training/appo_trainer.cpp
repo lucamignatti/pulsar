@@ -646,7 +646,7 @@ TrainerMetrics APPOTrainer::update_actor() {
 
           const auto active_count = active_features.size(0);
           const int cb_size = config_.goal_critic.contrastive_batch_size;
-          torch::Tensor sa_emb, g_emb, sa_emb_actor;
+          torch::Tensor sa_emb, g_emb;
           if (active_count > static_cast<c10::IntArrayRef::value_type>(cb_size)) {
             const torch::Tensor idx = torch::randperm(active_count, active_actions.options())
                 .narrow(0, 0, cb_size);
@@ -654,23 +654,26 @@ TrainerMetrics APPOTrainer::update_actor() {
             const torch::Tensor act_sub = active_actions.index({idx});
             const torch::Tensor goal_sub = active_future_goal_pos.index({idx});
             const torch::Tensor logit_sub = active_logits.index({idx});
+            const torch::Tensor mask_sub = active_masks.index({idx});
 
             sa_emb = actor_->goal_critic()->sa_embedding(feat_sub, act_sub);
             g_emb = actor_->goal_critic()->goal_embedding(goal_sub);
 
-            const torch::Tensor actor_probs = torch::softmax(logit_sub, -1);
-            sa_emb_actor = actor_->goal_critic()->sa_embedding(feat_sub, actor_probs);
+            torch::Tensor sampled = sample_masked_actions(
+                logit_sub.detach(), mask_sub.detach(), false, nullptr);
+            actor_goal_loss = -actor_->goal_critic()->forward(
+                feat_sub.detach(), sampled.detach(), goal_sub).mean();
           } else {
             sa_emb = actor_->goal_critic()->sa_embedding(active_features, active_actions);
             g_emb = actor_->goal_critic()->goal_embedding(active_future_goal_pos);
 
-            const torch::Tensor actor_probs = torch::softmax(active_logits, -1);
-            sa_emb_actor = actor_->goal_critic()->sa_embedding(active_features, actor_probs);
+            torch::Tensor sampled = sample_masked_actions(
+                active_logits.detach(), active_masks.detach(), false, nullptr);
+            actor_goal_loss = -actor_->goal_critic()->forward(
+                active_features.detach(), sampled.detach(), active_future_goal_pos).mean();
           }
           const torch::Tensor sa_logits = compute_pairwise_negative_l2_logits(sa_emb, g_emb);
           goal_loss = compute_symmetric_infonce_loss(sa_logits, config_.goal_critic.logsumexp_penalty_coeff);
-
-          actor_goal_loss = (sa_emb_actor - g_emb).square().sum(-1).mean();
 
           {
             torch::NoGradGuard no_grad;
@@ -896,30 +899,30 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
     normalized_f.push_back((f - mu) / (sigma + 1.0e-8F));
   }
 
-  torch::Tensor delta_weight = torch::zeros(
-      {out_features, in_features},
+  torch::Tensor grad_A = torch::zeros(
+      {rank, in_features},
+      torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+  torch::Tensor grad_B = torch::zeros(
+      {out_features, rank},
       torch::TensorOptions().dtype(torch::kFloat32).device(device_));
   for (uint64_t i = 0; i < total_members; ++i) {
-    delta_weight.add_(
-        torch::matmul(B_stack[static_cast<long>(i)], A_stack[static_cast<long>(i)]),
-        normalized_f[i]);
+    grad_A.add_(A_stack[static_cast<long>(i)], normalized_f[i]);
+    grad_B.add_(B_stack[static_cast<long>(i)], normalized_f[i]);
   }
-  delta_weight.div_(static_cast<float>(total_members) * es_cfg.sigma_ES);
-  delta_weight.mul_(es_cfg.eta_ES);
+  grad_A.div_(static_cast<float>(total_members));
+  grad_B.div_(static_cast<float>(total_members));
 
-  double update_norm = static_cast<double>(delta_weight.norm().item<float>());
-
-  if (es_cfg.update_norm_clip) {
-    const double param_norm = static_cast<double>(actor_->policy_lora()->base->weight.norm().item<float>());
-    double clip_val = 0.1 * param_norm;
-    if (update_norm > clip_val) {
-      double scale = clip_val / update_norm;
-      delta_weight.mul_(static_cast<float>(scale));
-      update_norm = clip_val;
-    }
+  const float step = es_cfg.eta_ES * es_cfg.sigma_ES;
+  {
+    torch::NoGradGuard no_grad;
+    auto lora_params = actor_->es_lora_parameters();
+    lora_params[0].add_(grad_A, step);
+    lora_params[1].add_(grad_B, step);
   }
 
-  actor_->apply_policy_eggroll_update(delta_weight);
+  double update_norm = std::sqrt(
+      std::pow(static_cast<double>(grad_A.norm().item<float>()) * static_cast<double>(step), 2) +
+      std::pow(static_cast<double>(grad_B.norm().item<float>()) * static_cast<double>(step), 2));
 
   float best_fitness = *std::max_element(fitnesses.begin(), fitnesses.end());
 
