@@ -22,9 +22,6 @@ pulsar::ModelConfig small_model_config() {
   config.controller_dim = 8;
   config.consolidation_stride = 2;
   config.value_hidden_dim = 32;
-  config.value_num_atoms = 51;
-  config.value_v_min = -10.0F;
-  config.value_v_max = 10.0F;
   return config;
 }
 

@@ -153,12 +153,8 @@ void append_metrics_line(
       {"value_loss", metrics.value_loss},
       {"entropy", metrics.entropy},
       {"grad_norm", metrics.grad_norm},
-      {"adaptive_epsilon", metrics.adaptive_epsilon},
-      {"critic_variance", metrics.critic_variance},
-      {"mean_confidence_weight", metrics.mean_confidence_weight},
       {"sparse_reward_mean", metrics.sparse_reward_mean},
       {"sampled_value_win_mean", metrics.sampled_value_win_mean},
-      {"value_win_entropy", metrics.value_win_entropy},
       {"rollout_steps", metrics.rollout_steps},
       {"completed_episodes", metrics.completed_episodes},
       {"scored_episodes", metrics.scored_episodes},
@@ -440,9 +436,6 @@ TrainerMetrics APPOTrainer::update_actor() {
   const int total_agents = rollout_.num_agents();
   const int rollout_steps = rollout_.rollout_length();
   std::int64_t metric_steps = 0;
-  double accumulated_variance = 0.0;
-  double accumulated_epsilon = 0.0;
-  double accumulated_confidence = 0.0;
   double accumulated_goal_critic_loss = 0.0;
   double accumulated_goal_score = 0.0;
   double accumulated_sampled_goal_distance = 0.0;
@@ -703,9 +696,6 @@ TrainerMetrics APPOTrainer::update_actor() {
     metrics.value_loss /= static_cast<double>(metric_steps);
     metrics.entropy /= static_cast<double>(metric_steps);
     metrics.grad_norm /= static_cast<double>(metric_steps);
-    metrics.adaptive_epsilon = accumulated_epsilon / static_cast<double>(metric_steps);
-    metrics.critic_variance = accumulated_variance / static_cast<double>(metric_steps);
-    metrics.mean_confidence_weight = accumulated_confidence / static_cast<double>(metric_steps);
     metrics.goal_critic_loss = accumulated_goal_critic_loss / static_cast<double>(metric_steps);
     metrics.mean_goal_score = accumulated_goal_score / static_cast<double>(metric_steps);
     metrics.mean_sampled_goal_distance = accumulated_sampled_goal_distance / static_cast<double>(metric_steps);
@@ -939,8 +929,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   int64_t total_steps = 0;
   int64_t total_learner_steps = 0;
   double accumulated_sampled_value = 0.0;
-  double accumulated_value_entropy = 0.0;
-  int64_t accumulated_value_stat_count = 0;
+  int64_t accumulated_value_count = 0;
   double total_goal_distance = 0.0;
   double min_goal_distance = 1.0;
   int64_t total_goals_scored = 0;
@@ -967,7 +956,6 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
       torch::Tensor action_indices_cpu{};
       torch::Tensor action_log_probs{};
       torch::Tensor sampled_value{};
-      torch::Tensor entropy_tensor{};
       CollectorTimings timings{};
       std::future<void> step_future{};
     };
@@ -1036,7 +1024,6 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
         shard_step.learner_active_host = learner_active_host;
         shard_step.action_log_probs = action_log_probs;
         shard_step.sampled_value = output.value_win_logits.squeeze(-1);
-        shard_step.entropy_tensor = torch::zeros_like(shard_step.sampled_value);
 
         const auto decode_start = std::chrono::steady_clock::now();
         {
@@ -1103,9 +1090,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
 
         const torch::Tensor sampled_value_cpu = shard_step.sampled_value.to(torch::kCPU);
         accumulated_sampled_value += sampled_value_cpu.sum().item<double>();
-        const torch::Tensor entropy_cpu = shard_step.entropy_tensor.to(torch::kCPU);
-        accumulated_value_entropy += entropy_cpu.sum().item<double>();
-        accumulated_value_stat_count += static_cast<int64_t>(sampled_value_cpu.numel());
+        accumulated_value_count += static_cast<int64_t>(sampled_value_cpu.numel());
 
         torch::Tensor goal_pos_host = collector.host_goal_positions();
         torch::Tensor goal_norms = goal_pos_host.norm(2, 1);
@@ -1224,7 +1209,6 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
     }
 
     torch::Tensor sampled_value = output.value_win_logits.squeeze(-1);
-    torch::Tensor entropy_tensor = torch::zeros({output.value_win_logits.size(0)}, output.value_win_logits.options());
 
     const auto decode_start = std::chrono::steady_clock::now();
     torch::Tensor action_indices_cpu;
@@ -1280,9 +1264,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
 
     const torch::Tensor sampled_value_cpu = sampled_value.to(torch::kCPU);
     accumulated_sampled_value += sampled_value_cpu.sum().item<double>();
-    const torch::Tensor entropy_cpu = entropy_tensor.to(torch::kCPU);
-    accumulated_value_entropy += entropy_cpu.sum().item<double>();
-    accumulated_value_stat_count += static_cast<int64_t>(sampled_value_cpu.numel());
+    accumulated_value_count += static_cast<int64_t>(sampled_value_cpu.numel());
 
     torch::Tensor goal_pos_host = collector_->host_goal_positions();
     torch::Tensor goal_norms = goal_pos_host.norm(2, 1);
@@ -1371,11 +1353,9 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   if (total_ball_proximity_denom > 0) {
     metrics.ball_proximity_rate = static_cast<double>(total_ball_proximity_steps) / static_cast<double>(total_ball_proximity_denom);
   }
-  if (accumulated_value_stat_count > 0) {
+  if (accumulated_value_count > 0) {
     metrics.sampled_value_win_mean = accumulated_sampled_value
-        / static_cast<double>(accumulated_value_stat_count);
-    metrics.value_win_entropy = accumulated_value_entropy
-        / static_cast<double>(accumulated_value_stat_count);
+        / static_cast<double>(accumulated_value_count);
   }
 
   TrainerMetrics update_metrics = update_actor();
@@ -1386,9 +1366,6 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   metrics.update_seconds = update_metrics.update_seconds;
   metrics.forward_backward_seconds = update_metrics.forward_backward_seconds;
   metrics.optimizer_step_seconds = update_metrics.optimizer_step_seconds;
-  metrics.adaptive_epsilon = update_metrics.adaptive_epsilon;
-  metrics.critic_variance = update_metrics.critic_variance;
-  metrics.mean_confidence_weight = update_metrics.mean_confidence_weight;
   metrics.goal_critic_loss = update_metrics.goal_critic_loss;
   metrics.mean_goal_score = update_metrics.mean_goal_score;
   metrics.mean_sampled_goal_distance = update_metrics.mean_sampled_goal_distance;
@@ -1517,7 +1494,6 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " value_loss=" << metrics.value_loss
               << " entropy=" << metrics.entropy
               << " grad_norm=" << metrics.grad_norm
-              << " epsilon=" << metrics.adaptive_epsilon
               << " sparse_reward=" << metrics.sparse_reward_mean
               << " rollout_steps=" << metrics.rollout_steps
               << " completed_eps=" << metrics.completed_episodes
@@ -1535,12 +1511,8 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"policy_loss", metrics.policy_loss},
           {"value_loss", metrics.value_loss},
           {"entropy", metrics.entropy},
-          {"adaptive_epsilon", metrics.adaptive_epsilon},
-          {"critic_variance", metrics.critic_variance},
-          {"mean_confidence_weight", metrics.mean_confidence_weight},
           {"sparse_reward_mean", metrics.sparse_reward_mean},
           {"sampled_value_win_mean", metrics.sampled_value_win_mean},
-          {"value_win_entropy", metrics.value_win_entropy},
           {"rollout_steps", metrics.rollout_steps},
           {"completed_episodes", metrics.completed_episodes},
           {"scored_episodes", metrics.scored_episodes},

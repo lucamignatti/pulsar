@@ -49,9 +49,6 @@ struct ModelConfig {
   int consolidation_stride = 8;
   float retired_decay = 0.96F;
   int value_hidden_dim = 256;
-  int value_num_atoms = 51;
-  float value_v_min = -10.0F;
-  float value_v_max = 10.0F;
   int policy_hidden_dim = 0;
 };
 
@@ -109,13 +106,7 @@ struct PPOConfig {
   int early_update_completed_episodes = 0;
   bool train_only_scored_episodes = false;
   bool use_adaptive_epsilon = true;
-  float adaptive_epsilon_beta = 1.0F;
-  float epsilon_min = 0.05F;
-  float epsilon_max = 0.3F;
   bool use_confidence_weighting = true;
-  std::string confidence_weight_type = "entropy";
-  float confidence_weight_delta = 1.0e-6F;
-  bool normalize_confidence_weights = false;
   bool synchronize_cuda_timing = false;
 };
 

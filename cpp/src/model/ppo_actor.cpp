@@ -86,10 +86,6 @@ void validate_model_config(const ModelConfig& config) {
   require_positive(config.controller_dim, "controller_dim");
   require_positive(config.consolidation_stride, "consolidation_stride");
   require_positive(config.value_hidden_dim, "value_hidden_dim");
-
-  if (!(config.value_v_max > config.value_v_min)) {
-    throw std::invalid_argument("ModelConfig.value_v_max must be greater than value_v_min.");
-  }
 }
 
 }  // namespace
@@ -407,7 +403,6 @@ ActorStepOutput PPOActorImpl::forward_encoded_step(
       policy_logits,
       encoded,
       value_head_win_->forward(features),
-      torch::Tensor{},
       features,
       std::move(state),
   };
@@ -464,7 +459,6 @@ ActorSequenceOutput PPOActorImpl::forward_sequence(
       torch::stack(policy_logits, 0),
       torch::stack(encoded_seq_stack, 0),
       torch::stack(value_win_logits, 0),
-      torch::Tensor{},
       torch::stack(features, 0),
       std::move(state),
   };

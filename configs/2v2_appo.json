@@ -37,9 +37,7 @@
     "consolidation_stride": 8,
     "retired_decay": 0.96,
     "value_hidden_dim": 256,
-    "value_num_atoms": 51,
-    "value_v_min": -10.0,
-    "value_v_max": 10.0
+    "policy_hidden_dim": 0
   },
   "ppo": {
     "num_envs": 512,
@@ -47,7 +45,7 @@
     "collection_shards": 2,
     "init_checkpoint": "",
     "rollout_length": 288,
-    "minibatch_size": 65536,
+    "minibatch_size": 131072,
     "update_epochs": 3,
     "clip_range": 0.2,
     "entropy_coef": 0.01,
@@ -65,13 +63,7 @@
     "early_update_completed_episodes": 64,
     "train_only_scored_episodes": false,
     "use_adaptive_epsilon": false,
-    "adaptive_epsilon_beta": 1.0,
-    "epsilon_min": 0.05,
-    "epsilon_max": 0.3,
     "use_confidence_weighting": false,
-    "confidence_weight_type": "entropy",
-    "confidence_weight_delta": 1.0e-6,
-    "normalize_confidence_weights": true,
     "synchronize_cuda_timing": false
   },
   "goal_mapping": {

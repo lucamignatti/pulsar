@@ -38,41 +38,6 @@ torch::Tensor clipped_ppo_policy_loss(
     const torch::Tensor& old_log_probs,
     const torch::Tensor& advantages,
     const torch::Tensor& clip_range);
-torch::Tensor distributional_value_loss(
-    const torch::Tensor& value_logits,
-    const torch::Tensor& returns,
-    float v_min,
-    float v_max,
-    int num_atoms);
-torch::Tensor sample_quantile_value(
-    const torch::Tensor& value_logits,
-    const torch::Tensor& atom_support);
-torch::Tensor compute_mean_value(
-    const torch::Tensor& value_logits,
-    const torch::Tensor& atom_support);
-torch::Tensor compute_distribution_variance(
-    const torch::Tensor& value_logits,
-    const torch::Tensor& atom_support);
-torch::Tensor compute_distribution_entropy(
-    const torch::Tensor& value_logits);
-float compute_adaptive_epsilon(
-    const torch::Tensor& variance,
-    float epsilon_base,
-    float epsilon_beta,
-    float epsilon_min,
-    float epsilon_max);
-torch::Tensor compute_adaptive_epsilon_tensor(
-    const torch::Tensor& variance,
-    float epsilon_base,
-    float epsilon_beta,
-    float epsilon_min,
-    float epsilon_max);
-torch::Tensor compute_confidence_weights(
-    const torch::Tensor& value_logits,
-    const torch::Tensor& atom_support,
-    const std::string& weight_type,
-    float weight_delta,
-    bool normalize);
 
 torch::Tensor normalize_advantage(const torch::Tensor& advantages, const torch::Tensor& active_mask);
 

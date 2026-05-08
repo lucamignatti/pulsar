@@ -119,9 +119,6 @@ void to_json(json& j, const ModelConfig& value) {
       {"consolidation_stride", value.consolidation_stride},
       {"retired_decay", value.retired_decay},
       {"value_hidden_dim", value.value_hidden_dim},
-      {"value_num_atoms", value.value_num_atoms},
-      {"value_v_min", value.value_v_min},
-      {"value_v_max", value.value_v_max},
       {"policy_hidden_dim", value.policy_hidden_dim},
   };
 }
@@ -141,9 +138,6 @@ void from_json(const json& j, ModelConfig& value) {
   value.consolidation_stride = j.value("consolidation_stride", 8);
   value.retired_decay = j.value("retired_decay", 0.96F);
   value.value_hidden_dim = j.value("value_hidden_dim", 256);
-  value.value_num_atoms = j.value("value_num_atoms", 51);
-  value.value_v_min = j.value("value_v_min", -10.0F);
-  value.value_v_max = j.value("value_v_max", 10.0F);
   value.policy_hidden_dim = j.value("policy_hidden_dim", 0);
 }
 
@@ -241,13 +235,7 @@ void to_json(json& j, const PPOConfig& value) {
       {"early_update_completed_episodes", value.early_update_completed_episodes},
       {"train_only_scored_episodes", value.train_only_scored_episodes},
       {"use_adaptive_epsilon", value.use_adaptive_epsilon},
-      {"adaptive_epsilon_beta", value.adaptive_epsilon_beta},
-      {"epsilon_min", value.epsilon_min},
-      {"epsilon_max", value.epsilon_max},
       {"use_confidence_weighting", value.use_confidence_weighting},
-      {"confidence_weight_type", value.confidence_weight_type},
-      {"confidence_weight_delta", value.confidence_weight_delta},
-      {"normalize_confidence_weights", value.normalize_confidence_weights},
       {"synchronize_cuda_timing", value.synchronize_cuda_timing},
   };
 }
@@ -276,13 +264,7 @@ void from_json(const json& j, PPOConfig& value) {
   value.early_update_completed_episodes = j.value("early_update_completed_episodes", 0);
   value.train_only_scored_episodes = j.value("train_only_scored_episodes", false);
   value.use_adaptive_epsilon = j.value("use_adaptive_epsilon", true);
-  value.adaptive_epsilon_beta = j.value("adaptive_epsilon_beta", 1.0F);
-  value.epsilon_min = j.value("epsilon_min", 0.05F);
-  value.epsilon_max = j.value("epsilon_max", 0.3F);
   value.use_confidence_weighting = j.value("use_confidence_weighting", true);
-  value.confidence_weight_type = j.value("confidence_weight_type", std::string{"entropy"});
-  value.confidence_weight_delta = j.value("confidence_weight_delta", 1.0e-6F);
-  value.normalize_confidence_weights = j.value("normalize_confidence_weights", false);
   value.synchronize_cuda_timing = j.value("synchronize_cuda_timing", false);
 }
 

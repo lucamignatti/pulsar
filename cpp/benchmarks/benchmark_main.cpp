@@ -33,9 +33,6 @@ pulsar::ModelConfig benchmark_model_config() {
   config.ltm_dim = 16;
   config.controller_dim = 64;
   config.value_hidden_dim = 128;
-  config.value_num_atoms = 51;
-  config.value_v_min = -10.0F;
-  config.value_v_max = 10.0F;
   return config;
 }
 

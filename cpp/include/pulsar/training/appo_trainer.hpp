@@ -40,12 +40,8 @@ struct TrainerMetrics {
   double forward_backward_seconds = 0.0;
   double optimizer_step_seconds = 0.0;
   double self_play_eval_seconds = 0.0;
-  double adaptive_epsilon = 0.0;
-  double critic_variance = 0.0;
-  double mean_confidence_weight = 0.0;
   double sparse_reward_mean = 0.0;
   double sampled_value_win_mean = 0.0;
-  double value_win_entropy = 0.0;
   int64_t rollout_steps = 0;
   int64_t completed_episodes = 0;
   int64_t scored_episodes = 0;

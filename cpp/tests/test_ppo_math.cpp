@@ -44,9 +44,6 @@ pulsar::ModelConfig tiny_model_config() {
   cfg.controller_dim = 8;
   cfg.consolidation_stride = 2;
   cfg.value_hidden_dim = 16;
-  cfg.value_num_atoms = 21;
-  cfg.value_v_min = -5.0F;
-  cfg.value_v_max = 5.0F;
   return cfg;
 }
 
@@ -95,19 +92,7 @@ int main() {
       require_close(loss.item<float>(), expected, "clipped PPO with negative advantage");
     }
 
-    // 4. Confidence weighting is per-sample
-    {
-      const auto value_logits = torch::zeros({2, 21}, torch::kFloat32);
-      value_logits[0][10] = 5.0F;
-      value_logits[1][5] = 5.0F;
-      const auto atom_support = torch::linspace(-5.0F, 5.0F, 21, torch::kFloat32);
-      const auto weights = pulsar::compute_confidence_weights(
-          value_logits, atom_support, "entropy", 1.0e-6F, false);
-      require(weights.sizes() == torch::IntArrayRef({2}), "confidence weights shape");
-      require_finite(weights, "confidence weights");
-    }
-
-    // 5. GAE final bootstrap
+    // 4. GAE final bootstrap
     {
       const auto values = torch::zeros({2, 1}, torch::kFloat32);
       const auto rewards = torch::zeros({2, 1}, torch::kFloat32);
@@ -119,7 +104,7 @@ int main() {
       require_close(advantages[1].item<float>(), 1.0F, "GAE bootstrap step 1");
     }
 
-    // 6. GAE terminal masking
+    // 5. GAE terminal masking
     {
       const auto values = torch::zeros({3, 1}, torch::kFloat32);
       const auto rewards = torch::tensor({1.0F, 1.0F, 1.0F}, torch::kFloat32).unsqueeze(1);
@@ -130,7 +115,7 @@ int main() {
       require_close(advantages[2].item<float>(), 1.0F, "GAE terminal mask step 2");
     }
 
-    // 7. One-sample advantage normalization
+    // 6. One-sample advantage normalization
     {
       const auto adv = torch::tensor({3.0F}, torch::kFloat32);
       const auto mask = torch::ones({1}, torch::kFloat32);
@@ -139,44 +124,7 @@ int main() {
       require_close(normalized.item<float>(), 0.0F, "one-sample normalized advantage zero");
     }
 
-    // 8. Distributional projection
-    {
-      const auto logits = torch::zeros({1, 21}, torch::kFloat32);
-      const float v_min = -5.0F;
-      const float v_max = 5.0F;
-      const int num_atoms = 21;
-      const float delta_z = (v_max - v_min) / static_cast<float>(num_atoms - 1);
-
-      const auto ret_at_min = torch::tensor({v_min}, torch::kFloat32);
-      const auto loss_min = pulsar::distributional_value_loss(logits, ret_at_min, v_min, v_max, num_atoms);
-      require_finite(loss_min, "distributional loss at v_min");
-
-      const auto ret_at_max = torch::tensor({v_max}, torch::kFloat32);
-      const auto loss_max = pulsar::distributional_value_loss(logits, ret_at_max, v_min, v_max, num_atoms);
-      require_finite(loss_max, "distributional loss at v_max");
-
-      const float between_val = v_min + delta_z * 5.5F;
-      const auto ret_between = torch::tensor({between_val}, torch::kFloat32);
-      const auto loss_between = pulsar::distributional_value_loss(logits, ret_between, v_min, v_max, num_atoms);
-      require_finite(loss_between, "distributional loss between atoms");
-    }
-
-    // 9. Distributional sampling
-    {
-      torch::manual_seed(42);
-      const auto atom_support = torch::linspace(-5.0F, 5.0F, 21, torch::kFloat32);
-      const auto logits_uniform = torch::zeros({32, 21}, torch::kFloat32);
-      const auto sampled_uniform = pulsar::sample_quantile_value(logits_uniform, atom_support);
-      const float min_atom = atom_support[0].item<float>();
-      const float max_atom = atom_support[-1].item<float>();
-      for (int i = 0; i < 32; ++i) {
-        const float val = sampled_uniform[i].item<float>();
-        require(val >= min_atom && val <= max_atom,
-                "sampled value outside support at index " + std::to_string(i));
-      }
-    }
-
-    // 10. Config validation
+    // 7. Config validation
     {
       pulsar::ExperimentConfig config = pulsar::test::make_test_config();
       config.ppo.rollout_length = 2;
@@ -201,7 +149,7 @@ int main() {
       require(caught, "rollout_length <= 1 should throw");
     }
 
-    // 11. Future goal sampling
+    // 8. Future goal sampling
     {
       torch::manual_seed(42);
       const int steps = 5;
@@ -226,7 +174,7 @@ int main() {
       require_finite(future_goals, "future goals finite");
     }
 
-    // 12. Contrastive loss
+    // 9. Contrastive loss
     {
       torch::manual_seed(42);
       auto lhs = torch::randn({8, 64}, torch::kFloat32);
@@ -239,7 +187,7 @@ int main() {
       require_finite(loss, "contrastive loss finite");
     }
 
-    // 13. KL divergence computation
+    // 10. KL divergence computation
     {
       auto base_logits = torch::full({2, 4}, 0.01F, torch::kFloat32);
       auto perturbed_logits = torch::full({2, 4}, 0.01F, torch::kFloat32);
@@ -253,29 +201,6 @@ int main() {
       require(kl_diff > 0.0F, "KL between different distributions should be positive");
     }
 
-    // 14. Adaptive epsilon bounds
-    {
-      const auto tiny_variance = torch::tensor({0.01F}, torch::kFloat32);
-      const float eps = pulsar::compute_adaptive_epsilon(tiny_variance, 0.2F, 1.0F, 0.05F, 0.3F);
-      require(eps >= 0.05F && eps <= 0.3F, "adaptive epsilon within bounds");
-
-      const auto large_variance = torch::tensor({100.0F}, torch::kFloat32);
-      const float small_eps = pulsar::compute_adaptive_epsilon(large_variance, 0.2F, 1.0F, 0.05F, 0.3F);
-      require_close(small_eps, 0.05F, "adaptive epsilon clamps to min");
-    }
-
-    // 15. compute_mean_value and compute_distribution_variance
-    {
-      const auto atom_support = torch::linspace(-5.0F, 5.0F, 21, torch::kFloat32);
-      const auto logits = torch::zeros({4, 21}, torch::kFloat32);
-      const auto mean_val = pulsar::compute_mean_value(logits, atom_support);
-      require(mean_val.sizes() == torch::IntArrayRef({4}), "mean value shape");
-      require_finite(mean_val, "mean value finite");
-
-      const auto variance = pulsar::compute_distribution_variance(logits, atom_support);
-      require(variance.sizes() == torch::IntArrayRef({4}), "variance shape");
-      require_finite(variance, "variance finite");
-    }
     std::cout << "pulsar_ppo_math_tests passed\n";
     return EXIT_SUCCESS;
   } catch (const std::exception& exc) {

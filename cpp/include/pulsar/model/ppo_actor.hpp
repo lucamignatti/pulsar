@@ -29,7 +29,6 @@ struct ActorStepOutput {
   torch::Tensor policy_logits;
   torch::Tensor encoded;
   torch::Tensor value_win_logits;
-  torch::Tensor goal_critic_logits;
   torch::Tensor features;
   ContinuumState state;
 };
@@ -38,7 +37,6 @@ struct ActorSequenceOutput {
   torch::Tensor policy_logits;
   torch::Tensor encoded;
   torch::Tensor value_win_logits;
-  torch::Tensor goal_critic_logits;
   torch::Tensor features;
   ContinuumState final_state;
 };
