@@ -177,7 +177,7 @@ void from_json(const json& j, GoalCriticConfig& value) {
   value.logsumexp_penalty_coeff = j.value("logsumexp_penalty_coeff", 0.01F);
   value.lambda_Zg = j.value("lambda_Zg", 1.0F);
   value.lambda_goal_actor = j.value("lambda_goal_actor", 0.1F);
-  value.contrastive_batch_size = j.value("contrastive_batch_size", 4096);
+  value.contrastive_batch_size = j.value("contrastive_batch_size", 2048);
   value.max_future_horizon = j.value("max_future_horizon", 256);
 }
 

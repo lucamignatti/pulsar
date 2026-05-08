@@ -66,7 +66,7 @@ struct GoalCriticConfig {
   float logsumexp_penalty_coeff = 0.01F;
   float lambda_Zg = 1.0F;
   float lambda_goal_actor = 0.1F;
-  int contrastive_batch_size = 4096;
+  int contrastive_batch_size = 2048;
   int max_future_horizon = 256;
 };
 
