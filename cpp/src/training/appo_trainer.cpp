@@ -646,19 +646,31 @@ TrainerMetrics APPOTrainer::update_actor() {
 
           const auto active_count = active_features.size(0);
           const int cb_size = config_.goal_critic.contrastive_batch_size;
-          torch::Tensor sa_emb, g_emb;
+          torch::Tensor sa_emb, g_emb, sa_emb_actor;
           if (active_count > static_cast<c10::IntArrayRef::value_type>(cb_size)) {
             const torch::Tensor idx = torch::randperm(active_count, active_actions.options())
                 .narrow(0, 0, cb_size);
-            sa_emb = actor_->goal_critic()->sa_embedding(
-                active_features.index({idx}), active_actions.index({idx}));
-            g_emb = actor_->goal_critic()->goal_embedding(active_future_goal_pos.index({idx}));
+            const torch::Tensor feat_sub = active_features.index({idx});
+            const torch::Tensor act_sub = active_actions.index({idx});
+            const torch::Tensor goal_sub = active_future_goal_pos.index({idx});
+            const torch::Tensor logit_sub = active_logits.index({idx});
+
+            sa_emb = actor_->goal_critic()->sa_embedding(feat_sub, act_sub);
+            g_emb = actor_->goal_critic()->goal_embedding(goal_sub);
+
+            const torch::Tensor actor_probs = torch::softmax(logit_sub, -1);
+            sa_emb_actor = actor_->goal_critic()->sa_embedding(feat_sub, actor_probs);
           } else {
             sa_emb = actor_->goal_critic()->sa_embedding(active_features, active_actions);
             g_emb = actor_->goal_critic()->goal_embedding(active_future_goal_pos);
+
+            const torch::Tensor actor_probs = torch::softmax(active_logits, -1);
+            sa_emb_actor = actor_->goal_critic()->sa_embedding(active_features, actor_probs);
           }
           const torch::Tensor sa_logits = compute_pairwise_negative_l2_logits(sa_emb, g_emb);
           goal_loss = compute_symmetric_infonce_loss(sa_logits, config_.goal_critic.logsumexp_penalty_coeff);
+
+          actor_goal_loss = (sa_emb_actor - g_emb).square().sum(-1).mean();
 
           {
             torch::NoGradGuard no_grad;
@@ -673,11 +685,6 @@ TrainerMetrics APPOTrainer::update_actor() {
           accumulated_sampled_goal_distance += chunk_sampled_goal_norm * static_cast<double>(active_logits.size(0));
           accumulated_goal_critic_loss += goal_loss.item<double>() * static_cast<double>(active_logits.size(0));
           accumulated_goal_score += chunk_goal_score * static_cast<double>(active_logits.size(0));
-
-          const torch::Tensor g_emb_all = actor_->goal_critic()->goal_embedding(active_future_goal_pos);
-          const torch::Tensor actor_probs = torch::softmax(active_logits, -1);
-          const torch::Tensor sa_emb_actor = actor_->goal_critic()->sa_embedding(active_features, actor_probs);
-          actor_goal_loss = (sa_emb_actor - g_emb_all).square().sum(-1).mean();
         }
 
         const torch::Tensor loss =
