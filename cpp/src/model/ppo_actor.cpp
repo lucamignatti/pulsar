@@ -86,11 +86,7 @@ void validate_model_config(const ModelConfig& config) {
   require_positive(config.controller_dim, "controller_dim");
   require_positive(config.consolidation_stride, "consolidation_stride");
   require_positive(config.value_hidden_dim, "value_hidden_dim");
-  require_positive(config.value_num_atoms, "value_num_atoms");
 
-  if (config.value_num_atoms < 2) {
-    throw std::invalid_argument("ModelConfig.value_num_atoms must be >= 2 for distributional RL.");
-  }
   if (!(config.value_v_max > config.value_v_min)) {
     throw std::invalid_argument("ModelConfig.value_v_max must be greater than value_v_min.");
   }
@@ -99,15 +95,15 @@ void validate_model_config(const ModelConfig& config) {
 }  // namespace
 
 LoRALinearImpl::LoRALinearImpl(int in_features, int out_features, int rank, float lora_alpha)
-    : rank_(rank), scale_(lora_alpha / static_cast<float>(rank)) {
+    : rank_(rank), scale_(lora_alpha / static_cast<float>(rank) / 2.0F) {
   base = register_module("base", torch::nn::Linear(in_features, out_features));
 
   A = register_parameter(
       "A",
-      torch::randn({rank, in_features}) * 0.02F);
+      torch::randn({rank, in_features}) * 0.01F);
   B = register_parameter(
       "B",
-      torch::zeros({out_features, rank}));
+      torch::randn({out_features, rank}) * 0.01F);
 }
 
 torch::Tensor LoRALinearImpl::forward(torch::Tensor x) {
@@ -148,8 +144,8 @@ torch::Tensor LoRALinearImpl::forward_eggroll_population(
 
 void LoRALinearImpl::reset_lora_parameters() {
   torch::NoGradGuard no_grad;
-  A.normal_(0.0, 0.02);
-  B.zero_();
+  A.normal_(0.0, 0.01);
+  B.normal_(0.0, 0.01);
 }
 
 std::vector<torch::Tensor> LoRALinearImpl::lora_parameters() const {
@@ -190,17 +186,15 @@ float LoRALinearImpl::scale() const {
 GoalCriticImpl::GoalCriticImpl(int feature_dim, int action_dim, int embedding_dim, int hidden_dim, int goal_dim)
     : action_dim_(action_dim), hidden_dim_(hidden_dim), embedding_dim_(embedding_dim), goal_dim_(goal_dim) {
   sa_encoder_ = torch::nn::Sequential();
-  sa_encoder_->push_back(torch::nn::Linear(feature_dim + action_dim, hidden_dim));
+   sa_encoder_->push_back(torch::nn::Linear(feature_dim + action_dim, hidden_dim));
   sa_encoder_->push_back(torch::nn::Functional(torch::relu));
   sa_encoder_->push_back(torch::nn::Linear(hidden_dim, embedding_dim));
-  sa_encoder_->push_back(torch::nn::Functional(torch::relu));
   register_module("sa_encoder", sa_encoder_);
 
   goal_encoder_ = torch::nn::Sequential();
   goal_encoder_->push_back(torch::nn::Linear(goal_dim, hidden_dim));
   goal_encoder_->push_back(torch::nn::Functional(torch::relu));
   goal_encoder_->push_back(torch::nn::Linear(hidden_dim, embedding_dim));
-  goal_encoder_->push_back(torch::nn::Functional(torch::relu));
   register_module("goal_encoder", goal_encoder_);
 }
 
@@ -209,7 +203,7 @@ torch::Tensor GoalCriticImpl::forward(
     const torch::Tensor& action_inputs,
     const torch::Tensor& goal_value) {
   PULSAR_TRACE_SCOPE_CAT("actor", "goal_forward");
-  return -(sa_embedding(features, action_inputs) - goal_embedding(goal_value)).square().sum(-1).clamp_min(1.0e-8F);
+  return -((sa_embedding(features, action_inputs) - goal_embedding(goal_value)).square().sum(-1).clamp_min(1.0e-8F));
 }
 
 torch::Tensor GoalCriticImpl::sa_embedding(const torch::Tensor& features, const torch::Tensor& action_inputs) {
@@ -229,7 +223,7 @@ torch::nn::Sequential PPOActorImpl::make_value_win_head(int input_dim) const {
   torch::nn::Sequential head;
   head->push_back(torch::nn::Linear(input_dim, config_.value_hidden_dim));
   head->push_back(torch::nn::Functional(torch::relu));
-  head->push_back(torch::nn::Linear(config_.value_hidden_dim, config_.value_num_atoms));
+  head->push_back(torch::nn::Linear(config_.value_hidden_dim, 1));
   return head;
 }
 
@@ -284,17 +278,6 @@ PPOActorImpl::PPOActorImpl(ModelConfig config, const GoalCriticConfig& goal_crit
 
   value_head_win_ = make_value_win_head(feature_dim_);
   register_module("value_head_win", value_head_win_);
-
-  {
-    const float atom_delta = (config_.value_v_max - config_.value_v_min)
-        / static_cast<float>(config_.value_num_atoms - 1);
-    atom_support_win_ = register_buffer(
-        "atom_support_win",
-        torch::arange(static_cast<float>(config_.value_num_atoms),
-                      torch::TensorOptions().dtype(torch::kFloat32))
-            .mul_(atom_delta)
-            .add_(config_.value_v_min));
-  }
 
   goal_critic_ = GoalCritic(feature_dim_, config_.action_dim, goal_critic_config_.embedding_dim, goal_critic_config_.hidden_dim, goal_critic_config_.goal_dim);
   register_module("goal_critic", goal_critic_);
@@ -485,10 +468,6 @@ ActorSequenceOutput PPOActorImpl::forward_sequence(
       torch::stack(features, 0),
       std::move(state),
   };
-}
-
-torch::Tensor PPOActorImpl::value_win_support() const {
-  return atom_support_win_;
 }
 
 int PPOActorImpl::feature_dim() const {

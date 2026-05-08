@@ -339,7 +339,7 @@ APPOTrainer::APPOTrainer(
       action_table_(config_.action_table),
       actor_(PPOActor(config_.model, config_.goal_critic)),
       actor_normalizer_(config_.model.observation_dim),
-      actor_optimizer_(actor_->parameters(), torch::optim::AdamOptions(config_.ppo.learning_rate)),
+      actor_optimizer_(actor_->parameters(), torch::optim::AdamOptions(config_.ppo.learning_rate).eps(1.0e-5F)),
       rollout_(make_rollout_storage(
           config_,
           static_cast<int>(total_agents_for_collectors(collectors_)),
@@ -472,8 +472,6 @@ TrainerMetrics APPOTrainer::update_actor() {
   }
   torch::Tensor sparse_returns = sparse_advantages + extrinsic_values.detach();
 
-  const torch::Tensor atom_support_win = actor_->value_win_support().to(device_);
-
   for (int epoch = 0; epoch < config_.ppo.update_epochs; ++epoch) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "update_epoch");
     const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
@@ -572,39 +570,10 @@ TrainerMetrics APPOTrainer::update_actor() {
         const torch::Tensor current_log_probs = log_probs.gather(1, active_actions.unsqueeze(1)).squeeze(1);
 
         torch::Tensor epsilon = torch::full({active_advantages.size(0)}, config_.ppo.clip_range, active_advantages.options());
-        torch::Tensor confidence_weights = torch::ones({active_advantages.size(0)}, active_advantages.options());
-
-        {
-          torch::Tensor value_win_chunk = output.value_win_logits.narrow(0, burn, loss_steps);
-          const int64_t win_atoms = atom_support_win.size(0);
-          torch::Tensor flat_value_logits = value_win_chunk.reshape({samples, win_atoms});
-          torch::Tensor active_value_logits = flat_value_logits.index({flat_active});
-          const torch::Tensor critic_variance = compute_distribution_variance(active_value_logits, atom_support_win);
-          accumulated_variance += critic_variance.mean().item<double>() * static_cast<double>(active_logits.size(0));
-
-          if (config_.ppo.use_adaptive_epsilon) {
-            epsilon = compute_adaptive_epsilon_tensor(
-                critic_variance,
-                config_.ppo.clip_range,
-                config_.ppo.adaptive_epsilon_beta,
-                config_.ppo.epsilon_min,
-                config_.ppo.epsilon_max);
-          }
-          if (config_.ppo.use_confidence_weighting) {
-            confidence_weights = compute_confidence_weights(
-                active_value_logits,
-                atom_support_win,
-                config_.ppo.confidence_weight_type,
-                config_.ppo.confidence_weight_delta,
-                config_.ppo.normalize_confidence_weights);
-          }
-          accumulated_confidence += confidence_weights.mean().item<double>() * static_cast<double>(active_logits.size(0));
-        }
-        accumulated_epsilon += static_cast<double>(epsilon.mean().item<float>()) * static_cast<double>(active_logits.size(0));
 
         torch::Tensor policy_loss =
             clipped_ppo_policy_loss(current_log_probs, active_old_log_probs, active_advantages, epsilon);
-        policy_loss = (policy_loss * confidence_weights).mean();
+        policy_loss = policy_loss.mean();
 
         const torch::Tensor entropy = masked_action_entropy(active_logits, active_masks).mean();
 
@@ -613,15 +582,11 @@ TrainerMetrics APPOTrainer::update_actor() {
         torch::Tensor active_returns = chunk_returns.index({flat_active});
 
         torch::Tensor value_win_chunk = output.value_win_logits.narrow(0, burn, loss_steps);
-        const int64_t win_atoms = atom_support_win.size(0);
-        torch::Tensor flat_value_win_logits = value_win_chunk.reshape({samples, win_atoms});
+        torch::Tensor flat_value_win_logits = value_win_chunk.reshape({samples, 1});
         torch::Tensor active_value_win_logits = flat_value_win_logits.index({flat_active});
 
-        const float v_min = atom_support_win[0].item<float>();
-        const float v_max = atom_support_win[-1].item<float>();
-        const int num_atoms = static_cast<int>(atom_support_win.size(0));
-        torch::Tensor value_loss = distributional_value_loss(
-            active_value_win_logits, active_returns, v_min, v_max, num_atoms);
+        torch::Tensor value_loss = torch::mse_loss(
+            active_value_win_logits.squeeze(-1), active_returns, torch::Reduction::Mean);
 
         torch::Tensor goal_loss = torch::zeros({}, active_advantages.options());
         torch::Tensor actor_goal_loss = torch::zeros({}, active_advantages.options());
@@ -969,7 +934,6 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   }
   rollout_.set_initial_state(
       collectors_.size() > 1 ? concatenate_states(shard_collection_states_) : collection_state_);
-  const torch::Tensor atom_support_win = actor_->value_win_support().to(device_);
 
   double total_sparse_reward = 0.0;
   int64_t total_steps = 0;
@@ -1071,8 +1035,8 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
         shard_step.action_masks_host = action_masks_host;
         shard_step.learner_active_host = learner_active_host;
         shard_step.action_log_probs = action_log_probs;
-        shard_step.sampled_value = compute_mean_value(output.value_win_logits, atom_support_win);
-        shard_step.entropy_tensor = compute_distribution_entropy(output.value_win_logits);
+        shard_step.sampled_value = output.value_win_logits.squeeze(-1);
+        shard_step.entropy_tensor = torch::zeros_like(shard_step.sampled_value);
 
         const auto decode_start = std::chrono::steady_clock::now();
         {
@@ -1203,7 +1167,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
         const torch::Tensor final_goal_values = policy_goal_values_like(final_normalized, config_.goal_critic.goal_dim);
         ActorStepOutput final_output = actor_->forward_step(
             final_normalized, std::move(bootstrap_state), final_starts, final_goal_values);
-        final_values.push_back(compute_mean_value(final_output.value_win_logits, atom_support_win).to(torch::kCPU));
+        final_values.push_back(final_output.value_win_logits.squeeze(-1).to(torch::kCPU));
       }
       std::unordered_map<std::string, torch::Tensor> bootstrap_values;
       bootstrap_values["extrinsic"] = torch::cat(final_values, 0);
@@ -1259,8 +1223,8 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
       actions = torch::where(snapshot_ids >= 0, opponent_actions, actions);
     }
 
-    torch::Tensor sampled_value = compute_mean_value(output.value_win_logits, atom_support_win);
-    torch::Tensor entropy_tensor = compute_distribution_entropy(output.value_win_logits);
+    torch::Tensor sampled_value = output.value_win_logits.squeeze(-1);
+    torch::Tensor entropy_tensor = torch::zeros({output.value_win_logits.size(0)}, output.value_win_logits.options());
 
     const auto decode_start = std::chrono::steady_clock::now();
     torch::Tensor action_indices_cpu;
@@ -1373,8 +1337,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
         final_normalized, std::move(bootstrap_state), final_starts, final_goal_values);
 
     std::unordered_map<std::string, torch::Tensor> bootstrap_values;
-    bootstrap_values["extrinsic"] = compute_mean_value(
-        final_output.value_win_logits, atom_support_win).to(torch::kCPU);
+    bootstrap_values["extrinsic"] = final_output.value_win_logits.squeeze(-1).to(torch::kCPU);
     rollout_.set_final_values(bootstrap_values);
     }
   }

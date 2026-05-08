@@ -114,8 +114,6 @@ class PPOActorImpl : public torch::nn::Module {
       ContinuumState state,
       torch::Tensor episode_starts = {},
       torch::Tensor goal_values = {});
-  [[nodiscard]] torch::Tensor value_win_support() const;
-  [[nodiscard]] int feature_dim() const;
   [[nodiscard]] const ModelConfig& config() const;
   [[nodiscard]] const GoalCriticConfig& goal_critic_config() const;
   [[nodiscard]] std::vector<std::string> enabled_critic_heads() const;
@@ -169,7 +167,6 @@ class PPOActorImpl : public torch::nn::Module {
   LoRALinear policy_lora_{nullptr};
 
   torch::nn::Sequential value_head_win_{nullptr};
-  torch::Tensor atom_support_win_;
   GoalCritic goal_critic_{nullptr};
 
   torch::Tensor ltm_basis_keys_;
