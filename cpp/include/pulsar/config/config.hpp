@@ -14,6 +14,7 @@ struct OutcomeConfig {
   float score = 1.0F;
   float concede = -1.0F;
   float neutral = 0.0F;
+  float neutral_no_touch = -1.0F;
 };
 
 struct ActionTableConfig {

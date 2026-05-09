@@ -257,11 +257,10 @@ OutcomeFilterStats keep_only_scored_episode_segments(RolloutStorage& rollout, in
     return stats;
   }
   const int total_agents = rollout.num_agents();
-  const torch::Tensor rewards = rollout.reward("extrinsic");
   float* learner_active = rollout.learner_active.data_ptr<float>();
   const float* starts = rollout.episode_starts.data_ptr<float>();
   const float* dones = rollout.dones.data_ptr<float>();
-  const float* reward_values = rewards.data_ptr<float>();
+  const std::int64_t* labels = rollout.terminal_outcome_labels.data_ptr<std::int64_t>();
   for (int agent_begin = 0; agent_begin < total_agents; agent_begin += agents_per_env) {
     const int agent_count = std::min(agents_per_env, total_agents - agent_begin);
     int segment_start = 0;
@@ -277,7 +276,7 @@ OutcomeFilterStats keep_only_scored_episode_segments(RolloutStorage& rollout, in
       }
       bool scored = false;
       for (int local = 0; local < agent_count; ++local) {
-        scored = scored || std::abs(reward_values[row_offset + local]) > 0.5F;
+        scored = scored || (labels[row_offset + local] == 0 || labels[row_offset + local] == 1);
       }
       if (scored) {
         stats.scored_episodes++;
@@ -583,6 +582,7 @@ torch::Tensor APPOTrainer::map_outcome_labels_to_rewards(const torch::Tensor& la
   rewards.masked_fill_(labels == 0, config_.outcome.score);
   rewards.masked_fill_(labels == 1, config_.outcome.concede);
   rewards.masked_fill_(labels == 2, config_.outcome.neutral);
+  rewards.masked_fill_(labels == 3, config_.outcome.neutral_no_touch);
   return rewards;
 }
 
@@ -1298,7 +1298,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
           const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + agents_per_env, dones_host.numel());
           for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
             env_done = env_done || dones_ptr[i] > 0.5F;
-            env_scored = env_scored || (dones_ptr[i] > 0.5F && tl_ptr[i] != 2);
+            env_scored = env_scored || (dones_ptr[i] > 0.5F && (tl_ptr[i] == 0 || tl_ptr[i] == 1));
           }
           if (env_done) {
             completed_episodes++;
@@ -1346,7 +1346,8 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
             all_values,
             all_rewards,
             dones_host,
-            goal_pos_host);
+            goal_pos_host,
+            terminal_labels);
 
         pos_acc.accumulate(collector);
         if (heatmap_logger_.enabled()) {
@@ -1479,7 +1480,7 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
       const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + agents_per_env, dones_host.numel());
       for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
         env_done = env_done || dones_ptr[i] > 0.5F;
-        env_scored = env_scored || (dones_ptr[i] > 0.5F && tl_ptr[i] != 2);
+        env_scored = env_scored || (dones_ptr[i] > 0.5F && (tl_ptr[i] == 0 || tl_ptr[i] == 1));
       }
       if (env_done) {
         completed_episodes++;
@@ -1524,7 +1525,8 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
         all_values,
         all_rewards,
         dones_host,
-        goal_pos_host);
+        goal_pos_host,
+        terminal_labels);
 
     pos_acc.accumulate(*collector_);
     if (heatmap_logger_.enabled()) {

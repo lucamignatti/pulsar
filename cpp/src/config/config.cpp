@@ -57,13 +57,19 @@ void from_json(const json& j, ControllerState& value) {
 }
 
 void to_json(json& j, const OutcomeConfig& value) {
-  j = json{{"score", value.score}, {"concede", value.concede}, {"neutral", value.neutral}};
+  j = json{
+      {"score", value.score},
+      {"concede", value.concede},
+      {"neutral", value.neutral},
+      {"neutral_no_touch", value.neutral_no_touch},
+  };
 }
 
 void from_json(const json& j, OutcomeConfig& value) {
   value.score = j.value("score", 1.0F);
   value.concede = j.value("concede", -1.0F);
   value.neutral = j.value("neutral", 0.0F);
+  value.neutral_no_touch = j.value("neutral_no_touch", -1.0F);
 }
 
 void to_json(json& j, const ActionTableConfig& value) {

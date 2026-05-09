@@ -133,6 +133,7 @@ void BatchedRocketSimCollector::initialize(
       torch::zeros({static_cast<long>(total_agents_), obs_dim_}, f32);
   host_goal_positions_ = torch::zeros({static_cast<long>(total_agents_), 3}, f32);
   host_ball_proximity_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
+  host_episode_ball_touch_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   host_car_positions_ = torch::zeros({static_cast<long>(total_agents_), 4}, f32);
   host_ball_position_ = torch::zeros({static_cast<long>(total_agents_), 3}, f32);
 
@@ -171,6 +172,7 @@ void BatchedRocketSimCollector::reset_all(CollectorTimings* timings) {
   host_terminal_observations_.zero_();
   host_goal_positions_.zero_();
   host_ball_proximity_.zero_();
+  host_episode_ball_touch_.zero_();
   host_car_positions_.zero_();
   host_ball_position_.zero_();
   current_buffers_.episode_starts.fill_(1.0F);
@@ -293,6 +295,7 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
   float* terminal_obs_ptr = host_terminal_observations_.data_ptr<float>();
   float* goal_pos_ptr = host_goal_positions_.data_ptr<float>();
   float* ball_touch_ptr = host_ball_proximity_.data_ptr<float>();
+  float* episode_touch_ptr = host_episode_ball_touch_.data_ptr<float>();
   float* car_pos_ptr = host_car_positions_.data_ptr<float>();
   float* ball_pos_ptr = host_ball_position_.data_ptr<float>();
   const std::size_t obs_stride = static_cast<std::size_t>(obs_dim_);
@@ -324,43 +327,48 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
       const Team scoring_team = current_state.last_scoring_team;
       for (std::size_t idx = 0; idx < count; ++idx) {
         const CarState& car = current_state.cars[idx];
-        const bool is_terminated = envs_[env_idx].terminated_scratch[idx] != 0;
-        const bool is_truncated = envs_[env_idx].truncated_scratch[idx] != 0;
-        const bool done = is_terminated || is_truncated;
-        dones_ptr[agent_begin + idx] = done ? 1.0F : 0.0F;
-        terminated_ptr[agent_begin + idx] = is_terminated ? 1.0F : 0.0F;
-        truncated_ptr[agent_begin + idx] = is_truncated ? 1.0F : 0.0F;
-        if (done) {
-          labels_ptr[agent_begin + idx] =
-              goal_scored ? (car.team == scoring_team ? 0 : 1) : 2;
-        }
-        reset_needed = reset_needed || done;
-      }
-
-      for (std::size_t idx = 0; idx < count; ++idx) {
-        const CarState& car = current_state.cars[idx];
         const BallState& ball = current_state.ball;
+
         const float dx = car.position.x - ball.position.x;
         const float dy = car.position.y - ball.position.y;
         const float dz = car.position.z - ball.position.z;
         const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+        const float step_touch = (dist < 300.0F) ? 1.0F : 0.0F;
+
+        const std::size_t global_idx = agent_begin + idx;
+        float& accumulated = episode_touch_ptr[global_idx];
+        accumulated = std::max(accumulated, step_touch);
+        ball_touch_ptr[global_idx] = step_touch;
+
+        const bool is_terminated = envs_[env_idx].terminated_scratch[idx] != 0;
+        const bool is_truncated = envs_[env_idx].truncated_scratch[idx] != 0;
+        const bool done = is_terminated || is_truncated;
+        dones_ptr[global_idx] = done ? 1.0F : 0.0F;
+        terminated_ptr[global_idx] = is_terminated ? 1.0F : 0.0F;
+        truncated_ptr[global_idx] = is_truncated ? 1.0F : 0.0F;
+        if (done) {
+          if (goal_scored) {
+            labels_ptr[global_idx] = car.team == scoring_team ? 0 : 1;
+          } else {
+            labels_ptr[global_idx] = accumulated > 0.5F ? 2 : 3;
+          }
+        }
+        reset_needed = reset_needed || done;
 
         float goal_pos[3];
         compute_goal_position(current_state, config_.goal_mapping, goal_pos);
-        const int pos_offset = static_cast<int>(agent_begin + idx) * 3;
+        const int pos_offset = static_cast<int>(global_idx) * 3;
         goal_pos_ptr[pos_offset + 0] = goal_pos[0];
         goal_pos_ptr[pos_offset + 1] = goal_pos[1];
         goal_pos_ptr[pos_offset + 2] = goal_pos[2];
 
-        ball_touch_ptr[agent_begin + idx] = (dist < 300.0F) ? 1.0F : 0.0F;
-
-        const int car_offset = static_cast<int>(agent_begin + idx) * 4;
+        const int car_offset = static_cast<int>(global_idx) * 4;
         car_pos_ptr[car_offset + 0] = car.position.x;
         car_pos_ptr[car_offset + 1] = car.position.y;
         car_pos_ptr[car_offset + 2] = car.position.z;
         car_pos_ptr[car_offset + 3] = static_cast<float>(static_cast<int>(car.team));
 
-        const int ball_offset = static_cast<int>(agent_begin + idx) * 3;
+        const int ball_offset = static_cast<int>(global_idx) * 3;
         ball_pos_ptr[ball_offset + 0] = ball.position.x;
         ball_pos_ptr[ball_offset + 1] = ball.position.y;
         ball_pos_ptr[ball_offset + 2] = ball.position.z;
@@ -375,6 +383,9 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         envs_[env_idx].reset_seed += static_cast<std::uint64_t>(envs_.size());
         envs_[env_idx].engine->reset(envs_[env_idx].reset_seed);
         assign_env(env_idx, envs_[env_idx].reset_seed);
+        for (std::size_t idx = 0; idx < count; ++idx) {
+          episode_touch_ptr[agent_begin + idx] = 0.0F;
+        }
       }
     }
   });
@@ -484,6 +495,10 @@ const torch::Tensor& BatchedRocketSimCollector::host_goal_positions() const {
 
 const torch::Tensor& BatchedRocketSimCollector::host_ball_proximity() const {
   return host_ball_proximity_;
+}
+
+const torch::Tensor& BatchedRocketSimCollector::host_episode_ball_touch() const {
+  return host_episode_ball_touch_;
 }
 
 const torch::Tensor& BatchedRocketSimCollector::host_car_positions() const {

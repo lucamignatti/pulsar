@@ -33,7 +33,8 @@ class RolloutStorage {
       const std::unordered_map<std::string, torch::Tensor>& values,
       const std::unordered_map<std::string, torch::Tensor>& rewards,
       const torch::Tensor& dones,
-      const torch::Tensor& goal_positions);
+      const torch::Tensor& goal_positions,
+      const torch::Tensor& terminal_outcome_labels);
   void append_slice(
       int step,
       int agent_offset,
@@ -46,7 +47,8 @@ class RolloutStorage {
       const std::unordered_map<std::string, torch::Tensor>& values,
       const std::unordered_map<std::string, torch::Tensor>& rewards,
       const torch::Tensor& dones,
-      const torch::Tensor& goal_positions);
+      const torch::Tensor& goal_positions,
+      const torch::Tensor& terminal_outcome_labels);
 
   void set_final_values(const std::unordered_map<std::string, torch::Tensor>& final_values);
   void set_rewards_at(int step, const std::unordered_map<std::string, torch::Tensor>& rewards_in);
@@ -72,6 +74,7 @@ class RolloutStorage {
   torch::Tensor action_log_probs;
   torch::Tensor dones;
   torch::Tensor goal_positions;
+  torch::Tensor terminal_outcome_labels;
   std::unordered_map<std::string, torch::Tensor> final_values_;
 
  private:

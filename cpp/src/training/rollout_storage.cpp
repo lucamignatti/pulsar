@@ -29,6 +29,9 @@ RolloutStorage::RolloutStorage(
   action_log_probs = torch::zeros({rollout_length, num_agents}, device);
   dones = torch::zeros({rollout_length, num_agents}, device);
   goal_positions = torch::zeros({rollout_length, num_agents, 3}, device);
+  terminal_outcome_labels = torch::full(
+      {rollout_length, num_agents}, 2,
+      torch::TensorOptions().dtype(torch::kInt64).device(device));
 
   for (const auto& name : head_names) {
     values_[name] = torch::zeros({rollout_length, num_agents}, device);
@@ -47,7 +50,8 @@ void RolloutStorage::append(
     const std::unordered_map<std::string, torch::Tensor>& values_in,
     const std::unordered_map<std::string, torch::Tensor>& rewards_in,
     const torch::Tensor& dones_in,
-    const torch::Tensor& goal_positions_in) {
+    const torch::Tensor& goal_positions_in,
+    const torch::Tensor& terminal_outcome_labels_in) {
   if (step < 0 || step >= rollout_length_) {
     throw std::out_of_range("RolloutStorage::append step is outside rollout capacity.");
   }
@@ -59,6 +63,7 @@ void RolloutStorage::append(
   action_log_probs[step].copy_(action_log_probs_in.detach());
   dones[step].copy_(dones_in.detach());
   goal_positions[step].copy_(goal_positions_in.detach());
+  terminal_outcome_labels[step].copy_(terminal_outcome_labels_in.detach());
 
   for (const auto& [name, tensor] : values_in) {
     auto it = values_.find(name);
@@ -87,7 +92,8 @@ void RolloutStorage::append_slice(
     const std::unordered_map<std::string, torch::Tensor>& values_in,
     const std::unordered_map<std::string, torch::Tensor>& rewards_in,
     const torch::Tensor& dones_in,
-    const torch::Tensor& goal_positions_in) {
+    const torch::Tensor& goal_positions_in,
+    const torch::Tensor& terminal_outcome_labels_in) {
   if (step < 0 || step >= rollout_length_) {
     throw std::out_of_range("RolloutStorage::append_slice step is outside rollout capacity.");
   }
@@ -104,6 +110,7 @@ void RolloutStorage::append_slice(
   action_log_probs[step].narrow(0, agent_offset, agent_count).copy_(action_log_probs_in.detach());
   dones[step].narrow(0, agent_offset, agent_count).copy_(dones_in.detach());
   goal_positions[step].narrow(0, agent_offset, agent_count).copy_(goal_positions_in.detach());
+  terminal_outcome_labels[step].narrow(0, agent_offset, agent_count).copy_(terminal_outcome_labels_in.detach());
 
   for (const auto& [name, tensor] : values_in) {
     auto it = values_.find(name);
