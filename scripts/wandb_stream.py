@@ -83,7 +83,36 @@ def main() -> int:
             if not stripped:
                 continue
             payload = json.loads(stripped)
-            wandb.log(payload)
+
+            if "_position_heatmap" in payload:
+                hm = payload.pop("_position_heatmap")
+                x_labels = [str(round(x, 1)) for x in hm["x_labels"]]
+                y_labels = [str(round(y, 1)) for y in hm["y_labels"]]
+                blue_grid = hm["blue_grid"]
+                orange_grid = hm["orange_grid"]
+                step_count = hm.get("step_count", 0)
+
+                rows = []
+                for j, y_label in enumerate(y_labels):
+                    for i, x_label in enumerate(x_labels):
+                        rows.append([
+                            x_label,
+                            y_label,
+                            blue_grid[j][i] if blue_grid else 0,
+                            orange_grid[j][i] if orange_grid else 0,
+                        ])
+
+                table = wandb.Table(
+                    data=rows,
+                    columns=["x", "y", "blue_count", "orange_count"],
+                )
+                wandb.log({
+                    "car_position_heatmap": table,
+                    "car_position_heatmap_step_count": step_count,
+                })
+
+            if payload:
+                wandb.log(payload)
     finally:
         wandb.finish()
     return 0

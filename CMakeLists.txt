@@ -94,6 +94,7 @@ add_library(
   cpp/src/env/rocketsim_engine.cpp
   cpp/src/checkpoint/checkpoint.cpp
   cpp/src/logging/wandb_logger.cpp
+  cpp/src/logging/position_heatmap_logger.cpp
   cpp/src/tracing/tracing.cpp
 )
 

@@ -74,6 +74,8 @@ class BatchedRocketSimCollector {
   [[nodiscard]] const torch::Tensor& host_terminal_observations() const;
   [[nodiscard]] const torch::Tensor& host_goal_positions() const;
   [[nodiscard]] const torch::Tensor& host_ball_proximity() const;
+  [[nodiscard]] const torch::Tensor& host_car_positions() const;
+  [[nodiscard]] const torch::Tensor& host_ball_position() const;
 
  private:
   struct HostBuffers {
@@ -117,6 +119,8 @@ class BatchedRocketSimCollector {
   torch::Tensor host_terminal_observations_;
   torch::Tensor host_goal_positions_;
   torch::Tensor host_ball_proximity_;
+  torch::Tensor host_car_positions_;
+  torch::Tensor host_ball_position_;
   std::size_t total_agents_ = 0;
   int obs_dim_ = 0;
   int action_dim_ = 0;

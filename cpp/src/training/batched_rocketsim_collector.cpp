@@ -133,6 +133,8 @@ void BatchedRocketSimCollector::initialize(
       torch::zeros({static_cast<long>(total_agents_), obs_dim_}, f32);
   host_goal_positions_ = torch::zeros({static_cast<long>(total_agents_), 3}, f32);
   host_ball_proximity_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
+  host_car_positions_ = torch::zeros({static_cast<long>(total_agents_), 4}, f32);
+  host_ball_position_ = torch::zeros({static_cast<long>(total_agents_), 3}, f32);
 
   for (std::size_t env_idx = 0; env_idx < envs_.size(); ++env_idx) {
     assign_env(env_idx, envs_[env_idx].reset_seed);
@@ -169,6 +171,8 @@ void BatchedRocketSimCollector::reset_all(CollectorTimings* timings) {
   host_terminal_observations_.zero_();
   host_goal_positions_.zero_();
   host_ball_proximity_.zero_();
+  host_car_positions_.zero_();
+  host_ball_position_.zero_();
   current_buffers_.episode_starts.fill_(1.0F);
   rebuild_host_buffers(current_buffers_, timings);
   if (timings != nullptr) {
@@ -289,6 +293,8 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
   float* terminal_obs_ptr = host_terminal_observations_.data_ptr<float>();
   float* goal_pos_ptr = host_goal_positions_.data_ptr<float>();
   float* ball_touch_ptr = host_ball_proximity_.data_ptr<float>();
+  float* car_pos_ptr = host_car_positions_.data_ptr<float>();
+  float* ball_pos_ptr = host_ball_position_.data_ptr<float>();
   const std::size_t obs_stride = static_cast<std::size_t>(obs_dim_);
   host_dones_.zero_();
   host_terminated_.zero_();
@@ -297,6 +303,8 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
   host_terminal_observations_.zero_();
   host_goal_positions_.zero_();
   host_ball_proximity_.zero_();
+  host_car_positions_.zero_();
+  host_ball_position_.zero_();
 
   executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
     for (std::size_t env_idx = begin; env_idx < end; ++env_idx) {
@@ -345,6 +353,17 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         goal_pos_ptr[pos_offset + 2] = goal_pos[2];
 
         ball_touch_ptr[agent_begin + idx] = (dist < 300.0F) ? 1.0F : 0.0F;
+
+        const int car_offset = static_cast<int>(agent_begin + idx) * 4;
+        car_pos_ptr[car_offset + 0] = car.position.x;
+        car_pos_ptr[car_offset + 1] = car.position.y;
+        car_pos_ptr[car_offset + 2] = car.position.z;
+        car_pos_ptr[car_offset + 3] = static_cast<float>(static_cast<int>(car.team));
+
+        const int ball_offset = static_cast<int>(agent_begin + idx) * 3;
+        ball_pos_ptr[ball_offset + 0] = ball.position.x;
+        ball_pos_ptr[ball_offset + 1] = ball.position.y;
+        ball_pos_ptr[ball_offset + 2] = ball.position.z;
       }
 
       if (reset_needed) {
@@ -465,6 +484,14 @@ const torch::Tensor& BatchedRocketSimCollector::host_goal_positions() const {
 
 const torch::Tensor& BatchedRocketSimCollector::host_ball_proximity() const {
   return host_ball_proximity_;
+}
+
+const torch::Tensor& BatchedRocketSimCollector::host_car_positions() const {
+  return host_car_positions_;
+}
+
+const torch::Tensor& BatchedRocketSimCollector::host_ball_position() const {
+  return host_ball_position_;
 }
 
 }  // namespace pulsar
