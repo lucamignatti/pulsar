@@ -24,6 +24,7 @@ class WandbLogger {
   WandbLogger& operator=(WandbLogger&& other) noexcept;
 
   [[nodiscard]] bool enabled() const;
+  [[nodiscard]] std::string run_id() const;
   void log(const nlohmann::json& payload);
   void finish();
 
@@ -31,6 +32,8 @@ class WandbLogger {
   WandbConfig config_{};
   std::FILE* pipe_ = nullptr;
   bool enabled_ = false;
+  std::string run_dir_{};
+  mutable std::string run_id_{};
 };
 
 }  // namespace pulsar

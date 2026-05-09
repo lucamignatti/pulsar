@@ -16,11 +16,11 @@ namespace pulsar {
 namespace {
 
 constexpr std::array<const char*, 5> kCheckpointFiles = {
-    "model.pt",
+    "state.pt",
     "metadata.json",
     "config.json",
     "ratings.json",
-    "actor_optimizer.pt",
+    "model.pt",
 };
 
 std::filesystem::path unique_sibling_path(const std::filesystem::path& target, const char* infix) {

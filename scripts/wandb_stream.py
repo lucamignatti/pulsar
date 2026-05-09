@@ -51,6 +51,8 @@ def main() -> int:
     parser.add_argument("--mode", default="online")
     parser.add_argument("--config-path", default="")
     parser.add_argument("--tag", action="append", default=[])
+    parser.add_argument("--id", default="")
+    parser.add_argument("--resume", default="")
     args = parser.parse_args()
 
     _check_disk_space(args.wandb_dir)
@@ -72,10 +74,19 @@ def main() -> int:
         mode=args.mode,
         tags=args.tag or None,
         config=_load_config(args.config_path) if args.config_path else None,
+        id=args.id or None,
+        resume=args.resume or "allow",
         reinit="finish_previous",
     )
     if run is None:
         return 0
+
+    run_id_file = os.path.join(args.run_dir, "wandb_run_id.txt")
+    try:
+        with open(run_id_file, "w") as f:
+            f.write(run.id)
+    except OSError:
+        pass
 
     try:
         for line in sys.stdin:
@@ -83,36 +94,8 @@ def main() -> int:
             if not stripped:
                 continue
             payload = json.loads(stripped)
-
-            if "_position_heatmap" in payload:
-                hm = payload.pop("_position_heatmap")
-                x_labels = [str(round(x, 1)) for x in hm["x_labels"]]
-                y_labels = [str(round(y, 1)) for y in hm["y_labels"]]
-                blue_grid = hm["blue_grid"]
-                orange_grid = hm["orange_grid"]
-                step_count = hm.get("step_count", 0)
-
-                rows = []
-                for j, y_label in enumerate(y_labels):
-                    for i, x_label in enumerate(x_labels):
-                        rows.append([
-                            x_label,
-                            y_label,
-                            blue_grid[j][i] if blue_grid else 0,
-                            orange_grid[j][i] if orange_grid else 0,
-                        ])
-
-                table = wandb.Table(
-                    data=rows,
-                    columns=["x", "y", "blue_count", "orange_count"],
-                )
-                wandb.log({
-                    "car_position_heatmap": table,
-                    "car_position_heatmap_step_count": step_count,
-                })
-
-            if payload:
-                wandb.log(payload)
+            step = payload.pop("_step", None)
+            wandb.log(payload, step=step)
     finally:
         wandb.finish()
     return 0

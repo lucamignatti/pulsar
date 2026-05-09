@@ -12,7 +12,6 @@
 
 #include "pulsar/checkpoint/checkpoint.hpp"
 #include "pulsar/config/config.hpp"
-#include "pulsar/logging/position_heatmap_logger.hpp"
 #include "pulsar/logging/wandb_logger.hpp"
 #include "pulsar/model/normalizer.hpp"
 #include "pulsar/model/ppo_actor.hpp"
@@ -56,34 +55,6 @@ struct TrainerMetrics {
   int64_t goals_scored = 0;
   int64_t goals_conceded = 0;
 
-  double car_pos_x_mean_blue = 0.0;
-  double car_pos_y_mean_blue = 0.0;
-  double car_pos_z_mean_blue = 0.0;
-  double car_pos_x_mean_orange = 0.0;
-  double car_pos_y_mean_orange = 0.0;
-  double car_pos_z_mean_orange = 0.0;
-  double car_pos_spread_blue = 0.0;
-  double car_pos_spread_orange = 0.0;
-  double car_ball_distance_mean_blue = 0.0;
-  double car_ball_distance_mean_orange = 0.0;
-  double car_intra_team_distance_blue = 0.0;
-  double car_intra_team_distance_orange = 0.0;
-  double ball_pos_x_mean = 0.0;
-  double ball_pos_y_mean = 0.0;
-  double ball_pos_z_mean = 0.0;
-  double blue_defensive_third_rate = 0.0;
-  double blue_midfield_third_rate = 0.0;
-  double blue_offensive_third_rate = 0.0;
-  double orange_defensive_third_rate = 0.0;
-  double orange_midfield_third_rate = 0.0;
-  double orange_offensive_third_rate = 0.0;
-  double blue_ground_rate = 0.0;
-  double blue_low_aerial_rate = 0.0;
-  double blue_high_aerial_rate = 0.0;
-  double orange_ground_rate = 0.0;
-  double orange_low_aerial_rate = 0.0;
-  double orange_high_aerial_rate = 0.0;
-
   double es_fitness_mean = 0.0;
   double es_fitness_std = 0.0;
   double es_fitness_best = 0.0;
@@ -118,11 +89,13 @@ class APPOTrainer {
  private:
   [[nodiscard]] torch::Tensor map_outcome_labels_to_rewards(const torch::Tensor& labels) const;
   void maybe_initialize_from_checkpoint();
-  void save_checkpoint(const std::filesystem::path& directory, std::int64_t global_step, int update_index) const;
+  void save_checkpoint(const std::filesystem::path& directory, std::int64_t global_step, int update_index, const std::string& wandb_run_id) const;
+  void save_training_state(const std::filesystem::path& path) const;
+  void load_training_state(const std::filesystem::path& path);
   void prune_old_checkpoints(const std::filesystem::path& checkpoint_dir) const;
   TrainerMetrics run_update(std::int64_t* global_step, int update_index);
   TrainerMetrics update_actor();
-  CheckpointMetadata make_checkpoint_metadata(std::int64_t global_step, int update_index) const;
+  CheckpointMetadata make_checkpoint_metadata(std::int64_t global_step, int update_index, const std::string& wandb_run_id) const;
 
   void run_es_lora_update(int update_index, TrainerMetrics& metrics);
 
@@ -157,7 +130,6 @@ class APPOTrainer {
   std::vector<ContinuumState> shard_opponent_collection_states_{};
   std::vector<std::int64_t> shard_agent_offsets_{};
   bool use_pinned_host_buffers_ = false;
-  PositionHeatmapLogger heatmap_logger_{};
 };
 
 }  // namespace pulsar

@@ -38,6 +38,10 @@ class SelfPlayManager {
   [[nodiscard]] SelfPlayAssignment sample_assignment(std::size_t env_idx, std::uint64_t seed);
   [[nodiscard]] bool has_snapshots() const;
 
+  [[nodiscard]] const std::map<std::string, double>& current_ratings() const;
+  [[nodiscard]] std::string rng_state() const;
+  void restore_rng_state(const std::string& state);
+
   void infer_opponent_actions(
       PPOActor& current_model,
       const torch::Tensor& raw_obs,

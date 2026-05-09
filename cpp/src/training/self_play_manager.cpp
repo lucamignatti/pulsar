@@ -8,6 +8,7 @@
 #include <fstream>
 #include <numeric>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
@@ -487,6 +488,24 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
 
 std::string SelfPlayManager::mode_name() const {
   return std::to_string(config_.env.team_size) + "v" + std::to_string(config_.env.team_size);
+}
+
+const std::map<std::string, double>& SelfPlayManager::current_ratings() const {
+  return current_ratings_;
+}
+
+std::string SelfPlayManager::rng_state() const {
+  std::ostringstream ss;
+  ss << rng_;
+  return ss.str();
+}
+
+void SelfPlayManager::restore_rng_state(const std::string& state) {
+  if (state.empty()) {
+    return;
+  }
+  std::istringstream ss(state);
+  ss >> rng_;
 }
 
 }  // namespace pulsar

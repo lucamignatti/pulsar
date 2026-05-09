@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include <nlohmann/json_fwd.hpp>
+#include <nlohmann/json.hpp>
 
 #include "pulsar/core/types.hpp"
 
@@ -142,6 +142,7 @@ struct WandbConfig {
   std::string script_path = "scripts/wandb_stream.py";
   double log_interval_seconds = 30.0;
   std::vector<std::string> tags{};
+  std::string run_id{};
 };
 
 struct ExperimentConfig {
@@ -169,6 +170,7 @@ struct CheckpointMetadata {
   std::int64_t global_step = 0;
   std::int64_t update_index = 0;
   std::vector<std::string> critic_heads{};
+  nlohmann::json extra{};
 };
 
 void to_json(nlohmann::json& j, const ControllerState& value);

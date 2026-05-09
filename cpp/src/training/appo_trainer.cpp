@@ -76,164 +76,6 @@ struct OutcomeFilterStats {
   int64_t unfinished_segments = 0;
 };
 
-struct PositionAccumulator {
-  double blue_sum_x = 0, blue_sum_y = 0, blue_sum_z = 0;
-  double blue_sum_x2 = 0, blue_sum_y2 = 0, blue_sum_z2 = 0;
-  double orange_sum_x = 0, orange_sum_y = 0, orange_sum_z = 0;
-  double orange_sum_x2 = 0, orange_sum_y2 = 0, orange_sum_z2 = 0;
-  int64_t blue_count = 0, orange_count = 0;
-  double blue_ball_dist_sum = 0, orange_ball_dist_sum = 0;
-  double blue_intra_dist_sum = 0, orange_intra_dist_sum = 0;
-  int64_t blue_intra_count = 0, orange_intra_count = 0;
-  double ball_sum_x = 0, ball_sum_y = 0, ball_sum_z = 0;
-  int64_t ball_count = 0;
-  int64_t blue_def_third = 0, blue_mid_third = 0, blue_off_third = 0;
-  int64_t orange_def_third = 0, orange_mid_third = 0, orange_off_third = 0;
-  int64_t blue_ground = 0, blue_low_aerial = 0, blue_high_aerial = 0;
-  int64_t orange_ground = 0, orange_low_aerial = 0, orange_high_aerial = 0;
-
-  void accumulate(const BatchedRocketSimCollector& collector) {
-    torch::Tensor car_pos = collector.host_car_positions();
-    torch::Tensor ball_pos = collector.host_ball_position();
-    const float* cp = car_pos.data_ptr<float>();
-    const float* bp = ball_pos.data_ptr<float>();
-    const int n = static_cast<int>(car_pos.size(0));
-
-    std::vector<int> blue_idx, orange_idx;
-    blue_idx.reserve(static_cast<std::size_t>(n));
-    orange_idx.reserve(static_cast<std::size_t>(n));
-
-    for (int i = 0; i < n; ++i) {
-      const float x = cp[i * 4 + 0];
-      const float y = cp[i * 4 + 1];
-      const float z = cp[i * 4 + 2];
-      const float team = cp[i * 4 + 3];
-      const float bx = bp[i * 3 + 0];
-      const float by = bp[i * 3 + 1];
-      const float bz = bp[i * 3 + 2];
-
-      const float dx = x - bx;
-      const float dy = y - by;
-      const float dz = z - bz;
-      const float ball_dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-
-      if (team < 0.5F) {
-        blue_sum_x += static_cast<double>(x);
-        blue_sum_y += static_cast<double>(y);
-        blue_sum_z += static_cast<double>(z);
-        blue_sum_x2 += static_cast<double>(x) * x;
-        blue_sum_y2 += static_cast<double>(y) * y;
-        blue_sum_z2 += static_cast<double>(z) * z;
-        blue_count++;
-        blue_ball_dist_sum += static_cast<double>(ball_dist);
-        blue_idx.push_back(i);
-        if (y < -1707.0F) blue_def_third++;
-        else if (y < 1707.0F) blue_mid_third++;
-        else blue_off_third++;
-        if (z < 200.0F) blue_ground++;
-        else if (z < 800.0F) blue_low_aerial++;
-        else blue_high_aerial++;
-      } else {
-        orange_sum_x += static_cast<double>(x);
-        orange_sum_y += static_cast<double>(y);
-        orange_sum_z += static_cast<double>(z);
-        orange_sum_x2 += static_cast<double>(x) * x;
-        orange_sum_y2 += static_cast<double>(y) * y;
-        orange_sum_z2 += static_cast<double>(z) * z;
-        orange_count++;
-        orange_ball_dist_sum += static_cast<double>(ball_dist);
-        orange_idx.push_back(i);
-        if (y > 1707.0F) orange_def_third++;
-        else if (y > -1707.0F) orange_mid_third++;
-        else orange_off_third++;
-        if (z < 200.0F) orange_ground++;
-        else if (z < 800.0F) orange_low_aerial++;
-        else orange_high_aerial++;
-      }
-
-      ball_sum_x += static_cast<double>(bx);
-      ball_sum_y += static_cast<double>(by);
-      ball_sum_z += static_cast<double>(bz);
-      ball_count++;
-    }
-
-    for (std::size_t a = 0; a < blue_idx.size(); ++a) {
-      for (std::size_t b = a + 1; b < blue_idx.size(); ++b) {
-        const int ia = blue_idx[a];
-        const int ib = blue_idx[b];
-        const float dx = cp[ia * 4 + 0] - cp[ib * 4 + 0];
-        const float dy = cp[ia * 4 + 1] - cp[ib * 4 + 1];
-        const float dz = cp[ia * 4 + 2] - cp[ib * 4 + 2];
-        blue_intra_dist_sum += static_cast<double>(std::sqrt(dx * dx + dy * dy + dz * dz));
-        blue_intra_count++;
-      }
-    }
-    for (std::size_t a = 0; a < orange_idx.size(); ++a) {
-      for (std::size_t b = a + 1; b < orange_idx.size(); ++b) {
-        const int ia = orange_idx[a];
-        const int ib = orange_idx[b];
-        const float dx = cp[ia * 4 + 0] - cp[ib * 4 + 0];
-        const float dy = cp[ia * 4 + 1] - cp[ib * 4 + 1];
-        const float dz = cp[ia * 4 + 2] - cp[ib * 4 + 2];
-        orange_intra_dist_sum += static_cast<double>(std::sqrt(dx * dx + dy * dy + dz * dz));
-        orange_intra_count++;
-      }
-    }
-  }
-
-  void finalize(TrainerMetrics& m) const {
-    if (blue_count > 0) {
-      m.car_pos_x_mean_blue = blue_sum_x / static_cast<double>(blue_count);
-      m.car_pos_y_mean_blue = blue_sum_y / static_cast<double>(blue_count);
-      m.car_pos_z_mean_blue = blue_sum_z / static_cast<double>(blue_count);
-      const double var_x = blue_sum_x2 / static_cast<double>(blue_count)
-          - m.car_pos_x_mean_blue * m.car_pos_x_mean_blue;
-      const double var_y = blue_sum_y2 / static_cast<double>(blue_count)
-          - m.car_pos_y_mean_blue * m.car_pos_y_mean_blue;
-      const double var_z = blue_sum_z2 / static_cast<double>(blue_count)
-          - m.car_pos_z_mean_blue * m.car_pos_z_mean_blue;
-      m.car_pos_spread_blue = std::sqrt(std::max(0.0, var_x + var_y + var_z));
-      m.car_ball_distance_mean_blue = blue_ball_dist_sum / static_cast<double>(blue_count);
-      m.blue_defensive_third_rate = static_cast<double>(blue_def_third) / static_cast<double>(blue_count);
-      m.blue_midfield_third_rate = static_cast<double>(blue_mid_third) / static_cast<double>(blue_count);
-      m.blue_offensive_third_rate = static_cast<double>(blue_off_third) / static_cast<double>(blue_count);
-      m.blue_ground_rate = static_cast<double>(blue_ground) / static_cast<double>(blue_count);
-      m.blue_low_aerial_rate = static_cast<double>(blue_low_aerial) / static_cast<double>(blue_count);
-      m.blue_high_aerial_rate = static_cast<double>(blue_high_aerial) / static_cast<double>(blue_count);
-    }
-    if (orange_count > 0) {
-      m.car_pos_x_mean_orange = orange_sum_x / static_cast<double>(orange_count);
-      m.car_pos_y_mean_orange = orange_sum_y / static_cast<double>(orange_count);
-      m.car_pos_z_mean_orange = orange_sum_z / static_cast<double>(orange_count);
-      const double var_x = orange_sum_x2 / static_cast<double>(orange_count)
-          - m.car_pos_x_mean_orange * m.car_pos_x_mean_orange;
-      const double var_y = orange_sum_y2 / static_cast<double>(orange_count)
-          - m.car_pos_y_mean_orange * m.car_pos_y_mean_orange;
-      const double var_z = orange_sum_z2 / static_cast<double>(orange_count)
-          - m.car_pos_z_mean_orange * m.car_pos_z_mean_orange;
-      m.car_pos_spread_orange = std::sqrt(std::max(0.0, var_x + var_y + var_z));
-      m.car_ball_distance_mean_orange = orange_ball_dist_sum / static_cast<double>(orange_count);
-      m.orange_defensive_third_rate = static_cast<double>(orange_def_third) / static_cast<double>(orange_count);
-      m.orange_midfield_third_rate = static_cast<double>(orange_mid_third) / static_cast<double>(orange_count);
-      m.orange_offensive_third_rate = static_cast<double>(orange_off_third) / static_cast<double>(orange_count);
-      m.orange_ground_rate = static_cast<double>(orange_ground) / static_cast<double>(orange_count);
-      m.orange_low_aerial_rate = static_cast<double>(orange_low_aerial) / static_cast<double>(orange_count);
-      m.orange_high_aerial_rate = static_cast<double>(orange_high_aerial) / static_cast<double>(orange_count);
-    }
-    if (blue_intra_count > 0) {
-      m.car_intra_team_distance_blue = blue_intra_dist_sum / static_cast<double>(blue_intra_count);
-    }
-    if (orange_intra_count > 0) {
-      m.car_intra_team_distance_orange = orange_intra_dist_sum / static_cast<double>(orange_intra_count);
-    }
-    if (ball_count > 0) {
-      m.ball_pos_x_mean = ball_sum_x / static_cast<double>(ball_count);
-      m.ball_pos_y_mean = ball_sum_y / static_cast<double>(ball_count);
-      m.ball_pos_z_mean = ball_sum_z / static_cast<double>(ball_count);
-    }
-  }
-};
-
 void zero_active_segment(
     float* learner_active,
     int total_agents,
@@ -341,33 +183,6 @@ void append_metrics_line(
       {"es_lora_a_norm", metrics.es_lora_a_norm},
       {"es_lora_b_norm", metrics.es_lora_b_norm},
       {"es_seconds", metrics.es_seconds},
-      {"car_pos_x_mean_blue", metrics.car_pos_x_mean_blue},
-      {"car_pos_y_mean_blue", metrics.car_pos_y_mean_blue},
-      {"car_pos_z_mean_blue", metrics.car_pos_z_mean_blue},
-      {"car_pos_x_mean_orange", metrics.car_pos_x_mean_orange},
-      {"car_pos_y_mean_orange", metrics.car_pos_y_mean_orange},
-      {"car_pos_z_mean_orange", metrics.car_pos_z_mean_orange},
-      {"car_pos_spread_blue", metrics.car_pos_spread_blue},
-      {"car_pos_spread_orange", metrics.car_pos_spread_orange},
-      {"car_ball_distance_mean_blue", metrics.car_ball_distance_mean_blue},
-      {"car_ball_distance_mean_orange", metrics.car_ball_distance_mean_orange},
-      {"car_intra_team_distance_blue", metrics.car_intra_team_distance_blue},
-      {"car_intra_team_distance_orange", metrics.car_intra_team_distance_orange},
-      {"ball_pos_x_mean", metrics.ball_pos_x_mean},
-      {"ball_pos_y_mean", metrics.ball_pos_y_mean},
-      {"ball_pos_z_mean", metrics.ball_pos_z_mean},
-      {"blue_defensive_third_rate", metrics.blue_defensive_third_rate},
-      {"blue_midfield_third_rate", metrics.blue_midfield_third_rate},
-      {"blue_offensive_third_rate", metrics.blue_offensive_third_rate},
-      {"orange_defensive_third_rate", metrics.orange_defensive_third_rate},
-      {"orange_midfield_third_rate", metrics.orange_midfield_third_rate},
-      {"orange_offensive_third_rate", metrics.orange_offensive_third_rate},
-      {"blue_ground_rate", metrics.blue_ground_rate},
-      {"blue_low_aerial_rate", metrics.blue_low_aerial_rate},
-      {"blue_high_aerial_rate", metrics.blue_high_aerial_rate},
-      {"orange_ground_rate", metrics.orange_ground_rate},
-      {"orange_low_aerial_rate", metrics.orange_low_aerial_rate},
-      {"orange_high_aerial_rate", metrics.orange_high_aerial_rate},
   };
   for (const auto& [mode, rating] : metrics.elo_ratings) {
     line["elo_" + mode] = rating;
@@ -594,18 +409,35 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
   const ExperimentConfig checkpoint_config = load_experiment_config((base / "config.json").string());
   const CheckpointMetadata metadata = load_checkpoint_metadata((base / "metadata.json").string());
   validate_inference_checkpoint_metadata(metadata, checkpoint_config);
-  torch::serialize::InputArchive actor_archive;
-  actor_archive.load_from((base / "model.pt").string(), device_);
-  actor_->load(actor_archive);
-  actor_normalizer_.load(actor_archive);
-  actor_->to(device_);
-  actor_normalizer_.to(device_);
-  if (std::filesystem::exists(base / "actor_optimizer.pt")) {
-    torch::serialize::InputArchive optimizer_archive;
-    optimizer_archive.load_from((base / "actor_optimizer.pt").string(), device_);
-    actor_optimizer_.load(optimizer_archive);
+
+  const std::filesystem::path state_path = base / "state.pt";
+  if (std::filesystem::exists(state_path)) {
+    load_training_state(state_path);
     resumed_global_step_ = metadata.global_step;
     resumed_update_index_ = metadata.update_index;
+  } else {
+    torch::serialize::InputArchive actor_archive;
+    actor_archive.load_from((base / "model.pt").string(), device_);
+    actor_->load(actor_archive);
+    actor_normalizer_.load(actor_archive);
+    actor_->to(device_);
+    actor_normalizer_.to(device_);
+    if (std::filesystem::exists(base / "actor_optimizer.pt")) {
+      torch::serialize::InputArchive optimizer_archive;
+      optimizer_archive.load_from((base / "actor_optimizer.pt").string(), device_);
+      actor_optimizer_.load(optimizer_archive);
+    }
+    resumed_global_step_ = metadata.global_step;
+    resumed_update_index_ = metadata.update_index;
+  }
+
+  if (metadata.extra.contains("wandb_run_id")) {
+    config_.wandb.run_id = metadata.extra["wandb_run_id"].get<std::string>();
+  }
+  if (self_play_manager_ && self_play_manager_->enabled()) {
+    if (metadata.extra.contains("self_play_rng_state")) {
+      self_play_manager_->restore_rng_state(metadata.extra["self_play_rng_state"].get<std::string>());
+    }
   }
   if (log_initialization_) {
     std::cout << "initialized_from_checkpoint=" << base.string() << '\n';
@@ -1125,7 +957,6 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
   CollectorTimings collector_timings{};
   BatchedRocketSimCollector* collector_ = collectors_.front().get();
   std::int64_t collected_agent_steps = 0;
-  PositionAccumulator pos_acc{};
 
   const auto collection_start = std::chrono::steady_clock::now();
   if (config_.ppo.train_only_scored_episodes) {
@@ -1349,13 +1180,6 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
             goal_pos_host,
             terminal_labels);
 
-        pos_acc.accumulate(collector);
-        if (heatmap_logger_.enabled()) {
-          torch::Tensor cp = collector.host_car_positions();
-          heatmap_logger_.record_positions_interleaved(
-              cp.data_ptr<float>(), static_cast<int>(cp.size(0)));
-        }
-
         collected_agent_steps += learner_step_count;
       }
 
@@ -1528,13 +1352,6 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
         goal_pos_host,
         terminal_labels);
 
-    pos_acc.accumulate(*collector_);
-    if (heatmap_logger_.enabled()) {
-      torch::Tensor cp = collector_->host_car_positions();
-      heatmap_logger_.record_positions_interleaved(
-          cp.data_ptr<float>(), static_cast<int>(cp.size(0)));
-    }
-
     collected_agent_steps += learner_step_count;
     if (early_update_completed_episodes > 0
         && step + 1 >= min_rollout_steps
@@ -1634,12 +1451,21 @@ TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_ind
           ? static_cast<double>(collected_agent_steps) /
                 std::max(std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count(), 1.0e-9)
           : 0.0;
-  pos_acc.finalize(metrics);
-  heatmap_logger_.on_update_complete();
   return metrics;
 }
 
-CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_step, int update_index) const {
+CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_step, int update_index, const std::string& wandb_run_id) const {
+  nlohmann::json extra = nlohmann::json::object();
+  if (!wandb_run_id.empty()) {
+    extra["wandb_run_id"] = wandb_run_id;
+  }
+  if (self_play_manager_ && self_play_manager_->enabled()) {
+    extra["self_play_ratings"] = self_play_manager_->current_ratings();
+    const std::string rng = self_play_manager_->rng_state();
+    if (!rng.empty()) {
+      extra["self_play_rng_state"] = rng;
+    }
+  }
   return CheckpointMetadata{
       .schema_version = config_.schema_version,
       .obs_schema_version = config_.obs_schema_version,
@@ -1650,10 +1476,11 @@ CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
       .global_step = global_step,
       .update_index = update_index,
       .critic_heads = {"extrinsic"},
+      .extra = std::move(extra),
   };
 }
 
-void APPOTrainer::save_checkpoint(const std::filesystem::path& directory, std::int64_t global_step, int update_index) const {
+void APPOTrainer::save_checkpoint(const std::filesystem::path& directory, std::int64_t global_step, int update_index, const std::string& wandb_run_id) const {
   PULSAR_TRACE_SCOPE_CAT("trainer", "checkpoint_save");
   synchronize_cuda_if_needed(device_, "checkpoint save start");
   const std::filesystem::path staging = make_checkpoint_staging_directory(directory);
@@ -1661,26 +1488,37 @@ void APPOTrainer::save_checkpoint(const std::filesystem::path& directory, std::i
   try {
     std::filesystem::create_directories(staging);
     save_experiment_config(config_, (staging / "config.json").string());
-    save_checkpoint_metadata(make_checkpoint_metadata(global_step, update_index), (staging / "metadata.json").string());
-
-    torch::NoGradGuard no_grad;
-    PPOActor actor_cpu = clone_ppo_actor(actor_, torch::Device(torch::kCPU));
-    ObservationNormalizer normalizer_cpu = actor_normalizer_.clone();
-    normalizer_cpu.to(torch::Device(torch::kCPU));
-
-    torch::serialize::OutputArchive actor_archive;
-    actor_cpu->save(actor_archive);
-    normalizer_cpu.save(actor_archive);
-    actor_archive.save_to((staging / "model.pt").string());
-
-    std::error_code ec;
-    std::filesystem::remove(staging / "actor_optimizer.pt", ec);
+    save_checkpoint_metadata(make_checkpoint_metadata(global_step, update_index, wandb_run_id), (staging / "metadata.json").string());
+    save_training_state(staging / "state.pt");
     commit_checkpoint_directory(staging, directory);
     synchronize_cuda_if_needed(device_, "checkpoint save end");
   } catch (...) {
     remove_checkpoint_directory(staging);
     throw;
   }
+}
+
+void APPOTrainer::save_training_state(const std::filesystem::path& path) const {
+  torch::NoGradGuard no_grad;
+  PPOActor actor_cpu = clone_ppo_actor(actor_, torch::Device(torch::kCPU));
+  ObservationNormalizer normalizer_cpu = actor_normalizer_.clone();
+  normalizer_cpu.to(torch::Device(torch::kCPU));
+
+  torch::serialize::OutputArchive archive;
+  actor_cpu->save(archive);
+  normalizer_cpu.save(archive);
+  actor_optimizer_.save(archive);
+  archive.save_to(path.string());
+}
+
+void APPOTrainer::load_training_state(const std::filesystem::path& path) {
+  torch::serialize::InputArchive archive;
+  archive.load_from(path.string(), device_);
+  actor_->load(archive);
+  actor_normalizer_.load(archive);
+  actor_optimizer_.load(archive);
+  actor_->to(device_);
+  actor_normalizer_.to(device_);
 }
 
 void APPOTrainer::prune_old_checkpoints(const std::filesystem::path& checkpoint_dir) const {
@@ -1719,9 +1557,6 @@ void APPOTrainer::prune_old_checkpoints(const std::filesystem::path& checkpoint_
 
 void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const std::string& config_path) {
   WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "dappo_train");
-  if (wandb.enabled()) {
-    heatmap_logger_.start();
-  }
   std::int64_t global_step = resumed_global_step_;
   const bool train_forever = updates <= 0;
   for (int index = 0; train_forever || index < updates; ++index) {
@@ -1747,6 +1582,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << '\n';
     if (wandb.enabled()) {
       nlohmann::json payload{
+          {"_step", global_step},
           {"update", update_index},
           {"global_step", global_step},
           {"policy_loss", metrics.policy_loss},
@@ -1765,33 +1601,6 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"ball_proximity_rate", metrics.ball_proximity_rate},
           {"goals_scored", metrics.goals_scored},
           {"goals_conceded", metrics.goals_conceded},
-          {"car_pos_x_mean_blue", metrics.car_pos_x_mean_blue},
-          {"car_pos_y_mean_blue", metrics.car_pos_y_mean_blue},
-          {"car_pos_z_mean_blue", metrics.car_pos_z_mean_blue},
-          {"car_pos_x_mean_orange", metrics.car_pos_x_mean_orange},
-          {"car_pos_y_mean_orange", metrics.car_pos_y_mean_orange},
-          {"car_pos_z_mean_orange", metrics.car_pos_z_mean_orange},
-          {"car_pos_spread_blue", metrics.car_pos_spread_blue},
-          {"car_pos_spread_orange", metrics.car_pos_spread_orange},
-          {"car_ball_distance_mean_blue", metrics.car_ball_distance_mean_blue},
-          {"car_ball_distance_mean_orange", metrics.car_ball_distance_mean_orange},
-          {"car_intra_team_distance_blue", metrics.car_intra_team_distance_blue},
-          {"car_intra_team_distance_orange", metrics.car_intra_team_distance_orange},
-          {"ball_pos_x_mean", metrics.ball_pos_x_mean},
-          {"ball_pos_y_mean", metrics.ball_pos_y_mean},
-          {"ball_pos_z_mean", metrics.ball_pos_z_mean},
-          {"blue_defensive_third_rate", metrics.blue_defensive_third_rate},
-          {"blue_midfield_third_rate", metrics.blue_midfield_third_rate},
-          {"blue_offensive_third_rate", metrics.blue_offensive_third_rate},
-          {"orange_defensive_third_rate", metrics.orange_defensive_third_rate},
-          {"orange_midfield_third_rate", metrics.orange_midfield_third_rate},
-          {"orange_offensive_third_rate", metrics.orange_offensive_third_rate},
-          {"blue_ground_rate", metrics.blue_ground_rate},
-          {"blue_low_aerial_rate", metrics.blue_low_aerial_rate},
-          {"blue_high_aerial_rate", metrics.blue_high_aerial_rate},
-          {"orange_ground_rate", metrics.orange_ground_rate},
-          {"orange_low_aerial_rate", metrics.orange_low_aerial_rate},
-          {"orange_high_aerial_rate", metrics.orange_high_aerial_rate},
       };
       if (update_index % config_.es_lora.es_interval == 0) {
         payload["es_fitness_mean"] = metrics.es_fitness_mean;
@@ -1807,20 +1616,15 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
         payload["elo_" + mode] = rating;
       }
       wandb.log(payload);
-      nlohmann::json heatmap_payload;
-      if (heatmap_logger_.try_get_payload(heatmap_payload)) {
-        wandb.log(heatmap_payload);
-      }
     }
     if (config_.ppo.checkpoint_interval > 0 && update_index % config_.ppo.checkpoint_interval == 0) {
       std::cout << "checkpoint_start update=" << update_index << std::endl;
-      save_checkpoint(std::filesystem::path(checkpoint_dir) / ("update_" + std::to_string(update_index)), global_step, update_index);
+      save_checkpoint(std::filesystem::path(checkpoint_dir) / ("update_" + std::to_string(update_index)), global_step, update_index, wandb.run_id());
       prune_old_checkpoints(checkpoint_dir);
       std::cout << "checkpoint_done update=" << update_index << std::endl;
     }
   }
-  save_checkpoint(std::filesystem::path(checkpoint_dir) / "final", global_step, static_cast<int>(resumed_update_index_) + updates);
-  heatmap_logger_.stop();
+  save_checkpoint(std::filesystem::path(checkpoint_dir) / "final", global_step, static_cast<int>(resumed_update_index_) + updates, wandb.run_id());
   wandb.finish();
 }
 

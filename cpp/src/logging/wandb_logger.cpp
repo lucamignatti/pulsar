@@ -1,11 +1,14 @@
 #include "pulsar/logging/wandb_logger.hpp"
 
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 #include <nlohmann/json.hpp>
@@ -33,7 +36,7 @@ WandbLogger::WandbLogger(
     const std::string& run_dir,
     const std::string& config_path,
     const std::string& default_job_type)
-    : config_(config), enabled_(config.enabled) {
+    : config_(config), enabled_(config.enabled), run_dir_(run_dir) {
   if (!enabled_) {
     return;
   }
@@ -66,6 +69,10 @@ WandbLogger::WandbLogger(
   }
   for (const auto& tag : config_.tags) {
     command << " --tag " << shell_quote(tag);
+  }
+  if (!config_.run_id.empty()) {
+    command << " --id " << shell_quote(config_.run_id)
+            << " --resume allow";
   }
 
   pipe_ = popen(command.str().c_str(), "w");
@@ -101,6 +108,24 @@ WandbLogger& WandbLogger::operator=(WandbLogger&& other) noexcept {
 
 bool WandbLogger::enabled() const {
   return enabled_;
+}
+
+std::string WandbLogger::run_id() const {
+  if (!run_id_.empty()) {
+    return run_id_;
+  }
+  const std::filesystem::path run_id_path = std::filesystem::path(run_dir_) / "wandb_run_id.txt";
+  if (!std::filesystem::exists(run_id_path)) {
+    return "";
+  }
+  std::ifstream input(run_id_path);
+  if (!input) {
+    return "";
+  }
+  std::string id;
+  input >> id;
+  run_id_ = id;
+  return run_id_;
 }
 
 void WandbLogger::log(const nlohmann::json& payload) {

@@ -326,6 +326,7 @@ void to_json(json& j, const WandbConfig& value) {
       {"script_path", value.script_path},
       {"log_interval_seconds", value.log_interval_seconds},
       {"tags", value.tags},
+      {"run_id", value.run_id},
   };
 }
 
@@ -342,6 +343,7 @@ void from_json(const json& j, WandbConfig& value) {
   value.script_path = j.value("script_path", std::string{"scripts/wandb_stream.py"});
   value.log_interval_seconds = j.value("log_interval_seconds", 30.0);
   value.tags = j.value("tags", std::vector<std::string>{});
+  value.run_id = j.value("run_id", std::string{});
 }
 
 void to_json(json& j, const ExperimentConfig& value) {
@@ -405,6 +407,7 @@ void to_json(json& j, const CheckpointMetadata& value) {
       {"global_step", value.global_step},
       {"update_index", value.update_index},
       {"critic_heads", value.critic_heads},
+      {"extra", value.extra},
   };
 }
 
@@ -418,6 +421,7 @@ void from_json(const json& j, CheckpointMetadata& value) {
   value.global_step = j.at("global_step").get<std::int64_t>();
   value.update_index = j.at("update_index").get<std::int64_t>();
   value.critic_heads = j.value("critic_heads", std::vector<std::string>{});
+  value.extra = j.value("extra", json::object());
 }
 
 void validate_experiment_config(const ExperimentConfig& config) {
