@@ -52,6 +52,14 @@ ObservationNormalizer ObservationNormalizer::clone() const {
   return copy;
 }
 
+void ObservationNormalizer::merge(const ObservationNormalizer& other) {
+  const torch::Tensor new_count = count_ + other.count_;
+  const torch::Tensor delta = other.mean_ - mean_;
+  mean_ = mean_ + delta * (other.count_ / new_count);
+  var_ = var_ + other.var_ + delta * delta * (count_ * other.count_ / new_count);
+  count_ = new_count;
+}
+
 void ObservationNormalizer::save(torch::serialize::OutputArchive& archive) const {
   archive.write("norm_mean", mean_);
   archive.write("norm_var", var_);
