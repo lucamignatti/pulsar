@@ -35,14 +35,6 @@ pulsar::ModelConfig tiny_model_config() {
   cfg.action_dim = 4;
   cfg.use_layer_norm = false;
   cfg.encoder_dim = 8;
-  cfg.workspace_dim = 8;
-  cfg.stm_slots = 4;
-  cfg.stm_key_dim = 4;
-  cfg.stm_value_dim = 4;
-  cfg.ltm_slots = 4;
-  cfg.ltm_dim = 4;
-  cfg.controller_dim = 8;
-  cfg.consolidation_stride = 2;
   cfg.value_hidden_dim = 16;
   return cfg;
 }
@@ -128,9 +120,7 @@ int main() {
     {
       pulsar::ExperimentConfig config = pulsar::test::make_test_config();
       config.ppo.rollout_length = 2;
-      config.ppo.sequence_length = 1;
       config.ppo.minibatch_size = 1;
-      config.ppo.burn_in = 0;
       config.model.encoder_dim = 512;
       try {
         pulsar::validate_experiment_config(config);

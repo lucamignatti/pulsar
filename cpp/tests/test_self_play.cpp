@@ -101,7 +101,7 @@ void test_opponent_inference_and_elo_math() {
     action_masks.index_put_({3, 0}, true);
     torch::Tensor episode_starts = torch::zeros({4});
     torch::Tensor snapshot_ids = torch::tensor({-1, 0, 0, -1}, torch::kLong);
-    auto opponent_state = model->initial_state(4, torch::kCPU);
+    
     torch::Tensor actions;
     double inference_seconds = 0.0;
     manager.infer_opponent_actions(
@@ -175,9 +175,9 @@ void test_snapshot_reload_preserves_actor_config() {
 
     pulsar::PPOActor snapshot_model = pulsar::load_ppo_actor(
         (root / "10").string(), "cpu");
-    auto state = snapshot_model->initial_state(2, torch::kCPU);
+    
     auto output = snapshot_model->forward_step(
-        torch::randn({2, config.model.observation_dim}), std::move(state));
+        torch::randn({2, config.model.observation_dim}));
     pulsar::test::require(
         output.value_win_logits.sizes() ==
             torch::IntArrayRef({2, 1}),

@@ -115,15 +115,7 @@ void to_json(json& j, const ModelConfig& value) {
       {"action_dim", value.action_dim},
       {"use_layer_norm", value.use_layer_norm},
       {"encoder_dim", value.encoder_dim},
-      {"workspace_dim", value.workspace_dim},
-      {"stm_slots", value.stm_slots},
-      {"stm_key_dim", value.stm_key_dim},
-      {"stm_value_dim", value.stm_value_dim},
-      {"ltm_slots", value.ltm_slots},
-      {"ltm_dim", value.ltm_dim},
-      {"controller_dim", value.controller_dim},
-      {"consolidation_stride", value.consolidation_stride},
-      {"retired_decay", value.retired_decay},
+      {"num_encoder_blocks", value.num_encoder_blocks},
       {"value_hidden_dim", value.value_hidden_dim},
       {"policy_hidden_dim", value.policy_hidden_dim},
   };
@@ -133,16 +125,8 @@ void from_json(const json& j, ModelConfig& value) {
   value.observation_dim = j.value("observation_dim", 132);
   value.action_dim = j.value("action_dim", 90);
   value.use_layer_norm = j.value("use_layer_norm", true);
-  value.encoder_dim = j.value("encoder_dim", 512);
-  value.workspace_dim = j.value("workspace_dim", 512);
-  value.stm_slots = j.value("stm_slots", 48);
-  value.stm_key_dim = j.value("stm_key_dim", 128);
-  value.stm_value_dim = j.value("stm_value_dim", 128);
-  value.ltm_slots = j.value("ltm_slots", 32);
-  value.ltm_dim = j.value("ltm_dim", 128);
-  value.controller_dim = j.value("controller_dim", 512);
-  value.consolidation_stride = j.value("consolidation_stride", 8);
-  value.retired_decay = j.value("retired_decay", 0.96F);
+  value.encoder_dim = j.value("encoder_dim", 640);
+  value.num_encoder_blocks = j.value("num_encoder_blocks", 5);
   value.value_hidden_dim = j.value("value_hidden_dim", 256);
   value.policy_hidden_dim = j.value("policy_hidden_dim", 0);
 }
@@ -241,9 +225,7 @@ void to_json(json& j, const PPOConfig& value) {
       {"device", value.device},
       {"checkpoint_interval", value.checkpoint_interval},
       {"max_rolling_checkpoints", value.max_rolling_checkpoints},
-      {"sequence_length", value.sequence_length},
-      {"burn_in", value.burn_in},
-      {"min_rollout_length", value.min_rollout_length},
+
       {"early_update_completed_episodes", value.early_update_completed_episodes},
       {"train_only_scored_episodes", value.train_only_scored_episodes},
       {"use_adaptive_epsilon", value.use_adaptive_epsilon},
@@ -272,9 +254,7 @@ void from_json(const json& j, PPOConfig& value) {
   value.device = j.value("device", std::string{"cpu"});
   value.checkpoint_interval = j.value("checkpoint_interval", 10);
   value.max_rolling_checkpoints = j.value("max_rolling_checkpoints", 5);
-  value.sequence_length = j.value("sequence_length", 16);
-  value.burn_in = j.value("burn_in", 0);
-  value.min_rollout_length = j.value("min_rollout_length", 0);
+
   value.early_update_completed_episodes = j.value("early_update_completed_episodes", 0);
   value.train_only_scored_episodes = j.value("train_only_scored_episodes", false);
   value.use_adaptive_epsilon = j.value("use_adaptive_epsilon", true);
@@ -437,21 +417,7 @@ void validate_experiment_config(const ExperimentConfig& config) {
   if (config.ppo.collection_shards > config.ppo.num_envs) {
     throw std::invalid_argument("ppo.collection_shards must be <= ppo.num_envs.");
   }
-  if (config.ppo.sequence_length <= 0) {
-    throw std::invalid_argument("ppo.sequence_length must be positive.");
-  }
-  if (config.ppo.minibatch_size < config.ppo.sequence_length) {
-    throw std::invalid_argument("ppo.minibatch_size must be >= ppo.sequence_length.");
-  }
-  if (config.ppo.sequence_length > config.ppo.rollout_length) {
-    throw std::invalid_argument("ppo.sequence_length must be <= ppo.rollout_length.");
-  }
-  if (config.ppo.burn_in < 0 || config.ppo.burn_in >= config.ppo.sequence_length) {
-    throw std::invalid_argument("ppo.burn_in must satisfy 0 <= burn_in < sequence_length.");
-  }
-  if (config.ppo.min_rollout_length < 0 || config.ppo.min_rollout_length > config.ppo.rollout_length) {
-    throw std::invalid_argument("ppo.min_rollout_length must satisfy 0 <= min_rollout_length <= rollout_length.");
-  }
+
   if (config.ppo.early_update_completed_episodes < 0) {
     throw std::invalid_argument("ppo.early_update_completed_episodes must be non-negative.");
   }

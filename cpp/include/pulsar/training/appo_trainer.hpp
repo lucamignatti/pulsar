@@ -2,10 +2,10 @@
 
 #ifdef PULSAR_HAS_TORCH
 
+#include <atomic>
 #include <filesystem>
 #include <map>
 #include <memory>
-#include <random>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -98,6 +98,7 @@ class APPOTrainer {
   CheckpointMetadata make_checkpoint_metadata(std::int64_t global_step, int update_index, const std::string& wandb_run_id) const;
 
   void run_es_lora_update(int update_index, TrainerMetrics& metrics);
+  std::pair<torch::Tensor, torch::Tensor> compute_es_deltas();
 
   struct ESPopulationFitness {
     std::vector<float> fitness{};
@@ -119,6 +120,9 @@ class APPOTrainer {
   ObservationNormalizer actor_normalizer_;
   ObservationNormalizer normalizer_snapshot_{0};
   torch::optim::Adam actor_optimizer_;
+#ifdef PULSAR_HAS_CUDA
+  at::cuda::amp::GradScaler grad_scaler_;
+#endif
   RolloutStorage rollout_;
   RolloutStorage rollout_B_;
   torch::Device device_{torch::kCPU};
@@ -127,12 +131,15 @@ class APPOTrainer {
   std::int64_t resumed_global_step_ = 0;
   std::int64_t resumed_update_index_ = 0;
   std::size_t total_agents_ = 0;
-  ContinuumState collection_state_{};
-  ContinuumState opponent_collection_state_{};
-  std::vector<ContinuumState> shard_collection_states_{};
-  std::vector<ContinuumState> shard_opponent_collection_states_{};
   std::vector<std::int64_t> shard_agent_offsets_{};
   bool use_pinned_host_buffers_ = false;
+  std::atomic<bool> es_deltas_ready_{false};
+  torch::Tensor es_delta_A_;
+  torch::Tensor es_delta_B_;
+#ifdef PULSAR_HAS_CUDA
+  at::cuda::CUDAStream collection_stream_;
+  at::cuda::CUDAStream training_stream_;
+#endif
 };
 
 }  // namespace pulsar

@@ -118,6 +118,11 @@ if(PULSAR_ENABLE_TORCH)
     target_link_libraries(pulsar_torch PRIVATE pulsar_core_usage PUBLIC torch)
     target_compile_definitions(pulsar_torch PUBLIC PULSAR_HAS_TORCH=1)
 
+    find_package(CUDAToolkit QUIET)
+    if(CUDAToolkit_FOUND OR Torch_CUDA_FOUND)
+      target_compile_definitions(pulsar_torch PUBLIC PULSAR_HAS_CUDA=1 PULSAR_ENABLE_AMP=1)
+    endif()
+
     add_executable(pulsar_appo_train cpp/src/apps/train_main.cpp)
     pulsar_link_torch_whole_core(pulsar_appo_train)
   else()

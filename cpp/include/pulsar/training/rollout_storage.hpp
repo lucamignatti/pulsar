@@ -8,8 +8,6 @@
 
 #include <torch/torch.h>
 
-#include "pulsar/model/ppo_actor.hpp"
-
 namespace pulsar {
 
 class RolloutStorage {
@@ -53,8 +51,6 @@ class RolloutStorage {
   void set_final_values(const std::unordered_map<std::string, torch::Tensor>& final_values);
   void set_rewards_at(int step, const std::unordered_map<std::string, torch::Tensor>& rewards_in);
   [[nodiscard]] const std::unordered_map<std::string, torch::Tensor>& final_values() const;
-  void set_initial_state(const ContinuumState& state);
-  [[nodiscard]] ContinuumState initial_state_for_agents(const torch::Tensor& agent_indices) const;
 
   [[nodiscard]] int rollout_length() const;
   [[nodiscard]] int capacity() const;
@@ -65,7 +61,6 @@ class RolloutStorage {
   [[nodiscard]] const std::unordered_map<std::string, torch::Tensor>& all_values() const;
   [[nodiscard]] const std::unordered_map<std::string, torch::Tensor>& all_rewards() const;
 
-  ContinuumState initial_state{};
   torch::Tensor obs;
   torch::Tensor episode_starts;
   torch::Tensor action_masks;

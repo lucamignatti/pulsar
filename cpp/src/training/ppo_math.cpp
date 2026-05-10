@@ -240,62 +240,6 @@ float compute_discrete_policy_kl(
   return kl.mean().item<float>();
 }
 
-ContinuumState detach_state(ContinuumState state) {
-  state.workspace = detach_tensor(state.workspace);
-  state.stm_keys = detach_tensor(state.stm_keys);
-  state.stm_values = detach_tensor(state.stm_values);
-  state.stm_strengths = detach_tensor(state.stm_strengths);
-  state.stm_write_index = detach_tensor(state.stm_write_index);
-  state.ltm_coeffs = detach_tensor(state.ltm_coeffs);
-  state.timestep = detach_tensor(state.timestep);
-  return state;
-}
-
-ContinuumState clone_state(const ContinuumState& state) {
-  return {
-      clone_tensor(state.workspace),
-      clone_tensor(state.stm_keys),
-      clone_tensor(state.stm_values),
-      clone_tensor(state.stm_strengths),
-      clone_tensor(state.stm_write_index),
-      clone_tensor(state.ltm_coeffs),
-      clone_tensor(state.timestep),
-  };
-}
-
-ContinuumState state_to_device(ContinuumState state, const torch::Device& device) {
-  state.workspace = tensor_to_device(state.workspace, device);
-  state.stm_keys = tensor_to_device(state.stm_keys, device);
-  state.stm_values = tensor_to_device(state.stm_values, device);
-  state.stm_strengths = tensor_to_device(state.stm_strengths, device);
-  state.stm_write_index = tensor_to_device(state.stm_write_index, device);
-  state.ltm_coeffs = tensor_to_device(state.ltm_coeffs, device);
-  state.timestep = tensor_to_device(state.timestep, device);
-  return state;
-}
-
-ContinuumState gather_state(const ContinuumState& state, const torch::Tensor& indices) {
-  return {
-      gather_tensor(state.workspace, indices),
-      gather_tensor(state.stm_keys, indices),
-      gather_tensor(state.stm_values, indices),
-      gather_tensor(state.stm_strengths, indices),
-      gather_tensor(state.stm_write_index, indices),
-      gather_tensor(state.ltm_coeffs, indices),
-      gather_tensor(state.timestep, indices),
-  };
-}
-
-void scatter_state(ContinuumState& dst, const torch::Tensor& indices, const ContinuumState& src) {
-  scatter_tensor(dst.workspace, indices, src.workspace);
-  scatter_tensor(dst.stm_keys, indices, src.stm_keys);
-  scatter_tensor(dst.stm_values, indices, src.stm_values);
-  scatter_tensor(dst.stm_strengths, indices, src.stm_strengths);
-  scatter_tensor(dst.stm_write_index, indices, src.stm_write_index);
-  scatter_tensor(dst.ltm_coeffs, indices, src.ltm_coeffs);
-  scatter_tensor(dst.timestep, indices, src.timestep);
-}
-
 }  // namespace pulsar
 
 #endif

@@ -13,14 +13,14 @@ pulsar::ModelConfig small_model_config() {
   config.action_dim = 7;
   config.use_layer_norm = false;
   config.encoder_dim = 8;
-  config.workspace_dim = 8;
-  config.stm_slots = 4;
-  config.stm_key_dim = 4;
-  config.stm_value_dim = 4;
-  config.ltm_slots = 4;
-  config.ltm_dim = 4;
-  config.controller_dim = 8;
-  config.consolidation_stride = 2;
+  // config.workspace_dim = 8;
+  // config.stm_slots = 4;
+  // config.stm_key_dim = 4;
+  // config.stm_value_dim = 4;
+  // config.ltm_slots = 4;
+  // config.ltm_dim = 4;
+  // config.controller_dim = 8;
+  // config.consolidation_stride = 2;
   config.value_hidden_dim = 32;
   return config;
 }
@@ -39,9 +39,9 @@ int main() {
     const pulsar::ModelConfig model_config = small_model_config();
     const pulsar::GoalCriticConfig gc_cfg = default_goal_critic_config();
     pulsar::PPOActor actor(model_config, gc_cfg);
-    auto state = actor->initial_state(4, torch::kCPU);
+    
     const auto output = actor->forward_step(
-        torch::randn({4, model_config.observation_dim}), std::move(state));
+        torch::randn({4, model_config.observation_dim}));
 
     if (output.policy_logits.sizes() != torch::IntArrayRef({4, model_config.action_dim})) {
       throw std::runtime_error("policy logits shape mismatch");
@@ -55,11 +55,11 @@ int main() {
 
     {
       const torch::Tensor obs = torch::randn({2, model_config.observation_dim});
-      auto default_state = actor->initial_state(2, torch::kCPU);
-      auto explicit_state = actor->initial_state(2, torch::kCPU);
-      const auto default_out = actor->forward_step(obs, std::move(default_state));
+      
+      
+      const auto default_out = actor->forward_step(obs);
       const auto explicit_out = actor->forward_step(
-          obs, std::move(explicit_state), {}, torch::zeros({2, gc_cfg.goal_dim}));
+          obs, torch::zeros({2, gc_cfg.goal_dim}));
       if (!torch::allclose(default_out.policy_logits, explicit_out.policy_logits)) {
         throw std::runtime_error("default policy goal should match explicit zero goal");
       }
@@ -76,8 +76,8 @@ int main() {
 
     // Goal critic forward pass smoke test
     {
-      auto s = actor->initial_state(2, torch::kCPU);
-      auto out = actor->forward_step(torch::zeros({2, model_config.observation_dim}), std::move(s));
+      
+      auto out = actor->forward_step(torch::zeros({2, model_config.observation_dim}));
       torch::Tensor goal_score = actor->goal_critic()->forward(
           out.features,
           torch::zeros({2}, torch::TensorOptions().dtype(torch::kLong)),
@@ -114,8 +114,8 @@ int main() {
 
     // Policy-head EGGROLL helper smoke test
     {
-      auto s = actor->initial_state(4, torch::kCPU);
-      auto out = actor->forward_step(torch::randn({4, model_config.observation_dim}), std::move(s));
+      
+      auto out = actor->forward_step(torch::randn({4, model_config.observation_dim}));
       const int population = 2;
       const int rank = 4;
       const int in_features = actor->policy_lora()->in_features();

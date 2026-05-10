@@ -25,13 +25,7 @@ pulsar::ModelConfig benchmark_model_config() {
   config.observation_dim = 132;
   config.action_dim = 90;
   config.encoder_dim = 64;
-  config.workspace_dim = 64;
-  config.stm_slots = 8;
-  config.stm_key_dim = 16;
-  config.stm_value_dim = 16;
-  config.ltm_slots = 8;
-  config.ltm_dim = 16;
-  config.controller_dim = 64;
+  config.num_encoder_blocks = 2;
   config.value_hidden_dim = 128;
   return config;
 }
@@ -60,10 +54,8 @@ int main(int argc, char** argv) {
   for (int update = 0; update < updates; ++update) {
     torch::Tensor obs = torch::randn({sequence, batch, model_config.observation_dim}, device);
     torch::Tensor starts = torch::zeros({sequence, batch}, device);
-    auto state = actor->initial_state(batch, device);
-    synchronize_if_cuda(device);
     auto forward_start = std::chrono::steady_clock::now();
-    const pulsar::ActorSequenceOutput output = actor->forward_sequence(obs, std::move(state), starts);
+    const pulsar::ActorSequenceOutput output = actor->forward_sequence(obs);
     synchronize_if_cuda(device);
     policy_forward_seconds += seconds_since(forward_start);
 

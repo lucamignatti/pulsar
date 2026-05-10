@@ -138,16 +138,6 @@ const std::unordered_map<std::string, torch::Tensor>& RolloutStorage::final_valu
   return final_values_;
 }
 
-void RolloutStorage::set_initial_state(const ContinuumState& state) {
-  initial_state = state_to_device(clone_state(state), device_);
-  filled_length_ = 0;
-  final_values_.clear();
-}
-
-ContinuumState RolloutStorage::initial_state_for_agents(const torch::Tensor& agent_indices) const {
-  return gather_state(initial_state, agent_indices);
-}
-
 int RolloutStorage::rollout_length() const {
   return filled_length_;
 }

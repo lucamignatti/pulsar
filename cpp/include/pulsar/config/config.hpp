@@ -39,16 +39,8 @@ struct ModelConfig {
   int observation_dim = 132;
   int action_dim = 90;
   bool use_layer_norm = true;
-  int encoder_dim = 512;
-  int workspace_dim = 512;
-  int stm_slots = 48;
-  int stm_key_dim = 128;
-  int stm_value_dim = 128;
-  int ltm_slots = 32;
-  int ltm_dim = 128;
-  int controller_dim = 512;
-  int consolidation_stride = 8;
-  float retired_decay = 0.96F;
+  int encoder_dim = 640;
+  int num_encoder_blocks = 5;
   int value_hidden_dim = 256;
   int policy_hidden_dim = 0;
 };
@@ -105,9 +97,6 @@ struct PPOConfig {
   std::string device = "cpu";
   int checkpoint_interval = 10;
   int max_rolling_checkpoints = 5;
-  int sequence_length = 16;
-  int burn_in = 0;
-  int min_rollout_length = 0;
   int early_update_completed_episodes = 0;
   bool train_only_scored_episodes = false;
   bool use_adaptive_epsilon = true;

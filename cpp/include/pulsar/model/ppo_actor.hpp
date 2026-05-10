@@ -15,22 +15,11 @@ namespace pulsar {
 
 #ifdef PULSAR_HAS_TORCH
 
-struct ContinuumState {
-  torch::Tensor workspace;
-  torch::Tensor stm_keys;
-  torch::Tensor stm_values;
-  torch::Tensor stm_strengths;
-  torch::Tensor stm_write_index;
-  torch::Tensor ltm_coeffs;
-  torch::Tensor timestep;
-};
-
 struct ActorStepOutput {
   torch::Tensor policy_logits;
   torch::Tensor encoded;
   torch::Tensor value_win_logits;
   torch::Tensor features;
-  ContinuumState state;
 };
 
 struct ActorSequenceOutput {
@@ -38,7 +27,6 @@ struct ActorSequenceOutput {
   torch::Tensor encoded;
   torch::Tensor value_win_logits;
   torch::Tensor features;
-  ContinuumState final_state;
 };
 
 class LoRALinearImpl : public torch::nn::Module {
@@ -101,16 +89,11 @@ class PPOActorImpl : public torch::nn::Module {
  public:
   explicit PPOActorImpl(ModelConfig config, const GoalCriticConfig& goal_critic_config = {});
 
-  [[nodiscard]] ContinuumState initial_state(std::int64_t batch_size, const torch::Device& device) const;
   ActorStepOutput forward_step(
       torch::Tensor obs,
-      ContinuumState state,
-      torch::Tensor episode_starts = {},
       torch::Tensor goal_values = {});
   ActorSequenceOutput forward_sequence(
       torch::Tensor obs_seq,
-      ContinuumState state,
-      torch::Tensor episode_starts = {},
       torch::Tensor goal_values = {});
   [[nodiscard]] int feature_dim() const;
   [[nodiscard]] const ModelConfig& config() const;
@@ -132,44 +115,18 @@ class PPOActorImpl : public torch::nn::Module {
   [[nodiscard]] GoalCritic& goal_critic();
 
  private:
-  ActorStepOutput forward_encoded_step(torch::Tensor encoded, ContinuumState state, torch::Tensor episode_starts = {}, torch::Tensor goal_values = {});
-  [[nodiscard]] ContinuumState apply_episode_starts(ContinuumState state, torch::Tensor episode_starts) const;
-  [[nodiscard]] std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> read_memories(
-      const torch::Tensor& encoded,
-      const ContinuumState& state);
-  [[nodiscard]] ContinuumState write_short_term_memory(
-      ContinuumState state,
-      const torch::Tensor& key,
-      const torch::Tensor& value);
-  [[nodiscard]] ContinuumState maybe_consolidate(
-      ContinuumState state,
-      const torch::Tensor& controller_hidden);
   [[nodiscard]] torch::nn::Sequential make_value_win_head(int input_dim) const;
 
   ModelConfig config_{};
   GoalCriticConfig goal_critic_config_{};
   int feature_dim_ = 0;
   torch::nn::Sequential encoder_{};
-  torch::nn::Linear query_proj_{nullptr};
-  torch::nn::Linear stm_context_proj_{nullptr};
-  torch::nn::Linear ltm_query_proj_{nullptr};
-  torch::nn::Linear ltm_context_proj_{nullptr};
-  torch::nn::Linear ltm_write_proj_{nullptr};
-  torch::nn::Linear ltm_gate_proj_{nullptr};
-  torch::nn::Linear gate_proj_{nullptr};
-  torch::nn::Linear controller_proj_{nullptr};
-  torch::nn::GRUCell workspace_cell_{nullptr};
-  torch::nn::Linear stm_key_write_{nullptr};
-  torch::nn::Linear stm_value_write_{nullptr};
 
   torch::nn::Sequential policy_hidden_{nullptr};
   LoRALinear policy_lora_{nullptr};
 
   torch::nn::Sequential value_head_win_{nullptr};
   GoalCritic goal_critic_{nullptr};
-
-  torch::Tensor ltm_basis_keys_;
-  torch::Tensor ltm_basis_values_;
 };
 
 TORCH_MODULE(PPOActor);
@@ -179,7 +136,6 @@ PPOActor clone_ppo_actor(const PPOActor& source, const torch::Device& device);
 
 #else
 
-struct ContinuumState {};
 struct ActorStepOutput {};
 struct ActorSequenceOutput {};
 

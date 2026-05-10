@@ -15,17 +15,6 @@
 namespace pulsar {
 namespace {
 
-torch::Tensor maybe_zero_mask(torch::Tensor tensor, const torch::Tensor& mask) {
-  if (!mask.defined()) {
-    return tensor;
-  }
-  torch::Tensor expanded_mask = mask;
-  while (expanded_mask.dim() < tensor.dim()) {
-    expanded_mask = expanded_mask.unsqueeze(-1);
-  }
-  return tensor * (1.0 - expanded_mask);
-}
-
 void copy_module_tensors_to(const PPOActor& source, PPOActor& target, const torch::Device& device) {
   torch::NoGradGuard no_grad;
 
@@ -50,11 +39,6 @@ void copy_module_tensors_to(const PPOActor& source, PPOActor& target, const torc
   }
 }
 
-torch::Tensor masked_softmax(torch::Tensor logits, const torch::Tensor& strengths) {
-  const torch::Tensor masked_logits = logits.masked_fill(strengths <= 1.0e-6, -1.0e9);
-  return torch::softmax(masked_logits, -1);
-}
-
 void append_encoder_block(
     torch::nn::Sequential& encoder,
     int in_dim,
@@ -67,6 +51,21 @@ void append_encoder_block(
   encoder->push_back(torch::nn::Functional(torch::relu));
 }
 
+void append_residual_block(
+    torch::nn::Sequential& encoder,
+    int dim,
+    bool use_layer_norm) {
+  encoder->push_back(torch::nn::Linear(dim, dim));
+  if (use_layer_norm) {
+    encoder->push_back(torch::nn::LayerNorm(torch::nn::LayerNormOptions({dim})));
+  }
+  encoder->push_back(torch::nn::Functional(torch::relu));
+  encoder->push_back(torch::nn::Linear(dim, dim));
+  if (use_layer_norm) {
+    encoder->push_back(torch::nn::LayerNorm(torch::nn::LayerNormOptions({dim})));
+  }
+}
+
 void validate_model_config(const ModelConfig& config) {
   auto require_positive = [](int value, const char* field) {
     if (value <= 0) {
@@ -77,14 +76,7 @@ void validate_model_config(const ModelConfig& config) {
   require_positive(config.observation_dim, "observation_dim");
   require_positive(config.action_dim, "action_dim");
   require_positive(config.encoder_dim, "encoder_dim");
-  require_positive(config.workspace_dim, "workspace_dim");
-  require_positive(config.stm_slots, "stm_slots");
-  require_positive(config.stm_key_dim, "stm_key_dim");
-  require_positive(config.stm_value_dim, "stm_value_dim");
-  require_positive(config.ltm_slots, "ltm_slots");
-  require_positive(config.ltm_dim, "ltm_dim");
-  require_positive(config.controller_dim, "controller_dim");
-  require_positive(config.consolidation_stride, "consolidation_stride");
+  require_positive(config.num_encoder_blocks, "num_encoder_blocks");
   require_positive(config.value_hidden_dim, "value_hidden_dim");
 }
 
@@ -182,7 +174,7 @@ float LoRALinearImpl::scale() const {
 GoalCriticImpl::GoalCriticImpl(int feature_dim, int action_dim, int embedding_dim, int hidden_dim, int goal_dim)
     : action_dim_(action_dim), hidden_dim_(hidden_dim), embedding_dim_(embedding_dim), goal_dim_(goal_dim) {
   sa_encoder_ = torch::nn::Sequential();
-   sa_encoder_->push_back(torch::nn::Linear(feature_dim + action_dim, hidden_dim));
+  sa_encoder_->push_back(torch::nn::Linear(feature_dim + action_dim, hidden_dim));
   sa_encoder_->push_back(torch::nn::Functional(torch::relu));
   sa_encoder_->push_back(torch::nn::Linear(hidden_dim, embedding_dim));
   register_module("sa_encoder", sa_encoder_);
@@ -226,241 +218,76 @@ torch::nn::Sequential PPOActorImpl::make_value_win_head(int input_dim) const {
 PPOActorImpl::PPOActorImpl(ModelConfig config, const GoalCriticConfig& goal_critic_config)
     : config_(std::move(config)), goal_critic_config_(goal_critic_config) {
   validate_model_config(config_);
+
   append_encoder_block(encoder_, config_.observation_dim, config_.encoder_dim, config_.use_layer_norm);
+  for (int i = 0; i < config_.num_encoder_blocks; ++i) {
+    append_residual_block(encoder_, config_.encoder_dim, config_.use_layer_norm);
+  }
   register_module("encoder", encoder_);
 
-  const int fused_in = config_.encoder_dim + config_.workspace_dim;
-  query_proj_ = register_module("query_proj", torch::nn::Linear(fused_in, config_.stm_key_dim));
-  stm_context_proj_ = register_module(
-      "stm_context_proj",
-      torch::nn::Linear(config_.stm_value_dim, config_.controller_dim));
-  ltm_query_proj_ = register_module("ltm_query_proj", torch::nn::Linear(fused_in, config_.ltm_dim));
-  ltm_context_proj_ =
-      register_module("ltm_context_proj", torch::nn::Linear(config_.ltm_dim, config_.controller_dim));
-  ltm_write_proj_ =
-      register_module("ltm_write_proj", torch::nn::Linear(config_.controller_dim, config_.ltm_slots));
-  ltm_gate_proj_ =
-      register_module("ltm_gate_proj", torch::nn::Linear(config_.controller_dim, config_.ltm_slots));
-  gate_proj_ = register_module(
-      "gate_proj",
-      torch::nn::Linear(config_.controller_dim * 2 + config_.workspace_dim + config_.encoder_dim, 1));
-  controller_proj_ = register_module(
-      "controller_proj",
-      torch::nn::Linear(config_.controller_dim * 2 + config_.workspace_dim + config_.encoder_dim, config_.controller_dim));
-  workspace_cell_ = register_module(
-      "workspace_cell",
-      torch::nn::GRUCell(config_.encoder_dim + config_.controller_dim, config_.workspace_dim));
-  stm_key_write_ = register_module(
-      "stm_key_write",
-      torch::nn::Linear(config_.workspace_dim + config_.encoder_dim, config_.stm_key_dim));
-  stm_value_write_ = register_module(
-      "stm_value_write",
-      torch::nn::Linear(config_.workspace_dim + config_.encoder_dim, config_.stm_value_dim));
+  feature_dim_ = config_.encoder_dim;
 
-  feature_dim_ = config_.workspace_dim + config_.controller_dim + config_.encoder_dim;
-  {
-    if (config_.policy_hidden_dim > 0) {
-      policy_hidden_ = torch::nn::Sequential();
-      policy_hidden_->push_back(torch::nn::Linear(feature_dim_, config_.policy_hidden_dim));
-      policy_hidden_->push_back(torch::nn::Functional(torch::relu));
-      register_module("policy_hidden", policy_hidden_);
-      policy_lora_ = LoRALinear(
-          config_.policy_hidden_dim, config_.action_dim, 4, 8.0F);
-    } else {
-      policy_lora_ = LoRALinear(feature_dim_, config_.action_dim, 4, 8.0F);
-    }
-    register_module("policy_lora", policy_lora_);
+  if (config_.policy_hidden_dim > 0) {
+    policy_hidden_ = torch::nn::Sequential();
+    policy_hidden_->push_back(torch::nn::Linear(feature_dim_, config_.policy_hidden_dim));
+    policy_hidden_->push_back(torch::nn::Functional(torch::relu));
+    register_module("policy_hidden", policy_hidden_);
+    policy_lora_ = LoRALinear(
+        config_.policy_hidden_dim, config_.action_dim, 4, 8.0F);
+  } else {
+    policy_lora_ = LoRALinear(feature_dim_, config_.action_dim, 4, 8.0F);
   }
+  register_module("policy_lora", policy_lora_);
 
   value_head_win_ = make_value_win_head(feature_dim_);
   register_module("value_head_win", value_head_win_);
 
   goal_critic_ = GoalCritic(feature_dim_, config_.action_dim, goal_critic_config_.embedding_dim, goal_critic_config_.hidden_dim, goal_critic_config_.goal_dim);
   register_module("goal_critic", goal_critic_);
-
-  ltm_basis_keys_ = register_parameter(
-      "ltm_basis_keys",
-      torch::randn({config_.ltm_slots, config_.ltm_dim}) * 0.02);
-  ltm_basis_values_ = register_parameter(
-      "ltm_basis_values",
-      torch::randn({config_.ltm_slots, config_.ltm_dim}) * 0.02);
 }
 
-ContinuumState PPOActorImpl::initial_state(std::int64_t batch_size, const torch::Device& device) const {
-  auto f32 = torch::TensorOptions().dtype(torch::kFloat32).device(device);
-  auto i64 = torch::TensorOptions().dtype(torch::kLong).device(device);
-  return {
-      torch::zeros({batch_size, config_.workspace_dim}, f32),
-      torch::zeros({batch_size, config_.stm_slots, config_.stm_key_dim}, f32),
-      torch::zeros({batch_size, config_.stm_slots, config_.stm_value_dim}, f32),
-      torch::zeros({batch_size, config_.stm_slots}, f32),
-      torch::zeros({batch_size}, i64),
-      torch::zeros({batch_size, config_.ltm_slots}, f32),
-      torch::zeros({batch_size}, i64),
-  };
-}
-
-ContinuumState PPOActorImpl::apply_episode_starts(ContinuumState state, torch::Tensor episode_starts) const {
-  if (!episode_starts.defined()) {
-    return state;
-  }
-  torch::Tensor mask = episode_starts.to(state.workspace.device()).to(torch::kFloat32).view({-1});
-  state.workspace = maybe_zero_mask(state.workspace, mask);
-  state.stm_keys = maybe_zero_mask(state.stm_keys, mask);
-  state.stm_values = maybe_zero_mask(state.stm_values, mask);
-  state.stm_strengths = maybe_zero_mask(state.stm_strengths, mask);
-  state.stm_write_index = state.stm_write_index * (1 - mask.to(torch::kLong));
-  state.ltm_coeffs = maybe_zero_mask(state.ltm_coeffs, mask);
-  state.timestep = state.timestep * (1 - mask.to(torch::kLong));
-  return state;
-}
-
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> PPOActorImpl::read_memories(
-    const torch::Tensor& encoded,
-    const ContinuumState& state) {
-  const torch::Tensor query_input = torch::cat({encoded, state.workspace}, -1);
-  const torch::Tensor stm_query = query_proj_->forward(query_input).unsqueeze(1);
-  const float scale = 1.0f / std::sqrt(static_cast<float>(config_.stm_key_dim));
-  const torch::Tensor stm_scores = torch::bmm(stm_query, state.stm_keys.transpose(1, 2)).squeeze(1) * scale;
-  const torch::Tensor stm_weights = masked_softmax(stm_scores, state.stm_strengths);
-  const torch::Tensor stm_read = torch::bmm(stm_weights.unsqueeze(1), state.stm_values).squeeze(1);
-
-  const torch::Tensor ltm_query = ltm_query_proj_->forward(query_input);
-  const torch::Tensor ltm_scores = torch::matmul(ltm_query, ltm_basis_keys_.transpose(0, 1)) + state.ltm_coeffs;
-  const torch::Tensor ltm_weights = torch::softmax(ltm_scores, -1);
-  const torch::Tensor ltm_read = torch::matmul(ltm_weights, ltm_basis_values_);
-
-  const torch::Tensor stm_ctx = stm_context_proj_->forward(stm_read);
-  const torch::Tensor ltm_ctx = ltm_context_proj_->forward(ltm_read);
-  return {stm_ctx, ltm_ctx, query_input};
-}
-
-ContinuumState PPOActorImpl::write_short_term_memory(
-    ContinuumState state,
-    const torch::Tensor& key,
-    const torch::Tensor& value) {
-  const torch::Tensor write_index = state.stm_write_index.remainder(config_.stm_slots);
-  const torch::Tensor slot_mask = torch::one_hot(write_index, config_.stm_slots)
-                                      .to(state.stm_keys.device())
-                                      .to(torch::kFloat32);
-  const torch::Tensor slot_mask_keys = slot_mask.unsqueeze(-1);
-  state.stm_strengths = state.stm_strengths * config_.retired_decay;
-  state.stm_keys = state.stm_keys * (1.0 - slot_mask_keys) + key.unsqueeze(1) * slot_mask_keys;
-  state.stm_values = state.stm_values * (1.0 - slot_mask_keys) + value.unsqueeze(1) * slot_mask_keys;
-  state.stm_strengths = state.stm_strengths * (1.0 - slot_mask) + slot_mask;
-  state.stm_write_index = (state.stm_write_index + 1).remainder(config_.stm_slots);
-  return state;
-}
-
-ContinuumState PPOActorImpl::maybe_consolidate(
-    ContinuumState state,
-    const torch::Tensor& controller_hidden) {
-  const torch::Tensor should_consolidate =
-      (state.timestep > 0).logical_and_(
-          state.timestep.remainder(config_.consolidation_stride).eq(0))
-          .to(torch::kFloat32).unsqueeze(-1);
-  const torch::Tensor strengths = state.stm_strengths / state.stm_strengths.sum(-1, true).clamp_min(1.0e-6);
-  const torch::Tensor stm_summary = torch::bmm(strengths.unsqueeze(1), state.stm_values).squeeze(1);
-  const torch::Tensor write_logits = ltm_write_proj_->forward(controller_hidden + stm_context_proj_->forward(stm_summary));
-  const torch::Tensor write_gate = torch::sigmoid(ltm_gate_proj_->forward(controller_hidden));
-  const torch::Tensor delta = torch::tanh(write_logits) * write_gate * should_consolidate;
-  state.ltm_coeffs = torch::clamp(state.ltm_coeffs + delta, -8.0, 8.0);
-  return state;
-}
-
-ActorStepOutput PPOActorImpl::forward_encoded_step(
-    torch::Tensor encoded,
-    ContinuumState state,
-    torch::Tensor episode_starts,
+ActorStepOutput PPOActorImpl::forward_step(
+    torch::Tensor obs,
     torch::Tensor goal_values) {
-  PULSAR_TRACE_SCOPE_CAT("actor", "forward_encoded_step");
-  state = apply_episode_starts(std::move(state), std::move(episode_starts));
-  const auto [stm_ctx, ltm_ctx, query_input] = read_memories(encoded, state);
-  const torch::Tensor gate_input = torch::cat({encoded, state.workspace, stm_ctx, ltm_ctx}, -1);
-  const torch::Tensor gate = torch::sigmoid(gate_proj_->forward(gate_input));
-  const torch::Tensor fused_ctx = gate * stm_ctx + (1.0 - gate) * ltm_ctx;
-  const torch::Tensor controller_hidden = torch::relu(controller_proj_->forward(gate_input));
-  const torch::Tensor workspace_in = torch::cat({encoded, fused_ctx}, -1);
-  const torch::Tensor new_workspace = workspace_cell_->forward(workspace_in, state.workspace);
-  const torch::Tensor memory_in = torch::cat({encoded, new_workspace}, -1);
-  const torch::Tensor new_key = torch::tanh(stm_key_write_->forward(memory_in));
-  const torch::Tensor new_value = torch::tanh(stm_value_write_->forward(memory_in));
-  state.workspace = new_workspace;
-  state = write_short_term_memory(std::move(state), new_key, new_value);
-  state = maybe_consolidate(std::move(state), controller_hidden);
-  state.timestep = state.timestep + 1;
-
-  const torch::Tensor features = torch::cat({encoded, fused_ctx, new_workspace}, -1);
+  PULSAR_TRACE_SCOPE_CAT("actor", "forward_step");
+  torch::Tensor encoded = encoder_->forward(obs);
 
   torch::Tensor policy_logits;
   if (!policy_hidden_.is_empty()) {
-    policy_logits = policy_lora_->forward(policy_hidden_->forward(features));
+    policy_logits = policy_lora_->forward(policy_hidden_->forward(encoded));
   } else {
-    policy_logits = policy_lora_->forward(features);
+    policy_logits = policy_lora_->forward(encoded);
   }
 
   return {
       policy_logits,
       encoded,
-      value_head_win_->forward(features),
-      features,
-      std::move(state),
+      value_head_win_->forward(encoded),
+      encoded,
   };
-}
-
-ActorStepOutput PPOActorImpl::forward_step(
-    torch::Tensor obs,
-    ContinuumState state,
-    torch::Tensor episode_starts,
-    torch::Tensor goal_values) {
-  PULSAR_TRACE_SCOPE_CAT("actor", "forward_step");
-  return forward_encoded_step(
-      encoder_->forward(obs), std::move(state), std::move(episode_starts), std::move(goal_values));
 }
 
 ActorSequenceOutput PPOActorImpl::forward_sequence(
     torch::Tensor obs_seq,
-    ContinuumState state,
-    torch::Tensor episode_starts,
     torch::Tensor goal_values) {
   PULSAR_TRACE_SCOPE_CAT("actor", "forward_sequence");
   const auto time = obs_seq.size(0);
   const auto batch = obs_seq.size(1);
-  const torch::Tensor encoded_seq =
-      encoder_->forward(obs_seq.reshape({time * batch, config_.observation_dim}))
-          .reshape({time, batch, config_.encoder_dim});
-  std::vector<torch::Tensor> policy_logits;
-  std::vector<torch::Tensor> encoded_seq_stack;
-  std::vector<torch::Tensor> value_win_logits;
-  std::vector<torch::Tensor> features;
-  policy_logits.reserve(time);
-  encoded_seq_stack.reserve(time);
-  value_win_logits.reserve(time);
-  features.reserve(time);
+  const auto flat_batch = time * batch;
+  torch::Tensor encoded = encoder_->forward(obs_seq.reshape({flat_batch, config_.observation_dim}));
 
-  for (std::int64_t t = 0; t < time; ++t) {
-    torch::Tensor starts;
-    if (episode_starts.defined()) {
-      starts = episode_starts[t];
-    }
-    torch::Tensor goals;
-    if (goal_values.defined()) {
-      goals = goal_values[t];
-    }
-    ActorStepOutput out = forward_encoded_step(encoded_seq[t], std::move(state), starts, goals);
-    policy_logits.push_back(out.policy_logits);
-    encoded_seq_stack.push_back(out.encoded);
-    value_win_logits.push_back(out.value_win_logits);
-    features.push_back(out.features);
-    state = std::move(out.state);
+  torch::Tensor policy_logits;
+  if (!policy_hidden_.is_empty()) {
+    policy_logits = policy_lora_->forward(policy_hidden_->forward(encoded));
+  } else {
+    policy_logits = policy_lora_->forward(encoded);
   }
 
   return {
-      torch::stack(policy_logits, 0),
-      torch::stack(encoded_seq_stack, 0),
-      torch::stack(value_win_logits, 0),
-      torch::stack(features, 0),
-      std::move(state),
+      policy_logits.reshape({time, batch, config_.action_dim}),
+      encoded.reshape({time, batch, config_.encoder_dim}),
+      value_head_win_->forward(encoded).reshape({time, batch, 1}),
+      encoded.reshape({time, batch, config_.encoder_dim}),
   };
 }
 
@@ -532,16 +359,19 @@ PPOActor load_ppo_actor(const std::string& checkpoint_path, const std::string& d
   const ExperimentConfig config = load_experiment_config((base / "config.json").string());
   const CheckpointMetadata metadata = load_checkpoint_metadata((base / "metadata.json").string());
   validate_inference_checkpoint_metadata(metadata, config);
-  if (metadata.architecture_name != "continuum_contrastive_goal_appo"
-      && metadata.architecture_name != "policy_snapshot") {
-    throw std::runtime_error("Checkpoint is not a continuum actor checkpoint.");
-  }
 
   torch::Device torch_device(device);
   auto model = PPOActor(config.model, config.goal_critic);
-  torch::serialize::InputArchive archive;
-  archive.load_from((base / "model.pt").string(), torch_device);
-  model->load(archive);
+  const fs::path state_path = base / "state.pt";
+  if (fs::exists(state_path)) {
+    torch::serialize::InputArchive archive;
+    archive.load_from(state_path.string(), torch_device);
+    model->load(archive);
+  } else {
+    torch::serialize::InputArchive archive;
+    archive.load_from((base / "model.pt").string(), torch_device);
+    model->load(archive);
+  }
   model->to(torch_device);
   model->eval();
   return model;

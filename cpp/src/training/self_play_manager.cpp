@@ -128,7 +128,6 @@ void SelfPlayManager::infer_opponent_actions(
     const torch::Tensor& action_masks,
     const torch::Tensor& episode_starts,
     const torch::Tensor& snapshot_ids,
-    ContinuumState& opponent_state,
     torch::Tensor* out_actions,
     double* inference_seconds) {
   PULSAR_TRACE_SCOPE_CAT("self_play", "infer_opponent_actions");
@@ -165,13 +164,11 @@ void SelfPlayManager::infer_opponent_actions(
     const torch::Tensor masks = action_masks.index_select(0, indices).to(torch::kBool);
     const torch::Tensor starts = episode_starts.index_select(0, indices);
     const torch::Tensor normalized_obs = snapshot.normalizer.normalize(obs);
-    ContinuumState state = gather_state(opponent_state, indices);
     const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
-    const ActorStepOutput output = snapshot.model->forward_step(normalized_obs, std::move(state), starts, goal_values);
+    const ActorStepOutput output = snapshot.model->forward_step(normalized_obs, goal_values);
     const torch::Tensor sampled_actions =
         deterministic ? masked_argmax(output.policy_logits, masks) : masked_sample(output.policy_logits, masks);
     actions.index_copy_(0, indices, sampled_actions);
-    scatter_state(opponent_state, indices, detach_state(std::move(output.state)));
   }
 
   if (inference_seconds != nullptr) {
@@ -383,8 +380,7 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
           {static_cast<long>(total_agents), static_cast<long>(discrete->action_table().size())},
           torch::TensorOptions().dtype(torch::kUInt8).device(device_));
       torch::Tensor episode_starts = torch::ones({static_cast<long>(total_agents)}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-      ContinuumState current_state = current_model->initial_state(static_cast<std::int64_t>(total_agents), device_);
-      ContinuumState snapshot_state = snapshot.model->initial_state(static_cast<std::int64_t>(total_agents), device_);
+      
       const Team current_team = (match % 2 == 0) ? Team::Blue : Team::Orange;
       std::vector<bool> env_done(engines.size(), false);
       int active_envs = static_cast<int>(engines.size());
@@ -412,11 +408,9 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
         const torch::Tensor snapshot_obs = snapshot.normalizer.normalize(obs);
         const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_critic.goal_dim);
         const ActorStepOutput current_out =
-            current_model->forward_step(current_obs, std::move(current_state), episode_starts, goal_values);
-        const ActorStepOutput snapshot_out =
-            snapshot.model->forward_step(snapshot_obs, std::move(snapshot_state), episode_starts, goal_values);
-        current_state = std::move(current_out.state);
-        snapshot_state = std::move(snapshot_out.state);
+            current_model->forward_step(current_obs, goal_values);
+          const ActorStepOutput snapshot_out =
+            snapshot.model->forward_step(snapshot_obs, goal_values);
         const torch::Tensor action_masks = masks.to(torch::kBool);
         const torch::Tensor current_actions =
             deterministic ? masked_argmax(current_out.policy_logits, action_masks)
@@ -464,7 +458,6 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
             --active_envs;
           }
         }
-        episode_starts.zero_();
       }
 
       // Handle draws: environments that reached max_episode_ticks without a goal.
