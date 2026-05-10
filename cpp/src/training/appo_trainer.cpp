@@ -114,21 +114,6 @@ void apply_pcgrad(std::vector<CapturedGrad>& group_a, std::vector<CapturedGrad>&
   }
 }
 
-void pcgrad_step(
-    const std::vector<CapturedGrad>& group_a,
-    const std::vector<CapturedGrad>& group_b,
-    torch::optim::Adam& optimizer) {
-  for (size_t i = 0; i < group_a.size(); ++i) {
-    torch::Tensor g = group_a[i].grad + group_b[i].grad;
-    if (group_a[i].param.grad().defined()) {
-      group_a[i].param.mutable_grad() = g;
-    } else {
-      group_a[i].param.mutable_grad() = g.clone();
-    }
-  }
-  optimizer.step();
-}
-
 torch::Tensor policy_goal_values_like(const torch::Tensor& obs, int goal_dim) {
   const auto options = obs.options().dtype(torch::kFloat32);
   if (obs.dim() == 3) {
@@ -1538,6 +1523,7 @@ void APPOTrainer::collect_rollout(
     PULSAR_TRACE_SCOPE_CAT("trainer", "success_trace_capture");
     const int steps = dest.rollout_length();
     const int all_agents = dest.num_agents();
+    if (steps > 0 && all_agents > 0) {
     const int obs_dim = config_.model.observation_dim;
     const int max_trace = config_.ppo.success_trace_len;
     const float* dones_ptr = dest.dones.narrow(0, 0, steps).data_ptr<float>();
@@ -1595,6 +1581,7 @@ void APPOTrainer::collect_rollout(
       if (excess_acts > 0) {
         success_actions_.erase(success_actions_.begin(), success_actions_.begin() + excess_acts);
       }
+    }
     }
   }
 
