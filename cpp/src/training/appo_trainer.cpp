@@ -912,6 +912,7 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
 
 void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics, std::int64_t* collected_agent_steps) {
   PULSAR_TRACE_SCOPE_CAT("trainer", "collect_rollout");
+  dest.clear();
   const auto update_start = std::chrono::steady_clock::now();
   CollectorTimings collector_timings{};
   BatchedRocketSimCollector* collector_ = collectors_.front().get();
@@ -993,6 +994,7 @@ void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics,
           actor_normalizer_.update(raw_obs);
           normalized_obs = actor_normalizer_.normalize(raw_obs);
           const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
+          output = actor_snapshot_->forward_step(normalized_obs, goal_values);
           actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
         }
         if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
@@ -1005,7 +1007,7 @@ void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics,
           torch::Tensor opponent_actions;
           torch::Tensor snapshot_ids = collector.host_snapshot_ids().to(device_, use_pinned_host_buffers_);
           self_play_manager_->infer_opponent_actions(
-              actor_,
+              actor_snapshot_,
               raw_obs,
               action_masks,
               episode_starts,
@@ -1183,6 +1185,7 @@ void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics,
       actor_normalizer_.update(raw_obs);
       normalized_obs = actor_normalizer_.normalize(raw_obs);
       const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
+      output = actor_snapshot_->forward_step(normalized_obs, goal_values);
       actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
     }
     if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
@@ -1195,7 +1198,7 @@ void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics,
       torch::Tensor opponent_actions;
       torch::Tensor snapshot_ids = collector_->host_snapshot_ids().to(device_, use_pinned_host_buffers_);
       self_play_manager_->infer_opponent_actions(
-          actor_,
+          actor_snapshot_,
           raw_obs,
           action_masks,
           episode_starts,

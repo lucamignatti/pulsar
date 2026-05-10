@@ -138,6 +138,11 @@ const std::unordered_map<std::string, torch::Tensor>& RolloutStorage::final_valu
   return final_values_;
 }
 
+void RolloutStorage::clear() {
+  filled_length_ = 0;
+  final_values_.clear();
+}
+
 int RolloutStorage::rollout_length() const {
   return filled_length_;
 }
