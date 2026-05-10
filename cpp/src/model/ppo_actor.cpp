@@ -208,7 +208,7 @@ torch::Tensor GoalCriticImpl::goal_embedding(const torch::Tensor& goal_values) {
 }
 
 torch::nn::Sequential PPOActorImpl::make_value_win_head(int input_dim) const {
-  torch::nn::Sequential head;
+  torch::nn::Sequential head = torch::nn::Sequential();
   head->push_back(torch::nn::Linear(input_dim, config_.value_hidden_dim));
   head->push_back(torch::nn::Functional(torch::relu));
   head->push_back(torch::nn::Linear(config_.value_hidden_dim, 1));
@@ -219,6 +219,7 @@ PPOActorImpl::PPOActorImpl(ModelConfig config, const GoalCriticConfig& goal_crit
     : config_(std::move(config)), goal_critic_config_(goal_critic_config) {
   validate_model_config(config_);
 
+  encoder_ = torch::nn::Sequential();
   append_encoder_block(encoder_, config_.observation_dim, config_.encoder_dim, config_.use_layer_norm);
   for (int i = 0; i < config_.num_encoder_blocks; ++i) {
     append_residual_block(encoder_, config_.encoder_dim, config_.use_layer_norm);

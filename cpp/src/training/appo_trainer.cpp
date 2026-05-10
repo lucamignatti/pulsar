@@ -489,15 +489,13 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
         const torch::Tensor obs =
             rollout.obs.narrow(0, chunk_start, chunk_steps).index_select(1, agent_indices).to(device_);
-        const torch::Tensor episode_starts =
-            rollout.episode_starts.narrow(0, chunk_start, chunk_steps).index_select(1, agent_indices).to(device_);
 
         const auto forward_start = std::chrono::steady_clock::now();
         ActorSequenceOutput output;
         {
           PULSAR_TRACE_SCOPE_CAT("trainer", "update_forward_sequence");
           const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_critic.goal_dim);
-          output = actor_->forward_sequence(obs, goal_values);
+          output = actor_->forward_sequence(obs);
         }
 
         if (loss_steps <= 0) {
