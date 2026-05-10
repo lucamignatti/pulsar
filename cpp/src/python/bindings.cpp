@@ -1,4 +1,5 @@
 #include <cstring>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -29,7 +30,12 @@ class PyPPOActor {
         torch_device_(device_) {
     validate_inference_checkpoint_metadata(metadata_, config_);
     torch::serialize::InputArchive archive;
-    archive.load_from(checkpoint_dir_ + "/model.pt", torch_device_);
+    const std::filesystem::path checkpoint_path(checkpoint_dir_);
+    const std::filesystem::path state_path = checkpoint_path / "state.pt";
+    const std::filesystem::path model_path = checkpoint_path / "model.pt";
+    archive.load_from(
+        std::filesystem::exists(state_path) ? state_path.string() : model_path.string(),
+        torch_device_);
     normalizer_.load(archive);
     normalizer_.to(torch_device_);
   }

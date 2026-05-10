@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 
 #include "pulsar/training/ppo_math.hpp"
@@ -11,6 +12,7 @@ namespace pulsar {
 
 void seed_everything(std::uint64_t seed) {
   torch::manual_seed(static_cast<int64_t>(seed));
+  std::srand(static_cast<unsigned int>(seed));
   if (torch::cuda::is_available()) {
     torch::cuda::manual_seed_all(static_cast<int64_t>(seed));
   }

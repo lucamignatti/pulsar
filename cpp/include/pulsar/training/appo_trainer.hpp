@@ -99,7 +99,11 @@ class APPOTrainer {
   void save_training_state(const std::filesystem::path& path) const;
   void load_training_state(const std::filesystem::path& path);
   void prune_old_checkpoints(const std::filesystem::path& checkpoint_dir) const;
-  void collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics, std::int64_t* collected_agent_steps);
+  void collect_rollout(
+      RolloutStorage& dest,
+      TrainerMetrics& metrics,
+      std::int64_t* collected_agent_steps,
+      PPOActor rollout_actor);
   TrainerMetrics update_actor(RolloutStorage& rollout);
   CheckpointMetadata make_checkpoint_metadata(std::int64_t global_step, int update_index, const std::string& wandb_run_id) const;
 
@@ -124,7 +128,6 @@ class APPOTrainer {
   PPOActor actor_{nullptr};
   PPOActor actor_snapshot_{nullptr};
   ObservationNormalizer actor_normalizer_;
-  ObservationNormalizer normalizer_snapshot_{0};
   torch::optim::Adam actor_optimizer_;
   RolloutStorage rollout_;
   RolloutStorage rollout_B_;

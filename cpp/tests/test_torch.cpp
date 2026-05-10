@@ -112,6 +112,19 @@ int main() {
       }
     }
 
+    {
+      pulsar::ESLoraConfig es_cfg;
+      es_cfg.rank = 2;
+      es_cfg.lora_alpha = 6.0F;
+      pulsar::PPOActor custom_actor(model_config, gc_cfg, es_cfg);
+      if (custom_actor->policy_lora()->rank() != es_cfg.rank) {
+        throw std::runtime_error("configured LoRA rank was not applied");
+      }
+      if (std::fabs(custom_actor->policy_lora()->scale() - (es_cfg.lora_alpha / static_cast<float>(es_cfg.rank) / 2.0F)) > 1.0e-6F) {
+        throw std::runtime_error("configured LoRA alpha was not applied");
+      }
+    }
+
     // Policy-head EGGROLL helper smoke test
     {
       
@@ -140,6 +153,21 @@ int main() {
     const torch::Tensor sample = torch::randn({2, model_config.observation_dim});
     if (!torch::allclose(normalizer.normalize(sample), normalizer_clone.normalize(sample))) {
       throw std::runtime_error("normalizer clone mismatch");
+    }
+    {
+      pulsar::ObservationNormalizer left(model_config.observation_dim);
+      pulsar::ObservationNormalizer right(model_config.observation_dim);
+      const torch::Tensor left_batch = torch::randn({8, model_config.observation_dim}) - 2.0F;
+      const torch::Tensor right_batch = torch::randn({12, model_config.observation_dim}) + 3.0F;
+      left.update(left_batch);
+      right.update(right_batch);
+      left.merge(right);
+
+      pulsar::ObservationNormalizer combined(model_config.observation_dim);
+      combined.update(torch::cat({left_batch, right_batch}, 0));
+      if (!torch::allclose(left.normalize(sample), combined.normalize(sample), 1.0e-5, 1.0e-4)) {
+        throw std::runtime_error("normalizer merge mismatch");
+      }
     }
 
     std::cout << "pulsar_torch_tests passed\n";

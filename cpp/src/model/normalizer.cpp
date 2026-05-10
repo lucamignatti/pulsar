@@ -9,7 +9,7 @@ namespace pulsar {
 ObservationNormalizer::ObservationNormalizer(int obs_dim) {
   mean_ = torch::zeros({obs_dim});
   var_ = torch::ones({obs_dim});
-  count_ = torch::tensor(1.0F);
+  count_ = torch::tensor(0.0F);
 }
 
 void ObservationNormalizer::to(const torch::Device& device) {
@@ -53,11 +53,24 @@ ObservationNormalizer ObservationNormalizer::clone() const {
 }
 
 void ObservationNormalizer::merge(const ObservationNormalizer& other) {
+  if (other.count_.item<float>() <= 0.0F) {
+    return;
+  }
+  if (count_.item<float>() <= 0.0F) {
+    mean_ = other.mean_.detach().clone();
+    var_ = other.var_.detach().clone();
+    count_ = other.count_.detach().clone();
+    return;
+  }
   const torch::Tensor new_count = count_ + other.count_;
   const torch::Tensor delta = other.mean_ - mean_;
-  mean_ = mean_ + delta * (other.count_ / new_count);
-  var_ = var_ + other.var_ + delta * delta * (count_ * other.count_ / new_count);
-  count_ = new_count;
+  const torch::Tensor new_mean = mean_ + delta * (other.count_ / new_count);
+  const torch::Tensor m_a = var_ * count_;
+  const torch::Tensor m_b = other.var_ * other.count_;
+  const torch::Tensor correction = delta.pow(2) * (count_ * other.count_ / new_count);
+  mean_ = new_mean.detach();
+  var_ = ((m_a + m_b + correction) / new_count).detach().clamp_min(1.0e-6);
+  count_ = new_count.detach();
 }
 
 void ObservationNormalizer::save(torch::serialize::OutputArchive& archive) const {

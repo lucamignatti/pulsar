@@ -87,7 +87,10 @@ TORCH_MODULE(GoalCritic);
 
 class PPOActorImpl : public torch::nn::Module {
  public:
-  explicit PPOActorImpl(ModelConfig config, const GoalCriticConfig& goal_critic_config = {});
+  explicit PPOActorImpl(
+      ModelConfig config,
+      const GoalCriticConfig& goal_critic_config = {},
+      const ESLoraConfig& es_lora_config = {});
 
   ActorStepOutput forward_step(
       torch::Tensor obs,
@@ -98,6 +101,7 @@ class PPOActorImpl : public torch::nn::Module {
   [[nodiscard]] int feature_dim() const;
   [[nodiscard]] const ModelConfig& config() const;
   [[nodiscard]] const GoalCriticConfig& goal_critic_config() const;
+  [[nodiscard]] const ESLoraConfig& es_lora_config() const;
   [[nodiscard]] std::vector<std::string> enabled_critic_heads() const;
 
   [[nodiscard]] std::vector<torch::Tensor> es_lora_parameters() const;
@@ -119,6 +123,7 @@ class PPOActorImpl : public torch::nn::Module {
 
   ModelConfig config_{};
   GoalCriticConfig goal_critic_config_{};
+  ESLoraConfig es_lora_config_{};
   int feature_dim_ = 0;
   torch::nn::Sequential encoder_{};
 

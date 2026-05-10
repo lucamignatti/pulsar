@@ -448,6 +448,9 @@ void validate_experiment_config(const ExperimentConfig& config) {
   if (config.es_lora.rank <= 0) {
     throw std::invalid_argument("es_lora.rank must be positive.");
   }
+  if (config.es_lora.lora_alpha <= 0.0F) {
+    throw std::invalid_argument("es_lora.lora_alpha must be positive.");
+  }
   if (config.es_lora.sigma_ES <= 0.0F) {
     throw std::invalid_argument("es_lora.sigma_ES must be positive.");
   }
@@ -477,6 +480,24 @@ void validate_experiment_config(const ExperimentConfig& config) {
   }
   if (config.es_lora.eval_rollout_length <= 0) {
     throw std::invalid_argument("es_lora.eval_rollout_length must be positive.");
+  }
+  if (config.goal_critic.max_future_horizon <= 0) {
+    throw std::invalid_argument("goal_critic.max_future_horizon must be positive.");
+  }
+  if (config.ppo.minibatch_size <= 0) {
+    throw std::invalid_argument("ppo.minibatch_size must be positive.");
+  }
+  if (config.ppo.update_epochs <= 0) {
+    throw std::invalid_argument("ppo.update_epochs must be positive.");
+  }
+  if (config.ppo.clip_range < 0.0F) {
+    throw std::invalid_argument("ppo.clip_range must be non-negative.");
+  }
+  if (config.ppo.learning_rate <= 0.0F) {
+    throw std::invalid_argument("ppo.learning_rate must be positive.");
+  }
+  if (config.ppo.max_grad_norm <= 0.0F) {
+    throw std::invalid_argument("ppo.max_grad_norm must be positive.");
   }
   if (config.ppo.entropy_floor < 0.0F) {
     throw std::invalid_argument("ppo.entropy_floor must be non-negative.");

@@ -80,6 +80,15 @@ void validate_model_config(const ModelConfig& config) {
   require_positive(config.value_hidden_dim, "value_hidden_dim");
 }
 
+void validate_es_lora_config(const ESLoraConfig& config) {
+  if (config.rank <= 0) {
+    throw std::invalid_argument("ESLoraConfig.rank must be positive.");
+  }
+  if (config.lora_alpha <= 0.0F) {
+    throw std::invalid_argument("ESLoraConfig.lora_alpha must be positive.");
+  }
+}
+
 }  // namespace
 
 LoRALinearImpl::LoRALinearImpl(int in_features, int out_features, int rank, float lora_alpha)
@@ -215,9 +224,15 @@ torch::nn::Sequential PPOActorImpl::make_value_win_head(int input_dim) const {
   return head;
 }
 
-PPOActorImpl::PPOActorImpl(ModelConfig config, const GoalCriticConfig& goal_critic_config)
-    : config_(std::move(config)), goal_critic_config_(goal_critic_config) {
+PPOActorImpl::PPOActorImpl(
+    ModelConfig config,
+    const GoalCriticConfig& goal_critic_config,
+    const ESLoraConfig& es_lora_config)
+    : config_(std::move(config)),
+      goal_critic_config_(goal_critic_config),
+      es_lora_config_(es_lora_config) {
   validate_model_config(config_);
+  validate_es_lora_config(es_lora_config_);
 
   encoder_ = torch::nn::Sequential();
   append_encoder_block(encoder_, config_.observation_dim, config_.encoder_dim, config_.use_layer_norm);
@@ -234,9 +249,9 @@ PPOActorImpl::PPOActorImpl(ModelConfig config, const GoalCriticConfig& goal_crit
     policy_hidden_->push_back(torch::nn::Functional(torch::relu));
     register_module("policy_hidden", policy_hidden_);
     policy_lora_ = LoRALinear(
-        config_.policy_hidden_dim, config_.action_dim, 4, 8.0F);
+        config_.policy_hidden_dim, config_.action_dim, es_lora_config_.rank, es_lora_config_.lora_alpha);
   } else {
-    policy_lora_ = LoRALinear(feature_dim_, config_.action_dim, 4, 8.0F);
+    policy_lora_ = LoRALinear(feature_dim_, config_.action_dim, es_lora_config_.rank, es_lora_config_.lora_alpha);
   }
   register_module("policy_lora", policy_lora_);
 
@@ -304,6 +319,10 @@ const GoalCriticConfig& PPOActorImpl::goal_critic_config() const {
   return goal_critic_config_;
 }
 
+const ESLoraConfig& PPOActorImpl::es_lora_config() const {
+  return es_lora_config_;
+}
+
 std::vector<torch::Tensor> PPOActorImpl::es_lora_parameters() const {
   return policy_lora_->lora_parameters();
 }
@@ -362,7 +381,7 @@ PPOActor load_ppo_actor(const std::string& checkpoint_path, const std::string& d
   validate_inference_checkpoint_metadata(metadata, config);
 
   torch::Device torch_device(device);
-  auto model = PPOActor(config.model, config.goal_critic);
+  auto model = PPOActor(config.model, config.goal_critic, config.es_lora);
   const fs::path state_path = base / "state.pt";
   if (fs::exists(state_path)) {
     torch::serialize::InputArchive archive;
@@ -382,7 +401,7 @@ PPOActor clone_ppo_actor(const PPOActor& source, const torch::Device& device) {
   if (!source) {
     return nullptr;
   }
-  auto clone = PPOActor(source->config(), source->goal_critic_config());
+  auto clone = PPOActor(source->config(), source->goal_critic_config(), source->es_lora_config());
   clone->to(device);
   copy_module_tensors_to(source, clone, device);
   return clone;
