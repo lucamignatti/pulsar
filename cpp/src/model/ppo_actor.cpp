@@ -54,6 +54,7 @@ void validate_model_config(const ModelConfig& config) {
   require_positive(config.num_encoder_blocks, "num_encoder_blocks");
   require_positive(config.transformer_num_heads, "transformer_num_heads");
   require_positive(config.transformer_window_size, "transformer_window_size");
+  require_positive(config.transformer_max_batch_size, "transformer_max_batch_size");
   require_positive(config.value_hidden_dim, "value_hidden_dim");
   if (config.encoder_dim % config.transformer_num_heads != 0) {
     throw std::invalid_argument("ModelConfig.encoder_dim must be divisible by transformer_num_heads.");

@@ -43,6 +43,7 @@ struct ModelConfig {
   int num_encoder_blocks = 5;
   int transformer_num_heads = 8;
   int transformer_window_size = 16;
+  int transformer_max_batch_size = 1024;
   int value_hidden_dim = 256;
   int policy_hidden_dim = 0;
 };

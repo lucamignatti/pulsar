@@ -415,7 +415,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   const auto update_start = std::chrono::steady_clock::now();
   TrainerMetrics metrics{};
   const int seq_len = std::max(1, config_.ppo.rollout_length);
-  const int agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
+  const int logical_agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
+  const int max_forward_samples = std::max(1, config_.model.transformer_max_batch_size);
+  const int agents_per_forward = std::max(1, max_forward_samples / seq_len);
   const int total_agents = rollout.num_agents();
   const int rollout_steps = rollout.rollout_length();
   std::int64_t metric_steps = 0;
@@ -451,9 +453,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   for (int epoch = 0; epoch < config_.ppo.update_epochs; ++epoch) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "update_epoch");
     const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
-    for (int agent_offset = 0; agent_offset < total_agents; agent_offset += agents_per_batch) {
+    for (int agent_offset = 0; agent_offset < total_agents; agent_offset += logical_agents_per_batch) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "update_minibatch");
-      const int count = std::min(agents_per_batch, total_agents - agent_offset);
+      const int count = std::min(logical_agents_per_batch, total_agents - agent_offset);
       const torch::Tensor agent_indices = perm.narrow(0, agent_offset, count);
 
       double total_active_samples_agent = 0.0;
@@ -480,6 +482,11 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
       actor_optimizer_.zero_grad();
 
+      for (int micro_agent_offset = 0; micro_agent_offset < count; micro_agent_offset += agents_per_forward) {
+        PULSAR_TRACE_SCOPE_CAT("trainer", "update_microbatch");
+        const int micro_count = std::min(agents_per_forward, count - micro_agent_offset);
+        const torch::Tensor micro_agent_indices = agent_indices.narrow(0, micro_agent_offset, micro_count);
+
       for (int seq_start = 0; seq_start < rollout.rollout_length(); seq_start += seq_len) {
         const int chunk_start = seq_start;
         const int chunk_end = std::min(rollout.rollout_length(), chunk_start + seq_len);
@@ -489,7 +496,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         const int loss_steps = chunk_steps;
 
         const torch::Tensor obs =
-            rollout.obs.narrow(0, chunk_start, chunk_steps).index_select(1, agent_indices).to(device_);
+            rollout.obs.narrow(0, chunk_start, chunk_steps).index_select(1, micro_agent_indices).to(device_);
 
         const auto forward_start = std::chrono::steady_clock::now();
         ActorSequenceOutput output;
@@ -507,17 +514,17 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         torch::Tensor features = output.features;
 
         const torch::Tensor action_masks =
-            rollout.action_masks.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_).to(torch::kBool);
+            rollout.action_masks.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices).to(device_).to(torch::kBool);
         const torch::Tensor learner_active =
-            rollout.learner_active.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
+            rollout.learner_active.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices).to(device_);
         const torch::Tensor old_actions =
-            rollout.actions.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
+            rollout.actions.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices).to(device_);
         const torch::Tensor old_log_probs =
-            rollout.action_log_probs.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
+            rollout.action_log_probs.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices).to(device_);
         const torch::Tensor chunk_advantages =
-            normalized_advantages.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
+            normalized_advantages.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices).to(device_);
 
-        const auto samples = loss_steps * count;
+        const auto samples = loss_steps * micro_count;
         const torch::Tensor flat_active = learner_active.reshape({samples}) > 0.5F;
         if (flat_active.sum().item<std::int64_t>() == 0) {
           continue;
@@ -555,7 +562,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         }
 
         torch::Tensor chunk_returns =
-            sparse_returns.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_).reshape({samples});
+            sparse_returns.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices).to(device_).reshape({samples});
         torch::Tensor active_returns = chunk_returns.index({flat_active});
 
         torch::Tensor value_win_chunk = output.value_win_logits;
@@ -571,11 +578,11 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
         {
           torch::Tensor chunk_goal_pos =
-              rollout.goal_positions.narrow(0, loss_start, loss_steps).index_select(1, agent_indices);
+              rollout.goal_positions.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
           torch::Tensor chunk_dones =
-              rollout.dones.narrow(0, loss_start, loss_steps).index_select(1, agent_indices);
+              rollout.dones.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
           torch::Tensor chunk_ep_starts =
-              rollout.episode_starts.narrow(0, loss_start, loss_steps).index_select(1, agent_indices);
+              rollout.episode_starts.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
           torch::Tensor future_goal_pos = sample_future_goal_positions(
               chunk_goal_pos,
               chunk_dones,
@@ -661,6 +668,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         metrics.value_loss += value_loss.item<double>() * static_cast<double>(active_samples);
         metrics.entropy += entropy.item<double>() * static_cast<double>(active_samples);
         metric_steps += active_samples;
+      }
       }
 
       const auto optim_start = std::chrono::steady_clock::now();
