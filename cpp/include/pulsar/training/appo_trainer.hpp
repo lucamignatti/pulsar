@@ -20,6 +20,11 @@
 #include "pulsar/training/rollout_storage.hpp"
 #include "pulsar/training/self_play_manager.hpp"
 
+#ifdef PULSAR_HAS_CUDA
+#include <c10/cuda/CUDAStream.h>
+#include <torch/cuda/amp/grad_scaler.h>
+#endif
+
 namespace pulsar {
 
 struct TrainerMetrics {
@@ -121,7 +126,7 @@ class APPOTrainer {
   ObservationNormalizer normalizer_snapshot_{0};
   torch::optim::Adam actor_optimizer_;
 #ifdef PULSAR_HAS_CUDA
-  at::cuda::amp::GradScaler grad_scaler_;
+  torch::cuda::amp::GradScaler grad_scaler_;
 #endif
   RolloutStorage rollout_;
   RolloutStorage rollout_B_;
@@ -137,8 +142,8 @@ class APPOTrainer {
   torch::Tensor es_delta_A_;
   torch::Tensor es_delta_B_;
 #ifdef PULSAR_HAS_CUDA
-  at::cuda::CUDAStream collection_stream_;
-  at::cuda::CUDAStream training_stream_;
+  c10::cuda::CUDAStream collection_stream_;
+  c10::cuda::CUDAStream training_stream_;
 #endif
 };
 
