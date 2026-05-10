@@ -418,7 +418,11 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
 TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   PULSAR_TRACE_SCOPE_CAT("trainer", "update_actor");
 #ifdef PULSAR_HAS_CUDA
-  c10::cuda::CUDAStreamGuard training_guard(training_stream_);
+  std::optional<c10::cuda::CUDAStream> _prev_train_stream;
+  if (training_stream_.has_value()) {
+    _prev_train_stream = c10::cuda::getCurrentCUDAStream(device_.index());
+    c10::cuda::setCurrentCUDAStream(*training_stream_);
+  }
 #endif
   const auto update_start = std::chrono::steady_clock::now();
   TrainerMetrics metrics{};
@@ -502,9 +506,12 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         {
           PULSAR_TRACE_SCOPE_CAT("trainer", "update_forward_sequence");
 #ifdef PULSAR_HAS_CUDA
-          c10::AutocastMode guard(true);
+          c10::impl::AutocastMode::set_enabled(true);
 #endif
           output = actor_->forward_sequence(obs);
+#ifdef PULSAR_HAS_CUDA
+          c10::impl::AutocastMode::set_enabled(false);
+#endif
         }
 
         if (loss_steps <= 0) {
@@ -920,7 +927,11 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
 void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics, std::int64_t* collected_agent_steps) {
   PULSAR_TRACE_SCOPE_CAT("trainer", "run_update");
 #ifdef PULSAR_HAS_CUDA
-  c10::cuda::CUDAStreamGuard collection_guard(collection_stream_);
+  std::optional<c10::cuda::CUDAStream> _prev_coll_stream;
+  if (collection_stream_.has_value()) {
+    _prev_coll_stream = c10::cuda::getCurrentCUDAStream(device_.index());
+    c10::cuda::setCurrentCUDAStream(*collection_stream_);
+  }
 #endif
   CollectorTimings collector_timings{};
   BatchedRocketSimCollector* collector_ = collectors_.front().get();

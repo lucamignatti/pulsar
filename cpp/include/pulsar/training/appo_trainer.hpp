@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -138,8 +139,8 @@ class APPOTrainer {
   torch::Tensor es_delta_A_;
   torch::Tensor es_delta_B_;
 #ifdef PULSAR_HAS_CUDA
-  c10::cuda::CUDAStream collection_stream_;
-  c10::cuda::CUDAStream training_stream_;
+  std::optional<c10::cuda::CUDAStream> collection_stream_;
+  std::optional<c10::cuda::CUDAStream> training_stream_;
 #endif
 };
 
