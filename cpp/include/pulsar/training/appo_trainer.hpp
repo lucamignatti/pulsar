@@ -73,6 +73,7 @@ struct TrainerMetrics {
   double es_seconds = 0.0;
   double scored_episode_rate = 0.0;
   double effective_entropy_coef = 0.0;
+  double effective_success_bc_coef = 0.0;
 
   std::map<std::string, double> elo_ratings{};
 };
@@ -147,6 +148,9 @@ class APPOTrainer {
   torch::Tensor es_delta_B_;
   std::deque<double> recent_scored_rates_{};
   static constexpr int kRecentScoredRateWindow = 20;
+  std::vector<float> success_obs_{};
+  std::vector<std::int64_t> success_actions_{};
+  bool success_bc_active_ = false;
 #ifdef PULSAR_HAS_CUDA
   std::optional<c10::cuda::CUDAStream> collection_stream_;
   std::optional<c10::cuda::CUDAStream> training_stream_;

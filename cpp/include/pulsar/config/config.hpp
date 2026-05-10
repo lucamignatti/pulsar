@@ -116,6 +116,14 @@ struct PPOConfig {
   int plasticity_interval = 40;
   float plasticity_shrink = 0.999F;
   float plasticity_noise = 1.0e-4F;
+  bool pcgrad = false;
+  float success_bc_coef = 0.0F;
+  int success_bc_batch = 256;
+  int success_buffer_size = 20000;
+  float success_bc_min_score = 0.0F;
+  float success_bc_decay_score = 0.95F;
+  float success_bc_decay = 0.35F;
+  int success_trace_len = 48;
 };
 
 struct SelfPlayLeagueConfig {

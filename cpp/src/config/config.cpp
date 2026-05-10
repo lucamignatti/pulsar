@@ -252,6 +252,14 @@ void to_json(json& j, const PPOConfig& value) {
       {"plasticity_interval", value.plasticity_interval},
       {"plasticity_shrink", value.plasticity_shrink},
       {"plasticity_noise", value.plasticity_noise},
+      {"pcgrad", value.pcgrad},
+      {"success_bc_coef", value.success_bc_coef},
+      {"success_bc_batch", value.success_bc_batch},
+      {"success_buffer_size", value.success_buffer_size},
+      {"success_bc_min_score", value.success_bc_min_score},
+      {"success_bc_decay_score", value.success_bc_decay_score},
+      {"success_bc_decay", value.success_bc_decay},
+      {"success_trace_len", value.success_trace_len},
   };
 }
 
@@ -288,6 +296,14 @@ void from_json(const json& j, PPOConfig& value) {
   value.plasticity_interval = j.value("plasticity_interval", 40);
   value.plasticity_shrink = j.value("plasticity_shrink", 0.999F);
   value.plasticity_noise = j.value("plasticity_noise", 1.0e-4F);
+  value.pcgrad = j.value("pcgrad", false);
+  value.success_bc_coef = j.value("success_bc_coef", 0.0F);
+  value.success_bc_batch = j.value("success_bc_batch", 256);
+  value.success_buffer_size = j.value("success_buffer_size", 20000);
+  value.success_bc_min_score = j.value("success_bc_min_score", 0.0F);
+  value.success_bc_decay_score = j.value("success_bc_decay_score", 0.95F);
+  value.success_bc_decay = j.value("success_bc_decay", 0.35F);
+  value.success_trace_len = j.value("success_trace_len", 48);
 }
 
 void to_json(json& j, const SelfPlayLeagueConfig& value) {

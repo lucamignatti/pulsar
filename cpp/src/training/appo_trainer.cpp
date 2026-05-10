@@ -81,6 +81,54 @@ void shrink_perturb_parameters(torch::nn::Module& module, float shrink, float no
   }
 }
 
+struct CapturedGrad {
+  torch::Tensor param;
+  torch::Tensor grad;
+};
+
+std::vector<CapturedGrad> capture_gradients(torch::nn::Module& module) {
+  std::vector<CapturedGrad> out;
+  for (auto& p : module.parameters()) {
+    if (p.grad().defined()) {
+      out.push_back({p, p.grad().clone()});
+    } else {
+      out.push_back({p, torch::zeros_like(p)});
+    }
+    p.mutable_grad().reset();
+  }
+  return out;
+}
+
+void apply_pcgrad(std::vector<CapturedGrad>& group_a, std::vector<CapturedGrad>& group_b) {
+  for (size_t i = 0; i < group_a.size(); ++i) {
+    torch::Tensor ga = group_a[i].grad;
+    torch::Tensor gb = group_b[i].grad;
+    torch::Tensor ga_flat = ga.view({-1});
+    torch::Tensor gb_flat = gb.view({-1});
+    float dot = ga_flat.dot(gb_flat).item<float>();
+    if (dot < 0.0F) {
+      float norm_sq = ga_flat.dot(ga_flat).item<float>() + 1.0e-12F;
+      float proj = dot / norm_sq;
+      group_b[i].grad = gb - proj * ga;
+    }
+  }
+}
+
+void pcgrad_step(
+    const std::vector<CapturedGrad>& group_a,
+    const std::vector<CapturedGrad>& group_b,
+    torch::optim::Adam& optimizer) {
+  for (size_t i = 0; i < group_a.size(); ++i) {
+    torch::Tensor g = group_a[i].grad + group_b[i].grad;
+    if (group_a[i].param.grad().defined()) {
+      group_a[i].param.mutable_grad() = g;
+    } else {
+      group_a[i].param.mutable_grad() = g.clone();
+    }
+  }
+  optimizer.step();
+}
+
 torch::Tensor policy_goal_values_like(const torch::Tensor& obs, int goal_dim) {
   const auto options = obs.options().dtype(torch::kFloat32);
   if (obs.dim() == 3) {
@@ -203,6 +251,7 @@ void append_metrics_line(
       {"es_seconds", metrics.es_seconds},
       {"scored_episode_rate", metrics.scored_episode_rate},
       {"effective_entropy_coef", metrics.effective_entropy_coef},
+      {"effective_success_bc_coef", metrics.effective_success_bc_coef},
   };
   for (const auto& [mode, rating] : metrics.elo_ratings) {
     line["elo_" + mode] = rating;
@@ -449,6 +498,23 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         config_.ppo.entropy_coef + progress * (config_.ppo.entropy_low_coef - config_.ppo.entropy_coef));
     effective_entropy_floor_coef = config_.ppo.entropy_floor_coef * static_cast<float>(1.0 - progress);
   }
+
+  float effective_bc_coef = config_.ppo.success_bc_coef;
+  if (config_.ppo.success_bc_coef > 0.0F) {
+    bool bc_active = true;
+    if (!recent_scored_rates_.empty()) {
+      double sum = 0.0;
+      for (double v : recent_scored_rates_) sum += v;
+      double recent_score = sum / static_cast<double>(recent_scored_rates_.size());
+      if (recent_score < static_cast<double>(config_.ppo.success_bc_min_score)) {
+        bc_active = false;
+        effective_bc_coef = 0.0F;
+      } else if (recent_score >= static_cast<double>(config_.ppo.success_bc_decay_score)) {
+        effective_bc_coef = config_.ppo.success_bc_coef * config_.ppo.success_bc_decay;
+      }
+    }
+    success_bc_active_ = bc_active;
+  }
   const int seq_len = std::max(1, config_.ppo.rollout_length);
   const int logical_agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
   const int max_forward_samples = std::max(1, config_.model.transformer_max_batch_size);
@@ -675,29 +741,104 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           accumulated_goal_score += chunk_goal_score * static_cast<double>(active_logits.size(0));
         }
 
-        const torch::Tensor loss =
-            policy_loss
-            + config_.ppo.value_coef * value_loss
-            + config_.goal_critic.lambda_Zg * goal_loss
-            + config_.goal_critic.lambda_goal_actor * actor_goal_loss
-            + entropy_floor_loss
-            - effective_entropy_coef * entropy;
+        const auto active_samples = static_cast<double>(active_logits.size(0));
+        const auto sample_weight = active_samples / total_active_samples_agent;
 
-        metrics.forward_backward_seconds +=
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - forward_start).count();
+        if (config_.ppo.pcgrad) {
+          torch::Tensor loss_a = (policy_loss
+              + config_.ppo.value_coef * value_loss
+              + entropy_floor_loss
+              - effective_entropy_coef * entropy) * sample_weight;
 
-        require_finite(loss, "loss");
-        require_finite(policy_loss, "policy_loss");
-        require_finite(value_loss, "value_loss");
-        require_finite(entropy, "entropy");
-        require_finite(entropy_floor_loss, "entropy_floor_loss");
-        require_finite(goal_loss, "goal_loss");
+          actor_->zero_grad();
+          loss_a.backward({}, true);
+          auto grads_a = capture_gradients(*actor_);
+          actor_->zero_grad();
 
-        const auto active_samples = active_logits.size(0);
-        const torch::Tensor weighted_loss = loss * (static_cast<double>(active_samples) / total_active_samples_agent);
-        {
-          PULSAR_TRACE_SCOPE_CAT("trainer", "update_backward");
-          weighted_loss.backward();
+          torch::Tensor loss_b = (config_.goal_critic.lambda_Zg * goal_loss
+              + config_.goal_critic.lambda_goal_actor * actor_goal_loss) * sample_weight;
+
+          if (effective_bc_coef > 0.0F && !success_obs_.empty()) {
+            int obs_dim = config_.model.observation_dim;
+            int stored_traces = static_cast<int>(success_actions_.size());
+            int bc_batch = std::min(config_.ppo.success_bc_batch, stored_traces);
+            if (bc_batch > 0) {
+              auto bc_options = active_advantages.options();
+              torch::Tensor bc_obs = torch::empty({bc_batch, obs_dim}, bc_options);
+              torch::Tensor bc_acts = torch::empty({bc_batch}, bc_options.dtype(torch::kLong));
+              float* bc_obs_ptr = bc_obs.data_ptr<float>();
+              std::int64_t* bc_acts_ptr = bc_acts.data_ptr<std::int64_t>();
+              torch::Tensor rand_idx = torch::randint(0, stored_traces, {bc_batch},
+                                                       torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
+              auto* rand_ptr = rand_idx.data_ptr<std::int64_t>();
+              for (int i = 0; i < bc_batch; ++i) {
+                int src = static_cast<int>(rand_ptr[i]);
+                std::copy(success_obs_.begin() + src * obs_dim,
+                          success_obs_.begin() + (src + 1) * obs_dim, bc_obs_ptr + i * obs_dim);
+                bc_acts_ptr[i] = success_actions_[src];
+              }
+              bc_obs = bc_obs.to(device_);
+              bc_acts = bc_acts.to(device_);
+              ActorStepOutput bc_output = actor_->forward_step(bc_obs);
+              torch::Tensor bc_ce = torch::nn::functional::cross_entropy(
+                  bc_output.policy_logits, bc_acts,
+                  torch::nn::functional::CrossEntropyFuncOptions().reduction(torch::kMean));
+              loss_b = loss_b + effective_bc_coef * bc_ce;
+            }
+          }
+
+          actor_->zero_grad();
+          loss_b.backward();
+          auto grads_b = capture_gradients(*actor_);
+          actor_->zero_grad();
+
+          apply_pcgrad(grads_a, grads_b);
+
+          for (size_t i = 0; i < grads_a.size(); ++i) {
+            torch::Tensor combined = grads_a[i].grad + grads_b[i].grad;
+            grads_a[i].param.mutable_grad() = combined;
+          }
+        } else {
+          const torch::Tensor loss =
+              policy_loss
+              + config_.ppo.value_coef * value_loss
+              + config_.goal_critic.lambda_Zg * goal_loss
+              + config_.goal_critic.lambda_goal_actor * actor_goal_loss
+              + entropy_floor_loss
+              - effective_entropy_coef * entropy;
+
+          torch::Tensor combined_loss = loss * sample_weight;
+
+          if (effective_bc_coef > 0.0F && !success_obs_.empty()) {
+            int obs_dim = config_.model.observation_dim;
+            int stored_traces = static_cast<int>(success_actions_.size());
+            int bc_batch = std::min(config_.ppo.success_bc_batch, stored_traces);
+            if (bc_batch > 0) {
+              auto bc_options = active_advantages.options();
+              torch::Tensor bc_obs = torch::empty({bc_batch, obs_dim}, bc_options);
+              torch::Tensor bc_acts = torch::empty({bc_batch}, bc_options.dtype(torch::kLong));
+              float* bc_obs_ptr = bc_obs.data_ptr<float>();
+              std::int64_t* bc_acts_ptr = bc_acts.data_ptr<std::int64_t>();
+              torch::Tensor rand_idx = torch::randint(0, stored_traces, {bc_batch},
+                                                       torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
+              auto* rand_ptr = rand_idx.data_ptr<std::int64_t>();
+              for (int i = 0; i < bc_batch; ++i) {
+                int src = static_cast<int>(rand_ptr[i]);
+                std::copy(success_obs_.begin() + src * obs_dim,
+                          success_obs_.begin() + (src + 1) * obs_dim, bc_obs_ptr + i * obs_dim);
+                bc_acts_ptr[i] = success_actions_[src];
+              }
+              bc_obs = bc_obs.to(device_);
+              bc_acts = bc_acts.to(device_);
+              ActorStepOutput bc_output = actor_->forward_step(bc_obs);
+              torch::Tensor bc_ce = torch::nn::functional::cross_entropy(
+                  bc_output.policy_logits, bc_acts,
+                  torch::nn::functional::CrossEntropyFuncOptions().reduction(torch::kMean));
+              combined_loss = combined_loss + effective_bc_coef * bc_ce;
+            }
+          }
+
+          combined_loss.backward();
         }
 
         metrics.policy_loss += policy_loss.item<double>() * static_cast<double>(active_samples);
@@ -731,6 +872,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
     metrics.mean_sampled_goal_distance = accumulated_sampled_goal_distance / static_cast<double>(metric_steps);
   }
   metrics.effective_entropy_coef = static_cast<double>(effective_entropy_coef);
+  metrics.effective_success_bc_coef = static_cast<double>(effective_bc_coef);
   metrics.update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count();
   return metrics;
 }
@@ -1392,6 +1534,70 @@ void APPOTrainer::collect_rollout(
     }
   }
 
+  if (config_.ppo.success_bc_coef > 0.0F) {
+    PULSAR_TRACE_SCOPE_CAT("trainer", "success_trace_capture");
+    const int steps = dest.rollout_length();
+    const int all_agents = dest.num_agents();
+    const int obs_dim = config_.model.observation_dim;
+    const int max_trace = config_.ppo.success_trace_len;
+    const float* dones_ptr = dest.dones.narrow(0, 0, steps).data_ptr<float>();
+    const float* starts_ptr = dest.episode_starts.narrow(0, 0, steps).data_ptr<float>();
+    const std::int64_t* labels_ptr = dest.terminal_outcome_labels.narrow(0, 0, steps).data_ptr<std::int64_t>();
+    const float* obs_ptr = dest.obs.narrow(0, 0, steps).data_ptr<float>();
+    const std::int64_t* act_ptr = dest.actions.narrow(0, 0, steps).data_ptr<std::int64_t>();
+    std::vector<int> episode_offsets;
+    episode_offsets.push_back(0);
+    for (int s = 1; s <= steps; ++s) {
+      bool any_new_ep = false;
+      for (int a = 0; a < all_agents; ++a) {
+        if (s < steps) {
+          any_new_ep = any_new_ep || (starts_ptr[s * all_agents + a] > 0.5F);
+        } else {
+          any_new_ep = true;
+        }
+        if (any_new_ep) break;
+      }
+      if (any_new_ep) {
+        episode_offsets.push_back(s);
+      }
+    }
+    for (size_t ep = 0; ep + 1 < episode_offsets.size(); ++ep) {
+      int ep_start = episode_offsets[ep];
+      int ep_end = episode_offsets[ep + 1];
+      if (ep_end <= ep_start) continue;
+      int done_step = ep_end - 1;
+      bool scored = false;
+      std::vector<int> scoring_agents;
+      for (int a = 0; a < all_agents; ++a) {
+        int idx = done_step * all_agents + a;
+        if (labels_ptr[idx] == 0) {
+          scored = true;
+          scoring_agents.push_back(a);
+        }
+      }
+      if (!scored) continue;
+      int trace_len = std::min(ep_end - ep_start, max_trace);
+      for (int a : scoring_agents) {
+        int trace_start = ep_end - trace_len;
+        for (int t = trace_start; t < ep_end; ++t) {
+          int buf_idx = t * all_agents + a;
+          const float* o = obs_ptr + static_cast<std::ptrdiff_t>(buf_idx) * obs_dim;
+          success_obs_.insert(success_obs_.end(), o, o + obs_dim);
+          success_actions_.push_back(act_ptr[buf_idx]);
+        }
+      }
+    }
+    int buffer_limit = config_.ppo.success_buffer_size * max_trace;
+    if (static_cast<int>(success_obs_.size()) > buffer_limit * obs_dim) {
+      int excess = static_cast<int>(success_obs_.size()) - buffer_limit * obs_dim;
+      success_obs_.erase(success_obs_.begin(), success_obs_.begin() + excess);
+      int excess_acts = static_cast<int>(success_actions_.size()) - buffer_limit;
+      if (excess_acts > 0) {
+        success_actions_.erase(success_actions_.begin(), success_actions_.begin() + excess_acts);
+      }
+    }
+  }
+
   OutcomeFilterStats outcome_filter_stats{};
   {
     PULSAR_TRACE_SCOPE_CAT("trainer", "scored_filter");
@@ -1591,6 +1797,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     metrics.entropy = train_metrics.entropy;
     metrics.scored_episode_rate = train_metrics.scored_episode_rate;
     metrics.effective_entropy_coef = train_metrics.effective_entropy_coef;
+    metrics.effective_success_bc_coef = train_metrics.effective_success_bc_coef;
     metrics.grad_norm = train_metrics.grad_norm;
     metrics.update_seconds = train_metrics.update_seconds;
     metrics.forward_backward_seconds = train_metrics.forward_backward_seconds;
@@ -1664,6 +1871,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"goals_conceded", metrics.goals_conceded},
           {"scored_episode_rate", metrics.scored_episode_rate},
           {"effective_entropy_coef", metrics.effective_entropy_coef},
+          {"effective_success_bc_coef", metrics.effective_success_bc_coef},
       };
       if (update_index % config_.es_lora.es_interval == 0) {
         payload["es_fitness_mean"] = metrics.es_fitness_mean;

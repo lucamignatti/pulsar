@@ -68,7 +68,15 @@
     "plasticity": true,
     "plasticity_interval": 40,
     "plasticity_shrink": 0.999,
-    "plasticity_noise": 0.0001
+    "plasticity_noise": 0.0001,
+    "pcgrad": true,
+    "success_bc_coef": 0.1,
+    "success_bc_batch": 256,
+    "success_buffer_size": 20000,
+    "success_bc_min_score": 0.25,
+    "success_bc_decay_score": 0.95,
+    "success_bc_decay": 0.25,
+    "success_trace_len": 48
   },
   "goal_mapping": {
     "arena_max_distance": 8192.0
