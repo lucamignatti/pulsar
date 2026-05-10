@@ -85,6 +85,60 @@ class GoalCriticImpl : public torch::nn::Module {
 
 TORCH_MODULE(GoalCritic);
 
+class SlidingWindowSelfAttentionImpl : public torch::nn::Module {
+ public:
+  SlidingWindowSelfAttentionImpl(int embed_dim, int num_heads, int window_size, int sequence_length);
+
+  torch::Tensor forward(const torch::Tensor& tokens);
+
+ private:
+  int embed_dim_ = 0;
+  int num_heads_ = 0;
+  int head_dim_ = 0;
+  int window_size_ = 0;
+  int sequence_length_ = 0;
+  torch::nn::Linear qkv_{nullptr};
+  torch::nn::Linear out_proj_{nullptr};
+  torch::Tensor attention_mask_;
+};
+
+TORCH_MODULE(SlidingWindowSelfAttention);
+
+class SWATransformerBlockImpl : public torch::nn::Module {
+ public:
+  SWATransformerBlockImpl(int embed_dim, int num_heads, int window_size, int sequence_length, bool use_layer_norm);
+
+  torch::Tensor forward(const torch::Tensor& tokens);
+
+ private:
+  bool use_layer_norm_ = true;
+  SlidingWindowSelfAttention attention_{nullptr};
+  torch::nn::LayerNorm attn_norm_{nullptr};
+  torch::nn::LayerNorm ffn_norm_{nullptr};
+  torch::nn::Sequential ffn_{nullptr};
+};
+
+TORCH_MODULE(SWATransformerBlock);
+
+class SWATransformerEncoderImpl : public torch::nn::Module {
+ public:
+  explicit SWATransformerEncoderImpl(const ModelConfig& config);
+
+  torch::Tensor forward(const torch::Tensor& obs);
+
+ private:
+  int observation_dim_ = 0;
+  int embed_dim_ = 0;
+  int sequence_length_ = 0;
+  torch::nn::Linear input_projection_{nullptr};
+  std::vector<SWATransformerBlock> blocks_{};
+  torch::nn::LayerNorm output_norm_{nullptr};
+  torch::Tensor cls_token_;
+  torch::Tensor position_embedding_;
+};
+
+TORCH_MODULE(SWATransformerEncoder);
+
 class PPOActorImpl : public torch::nn::Module {
  public:
   explicit PPOActorImpl(
@@ -125,7 +179,7 @@ class PPOActorImpl : public torch::nn::Module {
   GoalCriticConfig goal_critic_config_{};
   ESLoraConfig es_lora_config_{};
   int feature_dim_ = 0;
-  torch::nn::Sequential encoder_{};
+  SWATransformerEncoder encoder_{nullptr};
 
   torch::nn::Sequential policy_hidden_{nullptr};
   LoRALinear policy_lora_{nullptr};

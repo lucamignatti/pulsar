@@ -1388,7 +1388,7 @@ CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
       .obs_schema_version = config_.obs_schema_version,
       .config_hash = config_hash(config_),
       .action_table_hash = action_table_hash(config_.action_table),
-      .architecture_name = "continuum_contrastive_goal_appo",
+      .architecture_name = "swa_transformer_goal_appo",
       .device = config_.ppo.device,
       .global_step = global_step,
       .update_index = update_index,

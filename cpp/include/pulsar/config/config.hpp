@@ -41,6 +41,8 @@ struct ModelConfig {
   bool use_layer_norm = true;
   int encoder_dim = 640;
   int num_encoder_blocks = 5;
+  int transformer_num_heads = 8;
+  int transformer_window_size = 16;
   int value_hidden_dim = 256;
   int policy_hidden_dim = 0;
 };
@@ -154,7 +156,7 @@ struct CheckpointMetadata {
   int obs_schema_version = 2;
   std::string config_hash{};
   std::string action_table_hash{};
-  std::string architecture_name = "continuum_contrastive_goal_appo";
+  std::string architecture_name = "swa_transformer_goal_appo";
   std::string device = "cpu";
   std::int64_t global_step = 0;
   std::int64_t update_index = 0;

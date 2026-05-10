@@ -116,6 +116,8 @@ void to_json(json& j, const ModelConfig& value) {
       {"use_layer_norm", value.use_layer_norm},
       {"encoder_dim", value.encoder_dim},
       {"num_encoder_blocks", value.num_encoder_blocks},
+      {"transformer_num_heads", value.transformer_num_heads},
+      {"transformer_window_size", value.transformer_window_size},
       {"value_hidden_dim", value.value_hidden_dim},
       {"policy_hidden_dim", value.policy_hidden_dim},
   };
@@ -127,6 +129,8 @@ void from_json(const json& j, ModelConfig& value) {
   value.use_layer_norm = j.value("use_layer_norm", true);
   value.encoder_dim = j.value("encoder_dim", 640);
   value.num_encoder_blocks = j.value("num_encoder_blocks", 5);
+  value.transformer_num_heads = j.value("transformer_num_heads", 8);
+  value.transformer_window_size = j.value("transformer_window_size", 16);
   value.value_hidden_dim = j.value("value_hidden_dim", 256);
   value.policy_hidden_dim = j.value("policy_hidden_dim", 0);
 }
@@ -423,6 +427,18 @@ void validate_experiment_config(const ExperimentConfig& config) {
   }
   if (config.model.encoder_dim <= 0) {
     throw std::invalid_argument("model.encoder_dim must be positive.");
+  }
+  if (config.model.num_encoder_blocks <= 0) {
+    throw std::invalid_argument("model.num_encoder_blocks must be positive.");
+  }
+  if (config.model.transformer_num_heads <= 0) {
+    throw std::invalid_argument("model.transformer_num_heads must be positive.");
+  }
+  if (config.model.encoder_dim % config.model.transformer_num_heads != 0) {
+    throw std::invalid_argument("model.encoder_dim must be divisible by model.transformer_num_heads.");
+  }
+  if (config.model.transformer_window_size <= 0) {
+    throw std::invalid_argument("model.transformer_window_size must be positive.");
   }
   if (config.goal_mapping.arena_max_distance <= 0.0F) {
     throw std::invalid_argument("goal_mapping.arena_max_distance must be positive.");

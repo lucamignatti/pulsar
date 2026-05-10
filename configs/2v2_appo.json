@@ -29,6 +29,8 @@
     "use_layer_norm": true,
     "encoder_dim": 640,
     "num_encoder_blocks": 5,
+    "transformer_num_heads": 8,
+    "transformer_window_size": 16,
     "value_hidden_dim": 256,
     "policy_hidden_dim": 0
   },
