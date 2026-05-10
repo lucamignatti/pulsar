@@ -106,7 +106,13 @@ TORCH_MODULE(SlidingWindowSelfAttention);
 
 class SWATransformerBlockImpl : public torch::nn::Module {
  public:
-  SWATransformerBlockImpl(int embed_dim, int num_heads, int window_size, int sequence_length, bool use_layer_norm);
+  SWATransformerBlockImpl(
+      int embed_dim,
+      int num_heads,
+      int window_size,
+      int sequence_length,
+      int ffn_multiplier,
+      bool use_layer_norm);
 
   torch::Tensor forward(const torch::Tensor& tokens);
 
@@ -128,6 +134,8 @@ class SWATransformerEncoderImpl : public torch::nn::Module {
 
  private:
   int observation_dim_ = 0;
+  int token_group_size_ = 1;
+  int padded_observation_dim_ = 0;
   int embed_dim_ = 0;
   int sequence_length_ = 0;
   torch::nn::Linear input_projection_{nullptr};

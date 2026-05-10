@@ -44,6 +44,8 @@ struct ModelConfig {
   int transformer_num_heads = 8;
   int transformer_window_size = 16;
   int transformer_max_batch_size = 1024;
+  int transformer_token_group_size = 4;
+  int transformer_ffn_multiplier = 2;
   int value_hidden_dim = 256;
   int policy_hidden_dim = 0;
 };

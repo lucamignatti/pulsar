@@ -55,6 +55,8 @@ void validate_model_config(const ModelConfig& config) {
   require_positive(config.transformer_num_heads, "transformer_num_heads");
   require_positive(config.transformer_window_size, "transformer_window_size");
   require_positive(config.transformer_max_batch_size, "transformer_max_batch_size");
+  require_positive(config.transformer_token_group_size, "transformer_token_group_size");
+  require_positive(config.transformer_ffn_multiplier, "transformer_ffn_multiplier");
   require_positive(config.value_hidden_dim, "value_hidden_dim");
   if (config.encoder_dim % config.transformer_num_heads != 0) {
     throw std::invalid_argument("ModelConfig.encoder_dim must be divisible by transformer_num_heads.");
@@ -231,6 +233,7 @@ SWATransformerBlockImpl::SWATransformerBlockImpl(
     int num_heads,
     int window_size,
     int sequence_length,
+    int ffn_multiplier,
     bool use_layer_norm)
     : use_layer_norm_(use_layer_norm) {
   attention_ = register_module(
@@ -241,9 +244,10 @@ SWATransformerBlockImpl::SWATransformerBlockImpl(
     ffn_norm_ = register_module("ffn_norm", torch::nn::LayerNorm(torch::nn::LayerNormOptions({embed_dim})));
   }
   ffn_ = torch::nn::Sequential();
-  ffn_->push_back(torch::nn::Linear(embed_dim, 4 * embed_dim));
+  const int ffn_dim = ffn_multiplier * embed_dim;
+  ffn_->push_back(torch::nn::Linear(embed_dim, ffn_dim));
   ffn_->push_back(torch::nn::Functional(torch::relu));
-  ffn_->push_back(torch::nn::Linear(4 * embed_dim, embed_dim));
+  ffn_->push_back(torch::nn::Linear(ffn_dim, embed_dim));
   register_module("ffn", ffn_);
 }
 
@@ -257,9 +261,13 @@ torch::Tensor SWATransformerBlockImpl::forward(const torch::Tensor& tokens) {
 
 SWATransformerEncoderImpl::SWATransformerEncoderImpl(const ModelConfig& config)
     : observation_dim_(config.observation_dim),
+      token_group_size_(config.transformer_token_group_size),
+      padded_observation_dim_(((config.observation_dim + config.transformer_token_group_size - 1) /
+                               config.transformer_token_group_size) *
+                              config.transformer_token_group_size),
       embed_dim_(config.encoder_dim),
-      sequence_length_(config.observation_dim + 1) {
-  input_projection_ = register_module("input_projection", torch::nn::Linear(1, embed_dim_));
+      sequence_length_(padded_observation_dim_ / token_group_size_ + 1) {
+  input_projection_ = register_module("input_projection", torch::nn::Linear(token_group_size_, embed_dim_));
   cls_token_ = register_parameter("cls_token", torch::zeros({1, 1, embed_dim_}));
   position_embedding_ = register_parameter(
       "position_embedding",
@@ -272,6 +280,7 @@ SWATransformerEncoderImpl::SWATransformerEncoderImpl(const ModelConfig& config)
         config.transformer_num_heads,
         config.transformer_window_size,
         sequence_length_,
+        config.transformer_ffn_multiplier,
         config.use_layer_norm);
     blocks_.push_back(register_module("block_" + std::to_string(i), block));
   }
@@ -281,7 +290,14 @@ SWATransformerEncoderImpl::SWATransformerEncoderImpl(const ModelConfig& config)
 torch::Tensor SWATransformerEncoderImpl::forward(const torch::Tensor& obs) {
   PULSAR_TRACE_SCOPE_CAT("actor", "swa_encoder");
   const auto batch = obs.size(0);
-  torch::Tensor tokens = input_projection_->forward(obs.view({batch, observation_dim_, 1}));
+  torch::Tensor grouped_obs = obs;
+  if (padded_observation_dim_ != observation_dim_) {
+    grouped_obs = torch::cat(
+        {obs, torch::zeros({batch, padded_observation_dim_ - observation_dim_}, obs.options())},
+        1);
+  }
+  torch::Tensor tokens = input_projection_->forward(
+      grouped_obs.view({batch, padded_observation_dim_ / token_group_size_, token_group_size_}));
   const torch::Tensor cls = cls_token_.expand({batch, -1, -1});
   tokens = torch::cat({cls, tokens}, 1) + position_embedding_.to(obs.device());
   for (SWATransformerBlock& block : blocks_) {

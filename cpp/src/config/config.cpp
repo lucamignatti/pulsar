@@ -119,6 +119,8 @@ void to_json(json& j, const ModelConfig& value) {
       {"transformer_num_heads", value.transformer_num_heads},
       {"transformer_window_size", value.transformer_window_size},
       {"transformer_max_batch_size", value.transformer_max_batch_size},
+      {"transformer_token_group_size", value.transformer_token_group_size},
+      {"transformer_ffn_multiplier", value.transformer_ffn_multiplier},
       {"value_hidden_dim", value.value_hidden_dim},
       {"policy_hidden_dim", value.policy_hidden_dim},
   };
@@ -133,6 +135,8 @@ void from_json(const json& j, ModelConfig& value) {
   value.transformer_num_heads = j.value("transformer_num_heads", 8);
   value.transformer_window_size = j.value("transformer_window_size", 16);
   value.transformer_max_batch_size = j.value("transformer_max_batch_size", 1024);
+  value.transformer_token_group_size = j.value("transformer_token_group_size", 4);
+  value.transformer_ffn_multiplier = j.value("transformer_ffn_multiplier", 2);
   value.value_hidden_dim = j.value("value_hidden_dim", 256);
   value.policy_hidden_dim = j.value("policy_hidden_dim", 0);
 }
@@ -444,6 +448,12 @@ void validate_experiment_config(const ExperimentConfig& config) {
   }
   if (config.model.transformer_max_batch_size <= 0) {
     throw std::invalid_argument("model.transformer_max_batch_size must be positive.");
+  }
+  if (config.model.transformer_token_group_size <= 0) {
+    throw std::invalid_argument("model.transformer_token_group_size must be positive.");
+  }
+  if (config.model.transformer_ffn_multiplier <= 0) {
+    throw std::invalid_argument("model.transformer_ffn_multiplier must be positive.");
   }
   if (config.goal_mapping.arena_max_distance <= 0.0F) {
     throw std::invalid_argument("goal_mapping.arena_max_distance must be positive.");
