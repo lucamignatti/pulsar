@@ -49,15 +49,12 @@ RolloutStorage make_rollout_storage(
     const ExperimentConfig& config,
     int num_agents,
     int action_dim) {
-  const torch::Device storage_device = config.ppo.device == "cuda" || config.ppo.device.rfind("cuda:", 0) == 0
-      ? torch::Device(config.ppo.device)
-      : torch::Device(torch::kCPU);
   return RolloutStorage(
       config.ppo.rollout_length,
       num_agents,
       config.model.observation_dim,
       action_dim,
-      storage_device);
+      torch::Device(torch::kCPU));
 }
 
 void require_finite(const torch::Tensor& tensor, const std::string& name) {
@@ -262,6 +259,47 @@ int action_dim_for_collectors(
   return 0;
 }
 
+ContinuumState concatenate_states(const std::vector<ContinuumState>& states) {
+  if (states.empty()) {
+    return {};
+  }
+  if (states.size() == 1) {
+    return clone_state(states.front());
+  }
+  std::vector<torch::Tensor> workspaces;
+  std::vector<torch::Tensor> stm_keys;
+  std::vector<torch::Tensor> stm_values;
+  std::vector<torch::Tensor> stm_strengths;
+  std::vector<torch::Tensor> stm_write_indices;
+  std::vector<torch::Tensor> ltm_coeffs;
+  std::vector<torch::Tensor> timesteps;
+  workspaces.reserve(states.size());
+  stm_keys.reserve(states.size());
+  stm_values.reserve(states.size());
+  stm_strengths.reserve(states.size());
+  stm_write_indices.reserve(states.size());
+  ltm_coeffs.reserve(states.size());
+  timesteps.reserve(states.size());
+  for (const auto& state : states) {
+    workspaces.push_back(state.workspace);
+    stm_keys.push_back(state.stm_keys);
+    stm_values.push_back(state.stm_values);
+    stm_strengths.push_back(state.stm_strengths);
+    stm_write_indices.push_back(state.stm_write_index);
+    ltm_coeffs.push_back(state.ltm_coeffs);
+    timesteps.push_back(state.timestep);
+  }
+  return {
+      torch::cat(workspaces, 0),
+      torch::cat(stm_keys, 0),
+      torch::cat(stm_values, 0),
+      torch::cat(stm_strengths, 0),
+      torch::cat(stm_write_indices, 0),
+      torch::cat(ltm_coeffs, 0),
+      torch::cat(timesteps, 0),
+  };
+}
+
 void accumulate_timings(CollectorTimings& dst, const CollectorTimings& src) {
   dst.obs_build_seconds += src.obs_build_seconds;
   dst.mask_build_seconds += src.mask_build_seconds;
@@ -318,24 +356,18 @@ APPOTrainer::APPOTrainer(
     throw std::invalid_argument("APPOTrainer collectors must contain agents.");
   }
   seed_everything(config_.env.seed);
+  collection_state_ = actor_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
+  opponent_collection_state_ = actor_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
   configure_cuda_runtime(device_);
   use_pinned_host_buffers_ = device_.is_cuda();
-#ifdef PULSAR_HAS_CUDA
-  if (device_.is_cuda()) {
-    collection_stream_ = c10::cuda::getStreamFromPool(false, device_.index());
-    training_stream_ = c10::cuda::getStreamFromPool(false, device_.index());
-  }
-#endif
   actor_->to(device_);
   actor_normalizer_.to(device_);
 
   maybe_initialize_from_checkpoint();
 
-  actor_snapshot_ = clone_ppo_actor(actor_, device_);
-  actor_snapshot_->eval();
-  normalizer_snapshot_ = actor_normalizer_.clone();
-
   shard_agent_offsets_.clear();
+  shard_collection_states_.clear();
+  shard_opponent_collection_states_.clear();
   std::int64_t agent_offset = 0;
   for (const auto& collector : collectors_) {
     if (!collector) {
@@ -343,6 +375,8 @@ APPOTrainer::APPOTrainer(
     }
     shard_agent_offsets_.push_back(agent_offset);
     const auto shard_agents = static_cast<std::int64_t>(collector->total_agents());
+    shard_collection_states_.push_back(actor_->initial_state(shard_agents, device_));
+    shard_opponent_collection_states_.push_back(actor_->initial_state(shard_agents, device_));
     agent_offset += shard_agents;
   }
 
@@ -415,36 +449,29 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
   }
 }
 
-TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
+TrainerMetrics APPOTrainer::update_actor() {
   PULSAR_TRACE_SCOPE_CAT("trainer", "update_actor");
-#ifdef PULSAR_HAS_CUDA
-  std::optional<c10::cuda::CUDAStream> _prev_train_stream;
-  if (training_stream_.has_value()) {
-    _prev_train_stream = c10::cuda::getCurrentCUDAStream(device_.index());
-    c10::cuda::setCurrentCUDAStream(*training_stream_);
-  }
-#endif
   const auto update_start = std::chrono::steady_clock::now();
   TrainerMetrics metrics{};
-  const int seq_len = std::max(1, config_.ppo.rollout_length);
+  const int seq_len = std::max(1, config_.ppo.sequence_length);
   const int agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
-  const int total_agents = rollout.num_agents();
-  const int rollout_steps = rollout.rollout_length();
+  const int total_agents = rollout_.num_agents();
+  const int rollout_steps = rollout_.rollout_length();
   std::int64_t metric_steps = 0;
   double accumulated_goal_critic_loss = 0.0;
   double accumulated_goal_score = 0.0;
   double accumulated_sampled_goal_distance = 0.0;
 
-  const auto& all_values = rollout.all_values();
-  const auto& all_rewards = rollout.all_rewards();
+  const auto& all_values = rollout_.all_values();
+  const auto& all_rewards = rollout_.all_rewards();
   if (rollout_steps <= 0) {
     return metrics;
   }
   const torch::Tensor extrinsic_values = all_values.at("extrinsic").narrow(0, 0, rollout_steps);
   const torch::Tensor extrinsic_rewards = all_rewards.at("extrinsic").narrow(0, 0, rollout_steps);
-  const torch::Tensor rollout_dones = rollout.dones.narrow(0, 0, rollout_steps);
+  const torch::Tensor rollout_dones = rollout_.dones.narrow(0, 0, rollout_steps);
 
-  torch::Tensor active_mask = rollout.learner_active.narrow(0, 0, rollout_steps) > 0.5F;
+  torch::Tensor active_mask = rollout_.learner_active.narrow(0, 0, rollout_steps) > 0.5F;
   torch::Tensor sparse_advantages;
   torch::Tensor normalized_advantages;
   {
@@ -455,7 +482,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       rollout_dones,
       config_.ppo.gamma,
       config_.ppo.gae_lambda,
-      rollout.final_values().count("extrinsic") ? rollout.final_values().at("extrinsic") : torch::Tensor{});
+      rollout_.final_values().count("extrinsic") ? rollout_.final_values().at("extrinsic") : torch::Tensor{});
     normalized_advantages = normalize_advantage(sparse_advantages, active_mask);
   }
   torch::Tensor sparse_returns = sparse_advantages + extrinsic_values.detach();
@@ -467,19 +494,21 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "update_minibatch");
       const int count = std::min(agents_per_batch, total_agents - agent_offset);
       const torch::Tensor agent_indices = perm.narrow(0, agent_offset, count);
-      
+      ContinuumState state = state_to_device(rollout_.initial_state_for_agents(agent_indices), device_);
+
       double total_active_samples_agent = 0.0;
 
-      for (int seq_start = 0; seq_start < rollout.rollout_length(); seq_start += seq_len) {
+      for (int seq_start = 0; seq_start < rollout_.rollout_length(); seq_start += seq_len) {
         const int chunk_start = seq_start;
-        const int chunk_end = std::min(rollout.rollout_length(), chunk_start + seq_len);
+        const int chunk_end = std::min(rollout_.rollout_length(), chunk_start + seq_len);
         const int chunk_steps = chunk_end - chunk_start;
-        const int loss_start = chunk_start;
-        const int loss_steps = chunk_steps;
+        const int burn = seq_start == 0 ? std::min(std::max(0, config_.ppo.burn_in), chunk_steps) : 0;
+        const int loss_start = chunk_start + burn;
+        const int loss_steps = chunk_steps - burn;
         if (loss_steps <= 0) {
           continue;
         }
-        total_active_samples_agent += rollout.learner_active
+        total_active_samples_agent += rollout_.learner_active
             .narrow(0, loss_start, loss_steps)
             .index_select(1, agent_indices)
             .sum()
@@ -491,44 +520,43 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
       actor_optimizer_.zero_grad();
 
-      for (int seq_start = 0; seq_start < rollout.rollout_length(); seq_start += seq_len) {
+      for (int seq_start = 0; seq_start < rollout_.rollout_length(); seq_start += seq_len) {
         const int chunk_start = seq_start;
-        const int chunk_end = std::min(rollout.rollout_length(), chunk_start + seq_len);
+        const int chunk_end = std::min(rollout_.rollout_length(), chunk_start + seq_len);
         const int chunk_steps = chunk_end - chunk_start;
-        const int loss_start = chunk_start;
-        const int loss_steps = chunk_steps;
+        const int burn = seq_start == 0 ? std::min(std::max(0, config_.ppo.burn_in), chunk_steps) : 0;
+        const int loss_start = chunk_start + burn;
+        const int loss_steps = chunk_steps - burn;
 
         const torch::Tensor obs =
-            rollout.obs.narrow(0, chunk_start, chunk_steps).index_select(1, agent_indices).to(device_);
+            rollout_.obs.narrow(0, chunk_start, chunk_steps).index_select(1, agent_indices).to(device_);
+        const torch::Tensor episode_starts =
+            rollout_.episode_starts.narrow(0, chunk_start, chunk_steps).index_select(1, agent_indices).to(device_);
 
         const auto forward_start = std::chrono::steady_clock::now();
         ActorSequenceOutput output;
         {
           PULSAR_TRACE_SCOPE_CAT("trainer", "update_forward_sequence");
-#ifdef PULSAR_HAS_CUDA
-          at::autocast::set_enabled(true);
-#endif
-          output = actor_->forward_sequence(obs);
-#ifdef PULSAR_HAS_CUDA
-          at::autocast::set_enabled(false);
-#endif
+          const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_critic.goal_dim);
+          output = actor_->forward_sequence(obs, std::move(state), episode_starts, goal_values);
         }
+        state = detach_state(std::move(output.final_state));
 
         if (loss_steps <= 0) {
           continue;
         }
 
-        torch::Tensor policy_logits = output.policy_logits;
-        torch::Tensor features = output.features;
+        torch::Tensor policy_logits = output.policy_logits.narrow(0, burn, loss_steps);
+        torch::Tensor features = output.features.narrow(0, burn, loss_steps);
 
         const torch::Tensor action_masks =
-            rollout.action_masks.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_).to(torch::kBool);
+            rollout_.action_masks.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_).to(torch::kBool);
         const torch::Tensor learner_active =
-            rollout.learner_active.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
+            rollout_.learner_active.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
         const torch::Tensor old_actions =
-            rollout.actions.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
+            rollout_.actions.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
         const torch::Tensor old_log_probs =
-            rollout.action_log_probs.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
+            rollout_.action_log_probs.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
         const torch::Tensor chunk_advantages =
             normalized_advantages.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_);
 
@@ -573,7 +601,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             sparse_returns.narrow(0, loss_start, loss_steps).index_select(1, agent_indices).to(device_).reshape({samples});
         torch::Tensor active_returns = chunk_returns.index({flat_active});
 
-        torch::Tensor value_win_chunk = output.value_win_logits;
+        torch::Tensor value_win_chunk = output.value_win_logits.narrow(0, burn, loss_steps);
         torch::Tensor flat_value_win_logits = value_win_chunk.reshape({samples, 1});
         torch::Tensor active_value_win_logits = flat_value_win_logits.index({flat_active});
 
@@ -586,11 +614,11 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
         {
           torch::Tensor chunk_goal_pos =
-              rollout.goal_positions.narrow(0, loss_start, loss_steps).index_select(1, agent_indices);
+              rollout_.goal_positions.narrow(0, loss_start, loss_steps).index_select(1, agent_indices);
           torch::Tensor chunk_dones =
-              rollout.dones.narrow(0, loss_start, loss_steps).index_select(1, agent_indices);
+              rollout_.dones.narrow(0, loss_start, loss_steps).index_select(1, agent_indices);
           torch::Tensor chunk_ep_starts =
-              rollout.episode_starts.narrow(0, loss_start, loss_steps).index_select(1, agent_indices);
+              rollout_.episode_starts.narrow(0, loss_start, loss_steps).index_select(1, agent_indices);
           torch::Tensor future_goal_pos = sample_future_goal_positions(
               chunk_goal_pos,
               chunk_dones,
@@ -752,6 +780,8 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
   for (int ep = 0; ep < es_cfg.eval_episodes_per_member; ++ep) {
     auto eval_collector = make_es_eval_collector(
         config_, total_envs, eval_envs, update_index, ep, use_pinned_host_buffers_);
+    ContinuumState eval_state = actor_->initial_state(
+        static_cast<std::int64_t>(eval_collector->total_agents()), device_);
 
     for (int step = 0; step < es_cfg.eval_rollout_length; ++step) {
       torch::Tensor raw_obs = eval_collector->host_observations().to(device_, use_pinned_host_buffers_);
@@ -760,7 +790,8 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
       torch::Tensor normalized_obs = actor_normalizer_.normalize(raw_obs);
 
       const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
-      ActorStepOutput output = actor_->forward_step(normalized_obs, goal_values);
+      ActorStepOutput output = actor_->forward_step(normalized_obs, std::move(eval_state), episode_starts, goal_values);
+      eval_state = std::move(output.state);
       torch::Tensor perturbed_logits = actor_->policy_eggroll_logits(
           output.features, A_stack, B_stack, es_cfg.sigma_ES, goal_values);
 
@@ -924,18 +955,13 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
   metrics.es_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - es_start).count();
 }
 
-void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics, std::int64_t* collected_agent_steps) {
+TrainerMetrics APPOTrainer::run_update(std::int64_t* global_step, int update_index) {
   PULSAR_TRACE_SCOPE_CAT("trainer", "run_update");
-#ifdef PULSAR_HAS_CUDA
-  std::optional<c10::cuda::CUDAStream> _prev_coll_stream;
-  if (collection_stream_.has_value()) {
-    _prev_coll_stream = c10::cuda::getCurrentCUDAStream(device_.index());
-    c10::cuda::setCurrentCUDAStream(*collection_stream_);
-  }
-#endif
+  const auto update_start = std::chrono::steady_clock::now();
+  TrainerMetrics metrics{};
   CollectorTimings collector_timings{};
   BatchedRocketSimCollector* collector_ = collectors_.front().get();
-  std::int64_t local_collected_steps = 0;
+  std::int64_t collected_agent_steps = 0;
 
   const auto collection_start = std::chrono::steady_clock::now();
   if (config_.ppo.train_only_scored_episodes) {
@@ -943,11 +969,17 @@ void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics,
       for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
         collectors_[shard]->reset_all(&collector_timings);
         const auto shard_agents = static_cast<std::int64_t>(collectors_[shard]->total_agents());
+        shard_collection_states_[shard] = actor_->initial_state(shard_agents, device_);
+        shard_opponent_collection_states_[shard] = actor_->initial_state(shard_agents, device_);
       }
     } else {
       collector_->reset_all(&collector_timings);
+      collection_state_ = actor_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
+      opponent_collection_state_ = actor_->initial_state(static_cast<std::int64_t>(total_agents_), device_);
     }
   }
+  rollout_.set_initial_state(
+      collectors_.size() > 1 ? concatenate_states(shard_collection_states_) : collection_state_);
 
   double total_sparse_reward = 0.0;
   int64_t total_steps = 0;
@@ -963,8 +995,8 @@ void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics,
   int completed_episodes = 0;
   int scored_episodes = 0;
   const int agents_per_env = std::max(1, config_.env.team_size * 2);
-  const int min_rollout_steps = 0 > 0
-      ? 0
+  const int min_rollout_steps = config_.ppo.min_rollout_length > 0
+      ? config_.ppo.min_rollout_length
       : config_.ppo.rollout_length;
   const int early_update_completed_episodes = config_.ppo.early_update_completed_episodes;
 
@@ -1010,10 +1042,11 @@ void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics,
         {
           PULSAR_TRACE_SCOPE_CAT("trainer", "policy_forward_shard");
           torch::NoGradGuard no_grad;
-          normalizer_snapshot_.update(raw_obs);
-          normalized_obs = normalizer_snapshot_.normalize(raw_obs);
+          actor_normalizer_.update(raw_obs);
+          normalized_obs = actor_normalizer_.normalize(raw_obs);
           const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
-          output = actor_snapshot_->forward_step(normalized_obs, goal_values);
+          output = actor_->forward_step(normalized_obs, std::move(shard_collection_states_[shard]), episode_starts, goal_values);
+          shard_collection_states_[shard] = std::move(output.state);
           actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
         }
         if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
@@ -1026,11 +1059,12 @@ void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics,
           torch::Tensor opponent_actions;
           torch::Tensor snapshot_ids = collector.host_snapshot_ids().to(device_, use_pinned_host_buffers_);
           self_play_manager_->infer_opponent_actions(
-              actor_snapshot_,
+              actor_,
               raw_obs,
               action_masks,
               episode_starts,
               snapshot_ids,
+              shard_opponent_collection_states_[shard],
               &opponent_actions,
               &metrics.policy_forward_seconds);
           actions = torch::where(snapshot_ids >= 0, opponent_actions, actions);
@@ -1136,7 +1170,7 @@ void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics,
         std::unordered_map<std::string, torch::Tensor> all_rewards;
         all_rewards["extrinsic"] = extrinsic_rewards_host;
 
-        dest.append_slice(
+        rollout_.append_slice(
             step,
             shard_step.agent_offset,
             shard_step.normalized_obs.to(torch::kCPU),
@@ -1151,7 +1185,7 @@ void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics,
             goal_pos_host,
             terminal_labels);
 
-        local_collected_steps += learner_step_count;
+        collected_agent_steps += learner_step_count;
       }
 
       if (early_update_completed_episodes > 0
@@ -1169,16 +1203,17 @@ void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics,
       for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
         auto& collector = *collectors_[shard];
         torch::Tensor final_raw_obs = collector.host_observations().to(device_, use_pinned_host_buffers_);
-        torch::Tensor final_normalized = normalizer_snapshot_.normalize(final_raw_obs);
-        
+        torch::Tensor final_normalized = actor_normalizer_.normalize(final_raw_obs);
+        torch::Tensor final_starts = collector.host_episode_starts().to(device_, use_pinned_host_buffers_);
+        ContinuumState bootstrap_state = clone_state(shard_collection_states_[shard]);
         const torch::Tensor final_goal_values = policy_goal_values_like(final_normalized, config_.goal_critic.goal_dim);
-        ActorStepOutput final_output = actor_snapshot_->forward_step(
-            final_normalized, final_goal_values);
+        ActorStepOutput final_output = actor_->forward_step(
+            final_normalized, std::move(bootstrap_state), final_starts, final_goal_values);
         final_values.push_back(final_output.value_win_logits.squeeze(-1).to(torch::kCPU));
       }
       std::unordered_map<std::string, torch::Tensor> bootstrap_values;
       bootstrap_values["extrinsic"] = torch::cat(final_values, 0);
-      dest.set_final_values(bootstrap_values);
+      rollout_.set_final_values(bootstrap_values);
     }
   } else {
     PULSAR_TRACE_SCOPE_CAT("trainer", "collect_loop");
@@ -1202,10 +1237,11 @@ void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics,
     {
       PULSAR_TRACE_SCOPE_CAT("trainer", "policy_forward");
       torch::NoGradGuard no_grad;
-      normalizer_snapshot_.update(raw_obs);
-      normalized_obs = normalizer_snapshot_.normalize(raw_obs);
+      actor_normalizer_.update(raw_obs);
+      normalized_obs = actor_normalizer_.normalize(raw_obs);
       const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
-      output = actor_snapshot_->forward_step(normalized_obs, goal_values);
+      output = actor_->forward_step(normalized_obs, std::move(collection_state_), episode_starts, goal_values);
+      collection_state_ = std::move(output.state);
       actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
     }
     if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
@@ -1218,11 +1254,12 @@ void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics,
       torch::Tensor opponent_actions;
       torch::Tensor snapshot_ids = collector_->host_snapshot_ids().to(device_, use_pinned_host_buffers_);
       self_play_manager_->infer_opponent_actions(
-          actor_snapshot_,
+          actor_,
           raw_obs,
           action_masks,
           episode_starts,
           snapshot_ids,
+          opponent_collection_state_,
           &opponent_actions,
           &metrics.policy_forward_seconds);
       actions = torch::where(snapshot_ids >= 0, opponent_actions, actions);
@@ -1306,7 +1343,7 @@ void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics,
     std::unordered_map<std::string, torch::Tensor> all_rewards;
     all_rewards["extrinsic"] = extrinsic_rewards_host;
 
-    dest.append(
+    rollout_.append(
         step,
         normalized_obs.to(torch::kCPU),
         episode_starts_host.to(torch::kBool),
@@ -1320,7 +1357,7 @@ void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics,
         goal_pos_host,
         terminal_labels);
 
-    local_collected_steps += learner_step_count;
+    collected_agent_steps += learner_step_count;
     if (early_update_completed_episodes > 0
         && step + 1 >= min_rollout_steps
         && (use_completed_for_break ? completed_episodes : scored_episodes) >= early_update_completed_episodes) {
@@ -1332,15 +1369,16 @@ void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics,
     PULSAR_TRACE_SCOPE_CAT("trainer", "bootstrap_forward");
     torch::NoGradGuard no_grad;
     torch::Tensor final_raw_obs = collector_->host_observations().to(device_, use_pinned_host_buffers_);
-    torch::Tensor final_normalized = normalizer_snapshot_.normalize(final_raw_obs);
-    
+    torch::Tensor final_normalized = actor_normalizer_.normalize(final_raw_obs);
+    torch::Tensor final_starts = collector_->host_episode_starts().to(device_, use_pinned_host_buffers_);
+    ContinuumState bootstrap_state = clone_state(collection_state_);
     const torch::Tensor final_goal_values = policy_goal_values_like(final_normalized, config_.goal_critic.goal_dim);
-    ActorStepOutput final_output = actor_snapshot_->forward_step(
-        final_normalized, final_goal_values);
+    ActorStepOutput final_output = actor_->forward_step(
+        final_normalized, std::move(bootstrap_state), final_starts, final_goal_values);
 
     std::unordered_map<std::string, torch::Tensor> bootstrap_values;
     bootstrap_values["extrinsic"] = final_output.value_win_logits.squeeze(-1).to(torch::kCPU);
-    dest.set_final_values(bootstrap_values);
+    rollout_.set_final_values(bootstrap_values);
     }
   }
 
@@ -1349,8 +1387,8 @@ void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics,
     PULSAR_TRACE_SCOPE_CAT("trainer", "scored_filter");
     if (config_.ppo.train_only_scored_episodes) {
       outcome_filter_stats = keep_only_scored_episode_segments(rollout_, agents_per_env);
-      const torch::Tensor active_train_mask = dest.learner_active.narrow(0, 0, dest.rollout_length());
-      const torch::Tensor reward_train = dest.reward("extrinsic").narrow(0, 0, dest.rollout_length());
+      const torch::Tensor active_train_mask = rollout_.learner_active.narrow(0, 0, rollout_.rollout_length());
+      const torch::Tensor reward_train = rollout_.reward("extrinsic").narrow(0, 0, rollout_.rollout_length());
       total_learner_steps = active_train_mask.sum().item<int64_t>();
       total_sparse_reward = (reward_train * active_train_mask).sum().item<double>();
     }
@@ -1361,12 +1399,12 @@ void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics,
 
   if (total_learner_steps > 0) {
     metrics.sparse_reward_mean = total_sparse_reward / static_cast<double>(total_learner_steps);
-    metrics.mean_goal_distance = total_goal_distance / static_cast<double>(std::max(dest.rollout_length(), 1));
+    metrics.mean_goal_distance = total_goal_distance / static_cast<double>(std::max(rollout_.rollout_length(), 1));
   }
   metrics.min_goal_distance = min_goal_distance;
   metrics.goals_scored = total_goals_scored;
   metrics.goals_conceded = total_goals_conceded;
-  metrics.rollout_steps = dest.rollout_length();
+  metrics.rollout_steps = rollout_.rollout_length();
   metrics.completed_episodes = completed_episodes;
   const bool filtered = config_.ppo.train_only_scored_episodes;
   metrics.scored_episodes = filtered ? outcome_filter_stats.scored_episodes : scored_episodes;
@@ -1377,14 +1415,48 @@ void APPOTrainer::collect_rollout(RolloutStorage& dest, TrainerMetrics& metrics,
     metrics.sampled_value_win_mean = accumulated_sampled_value
         / static_cast<double>(accumulated_value_count);
   }
-  metrics.collection_agent_steps_per_second =
-      local_collected_steps > 0 ? static_cast<double>(local_collected_steps) / collection_seconds : 0.0;
+
+  TrainerMetrics update_metrics = update_actor();
+  metrics.policy_loss = update_metrics.policy_loss;
+  metrics.value_loss = update_metrics.value_loss;
+  metrics.entropy = update_metrics.entropy;
+  metrics.grad_norm = update_metrics.grad_norm;
+  metrics.update_seconds = update_metrics.update_seconds;
+  metrics.forward_backward_seconds = update_metrics.forward_backward_seconds;
+  metrics.optimizer_step_seconds = update_metrics.optimizer_step_seconds;
+  metrics.goal_critic_loss = update_metrics.goal_critic_loss;
+  metrics.mean_goal_score = update_metrics.mean_goal_score;
+  metrics.mean_sampled_goal_distance = update_metrics.mean_sampled_goal_distance;
+
   metrics.obs_build_seconds = collector_timings.obs_build_seconds;
   metrics.mask_build_seconds = collector_timings.mask_build_seconds;
   metrics.env_step_seconds = collector_timings.env_step_seconds;
   metrics.done_reset_seconds = collector_timings.done_reset_seconds;
+  metrics.collection_agent_steps_per_second =
+      collected_agent_steps > 0 ? static_cast<double>(collected_agent_steps) / collection_seconds : 0.0;
+  metrics.update_agent_steps_per_second =
+      collected_agent_steps > 0 ? static_cast<double>(collected_agent_steps) / std::max(metrics.update_seconds, 1.0e-9) : 0.0;
+  if (global_step != nullptr) {
+    *global_step += collected_agent_steps;
+  }
+  const std::int64_t effective_global_step = global_step != nullptr ? *global_step : collected_agent_steps;
+  if (self_play_manager_) {
+    const SelfPlayMetrics self_play_metrics =
+        self_play_manager_->on_update(actor_, actor_normalizer_, effective_global_step, update_index);
+    metrics.self_play_eval_seconds = self_play_metrics.eval_seconds;
+    metrics.elo_ratings = self_play_metrics.ratings;
+  }
 
-  *collected_agent_steps = local_collected_steps;
+  if (update_index % config_.es_lora.es_interval == 0) {
+    run_es_lora_update(update_index, metrics);
+  }
+
+  metrics.overall_agent_steps_per_second =
+      collected_agent_steps > 0
+          ? static_cast<double>(collected_agent_steps) /
+                std::max(std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count(), 1.0e-9)
+          : 0.0;
+  return metrics;
 }
 
 CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_step, int update_index, const std::string& wandb_run_id) const {
@@ -1404,7 +1476,7 @@ CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
       .obs_schema_version = config_.obs_schema_version,
       .config_hash = config_hash(config_),
       .action_table_hash = action_table_hash(config_.action_table),
-      .architecture_name = "feedforward_appo",
+      .architecture_name = "continuum_contrastive_goal_appo",
       .device = config_.ppo.device,
       .global_step = global_step,
       .update_index = update_index,
@@ -1492,73 +1564,10 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
   WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "dappo_train");
   std::int64_t global_step = resumed_global_step_;
   const bool train_forever = updates <= 0;
-
-  TrainerMetrics coll_metrics{};
-  std::int64_t coll_steps = 0;
-  collect_rollout(rollout_, coll_metrics, &coll_steps);
-  global_step += coll_steps;
-
   for (int index = 0; train_forever || index < updates; ++index) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "train_iteration");
-    const auto iter_start = std::chrono::steady_clock::now();
     const int update_index = static_cast<int>(resumed_update_index_) + index + 1;
-
-    TrainerMetrics next_coll_metrics{};
-    std::int64_t next_coll_steps = 0;
-    const bool has_next = train_forever || index + 1 < updates;
-    std::future<void> next_collection;
-    if (has_next) {
-      next_collection = std::async(std::launch::async, [this, &next_coll_metrics, &next_coll_steps] {
-        collect_rollout(rollout_B_, next_coll_metrics, &next_coll_steps);
-      });
-    }
-
-    TrainerMetrics train_metrics = update_actor(rollout_);
-
-    synchronize_cuda_if_needed(device_, "snapshot clone");
-    actor_snapshot_ = clone_ppo_actor(actor_, device_);
-    actor_snapshot_->eval();
-
-    if (has_next) {
-      next_collection.get();
-    }
-
-    actor_normalizer_.merge(normalizer_snapshot_);
-    normalizer_snapshot_ = actor_normalizer_.clone();
-
-    global_step += next_coll_steps;
-
-    TrainerMetrics metrics = has_next ? next_coll_metrics : coll_metrics;
-    metrics.policy_loss = train_metrics.policy_loss;
-    metrics.value_loss = train_metrics.value_loss;
-    metrics.entropy = train_metrics.entropy;
-    metrics.grad_norm = train_metrics.grad_norm;
-    metrics.update_seconds = train_metrics.update_seconds;
-    metrics.forward_backward_seconds = train_metrics.forward_backward_seconds;
-    metrics.optimizer_step_seconds = train_metrics.optimizer_step_seconds;
-    metrics.goal_critic_loss = train_metrics.goal_critic_loss;
-    metrics.mean_goal_score = train_metrics.mean_goal_score;
-    metrics.mean_sampled_goal_distance = train_metrics.mean_sampled_goal_distance;
-    metrics.update_agent_steps_per_second =
-        next_coll_steps > 0 ? static_cast<double>(next_coll_steps) / std::max(train_metrics.update_seconds, 1.0e-9) : 0.0;
-
-    if (self_play_manager_) {
-      const SelfPlayMetrics self_play_metrics =
-          self_play_manager_->on_update(actor_, actor_normalizer_, global_step, update_index);
-      metrics.self_play_eval_seconds = self_play_metrics.eval_seconds;
-      metrics.elo_ratings = self_play_metrics.ratings;
-    }
-
-    if (update_index % config_.es_lora.es_interval == 0) {
-      run_es_lora_update(update_index, metrics);
-    }
-
-    metrics.overall_agent_steps_per_second =
-        next_coll_steps > 0
-            ? static_cast<double>(next_coll_steps) /
-                  std::max(std::chrono::duration<double>(std::chrono::steady_clock::now() - iter_start).count(), 1.0e-9)
-            : 0.0;
-
+    TrainerMetrics metrics = run_update(&global_step, update_index);
     append_metrics_line(checkpoint_dir, update_index, global_step, metrics);
     std::cout << "update=" << update_index
               << " global_step=" << global_step
@@ -1619,12 +1628,6 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       prune_old_checkpoints(checkpoint_dir);
       std::cout << "checkpoint_done update=" << update_index << std::endl;
     }
-
-    if (has_next) {
-      std::swap(rollout_, rollout_B_);
-      coll_metrics = std::move(next_coll_metrics);
-    }
-    coll_steps = next_coll_steps;
   }
   save_checkpoint(std::filesystem::path(checkpoint_dir) / "final", global_step, static_cast<int>(resumed_update_index_) + updates, wandb.run_id());
   wandb.finish();

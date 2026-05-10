@@ -50,25 +50,15 @@ def main() -> int:
         config["env"]["collision_meshes_path"] = str((repo_root / "collision_meshes").resolve())
         config["model"].update({
             "encoder_dim": 64,
-            "workspace_dim": 64,
-            "stm_slots": 8,
-            "stm_key_dim": 16,
-            "stm_value_dim": 16,
-            "ltm_slots": 8,
-            "ltm_dim": 16,
-            "controller_dim": 64,
+            "num_encoder_blocks": 1,
             "value_hidden_dim": 64,
-            "value_num_atoms": 51,
-            "value_v_min": -10.0,
-            "value_v_max": 10.0,
         })
         config["ppo"]["num_envs"] = 2
+        config["ppo"]["collection_shards"] = 1
         config["ppo"]["rollout_length"] = 4
         config["ppo"]["minibatch_size"] = 8
         config["ppo"]["update_epochs"] = 1
         config["ppo"]["checkpoint_interval"] = 1
-        config["ppo"]["sequence_length"] = 2
-        config["ppo"]["burn_in"] = 0
         config["ppo"]["collection_workers"] = 0
         config["ppo"]["device"] = "cuda:0"
         config["ppo"]["init_checkpoint"] = ""
@@ -100,7 +90,7 @@ def main() -> int:
             value = float(metrics_lines[-1][field])
             if not math.isfinite(value):
                 raise RuntimeError(f"non-finite metric in CUDA smoke: {field}={value}")
-        if not (checkpoint_dir / "final" / "model.pt").exists():
+        if not (checkpoint_dir / "final" / "state.pt").exists() and not (checkpoint_dir / "final" / "model.pt").exists():
             raise RuntimeError("CUDA smoke did not write final checkpoint")
         keep_tmp_dir = False
     finally:
