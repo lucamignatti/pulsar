@@ -502,7 +502,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         {
           PULSAR_TRACE_SCOPE_CAT("trainer", "update_forward_sequence");
 #ifdef PULSAR_HAS_CUDA
-          c10::autocast::AutocastMode guard(true);
+          c10::AutocastMode guard(true);
 #endif
           output = actor_->forward_sequence(obs);
         }
@@ -662,11 +662,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         const torch::Tensor weighted_loss = loss * (static_cast<double>(active_samples) / total_active_samples_agent);
         {
           PULSAR_TRACE_SCOPE_CAT("trainer", "update_backward");
-#ifdef PULSAR_HAS_CUDA
-          grad_scaler_.scale(weighted_loss).backward();
-#else
           weighted_loss.backward();
-#endif
         }
 
         metrics.policy_loss += policy_loss.item<double>() * static_cast<double>(active_samples);
@@ -679,17 +675,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       double grad_norm = 0.0;
       {
         PULSAR_TRACE_SCOPE_CAT("trainer", "update_optimizer");
-#ifdef PULSAR_HAS_CUDA
-        grad_scaler_.unscale_(actor_optimizer_);
-#endif
         const auto grad_norm_value = torch::nn::utils::clip_grad_norm_(actor_->parameters(), config_.ppo.max_grad_norm);
         grad_norm = static_cast<double>(grad_norm_value);
-#ifdef PULSAR_HAS_CUDA
-        grad_scaler_.step(actor_optimizer_);
-        grad_scaler_.update();
-#else
         actor_optimizer_.step();
-#endif
       }
       metrics.optimizer_step_seconds +=
           std::chrono::duration<double>(std::chrono::steady_clock::now() - optim_start).count();

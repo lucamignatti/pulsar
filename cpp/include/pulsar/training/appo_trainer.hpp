@@ -22,7 +22,6 @@
 
 #ifdef PULSAR_HAS_CUDA
 #include <c10/cuda/CUDAStream.h>
-#include <torch/cuda/amp/grad_scaler.h>
 #endif
 
 namespace pulsar {
@@ -125,9 +124,6 @@ class APPOTrainer {
   ObservationNormalizer actor_normalizer_;
   ObservationNormalizer normalizer_snapshot_{0};
   torch::optim::Adam actor_optimizer_;
-#ifdef PULSAR_HAS_CUDA
-  torch::cuda::amp::GradScaler grad_scaler_;
-#endif
   RolloutStorage rollout_;
   RolloutStorage rollout_B_;
   torch::Device device_{torch::kCPU};
