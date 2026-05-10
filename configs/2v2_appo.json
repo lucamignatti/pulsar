@@ -38,11 +38,11 @@
     "policy_hidden_dim": 0
   },
   "ppo": {
-    "num_envs": 512,
+    "num_envs": 256,
     "collection_workers": 24,
     "collection_shards": 4,
     "init_checkpoint": "",
-    "rollout_length": 64,
+    "rollout_length": 128,
     "minibatch_size": 65536,
     "update_epochs": 1,
     "clip_range": 0.1,
@@ -61,7 +61,14 @@
     "train_only_scored_episodes": false,
     "use_adaptive_epsilon": false,
     "use_confidence_weighting": false,
-    "synchronize_cuda_timing": false
+    "synchronize_cuda_timing": false,
+    "adaptive_entropy": true,
+    "entropy_decay_score": 0.60,
+    "entropy_low_coef": 0.002,
+    "plasticity": true,
+    "plasticity_interval": 40,
+    "plasticity_shrink": 0.999,
+    "plasticity_noise": 0.0001
   },
   "goal_mapping": {
     "arena_max_distance": 8192.0
@@ -90,7 +97,9 @@
     "antithetic_sampling": true,
     "update_norm_clip": true,
     "max_update_norm": 0.002,
-    "max_kl_mean": 0.01
+    "max_kl_mean": 0.01,
+    "require_winrate_signal": true,
+    "min_winrate_std": 1e-6
   },
   "self_play_league": {
     "enabled": true,

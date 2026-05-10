@@ -191,6 +191,8 @@ void to_json(json& j, const ESLoraConfig& value) {
       {"update_norm_clip", value.update_norm_clip},
       {"max_update_norm", value.max_update_norm},
       {"max_kl_mean", value.max_kl_mean},
+      {"require_winrate_signal", value.require_winrate_signal},
+      {"min_winrate_std", value.min_winrate_std},
   };
 }
 
@@ -212,6 +214,8 @@ void from_json(const json& j, ESLoraConfig& value) {
   value.update_norm_clip = j.value("update_norm_clip", true);
   value.max_update_norm = j.value("max_update_norm", 0.002F);
   value.max_kl_mean = j.value("max_kl_mean", 0.01F);
+  value.require_winrate_signal = j.value("require_winrate_signal", true);
+  value.min_winrate_std = j.value("min_winrate_std", 1.0e-6F);
 }
 
 void to_json(json& j, const PPOConfig& value) {
@@ -241,6 +245,13 @@ void to_json(json& j, const PPOConfig& value) {
       {"use_adaptive_epsilon", value.use_adaptive_epsilon},
       {"use_confidence_weighting", value.use_confidence_weighting},
       {"synchronize_cuda_timing", value.synchronize_cuda_timing},
+      {"adaptive_entropy", value.adaptive_entropy},
+      {"entropy_decay_score", value.entropy_decay_score},
+      {"entropy_low_coef", value.entropy_low_coef},
+      {"plasticity", value.plasticity},
+      {"plasticity_interval", value.plasticity_interval},
+      {"plasticity_shrink", value.plasticity_shrink},
+      {"plasticity_noise", value.plasticity_noise},
   };
 }
 
@@ -270,6 +281,13 @@ void from_json(const json& j, PPOConfig& value) {
   value.use_adaptive_epsilon = j.value("use_adaptive_epsilon", true);
   value.use_confidence_weighting = j.value("use_confidence_weighting", true);
   value.synchronize_cuda_timing = j.value("synchronize_cuda_timing", false);
+  value.adaptive_entropy = j.value("adaptive_entropy", false);
+  value.entropy_decay_score = j.value("entropy_decay_score", 0.60F);
+  value.entropy_low_coef = j.value("entropy_low_coef", 0.005F);
+  value.plasticity = j.value("plasticity", false);
+  value.plasticity_interval = j.value("plasticity_interval", 40);
+  value.plasticity_shrink = j.value("plasticity_shrink", 0.999F);
+  value.plasticity_noise = j.value("plasticity_noise", 1.0e-4F);
 }
 
 void to_json(json& j, const SelfPlayLeagueConfig& value) {
@@ -502,6 +520,9 @@ void validate_experiment_config(const ExperimentConfig& config) {
   }
   if (config.es_lora.max_kl_mean < 0.0F) {
     throw std::invalid_argument("es_lora.max_kl_mean must be non-negative.");
+  }
+  if (config.es_lora.min_winrate_std < 0.0F) {
+    throw std::invalid_argument("es_lora.min_winrate_std must be non-negative.");
   }
   if (config.es_lora.eval_episodes_per_member <= 0) {
     throw std::invalid_argument("es_lora.eval_episodes_per_member must be positive.");

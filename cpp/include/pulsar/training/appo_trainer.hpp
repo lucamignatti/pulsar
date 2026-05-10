@@ -3,6 +3,7 @@
 #ifdef PULSAR_HAS_TORCH
 
 #include <atomic>
+#include <deque>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -70,6 +71,8 @@ struct TrainerMetrics {
   double es_lora_a_norm = 0.0;
   double es_lora_b_norm = 0.0;
   double es_seconds = 0.0;
+  double scored_episode_rate = 0.0;
+  double effective_entropy_coef = 0.0;
 
   std::map<std::string, double> elo_ratings{};
 };
@@ -142,6 +145,8 @@ class APPOTrainer {
   std::atomic<bool> es_deltas_ready_{false};
   torch::Tensor es_delta_A_;
   torch::Tensor es_delta_B_;
+  std::deque<double> recent_scored_rates_{};
+  static constexpr int kRecentScoredRateWindow = 20;
 #ifdef PULSAR_HAS_CUDA
   std::optional<c10::cuda::CUDAStream> collection_stream_;
   std::optional<c10::cuda::CUDAStream> training_stream_;

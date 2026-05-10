@@ -63,6 +63,24 @@ void require_finite(const torch::Tensor& tensor, const std::string& name) {
   }
 }
 
+void shrink_perturb_parameters(torch::nn::Module& module, float shrink, float noise) {
+  torch::NoGradGuard no_grad;
+  for (auto& param : module.named_parameters()) {
+    if (!param.value().requires_grad() || param.value().dim() < 2) {
+      continue;
+    }
+    const std::string& name = param.key();
+    if (name.find("lora_") != std::string::npos) {
+      continue;
+    }
+    if (name == "pos" || name.rfind(".pos") == name.size() - 4) {
+      continue;
+    }
+    param.value().mul_(shrink);
+    param.value().add_(torch::randn_like(param.value()) * noise);
+  }
+}
+
 torch::Tensor policy_goal_values_like(const torch::Tensor& obs, int goal_dim) {
   const auto options = obs.options().dtype(torch::kFloat32);
   if (obs.dim() == 3) {
@@ -183,6 +201,8 @@ void append_metrics_line(
       {"es_lora_a_norm", metrics.es_lora_a_norm},
       {"es_lora_b_norm", metrics.es_lora_b_norm},
       {"es_seconds", metrics.es_seconds},
+      {"scored_episode_rate", metrics.scored_episode_rate},
+      {"effective_entropy_coef", metrics.effective_entropy_coef},
   };
   for (const auto& [mode, rating] : metrics.elo_ratings) {
     line["elo_" + mode] = rating;
@@ -414,6 +434,21 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 #endif
   const auto update_start = std::chrono::steady_clock::now();
   TrainerMetrics metrics{};
+
+  float effective_entropy_coef = config_.ppo.entropy_coef;
+  float effective_entropy_floor_coef = config_.ppo.entropy_floor_coef;
+  if (config_.ppo.adaptive_entropy && !recent_scored_rates_.empty()) {
+    double sum = 0.0;
+    for (double v : recent_scored_rates_) sum += v;
+    double recent_score = sum / static_cast<double>(recent_scored_rates_.size());
+    double progress = std::clamp(
+        (recent_score - config_.ppo.entropy_decay_score) /
+            std::max(1.0e-6, 1.0 - config_.ppo.entropy_decay_score),
+        0.0, 1.0);
+    effective_entropy_coef = static_cast<float>(
+        config_.ppo.entropy_coef + progress * (config_.ppo.entropy_low_coef - config_.ppo.entropy_coef));
+    effective_entropy_floor_coef = config_.ppo.entropy_floor_coef * static_cast<float>(1.0 - progress);
+  }
   const int seq_len = std::max(1, config_.ppo.rollout_length);
   const int logical_agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
   const int max_forward_samples = std::max(1, config_.model.transformer_max_batch_size);
@@ -428,6 +463,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   const auto& all_values = rollout.all_values();
   const auto& all_rewards = rollout.all_rewards();
   if (rollout_steps <= 0) {
+    metrics.effective_entropy_coef = static_cast<double>(effective_entropy_coef);
     return metrics;
   }
   const torch::Tensor extrinsic_values = all_values.at("extrinsic").narrow(0, 0, rollout_steps);
@@ -556,9 +592,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
         const torch::Tensor entropy = masked_action_entropy(active_logits, active_masks).mean();
         torch::Tensor entropy_floor_loss = torch::zeros({}, active_advantages.options());
-        if (config_.ppo.entropy_floor > 0.0F && config_.ppo.entropy_floor_coef > 0.0F) {
+        if (config_.ppo.entropy_floor > 0.0F && effective_entropy_floor_coef > 0.0F) {
           const torch::Tensor entropy_floor = torch::full_like(entropy, config_.ppo.entropy_floor);
-          entropy_floor_loss = config_.ppo.entropy_floor_coef * torch::relu(entropy_floor - entropy).square();
+          entropy_floor_loss = effective_entropy_floor_coef * torch::relu(entropy_floor - entropy).square();
         }
 
         torch::Tensor chunk_returns =
@@ -645,7 +681,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             + config_.goal_critic.lambda_Zg * goal_loss
             + config_.goal_critic.lambda_goal_actor * actor_goal_loss
             + entropy_floor_loss
-            - config_.ppo.entropy_coef * entropy;
+            - effective_entropy_coef * entropy;
 
         metrics.forward_backward_seconds +=
             std::chrono::duration<double>(std::chrono::steady_clock::now() - forward_start).count();
@@ -694,6 +730,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
     metrics.mean_goal_score = accumulated_goal_score / static_cast<double>(metric_steps);
     metrics.mean_sampled_goal_distance = accumulated_sampled_goal_distance / static_cast<double>(metric_steps);
   }
+  metrics.effective_entropy_coef = static_cast<double>(effective_entropy_coef);
   metrics.update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count();
   return metrics;
 }
@@ -861,6 +898,28 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
   winrate_mean /= static_cast<double>(total_members);
   kl_mean /= static_cast<double>(total_members);
 
+  double winrate_variance = 0.0;
+  for (uint64_t i = 0; i < total_members; ++i) {
+    const double centered = static_cast<double>(population.winrate[i]) - winrate_mean;
+    winrate_variance += centered * centered;
+  }
+  const double winrate_std = std::sqrt(winrate_variance / static_cast<double>(total_members));
+  const float best_fitness = *std::max_element(fitnesses.begin(), fitnesses.end());
+  if (es_cfg.require_winrate_signal && winrate_std < static_cast<double>(es_cfg.min_winrate_std)) {
+    metrics.es_fitness_mean = mu;
+    metrics.es_fitness_std = sigma;
+    metrics.es_fitness_best = static_cast<double>(best_fitness);
+    metrics.es_update_norm = 0.0;
+    metrics.es_winrate_mean = winrate_mean;
+    metrics.es_kl_mean = kl_mean;
+
+    auto lora_params = actor_->es_lora_parameters();
+    metrics.es_lora_a_norm = static_cast<double>(lora_params[0].norm().item<float>());
+    metrics.es_lora_b_norm = static_cast<double>(lora_params[1].norm().item<float>());
+    metrics.es_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - es_start).count();
+    return;
+  }
+
   torch::Tensor grad_A = torch::zeros(
       {rank, in_features},
       torch::TensorOptions().dtype(torch::kFloat32).device(device_));
@@ -900,8 +959,6 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
     lora_params[0].add_(delta_A);
     lora_params[1].add_(delta_B);
   }
-
-  float best_fitness = *std::max_element(fitnesses.begin(), fitnesses.end());
 
   metrics.es_fitness_mean = mu;
   metrics.es_fitness_std = sigma;
@@ -1519,9 +1576,21 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     global_step += next_coll_steps;
 
     TrainerMetrics metrics = has_next ? next_coll_metrics : coll_metrics;
+    {
+      double scored = static_cast<double>(metrics.scored_episodes);
+      double completed = static_cast<double>(std::max(metrics.completed_episodes, static_cast<int64_t>(1)));
+      double scored_rate = scored / completed;
+      recent_scored_rates_.push_back(scored_rate);
+      metrics.scored_episode_rate = scored_rate;
+      if (static_cast<int>(recent_scored_rates_.size()) > kRecentScoredRateWindow) {
+        recent_scored_rates_.pop_front();
+      }
+    }
     metrics.policy_loss = train_metrics.policy_loss;
     metrics.value_loss = train_metrics.value_loss;
     metrics.entropy = train_metrics.entropy;
+    metrics.scored_episode_rate = train_metrics.scored_episode_rate;
+    metrics.effective_entropy_coef = train_metrics.effective_entropy_coef;
     metrics.grad_norm = train_metrics.grad_norm;
     metrics.update_seconds = train_metrics.update_seconds;
     metrics.forward_backward_seconds = train_metrics.forward_backward_seconds;
@@ -1541,6 +1610,12 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
 
     if (update_index % config_.es_lora.es_interval == 0) {
       run_es_lora_update(update_index, metrics);
+    }
+
+    if (config_.ppo.plasticity && update_index % config_.ppo.plasticity_interval == 0) {
+      PULSAR_TRACE_SCOPE_CAT("trainer", "plasticity");
+      shrink_perturb_parameters(*actor_, config_.ppo.plasticity_shrink, config_.ppo.plasticity_noise);
+      actor_->to(device_);
     }
 
     metrics.overall_agent_steps_per_second =
@@ -1587,6 +1662,8 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"ball_proximity_rate", metrics.ball_proximity_rate},
           {"goals_scored", metrics.goals_scored},
           {"goals_conceded", metrics.goals_conceded},
+          {"scored_episode_rate", metrics.scored_episode_rate},
+          {"effective_entropy_coef", metrics.effective_entropy_coef},
       };
       if (update_index % config_.es_lora.es_interval == 0) {
         payload["es_fitness_mean"] = metrics.es_fitness_mean;
