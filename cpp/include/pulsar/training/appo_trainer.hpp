@@ -23,6 +23,7 @@
 
 #ifdef PULSAR_HAS_CUDA
 #include <c10/cuda/CUDAStream.h>
+#include <ATen/autocast_mode.h>
 #endif
 
 namespace pulsar {

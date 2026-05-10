@@ -506,11 +506,11 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         {
           PULSAR_TRACE_SCOPE_CAT("trainer", "update_forward_sequence");
 #ifdef PULSAR_HAS_CUDA
-          c10::impl::AutocastMode::set_enabled(true);
+          at::autocast::set_enabled(true);
 #endif
           output = actor_->forward_sequence(obs);
 #ifdef PULSAR_HAS_CUDA
-          c10::impl::AutocastMode::set_enabled(false);
+          at::autocast::set_enabled(false);
 #endif
         }
 
