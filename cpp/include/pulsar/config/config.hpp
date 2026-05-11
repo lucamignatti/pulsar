@@ -37,6 +37,22 @@ struct MechanicRewardConfig {
   float mechanic_reward_cap_per_episode = 0.10F;
 };
 
+struct CurriculumStageConfig {
+  std::string name;
+  OutcomeConfig outcome_override{};
+  MechanicRewardConfig mechanic_rewards_override{};
+  float learning_rate = 0.0001F;
+  int64_t min_agent_steps = 20'000'000LL;
+  int promotion_window_updates = 5;
+  float required_touch_episode_rate = 0.0F;
+  float required_scored_episode_rate = 0.0F;
+};
+
+struct CurriculumConfig {
+  bool enabled = false;
+  std::vector<CurriculumStageConfig> stages;
+};
+
 struct ActionTableConfig {
   std::string builtin = "rlgym_lookup_v1";
   std::vector<ControllerState> actions{};
@@ -182,6 +198,7 @@ struct ExperimentConfig {
   EnvConfig env{};
   OutcomeConfig outcome{};
   MechanicRewardConfig mechanic_rewards{};
+  CurriculumConfig curriculum{};
   ActionTableConfig action_table{};
   ModelConfig model{};
   PPOConfig ppo{};
@@ -212,6 +229,10 @@ void to_json(nlohmann::json& j, const OutcomeConfig& value);
 void from_json(const nlohmann::json& j, OutcomeConfig& value);
 void to_json(nlohmann::json& j, const MechanicRewardConfig& value);
 void from_json(const nlohmann::json& j, MechanicRewardConfig& value);
+void to_json(nlohmann::json& j, const CurriculumStageConfig& value);
+void from_json(const nlohmann::json& j, CurriculumStageConfig& value);
+void to_json(nlohmann::json& j, const CurriculumConfig& value);
+void from_json(const nlohmann::json& j, CurriculumConfig& value);
 void to_json(nlohmann::json& j, const ActionTableConfig& value);
 void from_json(const nlohmann::json& j, ActionTableConfig& value);
 void to_json(nlohmann::json& j, const EnvConfig& value);

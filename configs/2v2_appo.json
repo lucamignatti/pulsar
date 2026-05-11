@@ -38,6 +38,110 @@
     "team_pinch": 0.0,
     "mechanic_reward_cap_per_episode": 0.0
   },
+  "curriculum": {
+    "enabled": true,
+    "stages": [
+      {
+        "name": "stage0-touch-bootstrap",
+        "outcome_override": {
+          "score": 0.0,
+          "concede": 0.0,
+          "neutral": 1.0,
+          "neutral_no_touch": -1.0
+        },
+        "mechanic_rewards_override": {
+          "kickoff_first_touch": 0.0,
+          "speed_flip": 0.0,
+          "wavedash": 0.0,
+          "chain_dash_bonus": 0.0,
+          "half_flip": 0.0,
+          "wall_dash": 0.0,
+          "air_dribble_base": 0.0,
+          "air_dribble_scale": 0.0,
+          "flip_reset": 0.0,
+          "ceiling_shot": 0.0,
+          "double_tap": 0.0,
+          "preflip": 0.0,
+          "redirect": 0.0,
+          "pogo": 0.0,
+          "pinch": 0.0,
+          "team_pinch": 0.0,
+          "mechanic_reward_cap_per_episode": 0.0
+        },
+        "learning_rate": 0.0002,
+        "min_agent_steps": 20000000,
+        "promotion_window_updates": 5,
+        "required_touch_episode_rate": 0.3,
+        "required_scored_episode_rate": 0.0
+      },
+      {
+        "name": "stage1-score-only",
+        "outcome_override": {
+          "score": 1.0,
+          "concede": -1.0,
+          "neutral": 0.0,
+          "neutral_no_touch": 0.0
+        },
+        "mechanic_rewards_override": {
+          "kickoff_first_touch": 0.0,
+          "speed_flip": 0.0,
+          "wavedash": 0.0,
+          "chain_dash_bonus": 0.0,
+          "half_flip": 0.0,
+          "wall_dash": 0.0,
+          "air_dribble_base": 0.0,
+          "air_dribble_scale": 0.0,
+          "flip_reset": 0.0,
+          "ceiling_shot": 0.0,
+          "double_tap": 0.0,
+          "preflip": 0.0,
+          "redirect": 0.0,
+          "pogo": 0.0,
+          "pinch": 0.0,
+          "team_pinch": 0.0,
+          "mechanic_reward_cap_per_episode": 0.0
+        },
+        "learning_rate": 0.0001,
+        "min_agent_steps": 50000000,
+        "promotion_window_updates": 5,
+        "required_touch_episode_rate": 0.0,
+        "required_scored_episode_rate": 0.05
+      },
+      {
+        "name": "stage2-mechanics",
+        "outcome_override": {
+          "score": 1.0,
+          "concede": -1.0,
+          "neutral": 0.0,
+          "neutral_no_touch": 0.0
+        },
+        "mechanic_rewards_override": {
+          "kickoff_first_touch": 0.005,
+          "speed_flip": 0.001,
+          "wavedash": 0.001,
+          "chain_dash_bonus": 0.005,
+          "half_flip": 0.001,
+          "wall_dash": 0.001,
+          "air_dribble_base": 0.002,
+          "air_dribble_scale": 0.001,
+          "flip_reset": 0.005,
+          "ceiling_shot": 0.002,
+          "double_tap": 0.002,
+          "preflip": 0.002,
+          "redirect": 0.002,
+          "pogo": 0.002,
+          "pinch": 0.005,
+          "team_pinch": 0.005,
+          "mechanic_reward_cap_per_episode": 0.05
+        },
+        "learning_rate": 0.0001,
+        "min_agent_steps": 50000000,
+        "promotion_window_updates": 5,
+        "required_touch_episode_rate": 0.0,
+        "required_scored_episode_rate": 0.1
+      }
+    ]
+  },
   "action_table": {
     "builtin": "rlgym_lookup_v1",
     "actions": []

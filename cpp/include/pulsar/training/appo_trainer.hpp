@@ -116,6 +116,9 @@ class APPOTrainer {
   void run_es_lora_update(int update_index, TrainerMetrics& metrics);
   std::pair<torch::Tensor, torch::Tensor> compute_es_deltas();
 
+  void apply_curriculum_stage();
+  bool check_curriculum_promotion(const TrainerMetrics& metrics, std::int64_t agent_steps);
+
   struct ESPopulationFitness {
     std::vector<float> fitness{};
     std::vector<float> winrate{};
@@ -150,6 +153,11 @@ class APPOTrainer {
   torch::Tensor es_delta_B_;
   std::deque<double> recent_scored_rates_{};
   static constexpr int kRecentScoredRateWindow = 20;
+  std::deque<double> curriculum_touch_rates_{};
+  std::deque<double> curriculum_scored_rates_{};
+  int curriculum_stage_ = -1;
+  std::int64_t curriculum_agent_steps_ = 0;
+  int curriculum_promotion_counter_ = 0;
   std::vector<float> success_obs_{};
   std::vector<std::int64_t> success_actions_{};
   bool success_bc_active_ = false;

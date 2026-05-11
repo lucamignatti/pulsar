@@ -418,6 +418,95 @@ APPOTrainer::~APPOTrainer() {
   synchronize_cuda_if_needed(device_, "trainer shutdown");
 }
 
+void APPOTrainer::apply_curriculum_stage() {
+  const auto& stages = config_.curriculum.stages;
+  if (stages.empty()) return;
+
+  if (curriculum_stage_ < 0) {
+    curriculum_stage_ = 0;
+  }
+  const int idx = std::min(curriculum_stage_, static_cast<int>(stages.size()) - 1);
+  const auto& stage = stages[static_cast<std::size_t>(idx)];
+
+  config_.outcome = stage.outcome_override;
+  config_.mechanic_rewards = stage.mechanic_rewards_override;
+  config_.ppo.learning_rate = stage.learning_rate;
+
+  for (auto& opt_group : actor_optimizer_.param_groups()) {
+    opt_group.options().set_lr(stage.learning_rate);
+  }
+
+  for (auto& collector : collectors_) {
+    if (collector) {
+      collector->update_mechanic_rewards(config_.mechanic_rewards);
+    }
+  }
+
+  curriculum_promotion_counter_ = 0;
+  curriculum_agent_steps_ = 0;
+
+  std::cout << "curriculum_stage=" << idx
+            << " name=" << stage.name
+            << " lr=" << stage.learning_rate << '\n';
+}
+
+bool APPOTrainer::check_curriculum_promotion(
+    const TrainerMetrics& metrics, std::int64_t agent_steps) {
+  const auto& stages = config_.curriculum.stages;
+  if (stages.empty()) return false;
+
+  curriculum_agent_steps_ += agent_steps;
+
+  const int idx = std::min(curriculum_stage_, static_cast<int>(stages.size()) - 1);
+  if (idx < 0 || idx >= static_cast<int>(stages.size()) - 1) return false;
+
+  const auto& stage = stages[static_cast<std::size_t>(idx)];
+
+  if (curriculum_agent_steps_ < stage.min_agent_steps) return false;
+  if (stage.promotion_window_updates <= 0) return false;
+
+  curriculum_touch_rates_.push_back(metrics.touch_episode_rate);
+  curriculum_scored_rates_.push_back(metrics.scored_episode_rate);
+
+  const int window = stage.promotion_window_updates;
+  while (static_cast<int>(curriculum_touch_rates_.size()) > window) curriculum_touch_rates_.pop_front();
+  while (static_cast<int>(curriculum_scored_rates_.size()) > window) curriculum_scored_rates_.pop_front();
+
+  if (static_cast<int>(curriculum_touch_rates_.size()) < window) return false;
+
+  double avg_touch = 0.0;
+  for (double v : curriculum_touch_rates_) avg_touch += v;
+  avg_touch /= static_cast<double>(curriculum_touch_rates_.size());
+
+  double avg_scored = 0.0;
+  for (double v : curriculum_scored_rates_) avg_scored += v;
+  avg_scored /= static_cast<double>(curriculum_scored_rates_.size());
+
+  bool touch_ok = stage.required_touch_episode_rate <= 0.0F ||
+                  avg_touch >= static_cast<double>(stage.required_touch_episode_rate);
+  bool score_ok = stage.required_scored_episode_rate <= 0.0F ||
+                  avg_scored >= static_cast<double>(stage.required_scored_episode_rate);
+
+  if (!touch_ok || !score_ok) {
+    curriculum_promotion_counter_ = 0;
+    return false;
+  }
+
+  curriculum_promotion_counter_++;
+
+  if (curriculum_promotion_counter_ >= stage.promotion_window_updates) {
+    curriculum_stage_++;
+    curriculum_promotion_counter_ = 0;
+    curriculum_touch_rates_.clear();
+    curriculum_scored_rates_.clear();
+    apply_curriculum_stage();
+    std::cout << "curriculum_promoted stage=" << curriculum_stage_ << '\n';
+    return true;
+  }
+
+  return false;
+}
+
 torch::Tensor APPOTrainer::map_outcome_labels_to_rewards(const torch::Tensor& labels) const {
   torch::Tensor rewards = torch::zeros_like(labels, torch::TensorOptions().dtype(torch::kFloat32));
   rewards.masked_fill_(labels == 0, config_.outcome.score);
@@ -459,6 +548,12 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
 
   if (metadata.extra.contains("wandb_run_id")) {
     config_.wandb.run_id = metadata.extra["wandb_run_id"].get<std::string>();
+  }
+  if (metadata.extra.contains("curriculum_stage")) {
+    curriculum_stage_ = metadata.extra["curriculum_stage"].get<int>();
+  }
+  if (metadata.extra.contains("curriculum_agent_steps")) {
+    curriculum_agent_steps_ = metadata.extra["curriculum_agent_steps"].get<std::int64_t>();
   }
   if (self_play_manager_ && self_play_manager_->enabled()) {
     if (metadata.extra.contains("self_play_rng_state")) {
@@ -519,13 +614,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   const int agents_per_forward = std::max(1, max_forward_samples / seq_len);
   const int total_agents = rollout.num_agents();
   const int rollout_steps = rollout.rollout_length();
-  std::cout << "update_actor_config rollout_steps=" << rollout_steps
-            << " total_agents=" << total_agents
-            << " logical_agents_per_batch=" << logical_agents_per_batch
-            << " agents_per_forward=" << agents_per_forward
-            << " pcgrad=" << (config_.ppo.pcgrad ? 1 : 0)
-            << '\n'
-            << std::flush;
   std::int64_t metric_steps = 0;
   double accumulated_goal_critic_loss = 0.0;
   double accumulated_goal_score = 0.0;
@@ -555,9 +643,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       rollout.final_values().count("extrinsic") ? rollout.final_values().at("extrinsic") : torch::Tensor{});
     normalized_advantages = normalize_advantage(sparse_advantages, active_mask);
   }
-  std::cout << "update_actor_gae_done\n" << std::flush;
   torch::Tensor sparse_returns = sparse_advantages + extrinsic_values.detach();
-  bool logged_first_microbatch = false;
 
   for (int epoch = 0; epoch < config_.ppo.update_epochs; ++epoch) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "update_epoch");
@@ -597,16 +683,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         const torch::Tensor micro_agent_indices = agent_indices.narrow(0, micro_agent_offset, micro_count);
 
       for (int seq_start = 0; seq_start < rollout.rollout_length(); seq_start += seq_len) {
-        const bool log_microbatch = !logged_first_microbatch;
-        if (log_microbatch) {
-          std::cout << "update_microbatch_start epoch=" << epoch
-                    << " agent_offset=" << agent_offset
-                    << " micro_agent_offset=" << micro_agent_offset
-                    << " micro_count=" << micro_count
-                    << " seq_start=" << seq_start
-                    << '\n'
-                    << std::flush;
-        }
         const int chunk_start = seq_start;
         const int chunk_end = std::min(rollout.rollout_length(), chunk_start + seq_len);
         const int chunk_steps = chunk_end - chunk_start;
@@ -623,9 +699,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           PULSAR_TRACE_SCOPE_CAT("trainer", "update_forward_sequence");
           const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_critic.goal_dim);
           output = actor_->forward_sequence(obs, goal_values);
-        }
-        if (log_microbatch) {
-          std::cout << "update_microbatch_forward_done\n" << std::flush;
         }
 
         if (loss_steps <= 0) {
@@ -760,9 +833,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           accumulated_goal_critic_loss += goal_loss.item<double>() * static_cast<double>(active_logits.size(0));
           accumulated_goal_score += chunk_goal_score * static_cast<double>(active_logits.size(0));
         }
-        if (log_microbatch) {
-          std::cout << "update_microbatch_goal_done active_samples=" << active_logits.size(0) << '\n' << std::flush;
-        }
 
         const auto active_samples = static_cast<double>(active_logits.size(0));
         const auto sample_weight = active_samples / total_active_samples_agent;
@@ -779,29 +849,11 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           }
 
           zero_existing_gradients(*actor_);
-          if (log_microbatch) {
-            std::cout << "pcgrad_loss_a_backward_start\n" << std::flush;
-          }
           loss_a.backward({}, true);
-          if (log_microbatch) {
-            std::cout << "pcgrad_loss_a_backward_done\n" << std::flush;
-          }
-          if (log_microbatch) {
-            std::cout << "pcgrad_capture_a_start\n" << std::flush;
-          }
           auto grads_a = capture_gradients(*actor_);
-          if (log_microbatch) {
-            std::cout << "pcgrad_capture_a_done\n" << std::flush;
-          }
 
-          if (log_microbatch) {
-            std::cout << "pcgrad_loss_b_build_start\n" << std::flush;
-          }
           torch::Tensor loss_b = (config_.goal_critic.lambda_Zg * goal_loss
               + config_.goal_critic.lambda_goal_actor * actor_goal_loss) * sample_weight;
-          if (log_microbatch) {
-            std::cout << "pcgrad_loss_b_build_done\n" << std::flush;
-          }
 
           if (effective_bc_coef > 0.0F && !success_obs_.empty()) {
             int obs_dim = config_.model.observation_dim;
@@ -832,36 +884,12 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             }
           }
 
-          if (log_microbatch) {
-            std::cout << "pcgrad_zero_before_b_start\n" << std::flush;
-          }
           zero_existing_gradients(*actor_);
-          if (log_microbatch) {
-            std::cout << "pcgrad_zero_before_b_done\n" << std::flush;
-          }
-          if (log_microbatch) {
-            std::cout << "pcgrad_loss_b_backward_start\n" << std::flush;
-          }
           loss_b.backward();
-          if (log_microbatch) {
-            std::cout << "pcgrad_loss_b_backward_done\n" << std::flush;
-          }
-          if (log_microbatch) {
-            std::cout << "pcgrad_capture_b_start\n" << std::flush;
-          }
           auto grads_b = capture_gradients(*actor_);
-          if (log_microbatch) {
-            std::cout << "pcgrad_capture_b_done\n" << std::flush;
-          }
           zero_existing_gradients(*actor_);
 
-          if (log_microbatch) {
-            std::cout << "pcgrad_project_start\n" << std::flush;
-          }
           apply_pcgrad(grads_a, grads_b);
-          if (log_microbatch) {
-            std::cout << "pcgrad_project_done\n" << std::flush;
-          }
 
           for (size_t i = 0; i < grads_a.size(); ++i) {
             torch::Tensor combined = grads_a[i].grad + grads_b[i].grad;
@@ -912,10 +940,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           }
 
           combined_loss.backward();
-        }
-        if (log_microbatch) {
-          std::cout << "update_microbatch_backward_done\n" << std::flush;
-          logged_first_microbatch = true;
         }
 
         metrics.policy_loss += policy_loss.item<double>() * static_cast<double>(active_samples);
@@ -1766,6 +1790,8 @@ CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
       extra["self_play_rng_state"] = rng;
     }
   }
+  extra["curriculum_stage"] = curriculum_stage_;
+  extra["curriculum_agent_steps"] = curriculum_agent_steps_;
   return CheckpointMetadata{
       .schema_version = config_.schema_version,
       .obs_schema_version = config_.obs_schema_version,
@@ -1857,69 +1883,45 @@ void APPOTrainer::prune_old_checkpoints(const std::filesystem::path& checkpoint_
 
 void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const std::string& config_path) {
   const bool train_forever = updates <= 0;
-  std::cout << "train_start updates=" << (train_forever ? "forever" : std::to_string(updates))
-            << " checkpoint_dir=" << checkpoint_dir
-            << " config=" << config_path
-            << " num_envs=" << config_.ppo.num_envs
-            << " rollout_length=" << config_.ppo.rollout_length
-            << '\n'
-            << std::flush;
+  std::cout << "train_start curriculum_enabled=" << (config_.curriculum.enabled ? 1 : 0)
+            << " stages=" << config_.curriculum.stages.size()
+            << '\n';
   WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "dappo_train");
   std::int64_t global_step = resumed_global_step_;
 
+  if (config_.curriculum.enabled && !config_.curriculum.stages.empty()) {
+    apply_curriculum_stage();
+  }
+
   TrainerMetrics coll_metrics{};
   std::int64_t coll_steps = 0;
-  std::cout << "initial_rollout_start\n" << std::flush;
   collect_rollout(rollout_, coll_metrics, &coll_steps, actor_snapshot_);
   global_step += coll_steps;
-  std::cout << "initial_rollout_done collected_agent_steps=" << coll_steps
-            << " rollout_steps=" << coll_metrics.rollout_steps
-            << " completed_eps=" << coll_metrics.completed_episodes
-            << " touch_rate=" << coll_metrics.touch_episode_rate
-            << '\n'
-            << std::flush;
 
-  std::cout << "train_loop_ready train_forever=" << (train_forever ? 1 : 0)
-            << " updates=" << updates
-            << '\n'
-            << std::flush;
-
-  for (int index = 0;; ++index) {
-    if (!train_forever && index >= updates) {
-      break;
-    }
+  for (int index = 0; train_forever || index < updates; ++index) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "train_iteration");
     const auto iter_start = std::chrono::steady_clock::now();
     const int update_index = static_cast<int>(resumed_update_index_) + index + 1;
-    std::cout << "train_iteration_start update=" << update_index
-              << " has_next=" << ((train_forever || index + 1 < updates) ? 1 : 0)
-              << '\n'
-              << std::flush;
 
     TrainerMetrics next_coll_metrics{};
     std::int64_t next_coll_steps = 0;
     const bool has_next = train_forever || index + 1 < updates;
+    std::future<void> next_collection;
+    if (has_next) {
+      PPOActor collection_actor = actor_snapshot_;
+      next_collection = std::async(std::launch::async, [this, &next_coll_metrics, &next_coll_steps, collection_actor] {
+        collect_rollout(rollout_B_, next_coll_metrics, &next_coll_steps, collection_actor);
+      });
+    }
 
-    std::cout << "update_actor_start update=" << update_index << '\n' << std::flush;
     TrainerMetrics train_metrics = update_actor(rollout_);
-    std::cout << "update_actor_done update=" << update_index
-              << " update_seconds=" << train_metrics.update_seconds
-              << '\n'
-              << std::flush;
 
     synchronize_cuda_if_needed(device_, "snapshot clone");
     actor_snapshot_ = clone_ppo_actor(actor_, device_);
     actor_snapshot_->eval();
 
     if (has_next) {
-      std::cout << "next_rollout_start update=" << update_index << '\n' << std::flush;
-      collect_rollout(rollout_B_, next_coll_metrics, &next_coll_steps, actor_snapshot_);
-      std::cout << "next_rollout_done update=" << update_index
-                << " collected_agent_steps=" << next_coll_steps
-                << " completed_eps=" << next_coll_metrics.completed_episodes
-                << " touch_rate=" << next_coll_metrics.touch_episode_rate
-                << '\n'
-                << std::flush;
+      next_collection.get();
     }
 
     global_step += next_coll_steps;
@@ -1934,6 +1936,9 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       if (static_cast<int>(recent_scored_rates_.size()) > kRecentScoredRateWindow) {
         recent_scored_rates_.pop_front();
       }
+    }
+    if (config_.curriculum.enabled) {
+      check_curriculum_promotion(metrics, next_coll_steps);
     }
     metrics.policy_loss = train_metrics.policy_loss;
     metrics.value_loss = train_metrics.value_loss;
@@ -2036,10 +2041,8 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       wandb.log(payload);
     }
     if (config_.ppo.checkpoint_interval > 0 && update_index % config_.ppo.checkpoint_interval == 0) {
-      std::cout << "checkpoint_start update=" << update_index << std::endl;
       save_checkpoint(std::filesystem::path(checkpoint_dir) / ("update_" + std::to_string(update_index)), global_step, update_index, wandb.run_id());
       prune_old_checkpoints(checkpoint_dir);
-      std::cout << "checkpoint_done update=" << update_index << std::endl;
     }
 
     if (has_next) {
