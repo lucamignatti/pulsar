@@ -41,6 +41,7 @@ class DiscreteActionParser final : public ActionParser {
 
  private:
   ControllerActionTable action_table_{};
+  std::size_t fallback_index_ = 0;
 };
 
 }  // namespace pulsar

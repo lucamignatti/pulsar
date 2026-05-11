@@ -116,7 +116,18 @@ std::string ControllerActionTable::hash() const {
 }
 
 DiscreteActionParser::DiscreteActionParser(ControllerActionTable action_table)
-    : action_table_(std::move(action_table)) {}
+    : action_table_(std::move(action_table)) {
+  fallback_index_ = 0;
+  for (std::size_t i = 0; i < action_table_.size(); ++i) {
+    const ControllerState& a = action_table_.at(i);
+    if (a.throttle == 0.0F && a.steer == 0.0F
+        && a.yaw == 0.0F && a.pitch == 0.0F && a.roll == 0.0F
+        && !a.jump && !a.boost && !a.handbrake) {
+      fallback_index_ = i;
+      break;
+    }
+  }
+}
 
 std::vector<ControllerState> DiscreteActionParser::parse_actions(
     std::span<const std::int64_t> action_indices) const {
@@ -160,7 +171,7 @@ std::vector<std::uint8_t> DiscreteActionParser::build_action_mask(const EnvState
     any_valid = any_valid || valid;
   }
   if (!any_valid && !mask.empty()) {
-    mask[0] = 1;
+    mask[fallback_index_] = 1;
   }
   return mask;
 }
@@ -189,7 +200,7 @@ void DiscreteActionParser::build_action_mask_batch(const EnvState& state, std::s
       any_valid = any_valid || valid;
     }
     if (!any_valid && stride > 0) {
-      dst[0] = 1;
+      dst[fallback_index_] = 1;
     }
   }
 }

@@ -320,6 +320,9 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
   host_env_touched_.zero_();
   host_bootstrap_truncated_.zero_();
 
+  float* host_env_touched_ptr = host_env_touched_.data_ptr<float>();
+  const float* learner_ptr = current_buffers_.learner_active.data_ptr<float>();
+
   executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
     for (std::size_t env_idx = begin; env_idx < end; ++env_idx) {
       const std::size_t agent_begin = agent_offsets_[env_idx];
@@ -392,15 +395,16 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         envs_[env_idx].engine->reset(envs_[env_idx].reset_seed);
         assign_env(env_idx, envs_[env_idx].reset_seed);
         env_mechanic_states_[env_idx] = EnvMechanicState{};
-        bool any_touch = false;
+        bool learner_touched = false;
         for (std::size_t idx = 0; idx < count; ++idx) {
-          if (episode_touch_ptr[agent_begin + idx] > 0.5F) {
-            any_touch = true;
+          const std::size_t global_idx = agent_begin + idx;
+          if (learner_ptr[global_idx] > 0.5F && episode_touch_ptr[global_idx] > 0.5F) {
+            learner_touched = true;
             break;
           }
         }
-        if (any_touch) {
-          host_env_touched_.data_ptr<float>()[env_idx] = 1.0F;
+        if (learner_touched) {
+          host_env_touched_ptr[env_idx] = 1.0F;
         }
         for (std::size_t idx = 0; idx < count; ++idx) {
           episode_touch_ptr[agent_begin + idx] = 0.0F;

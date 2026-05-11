@@ -692,7 +692,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       config_.ppo.gamma,
       config_.ppo.gae_lambda,
       rollout.final_values().count("extrinsic") ? rollout.final_values().at("extrinsic") : torch::Tensor{},
-      rollout_bootstrap_truncated);
+      rollout_bootstrap_truncated,
+      torch::Tensor{});  // TODO: pass terminal-observation values here once rollout stores them
     normalized_advantages = normalize_advantage(sparse_advantages, active_mask);
   }
   torch::Tensor sparse_returns = sparse_advantages + extrinsic_values.detach();
