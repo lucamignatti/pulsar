@@ -47,7 +47,7 @@ class MechanicDetector {
       EnvMechanicState& env_state) const;
 
  private:
-  const MechanicRewardConfig* cfg_;
+  MechanicRewardConfig cfg_;
 
   static constexpr float kGroundZ = 17.0F;
   static constexpr float kCeilingZ = 2044.0F;
