@@ -1990,6 +1990,9 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " ball_prox=" << metrics.ball_proximity_rate
               << " goals=" << metrics.goals_scored << "/" << metrics.goals_conceded
               << " es_fitness=" << metrics.es_fitness_mean
+              << " curriculum=" << curriculum_stage_
+              << " cur_steps=" << curriculum_agent_steps_
+              << " cur_promo=" << curriculum_promotion_counter_
               << '\n';
     if (wandb.enabled()) {
       nlohmann::json payload{
@@ -2017,6 +2020,9 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       {"scored_episode_rate", metrics.scored_episode_rate},
           {"effective_entropy_coef", metrics.effective_entropy_coef},
           {"effective_success_bc_coef", metrics.effective_success_bc_coef},
+          {"curriculum_stage", curriculum_stage_},
+          {"curriculum_agent_steps", curriculum_agent_steps_},
+          {"curriculum_promotion_counter", curriculum_promotion_counter_},
       };
       if (update_index % config_.es_lora.es_interval == 0) {
         payload["es_fitness_mean"] = metrics.es_fitness_mean;
