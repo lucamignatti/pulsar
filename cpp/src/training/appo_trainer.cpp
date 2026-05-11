@@ -1535,13 +1535,15 @@ void APPOTrainer::collect_rollout(
     episode_offsets.push_back(0);
     for (int s = 1; s <= steps; ++s) {
       bool any_new_ep = false;
-      for (int a = 0; a < all_agents; ++a) {
-        if (s < steps) {
-          any_new_ep = any_new_ep || (starts_ptr[s * all_agents + a] > 0.5F);
-        } else {
-          any_new_ep = true;
+      if (s < steps) {
+        for (int a = 0; a < all_agents; ++a) {
+          if (starts_ptr[s * all_agents + a] > 0.5F) {
+            any_new_ep = true;
+            break;
+          }
         }
-        if (any_new_ep) break;
+      } else {
+        any_new_ep = true;
       }
       if (any_new_ep) {
         episode_offsets.push_back(s);
