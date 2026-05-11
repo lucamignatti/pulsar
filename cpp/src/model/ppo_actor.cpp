@@ -4,10 +4,9 @@
 
 #include <cmath>
 #include <filesystem>
-#include <optional>
+#include <limits>
 #include <stdexcept>
 
-#include <ATen/ops/scaled_dot_product_attention.h>
 #include <nlohmann/json.hpp>
 
 #include "pulsar/checkpoint/checkpoint.hpp"
@@ -213,15 +212,10 @@ torch::Tensor SlidingWindowSelfAttentionImpl::forward(const torch::Tensor& token
   const torch::Tensor v = parts[2];
 
   const torch::Tensor mask = attention_mask_.to(q.device()).narrow(2, 0, sequence).narrow(3, 0, sequence);
-  torch::Tensor attended = at::scaled_dot_product_attention(
-      q,
-      k,
-      v,
-      mask,
-      /*dropout_p=*/0.0,
-      /*is_causal=*/false,
-      /*scale=*/std::nullopt,
-      /*enable_gqa=*/false)
+  const float scale = 1.0F / std::sqrt(static_cast<float>(head_dim_));
+  torch::Tensor attention_scores = torch::matmul(q, k.transpose(-2, -1)) * scale;
+  attention_scores = attention_scores.masked_fill(mask.logical_not(), -std::numeric_limits<float>::infinity());
+  torch::Tensor attended = torch::matmul(torch::softmax(attention_scores, -1), v)
       .transpose(1, 2)
       .contiguous()
       .view({batch, sequence, embed_dim_});

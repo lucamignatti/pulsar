@@ -511,6 +511,13 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   const int agents_per_forward = std::max(1, max_forward_samples / seq_len);
   const int total_agents = rollout.num_agents();
   const int rollout_steps = rollout.rollout_length();
+  std::cout << "update_actor_config rollout_steps=" << rollout_steps
+            << " total_agents=" << total_agents
+            << " logical_agents_per_batch=" << logical_agents_per_batch
+            << " agents_per_forward=" << agents_per_forward
+            << " pcgrad=" << (config_.ppo.pcgrad ? 1 : 0)
+            << '\n'
+            << std::flush;
   std::int64_t metric_steps = 0;
   double accumulated_goal_critic_loss = 0.0;
   double accumulated_goal_score = 0.0;
@@ -540,7 +547,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       rollout.final_values().count("extrinsic") ? rollout.final_values().at("extrinsic") : torch::Tensor{});
     normalized_advantages = normalize_advantage(sparse_advantages, active_mask);
   }
+  std::cout << "update_actor_gae_done\n" << std::flush;
   torch::Tensor sparse_returns = sparse_advantages + extrinsic_values.detach();
+  bool logged_first_microbatch = false;
 
   for (int epoch = 0; epoch < config_.ppo.update_epochs; ++epoch) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "update_epoch");
@@ -580,6 +589,16 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         const torch::Tensor micro_agent_indices = agent_indices.narrow(0, micro_agent_offset, micro_count);
 
       for (int seq_start = 0; seq_start < rollout.rollout_length(); seq_start += seq_len) {
+        const bool log_microbatch = !logged_first_microbatch;
+        if (log_microbatch) {
+          std::cout << "update_microbatch_start epoch=" << epoch
+                    << " agent_offset=" << agent_offset
+                    << " micro_agent_offset=" << micro_agent_offset
+                    << " micro_count=" << micro_count
+                    << " seq_start=" << seq_start
+                    << '\n'
+                    << std::flush;
+        }
         const int chunk_start = seq_start;
         const int chunk_end = std::min(rollout.rollout_length(), chunk_start + seq_len);
         const int chunk_steps = chunk_end - chunk_start;
@@ -596,6 +615,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           PULSAR_TRACE_SCOPE_CAT("trainer", "update_forward_sequence");
           const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_critic.goal_dim);
           output = actor_->forward_sequence(obs, goal_values);
+        }
+        if (log_microbatch) {
+          std::cout << "update_microbatch_forward_done\n" << std::flush;
         }
 
         if (loss_steps <= 0) {
@@ -730,6 +752,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           accumulated_goal_critic_loss += goal_loss.item<double>() * static_cast<double>(active_logits.size(0));
           accumulated_goal_score += chunk_goal_score * static_cast<double>(active_logits.size(0));
         }
+        if (log_microbatch) {
+          std::cout << "update_microbatch_goal_done active_samples=" << active_logits.size(0) << '\n' << std::flush;
+        }
 
         const auto active_samples = static_cast<double>(active_logits.size(0));
         const auto sample_weight = active_samples / total_active_samples_agent;
@@ -746,7 +771,13 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           }
 
           actor_->zero_grad();
+          if (log_microbatch) {
+            std::cout << "pcgrad_loss_a_backward_start\n" << std::flush;
+          }
           loss_a.backward({}, true);
+          if (log_microbatch) {
+            std::cout << "pcgrad_loss_a_backward_done\n" << std::flush;
+          }
           auto grads_a = capture_gradients(*actor_);
 
           torch::Tensor loss_b = (config_.goal_critic.lambda_Zg * goal_loss
@@ -782,11 +813,23 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           }
 
           actor_->zero_grad();
+          if (log_microbatch) {
+            std::cout << "pcgrad_loss_b_backward_start\n" << std::flush;
+          }
           loss_b.backward();
+          if (log_microbatch) {
+            std::cout << "pcgrad_loss_b_backward_done\n" << std::flush;
+          }
           auto grads_b = capture_gradients(*actor_);
           actor_->zero_grad();
 
+          if (log_microbatch) {
+            std::cout << "pcgrad_project_start\n" << std::flush;
+          }
           apply_pcgrad(grads_a, grads_b);
+          if (log_microbatch) {
+            std::cout << "pcgrad_project_done\n" << std::flush;
+          }
 
           for (size_t i = 0; i < grads_a.size(); ++i) {
             torch::Tensor combined = grads_a[i].grad + grads_b[i].grad;
@@ -837,6 +880,10 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           }
 
           combined_loss.backward();
+        }
+        if (log_microbatch) {
+          std::cout << "update_microbatch_backward_done\n" << std::flush;
+          logged_first_microbatch = true;
         }
 
         metrics.policy_loss += policy_loss.item<double>() * static_cast<double>(active_samples);
