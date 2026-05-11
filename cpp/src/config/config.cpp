@@ -90,26 +90,28 @@ void to_json(json& j, const MechanicRewardConfig& value) {
       {"pogo", value.pogo},
       {"pinch", value.pinch},
       {"team_pinch", value.team_pinch},
+      {"mechanic_reward_cap_per_episode", value.mechanic_reward_cap_per_episode},
   };
 }
 
 void from_json(const json& j, MechanicRewardConfig& value) {
-  value.kickoff_first_touch = j.value("kickoff_first_touch", 0.05F);
-  value.speed_flip = j.value("speed_flip", 0.05F);
-  value.wavedash = j.value("wavedash", 0.04F);
-  value.chain_dash_bonus = j.value("chain_dash_bonus", 0.02F);
-  value.half_flip = j.value("half_flip", 0.03F);
-  value.wall_dash = j.value("wall_dash", 0.05F);
-  value.air_dribble_base = j.value("air_dribble_base", 0.05F);
-  value.air_dribble_scale = j.value("air_dribble_scale", 0.025F);
-  value.flip_reset = j.value("flip_reset", 0.10F);
-  value.ceiling_shot = j.value("ceiling_shot", 0.08F);
-  value.double_tap = j.value("double_tap", 0.10F);
-  value.preflip = j.value("preflip", 0.06F);
-  value.redirect = j.value("redirect", 0.08F);
-  value.pogo = j.value("pogo", 0.05F);
-  value.pinch = j.value("pinch", 0.08F);
-  value.team_pinch = j.value("team_pinch", 0.12F);
+  value.kickoff_first_touch = j.value("kickoff_first_touch", 0.0F);
+  value.speed_flip = j.value("speed_flip", 0.0F);
+  value.wavedash = j.value("wavedash", 0.0F);
+  value.chain_dash_bonus = j.value("chain_dash_bonus", 0.0F);
+  value.half_flip = j.value("half_flip", 0.0F);
+  value.wall_dash = j.value("wall_dash", 0.0F);
+  value.air_dribble_base = j.value("air_dribble_base", 0.0F);
+  value.air_dribble_scale = j.value("air_dribble_scale", 0.0F);
+  value.flip_reset = j.value("flip_reset", 0.0F);
+  value.ceiling_shot = j.value("ceiling_shot", 0.0F);
+  value.double_tap = j.value("double_tap", 0.0F);
+  value.preflip = j.value("preflip", 0.0F);
+  value.redirect = j.value("redirect", 0.0F);
+  value.pogo = j.value("pogo", 0.0F);
+  value.pinch = j.value("pinch", 0.0F);
+  value.team_pinch = j.value("team_pinch", 0.0F);
+  value.mechanic_reward_cap_per_episode = j.value("mechanic_reward_cap_per_episode", 0.10F);
 }
 
 void to_json(json& j, const ActionTableConfig& value) {

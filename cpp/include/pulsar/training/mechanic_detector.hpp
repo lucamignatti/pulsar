@@ -23,6 +23,8 @@ struct AgentMechanicState {
   bool was_on_ceiling = false;
   bool ball_hit_backboard = false;
   int last_toucher_id = -1;
+
+  float episode_mechanic_reward = 0.0F;
 };
 
 struct EnvMechanicState {

@@ -41,6 +41,17 @@ float MechanicDetector::update(
   reward += detect_team_pinch(car, env, s, env_team_size);
   reward += detect_kickoff_first_touch(car, env, env_s);
 
+  const float cap = cfg_.mechanic_reward_cap_per_episode;
+  if (cap > 0.0F) {
+    const float remaining = cap - s.episode_mechanic_reward;
+    if (remaining <= 0.0F) {
+      reward = 0.0F;
+    } else if (reward > remaining) {
+      reward = remaining;
+    }
+  }
+  s.episode_mechanic_reward += reward;
+
   s.prev_on_ground = car.on_ground;
   s.prev_has_flip = car.has_flip;
   s.prev_has_flipped = car.has_flipped;

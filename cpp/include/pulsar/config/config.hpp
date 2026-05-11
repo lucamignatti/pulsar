@@ -18,22 +18,23 @@ struct OutcomeConfig {
 };
 
 struct MechanicRewardConfig {
-  float kickoff_first_touch = 0.05F;
-  float speed_flip = 0.05F;
-  float wavedash = 0.04F;
-  float chain_dash_bonus = 0.02F;
-  float half_flip = 0.03F;
-  float wall_dash = 0.05F;
-  float air_dribble_base = 0.05F;
-  float air_dribble_scale = 0.025F;
-  float flip_reset = 0.10F;
-  float ceiling_shot = 0.08F;
-  float double_tap = 0.10F;
-  float preflip = 0.06F;
-  float redirect = 0.08F;
-  float pogo = 0.05F;
-  float pinch = 0.08F;
-  float team_pinch = 0.12F;
+  float kickoff_first_touch = 0.0F;
+  float speed_flip = 0.0F;
+  float wavedash = 0.0F;
+  float chain_dash_bonus = 0.0F;
+  float half_flip = 0.0F;
+  float wall_dash = 0.0F;
+  float air_dribble_base = 0.0F;
+  float air_dribble_scale = 0.0F;
+  float flip_reset = 0.0F;
+  float ceiling_shot = 0.0F;
+  float double_tap = 0.0F;
+  float preflip = 0.0F;
+  float redirect = 0.0F;
+  float pogo = 0.0F;
+  float pinch = 0.0F;
+  float team_pinch = 0.0F;
+  float mechanic_reward_cap_per_episode = 0.10F;
 };
 
 struct ActionTableConfig {

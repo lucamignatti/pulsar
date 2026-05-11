@@ -14,10 +14,10 @@
     "seed": 7
   },
   "outcome": {
-    "score": 0.0,
-    "concede": 0.0,
-    "neutral": 1.0,
-    "neutral_no_touch": -1.0
+    "score": 1.0,
+    "concede": -0.8,
+    "neutral": 0.0,
+    "neutral_no_touch": 0.0
   },
   "mechanic_rewards": {
     "kickoff_first_touch": 0.0,
@@ -71,7 +71,7 @@
     "value_coef": 0.5,
     "gamma": 0.997,
     "gae_lambda": 0.95,
-    "learning_rate": 0.0002,
+    "learning_rate": 0.0001,
     "max_grad_norm": 0.5,
     "device": "cuda",
     "checkpoint_interval": 100,
@@ -145,7 +145,7 @@
     "enabled": true,
     "project": "pulsar",
     "entity": "",
-    "run_name": "stage0-touch-bootstrap",
+    "run_name": "stage1-score-only",
     "group": "curriculum",
     "job_type": "train",
     "dir": "",
@@ -153,6 +153,6 @@
     "python_executable": "python3",
     "script_path": "scripts/wandb_stream.py",
     "log_interval_seconds": 30.0,
-    "tags": ["curriculum", "stage0", "touch-bootstrap", "2v2"]
+    "tags": ["curriculum", "stage1", "score-only", "2v2"]
   }
 }
