@@ -409,103 +409,6 @@ APPOTrainer::~APPOTrainer() {
   synchronize_cuda_if_needed(device_, "trainer shutdown");
 }
 
-void APPOTrainer::apply_curriculum_stage() {
-  const auto& stages = config_.curriculum.stages;
-  if (stages.empty()) return;
-  std::cerr << "apply_stage_enter stages=" << stages.size() << '\n';
-
-  if (curriculum_stage_ < 0) {
-    curriculum_stage_ = 0;
-  }
-  const int idx = std::min(curriculum_stage_, static_cast<int>(stages.size()) - 1);
-  const auto& stage = stages[static_cast<std::size_t>(idx)];
-  std::cerr << "apply_stage idx=" << idx << " name=" << stage.name << '\n';
-
-  config_.outcome = stage.outcome_override;
-  std::cerr << "apply_stage outcome_set score=" << config_.outcome.score << '\n';
-  config_.mechanic_rewards = stage.mechanic_rewards_override;
-  std::cerr << "apply_stage mech_set\n";
-  config_.ppo.learning_rate = stage.learning_rate;
-  std::cerr << "apply_stage lr_set\n";
-
-  for (auto& opt_group : actor_optimizer_.param_groups()) {
-    opt_group.options().set_lr(stage.learning_rate);
-  }
-  std::cerr << "apply_stage opt_set\n";
-
-  for (auto& collector : collectors_) {
-    if (collector) {
-      std::cerr << "apply_stage updating_collector\n";
-      collector->update_mechanic_rewards(config_.mechanic_rewards);
-    }
-  }
-  std::cerr << "apply_stage collectors_done\n";
-
-  curriculum_promotion_counter_ = 0;
-  curriculum_agent_steps_ = 0;
-
-  std::cerr << "curriculum_stage=" << idx
-            << " name=" << stage.name
-            << " lr=" << stage.learning_rate << '\n';
-}
-
-bool APPOTrainer::check_curriculum_promotion(
-    const TrainerMetrics& metrics, std::int64_t agent_steps) {
-  const auto& stages = config_.curriculum.stages;
-  if (stages.empty()) return false;
-
-  curriculum_agent_steps_ += agent_steps;
-
-  const int idx = std::min(curriculum_stage_, static_cast<int>(stages.size()) - 1);
-  if (idx < 0 || idx >= static_cast<int>(stages.size()) - 1) return false;
-
-  const auto& stage = stages[static_cast<std::size_t>(idx)];
-
-  if (curriculum_agent_steps_ < stage.min_agent_steps) return false;
-  if (stage.promotion_window_updates <= 0) return false;
-
-  curriculum_touch_rates_.push_back(metrics.touch_episode_rate);
-  curriculum_scored_rates_.push_back(metrics.scored_episode_rate);
-
-  const int window = stage.promotion_window_updates;
-  while (static_cast<int>(curriculum_touch_rates_.size()) > window) curriculum_touch_rates_.pop_front();
-  while (static_cast<int>(curriculum_scored_rates_.size()) > window) curriculum_scored_rates_.pop_front();
-
-  if (static_cast<int>(curriculum_touch_rates_.size()) < window) return false;
-
-  double avg_touch = 0.0;
-  for (double v : curriculum_touch_rates_) avg_touch += v;
-  avg_touch /= static_cast<double>(curriculum_touch_rates_.size());
-
-  double avg_scored = 0.0;
-  for (double v : curriculum_scored_rates_) avg_scored += v;
-  avg_scored /= static_cast<double>(curriculum_scored_rates_.size());
-
-  bool touch_ok = stage.required_touch_episode_rate <= 0.0F ||
-                  avg_touch >= static_cast<double>(stage.required_touch_episode_rate);
-  bool score_ok = stage.required_scored_episode_rate <= 0.0F ||
-                  avg_scored >= static_cast<double>(stage.required_scored_episode_rate);
-
-  if (!touch_ok || !score_ok) {
-    curriculum_promotion_counter_ = 0;
-    return false;
-  }
-
-  curriculum_promotion_counter_++;
-
-  if (curriculum_promotion_counter_ >= stage.promotion_window_updates) {
-    curriculum_stage_++;
-    curriculum_promotion_counter_ = 0;
-    curriculum_touch_rates_.clear();
-    curriculum_scored_rates_.clear();
-    apply_curriculum_stage();
-    std::cout << "curriculum_promoted stage=" << curriculum_stage_ << '\n';
-    return true;
-  }
-
-  return false;
-}
-
 torch::Tensor APPOTrainer::map_outcome_labels_to_rewards(const torch::Tensor& labels) const {
   torch::Tensor rewards = torch::zeros_like(labels, torch::TensorOptions().dtype(torch::kFloat32));
   rewards.masked_fill_(labels == 0, config_.outcome.score);
@@ -547,12 +450,6 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
 
   if (metadata.extra.contains("wandb_run_id")) {
     config_.wandb.run_id = metadata.extra["wandb_run_id"].get<std::string>();
-  }
-  if (metadata.extra.contains("curriculum_stage")) {
-    curriculum_stage_ = metadata.extra["curriculum_stage"].get<int>();
-  }
-  if (metadata.extra.contains("curriculum_agent_steps")) {
-    curriculum_agent_steps_ = metadata.extra["curriculum_agent_steps"].get<std::int64_t>();
   }
   if (self_play_manager_ && self_play_manager_->enabled()) {
     if (metadata.extra.contains("self_play_rng_state")) {
@@ -1072,11 +969,6 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
         }
     }
   }
-
-  if (config_.curriculum.enabled && !config_.curriculum.stages.empty()) {
-    std::cerr << "constructor calling apply_curriculum_stage stages=" << config_.curriculum.stages.size() << '\n';
-    apply_curriculum_stage();
-  }
 }
 
   torch::Tensor kl_mean = (kl_sum / kl_count.clamp_min(1.0F)).to(torch::kCPU);
@@ -1227,7 +1119,6 @@ void APPOTrainer::collect_rollout(
     std::int64_t* collected_agent_steps,
     PPOActor rollout_actor) {
   PULSAR_TRACE_SCOPE_CAT("trainer", "collect_rollout");
-  std::cerr << "collect_rollout_start" << std::endl;
   if (!rollout_actor) {
     throw std::invalid_argument("APPOTrainer::collect_rollout requires a policy snapshot.");
   }
@@ -1795,8 +1686,6 @@ CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
       extra["self_play_rng_state"] = rng;
     }
   }
-  extra["curriculum_stage"] = curriculum_stage_;
-  extra["curriculum_agent_steps"] = curriculum_agent_steps_;
   return CheckpointMetadata{
       .schema_version = config_.schema_version,
       .obs_schema_version = config_.obs_schema_version,
@@ -1887,8 +1776,6 @@ void APPOTrainer::prune_old_checkpoints(const std::filesystem::path& checkpoint_
 }
 
 void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const std::string& config_path) {
-  std::cerr << "train_start curriculum_enabled=" << config_.curriculum.enabled
-            << " stages=" << config_.curriculum.stages.size() << std::endl;
   WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "dappo_train");
   std::int64_t global_step = resumed_global_step_;
   const bool train_forever = updates <= 0;
@@ -1936,9 +1823,6 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       if (static_cast<int>(recent_scored_rates_.size()) > kRecentScoredRateWindow) {
         recent_scored_rates_.pop_front();
       }
-    }
-    if (config_.curriculum.enabled) {
-      check_curriculum_promotion(metrics, next_coll_steps);
     }
     metrics.policy_loss = train_metrics.policy_loss;
     metrics.value_loss = train_metrics.value_loss;

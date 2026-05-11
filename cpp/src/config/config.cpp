@@ -114,42 +114,6 @@ void from_json(const json& j, MechanicRewardConfig& value) {
   value.mechanic_reward_cap_per_episode = j.value("mechanic_reward_cap_per_episode", 0.10F);
 }
 
-void to_json(json& j, const CurriculumStageConfig& value) {
-  j = json{
-      {"name", value.name},
-      {"outcome_override", value.outcome_override},
-      {"mechanic_rewards_override", value.mechanic_rewards_override},
-      {"learning_rate", value.learning_rate},
-      {"min_agent_steps", value.min_agent_steps},
-      {"promotion_window_updates", value.promotion_window_updates},
-      {"required_touch_episode_rate", value.required_touch_episode_rate},
-      {"required_scored_episode_rate", value.required_scored_episode_rate},
-  };
-}
-
-void from_json(const json& j, CurriculumStageConfig& value) {
-  value.name = j.value("name", std::string{});
-  value.outcome_override = j.value("outcome_override", OutcomeConfig{});
-  value.mechanic_rewards_override = j.value("mechanic_rewards_override", MechanicRewardConfig{});
-  value.learning_rate = j.value("learning_rate", 0.0001F);
-  value.min_agent_steps = j.value("min_agent_steps", 20'000'000LL);
-  value.promotion_window_updates = j.value("promotion_window_updates", 5);
-  value.required_touch_episode_rate = j.value("required_touch_episode_rate", 0.0F);
-  value.required_scored_episode_rate = j.value("required_scored_episode_rate", 0.0F);
-}
-
-void to_json(json& j, const CurriculumConfig& value) {
-  j = json{
-      {"enabled", value.enabled},
-      {"stages", value.stages},
-  };
-}
-
-void from_json(const json& j, CurriculumConfig& value) {
-  value.enabled = j.value("enabled", false);
-  value.stages = j.value("stages", std::vector<CurriculumStageConfig>{});
-}
-
 void to_json(json& j, const ActionTableConfig& value) {
   j = json{{"builtin", value.builtin}, {"actions", value.actions}};
 }
@@ -455,7 +419,6 @@ void to_json(json& j, const ExperimentConfig& value) {
       {"env", value.env},
       {"outcome", value.outcome},
       {"mechanic_rewards", value.mechanic_rewards},
-      {"curriculum", value.curriculum},
       {"action_table", value.action_table},
       {"model", value.model},
       {"ppo", value.ppo},
@@ -491,7 +454,6 @@ void from_json(const json& j, ExperimentConfig& value) {
   value.env = j.value("env", EnvConfig{});
   value.outcome = j.value("outcome", OutcomeConfig{});
   value.mechanic_rewards = j.value("mechanic_rewards", MechanicRewardConfig{});
-  value.curriculum = j.value("curriculum", CurriculumConfig{});
   value.action_table = j.value("action_table", ActionTableConfig{});
   value.model = j.value("model", ModelConfig{});
   value.ppo = j.value("ppo", PPOConfig{});

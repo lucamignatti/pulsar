@@ -5,11 +5,7 @@
 
 namespace pulsar {
 
-MechanicDetector::MechanicDetector(const MechanicRewardConfig& cfg) : cfg_(&cfg) {}
-
-void MechanicDetector::update_config(const MechanicRewardConfig& cfg) {
-  cfg_ = &cfg;
-}
+MechanicDetector::MechanicDetector(const MechanicRewardConfig& cfg) : cfg_(cfg) {}
 
 float MechanicDetector::vec3_dot(const Vec3& a, const Vec3& b) {
   return a.x * b.x + a.y * b.y + a.z * b.z;
@@ -26,9 +22,6 @@ float MechanicDetector::update(
     int env_team_size,
     AgentMechanicState& s,
     EnvMechanicState& env_s) const {
-  // Guard against uninitialized config pointer
-  if (cfg_ == nullptr) return 0.0F;
-
   float reward = 0.0F;
   const int prev_wavedash_tick = s.last_wavedash_tick;
 
@@ -48,7 +41,7 @@ float MechanicDetector::update(
   reward += detect_team_pinch(car, env, s, env_team_size);
   reward += detect_kickoff_first_touch(car, env, env_s);
 
-  const float cap = cfg_->mechanic_reward_cap_per_episode;
+  const float cap = cfg_.mechanic_reward_cap_per_episode;
   if (cap > 0.0F) {
     const float remaining = cap - s.episode_mechanic_reward;
     if (remaining <= 0.0F) {
@@ -71,20 +64,20 @@ float MechanicDetector::update(
 }
 
 float MechanicDetector::detect_speed_flip(const CarState& car, AgentMechanicState& s) const {
-  if (cfg_->speed_flip <= 0.0F) return 0.0F;
+  if (cfg_.speed_flip <= 0.0F) return 0.0F;
   if (car.on_ground && !s.prev_is_flipping && car.is_flipping && car.is_boosting) {
-    return cfg_->speed_flip;
+    return cfg_.speed_flip;
   }
   return 0.0F;
 }
 
 float MechanicDetector::detect_wavedash(int tick, const CarState& car, AgentMechanicState& s) const {
-  if (cfg_->wavedash <= 0.0F) return 0.0F;
+  if (cfg_.wavedash <= 0.0F) return 0.0F;
   if (!car.on_ground && !s.prev_is_flipping && car.is_flipping) {
     const float z_above_ground = car.position.z - kGroundZ;
     if (z_above_ground < kWavedashZThreshold) {
       s.last_wavedash_tick = tick;
-      return cfg_->wavedash;
+      return cfg_.wavedash;
     }
   }
   return 0.0F;
@@ -92,16 +85,16 @@ float MechanicDetector::detect_wavedash(int tick, const CarState& car, AgentMech
 
 float MechanicDetector::detect_chain_dash(int tick, int prev_dash_tick, AgentMechanicState& s) const {
   (void)s;
-  if (cfg_->chain_dash_bonus <= 0.0F) return 0.0F;
+  if (cfg_.chain_dash_bonus <= 0.0F) return 0.0F;
   if (prev_dash_tick >= 0 && (tick - prev_dash_tick) <= kChainDashWindowTicks &&
       (tick - prev_dash_tick) > 0) {
-    return cfg_->chain_dash_bonus;
+    return cfg_.chain_dash_bonus;
   }
   return 0.0F;
 }
 
 float MechanicDetector::detect_half_flip(const CarState& car, AgentMechanicState& s) const {
-  if (cfg_->half_flip <= 0.0F) return 0.0F;
+  if (cfg_.half_flip <= 0.0F) return 0.0F;
   if (!car.on_ground && !s.prev_is_flipping && car.is_flipping && !car.has_double_jumped) {
     const float vel_mag = vec3_magnitude(car.velocity);
     if (vel_mag < 10.0F) return 0.0F;
@@ -112,14 +105,14 @@ float MechanicDetector::detect_half_flip(const CarState& car, AgentMechanicState
     };
     const float fwd_dot_vel = vec3_dot(car.forward, vel_norm);
     if (fwd_dot_vel < -0.3F && car.handbrake > 0.5F) {
-      return cfg_->half_flip;
+      return cfg_.half_flip;
     }
   }
   return 0.0F;
 }
 
 float MechanicDetector::detect_wall_dash(int tick, const CarState& car, AgentMechanicState& s) const {
-  if (cfg_->wall_dash <= 0.0F) return 0.0F;
+  if (cfg_.wall_dash <= 0.0F) return 0.0F;
   if (!car.on_ground && !s.prev_is_flipping && car.is_flipping) {
     const float z_above_ground = car.position.z - kGroundZ;
     if (z_above_ground < kWavedashZThreshold) {
@@ -128,7 +121,7 @@ float MechanicDetector::detect_wall_dash(int tick, const CarState& car, AgentMec
           std::abs(car.position.y) > (kArenaExtentY - kWallDashDist);
       if (near_wall) {
         s.last_wavedash_tick = tick;
-        return cfg_->wall_dash;
+        return cfg_.wall_dash;
       }
     }
   }
@@ -136,7 +129,7 @@ float MechanicDetector::detect_wall_dash(int tick, const CarState& car, AgentMec
 }
 
 float MechanicDetector::detect_air_dribble(const CarState& car, AgentMechanicState& s) const {
-  if (cfg_->air_dribble_base <= 0.0F) return 0.0F;
+  if (cfg_.air_dribble_base <= 0.0F) return 0.0F;
 
   if (car.on_ground) {
     s.consecutive_air_touches = 0;
@@ -149,22 +142,22 @@ float MechanicDetector::detect_air_dribble(const CarState& car, AgentMechanicSta
     }
     const int touches = s.consecutive_air_touches;
     const float scale = std::max(0.0F, static_cast<float>(touches - 1));
-    return cfg_->air_dribble_base + cfg_->air_dribble_scale * scale;
+    return cfg_.air_dribble_base + cfg_.air_dribble_scale * scale;
   }
 
   return 0.0F;
 }
 
 float MechanicDetector::detect_flip_reset(const CarState& car, AgentMechanicState& s) const {
-  if (cfg_->flip_reset <= 0.0F) return 0.0F;
+  if (cfg_.flip_reset <= 0.0F) return 0.0F;
   if (!s.prev_has_flip_reset && car.has_flip_reset) {
-    return cfg_->flip_reset;
+    return cfg_.flip_reset;
   }
   return 0.0F;
 }
 
 float MechanicDetector::detect_ceiling_shot(const CarState& car, AgentMechanicState& s) const {
-  if (cfg_->ceiling_shot <= 0.0F) return 0.0F;
+  if (cfg_.ceiling_shot <= 0.0F) return 0.0F;
 
   if (!car.on_ground && car.position.z > kCeilingThreshold) {
     s.was_on_ceiling = true;
@@ -173,7 +166,7 @@ float MechanicDetector::detect_ceiling_shot(const CarState& car, AgentMechanicSt
   if (s.was_on_ceiling && car.position.z < kCeilingThreshold - 100.0F) {
     if (car.ball_touched && !car.on_ground) {
       s.was_on_ceiling = false;
-      return cfg_->ceiling_shot;
+      return cfg_.ceiling_shot;
     }
   }
 
@@ -186,7 +179,7 @@ float MechanicDetector::detect_ceiling_shot(const CarState& car, AgentMechanicSt
 
 float MechanicDetector::detect_double_tap(int tick, const CarState& car, const EnvState& env,
                                           AgentMechanicState& s) const {
-  if (cfg_->double_tap <= 0.0F) return 0.0F;
+  if (cfg_.double_tap <= 0.0F) return 0.0F;
 
   if (car.ball_touched) {
     s.last_ball_touch_tick = tick;
@@ -202,14 +195,14 @@ float MechanicDetector::detect_double_tap(int tick, const CarState& car, const E
       (tick - s.last_ball_touch_tick) > 0) {
     s.ball_hit_backboard = false;
     s.last_ball_touch_tick = tick;
-    return cfg_->double_tap;
+    return cfg_.double_tap;
   }
 
   return 0.0F;
 }
 
 float MechanicDetector::detect_preflip(const CarState& car, AgentMechanicState& s) const {
-  if (cfg_->preflip <= 0.0F) return 0.0F;
+  if (cfg_.preflip <= 0.0F) return 0.0F;
 
   if (!s.prev_is_flipping && car.is_flipping) {
     s.flip_start_tick = 1;
@@ -218,7 +211,7 @@ float MechanicDetector::detect_preflip(const CarState& car, AgentMechanicState& 
   if (car.is_flipping && car.ball_touched && !s.prev_ball_touched) {
     if (s.flip_start_tick > 0) {
       s.flip_start_tick = -1;
-      return cfg_->preflip;
+      return cfg_.preflip;
     }
   }
 
@@ -231,7 +224,7 @@ float MechanicDetector::detect_preflip(const CarState& car, AgentMechanicState& 
 
 float MechanicDetector::detect_redirect(const CarState& car, const EnvState& env,
                                         AgentMechanicState& s, Team team) const {
-  if (cfg_->redirect <= 0.0F) return 0.0F;
+  if (cfg_.redirect <= 0.0F) return 0.0F;
   if (!car.ball_touched) return 0.0F;
 
   const Vec3 prev_vel = s.prev_ball_velocity;
@@ -246,20 +239,20 @@ float MechanicDetector::detect_redirect(const CarState& car, const EnvState& env
   const float post_y = post_vel.y / post_mag;
 
   if (prev_y * goal_dir < 0.2F && post_y * goal_dir > 0.5F) {
-    return cfg_->redirect;
+    return cfg_.redirect;
   }
 
   return 0.0F;
 }
 
 float MechanicDetector::detect_pogo(const CarState& car, AgentMechanicState& s) const {
-  if (cfg_->pogo <= 0.0F) return 0.0F;
+  if (cfg_.pogo <= 0.0F) return 0.0F;
 
   if (!s.prev_on_ground && car.on_ground) {
     if (!car.is_jumping && !car.has_jumped) {
       const float vz = car.velocity.z;
       if (vz > 200.0F) {
-        return cfg_->pogo;
+        return cfg_.pogo;
       }
     }
   }
@@ -268,14 +261,14 @@ float MechanicDetector::detect_pogo(const CarState& car, AgentMechanicState& s) 
 }
 
 float MechanicDetector::detect_pinch(const EnvState& env, AgentMechanicState& s) const {
-  if (cfg_->pinch <= 0.0F) return 0.0F;
+  if (cfg_.pinch <= 0.0F) return 0.0F;
 
   const float prev_mag = vec3_magnitude(s.prev_ball_velocity);
   const float post_mag = vec3_magnitude(env.ball.velocity);
   const float delta = post_mag - prev_mag;
 
   if (delta > kPinchVelocityDelta) {
-    return cfg_->pinch;
+    return cfg_.pinch;
   }
 
   return 0.0F;
@@ -283,7 +276,7 @@ float MechanicDetector::detect_pinch(const EnvState& env, AgentMechanicState& s)
 
 float MechanicDetector::detect_team_pinch(const CarState& car, const EnvState& env,
                                           AgentMechanicState& s, int env_team_size) const {
-  if (cfg_->team_pinch <= 0.0F) return 0.0F;
+  if (cfg_.team_pinch <= 0.0F) return 0.0F;
 
   const float prev_mag = vec3_magnitude(s.prev_ball_velocity);
   const float post_mag = vec3_magnitude(env.ball.velocity);
@@ -304,7 +297,7 @@ float MechanicDetector::detect_team_pinch(const CarState& car, const EnvState& e
   }
 
   if (teammate_near_ball >= 1) {
-    return cfg_->team_pinch;
+    return cfg_.team_pinch;
   }
 
   return 0.0F;
@@ -312,7 +305,7 @@ float MechanicDetector::detect_team_pinch(const CarState& car, const EnvState& e
 
 float MechanicDetector::detect_kickoff_first_touch(const CarState& car, const EnvState& env,
                                                    EnvMechanicState& env_s) const {
-  if (cfg_->kickoff_first_touch <= 0.0F) return 0.0F;
+  if (cfg_.kickoff_first_touch <= 0.0F) return 0.0F;
   if (!car.ball_touched) return 0.0F;
   if (env_s.kickoff_reward_given) return 0.0F;
 
@@ -335,11 +328,11 @@ float MechanicDetector::detect_kickoff_first_touch(const CarState& car, const En
   env_s.kickoff_reward_given = true;
 
   if (env_s.first_touch_team == 2) {
-    return cfg_->kickoff_first_touch;
+    return cfg_.kickoff_first_touch;
   } else if (env_s.first_touch_team == team_int) {
-    return cfg_->kickoff_first_touch;
+    return cfg_.kickoff_first_touch;
   } else {
-    return -cfg_->kickoff_first_touch;
+    return -cfg_.kickoff_first_touch;
   }
 }
 

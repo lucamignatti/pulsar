@@ -156,10 +156,6 @@ void BatchedRocketSimCollector::set_self_play_assignment_fn(AssignmentFn assignm
   rebuild_host_buffers(current_buffers_, nullptr);
 }
 
-void BatchedRocketSimCollector::update_mechanic_rewards(const MechanicRewardConfig& cfg) {
-  mechanic_detector_.update_config(cfg);
-}
-
 void BatchedRocketSimCollector::reset_all(CollectorTimings* timings) {
   PULSAR_TRACE_SCOPE_CAT("collector", "reset_all");
   const auto reset_start = std::chrono::steady_clock::now();
