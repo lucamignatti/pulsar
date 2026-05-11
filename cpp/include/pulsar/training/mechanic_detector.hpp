@@ -35,6 +35,7 @@ struct EnvMechanicState {
 class MechanicDetector {
  public:
   explicit MechanicDetector(const MechanicRewardConfig& cfg);
+  void update_config(const MechanicRewardConfig& cfg);
 
   float update(
       int global_tick,
@@ -45,7 +46,7 @@ class MechanicDetector {
       EnvMechanicState& env_state) const;
 
  private:
-  MechanicRewardConfig cfg_;
+  const MechanicRewardConfig* cfg_;
 
   static constexpr float kGroundZ = 17.0F;
   static constexpr float kCeilingZ = 2044.0F;
