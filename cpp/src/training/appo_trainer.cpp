@@ -125,8 +125,10 @@ void apply_pcgrad(std::vector<CapturedGrad>& group_a, std::vector<CapturedGrad>&
   if (dot < 0.0F) {
     float norm_a_sq = ga_all.dot(ga_all).item<float>() + 1.0e-12F;
     float norm_b_sq = gb_all.dot(gb_all).item<float>() + 1.0e-12F;
-    ga_all = ga_all - (dot / norm_b_sq) * gb_all;
-    gb_all = gb_all - (dot / norm_a_sq) * ga_all;
+    torch::Tensor ga_orig = ga_all.clone();
+    torch::Tensor gb_orig = gb_all.clone();
+    ga_all = ga_orig - (dot / norm_b_sq) * gb_orig;
+    gb_all = gb_orig - (dot / norm_a_sq) * ga_orig;
 
     size_t offset_a = 0, offset_b = 0;
     for (size_t i = 0; i < group_a.size(); ++i) {
@@ -676,7 +678,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   const torch::Tensor extrinsic_values = all_values.at("extrinsic").narrow(0, 0, rollout_steps);
   const torch::Tensor extrinsic_rewards = all_rewards.at("extrinsic").narrow(0, 0, rollout_steps);
   const torch::Tensor rollout_dones = rollout.dones.narrow(0, 0, rollout_steps);
-  const torch::Tensor rollout_truncated = rollout.truncated.narrow(0, 0, rollout_steps);
+  const torch::Tensor rollout_bootstrap_truncated = rollout.bootstrap_truncated.narrow(0, 0, rollout_steps);
 
   torch::Tensor active_mask = rollout.learner_active.narrow(0, 0, rollout_steps) > 0.5F;
   torch::Tensor sparse_advantages;
@@ -690,7 +692,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       config_.ppo.gamma,
       config_.ppo.gae_lambda,
       rollout.final_values().count("extrinsic") ? rollout.final_values().at("extrinsic") : torch::Tensor{},
-      rollout_truncated);
+      rollout_bootstrap_truncated);
     normalized_advantages = normalize_advantage(sparse_advantages, active_mask);
   }
   torch::Tensor sparse_returns = sparse_advantages + extrinsic_values.detach();
@@ -942,9 +944,18 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           apply_pcgrad(grads_a, grads_b);
 
           for (size_t i = 0; i < grads_a.size(); ++i) {
-            if (!grads_a[i].grad.defined()) continue;
-            torch::Tensor combined = grads_a[i].grad;
-            if (grads_b[i].grad.defined()) combined = combined + grads_b[i].grad;
+            torch::Tensor combined;
+            bool has_a = grads_a[i].grad.defined();
+            bool has_b = grads_b[i].grad.defined();
+            if (has_a && has_b) {
+              combined = grads_a[i].grad + grads_b[i].grad;
+            } else if (has_a) {
+              combined = grads_a[i].grad;
+            } else if (has_b) {
+              combined = grads_b[i].grad;
+            } else {
+              continue;
+            }
             if (saved_grads[i].defined()) {
               grads_a[i].param.mutable_grad() = saved_grads[i] + combined;
             } else {
@@ -1159,7 +1170,7 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
         const int half_pop = pop / 2;
         torch::Tensor A_half = torch::randn({half_pop, rank, in_features}, tensor_options);
         torch::Tensor B_half = torch::randn({half_pop, out_features, rank}, tensor_options);
-        A_stack = torch::cat({A_half, A_half}, 0);
+        A_stack = torch::cat({A_half, -A_half}, 0);
         B_stack = torch::cat({B_half, -B_half}, 0);
       } else {
     A_stack = torch::randn({pop, rank, in_features}, tensor_options);
@@ -1425,6 +1436,7 @@ void APPOTrainer::collect_rollout(
         auto& collector = *collectors_[shard_step.shard];
         torch::Tensor dones_host = collector.host_dones();
         torch::Tensor truncated_host = collector.host_truncated();
+        torch::Tensor bootstrap_truncated_host = collector.host_bootstrap_truncated();
         torch::Tensor terminal_labels = collector.host_terminal_outcome_labels();
         torch::Tensor mechanic_r_host = collector.host_mechanic_rewards();
         torch::Tensor extrinsic_rewards_host = map_outcome_labels_to_rewards(terminal_labels) * dones_host + mechanic_r_host;
@@ -1515,6 +1527,7 @@ void APPOTrainer::collect_rollout(
             all_rewards,
             dones_host,
             truncated_host,
+            bootstrap_truncated_host,
             goal_pos_host,
             terminal_labels);
 
@@ -1614,6 +1627,7 @@ void APPOTrainer::collect_rollout(
       PULSAR_TRACE_SCOPE_CAT("trainer", "collect_post_step");
       torch::Tensor dones_host = collector_->host_dones();
     torch::Tensor truncated_host = collector_->host_truncated();
+    torch::Tensor bootstrap_truncated_host = collector_->host_bootstrap_truncated();
     torch::Tensor terminal_labels = collector_->host_terminal_outcome_labels();
     torch::Tensor mechanic_r_host = collector_->host_mechanic_rewards();
     torch::Tensor extrinsic_rewards_host = map_outcome_labels_to_rewards(terminal_labels) * dones_host + mechanic_r_host;
@@ -1627,14 +1641,18 @@ void APPOTrainer::collect_rollout(
     const auto* la_ptr = learner_active_host.data_ptr<float>();
     torch::Tensor env_touch_host = collector_->host_env_touched();
     const auto* env_touch_ptr = env_touch_host.data_ptr<float>();
-    for (int64_t i = 0; i < terminal_labels.numel(); ++i) {
-      if (la_ptr[i] > 0.5F && dones_ptr[i] > 0.5F) {
-        if (tl_ptr[i] == 0) {
-          total_goals_scored++;
-        } else if (tl_ptr[i] == 1) {
-          total_goals_conceded++;
+    for (int64_t env_agent_begin = 0; env_agent_begin < terminal_labels.numel(); env_agent_begin += agents_per_env) {
+      const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + agents_per_env, terminal_labels.numel());
+      bool env_goal_scored = false;
+      bool env_goal_conceded = false;
+      for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
+        if (la_ptr[i] > 0.5F && dones_ptr[i] > 0.5F) {
+          if (tl_ptr[i] == 0) env_goal_scored = true;
+          if (tl_ptr[i] == 1) env_goal_conceded = true;
         }
       }
+      if (env_goal_scored) total_goals_scored++;
+      if (env_goal_conceded) total_goals_conceded++;
     }
     for (int64_t env_agent_begin = 0; env_agent_begin < dones_host.numel(); env_agent_begin += agents_per_env) {
       bool env_done = false;
@@ -1693,6 +1711,7 @@ void APPOTrainer::collect_rollout(
         all_rewards,
         dones_host,
         truncated_host,
+        bootstrap_truncated_host,
         goal_pos_host,
         terminal_labels);
 
@@ -1957,6 +1976,41 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
 
     TrainerMetrics train_metrics = update_actor(rollout_);
 
+    {
+      double scored = static_cast<double>(coll_metrics.scored_episodes);
+      double completed = static_cast<double>(std::max(coll_metrics.completed_episodes, static_cast<int64_t>(1)));
+      double scored_rate = scored / completed;
+      recent_scored_rates_.push_back(scored_rate);
+      coll_metrics.scored_episode_rate = scored_rate;
+      if (static_cast<int>(recent_scored_rates_.size()) > kRecentScoredRateWindow) {
+        recent_scored_rates_.pop_front();
+      }
+    }
+    if (config_.curriculum.enabled) {
+      check_curriculum_promotion(coll_metrics, coll_steps);
+    }
+
+    if (self_play_manager_) {
+      const SelfPlayMetrics self_play_metrics =
+          self_play_manager_->on_update(actor_, actor_normalizer_, global_step, update_index);
+      coll_metrics.self_play_eval_seconds = self_play_metrics.eval_seconds;
+      coll_metrics.elo_ratings = self_play_metrics.ratings;
+    }
+
+    if (update_index % config_.es_lora.es_interval == 0) {
+      run_es_lora_update(update_index, coll_metrics);
+    }
+
+    if (config_.ppo.plasticity && update_index % config_.ppo.plasticity_interval == 0) {
+      PULSAR_TRACE_SCOPE_CAT("trainer", "plasticity");
+      shrink_perturb_parameters(*actor_, config_.ppo.plasticity_shrink, config_.ppo.plasticity_noise);
+      actor_->to(device_);
+      for (auto& p : actor_->parameters()) {
+        if (!p.requires_grad() || p.dim() < 2) continue;
+        actor_optimizer_.state().erase(p.unsafeGetTensorImpl());
+      }
+    }
+
     synchronize_cuda_if_needed(device_, "snapshot clone");
     actor_snapshot_ = clone_ppo_actor(actor_, device_);
     actor_snapshot_->eval();
@@ -1967,76 +2021,45 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
 
     global_step += next_coll_steps;
 
-    TrainerMetrics metrics = has_next ? next_coll_metrics : coll_metrics;
-    {
-      double scored = static_cast<double>(metrics.scored_episodes);
-      double completed = static_cast<double>(std::max(metrics.completed_episodes, static_cast<int64_t>(1)));
-      double scored_rate = scored / completed;
-      recent_scored_rates_.push_back(scored_rate);
-      metrics.scored_episode_rate = scored_rate;
-      if (static_cast<int>(recent_scored_rates_.size()) > kRecentScoredRateWindow) {
-        recent_scored_rates_.pop_front();
-      }
-    }
-    if (config_.curriculum.enabled) {
-      check_curriculum_promotion(metrics, next_coll_steps);
-    }
-    metrics.policy_loss = train_metrics.policy_loss;
-    metrics.value_loss = train_metrics.value_loss;
-    metrics.entropy = train_metrics.entropy;
-    metrics.effective_entropy_coef = train_metrics.effective_entropy_coef;
-    metrics.effective_success_bc_coef = train_metrics.effective_success_bc_coef;
-    metrics.grad_norm = train_metrics.grad_norm;
-    metrics.update_seconds = train_metrics.update_seconds;
-    metrics.forward_backward_seconds = train_metrics.forward_backward_seconds;
-    metrics.optimizer_step_seconds = train_metrics.optimizer_step_seconds;
-    metrics.goal_critic_loss = train_metrics.goal_critic_loss;
-    metrics.mean_goal_score = train_metrics.mean_goal_score;
-    metrics.mean_sampled_goal_distance = train_metrics.mean_sampled_goal_distance;
-    metrics.update_agent_steps_per_second =
+    coll_metrics.policy_loss = train_metrics.policy_loss;
+    coll_metrics.value_loss = train_metrics.value_loss;
+    coll_metrics.entropy = train_metrics.entropy;
+    coll_metrics.effective_entropy_coef = train_metrics.effective_entropy_coef;
+    coll_metrics.effective_success_bc_coef = train_metrics.effective_success_bc_coef;
+    coll_metrics.grad_norm = train_metrics.grad_norm;
+    coll_metrics.update_seconds = train_metrics.update_seconds;
+    coll_metrics.forward_backward_seconds = train_metrics.forward_backward_seconds;
+    coll_metrics.optimizer_step_seconds = train_metrics.optimizer_step_seconds;
+    coll_metrics.goal_critic_loss = train_metrics.goal_critic_loss;
+    coll_metrics.mean_goal_score = train_metrics.mean_goal_score;
+    coll_metrics.mean_sampled_goal_distance = train_metrics.mean_sampled_goal_distance;
+    coll_metrics.update_agent_steps_per_second =
         next_coll_steps > 0 ? static_cast<double>(next_coll_steps) / std::max(train_metrics.update_seconds, 1.0e-9) : 0.0;
 
-    if (self_play_manager_) {
-      const SelfPlayMetrics self_play_metrics =
-          self_play_manager_->on_update(actor_, actor_normalizer_, global_step, update_index);
-      metrics.self_play_eval_seconds = self_play_metrics.eval_seconds;
-      metrics.elo_ratings = self_play_metrics.ratings;
-    }
-
-    if (update_index % config_.es_lora.es_interval == 0) {
-      run_es_lora_update(update_index, metrics);
-    }
-
-    if (config_.ppo.plasticity && update_index % config_.ppo.plasticity_interval == 0) {
-      PULSAR_TRACE_SCOPE_CAT("trainer", "plasticity");
-      shrink_perturb_parameters(*actor_, config_.ppo.plasticity_shrink, config_.ppo.plasticity_noise);
-      actor_->to(device_);
-    }
-
-    metrics.overall_agent_steps_per_second =
+    coll_metrics.overall_agent_steps_per_second =
         next_coll_steps > 0
             ? static_cast<double>(next_coll_steps) /
                   std::max(std::chrono::duration<double>(std::chrono::steady_clock::now() - iter_start).count(), 1.0e-9)
             : 0.0;
 
-    append_metrics_line(checkpoint_dir, update_index, global_step, metrics);
+    append_metrics_line(checkpoint_dir, update_index, global_step, coll_metrics);
     std::cout << "update=" << update_index
               << " global_step=" << global_step
-              << " policy_loss=" << metrics.policy_loss
-              << " value_loss=" << metrics.value_loss
-              << " entropy=" << metrics.entropy
-              << " grad_norm=" << metrics.grad_norm
-              << " sparse_reward=" << metrics.sparse_reward_mean
-              << " mechanic_reward=" << metrics.mechanic_reward_mean
-              << " rollout_steps=" << metrics.rollout_steps
-              << " completed_eps=" << metrics.completed_episodes
-              << " scored_eps=" << metrics.scored_episodes
-              << " touch_rate=" << metrics.touch_episode_rate
-              << " sampled_goal_dist=" << metrics.mean_sampled_goal_distance
-              << " mean_goal_dist=" << metrics.mean_goal_distance
-              << " ball_prox=" << metrics.ball_proximity_rate
-              << " goals=" << metrics.goals_scored << "/" << metrics.goals_conceded
-              << " es_fitness=" << metrics.es_fitness_mean
+              << " policy_loss=" << coll_metrics.policy_loss
+              << " value_loss=" << coll_metrics.value_loss
+              << " entropy=" << coll_metrics.entropy
+              << " grad_norm=" << coll_metrics.grad_norm
+              << " sparse_reward=" << coll_metrics.sparse_reward_mean
+              << " mechanic_reward=" << coll_metrics.mechanic_reward_mean
+              << " rollout_steps=" << coll_metrics.rollout_steps
+              << " completed_eps=" << coll_metrics.completed_episodes
+              << " scored_eps=" << coll_metrics.scored_episodes
+              << " touch_rate=" << coll_metrics.touch_episode_rate
+              << " sampled_goal_dist=" << coll_metrics.mean_sampled_goal_distance
+              << " mean_goal_dist=" << coll_metrics.mean_goal_distance
+              << " ball_prox=" << coll_metrics.ball_proximity_rate
+              << " goals=" << coll_metrics.goals_scored << "/" << coll_metrics.goals_conceded
+              << " es_fitness=" << coll_metrics.es_fitness_mean
               << " curriculum=" << curriculum_stage_
               << " cur_steps=" << curriculum_agent_steps_
               << " cur_promo=" << curriculum_promotion_counter_
@@ -2046,42 +2069,42 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"_step", global_step},
           {"update", update_index},
           {"global_step", global_step},
-          {"policy_loss", metrics.policy_loss},
-          {"value_loss", metrics.value_loss},
-          {"entropy", metrics.entropy},
-      {"sparse_reward_mean", metrics.sparse_reward_mean},
-      {"mechanic_reward_mean", metrics.mechanic_reward_mean},
-          {"sampled_value_win_mean", metrics.sampled_value_win_mean},
-          {"rollout_steps", metrics.rollout_steps},
-          {"completed_episodes", metrics.completed_episodes},
-      {"scored_episodes", metrics.scored_episodes},
-      {"touch_episode_rate", metrics.touch_episode_rate},
-          {"goal_critic_loss", metrics.goal_critic_loss},
-          {"mean_goal_score", metrics.mean_goal_score},
-          {"mean_sampled_goal_distance", metrics.mean_sampled_goal_distance},
-          {"mean_goal_distance", metrics.mean_goal_distance},
-          {"min_goal_distance", metrics.min_goal_distance},
-          {"ball_proximity_rate", metrics.ball_proximity_rate},
-          {"goals_scored", metrics.goals_scored},
-          {"goals_conceded", metrics.goals_conceded},
-      {"scored_episode_rate", metrics.scored_episode_rate},
-          {"effective_entropy_coef", metrics.effective_entropy_coef},
-          {"effective_success_bc_coef", metrics.effective_success_bc_coef},
+          {"policy_loss", coll_metrics.policy_loss},
+          {"value_loss", coll_metrics.value_loss},
+          {"entropy", coll_metrics.entropy},
+      {"sparse_reward_mean", coll_metrics.sparse_reward_mean},
+      {"mechanic_reward_mean", coll_metrics.mechanic_reward_mean},
+          {"sampled_value_win_mean", coll_metrics.sampled_value_win_mean},
+          {"rollout_steps", coll_metrics.rollout_steps},
+          {"completed_episodes", coll_metrics.completed_episodes},
+      {"scored_episodes", coll_metrics.scored_episodes},
+      {"touch_episode_rate", coll_metrics.touch_episode_rate},
+          {"goal_critic_loss", coll_metrics.goal_critic_loss},
+          {"mean_goal_score", coll_metrics.mean_goal_score},
+          {"mean_sampled_goal_distance", coll_metrics.mean_sampled_goal_distance},
+          {"mean_goal_distance", coll_metrics.mean_goal_distance},
+          {"min_goal_distance", coll_metrics.min_goal_distance},
+          {"ball_proximity_rate", coll_metrics.ball_proximity_rate},
+          {"goals_scored", coll_metrics.goals_scored},
+          {"goals_conceded", coll_metrics.goals_conceded},
+      {"scored_episode_rate", coll_metrics.scored_episode_rate},
+          {"effective_entropy_coef", coll_metrics.effective_entropy_coef},
+          {"effective_success_bc_coef", coll_metrics.effective_success_bc_coef},
           {"curriculum_stage", curriculum_stage_},
           {"curriculum_agent_steps", curriculum_agent_steps_},
           {"curriculum_promotion_counter", curriculum_promotion_counter_},
       };
       if (update_index % config_.es_lora.es_interval == 0) {
-        payload["es_fitness_mean"] = metrics.es_fitness_mean;
-        payload["es_fitness_std"] = metrics.es_fitness_std;
-        payload["es_fitness_best"] = metrics.es_fitness_best;
-        payload["es_winrate_mean"] = metrics.es_winrate_mean;
-        payload["es_kl_mean"] = metrics.es_kl_mean;
-        payload["es_update_norm"] = metrics.es_update_norm;
-        payload["es_lora_a_norm"] = metrics.es_lora_a_norm;
-        payload["es_lora_b_norm"] = metrics.es_lora_b_norm;
+        payload["es_fitness_mean"] = coll_metrics.es_fitness_mean;
+        payload["es_fitness_std"] = coll_metrics.es_fitness_std;
+        payload["es_fitness_best"] = coll_metrics.es_fitness_best;
+        payload["es_winrate_mean"] = coll_metrics.es_winrate_mean;
+        payload["es_kl_mean"] = coll_metrics.es_kl_mean;
+        payload["es_update_norm"] = coll_metrics.es_update_norm;
+        payload["es_lora_a_norm"] = coll_metrics.es_lora_a_norm;
+        payload["es_lora_b_norm"] = coll_metrics.es_lora_b_norm;
       }
-      for (const auto& [mode, rating] : metrics.elo_ratings) {
+      for (const auto& [mode, rating] : coll_metrics.elo_ratings) {
         payload["elo_" + mode] = rating;
       }
       wandb.log(payload);

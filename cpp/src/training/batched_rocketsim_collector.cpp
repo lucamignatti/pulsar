@@ -138,6 +138,7 @@ void BatchedRocketSimCollector::initialize(
   host_episode_ball_touch_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   host_mechanic_rewards_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   host_env_touched_ = torch::zeros({static_cast<long>(envs_.size())}, f32);
+  host_bootstrap_truncated_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   agent_mechanic_states_.resize(total_agents_);
   env_mechanic_states_.resize(envs_.size());
 
@@ -183,6 +184,7 @@ void BatchedRocketSimCollector::reset_all(CollectorTimings* timings) {
   host_episode_ball_touch_.zero_();
   host_mechanic_rewards_.zero_();
   host_env_touched_.zero_();
+  host_bootstrap_truncated_.zero_();
   agent_mechanic_states_.assign(total_agents_, AgentMechanicState{});
   env_mechanic_states_.assign(envs_.size(), EnvMechanicState{});
   current_buffers_.episode_starts.fill_(1.0F);
@@ -315,6 +317,8 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
   host_goal_positions_.zero_();
   host_ball_proximity_.zero_();
   host_mechanic_rewards_.zero_();
+  host_env_touched_.zero_();
+  host_bootstrap_truncated_.zero_();
 
   executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
     for (std::size_t env_idx = begin; env_idx < end; ++env_idx) {
@@ -360,6 +364,7 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         dones_ptr[global_idx] = done ? 1.0F : 0.0F;
         terminated_ptr[global_idx] = is_terminated ? 1.0F : 0.0F;
         truncated_ptr[global_idx] = is_truncated ? 1.0F : 0.0F;
+        host_bootstrap_truncated_.data_ptr<float>()[global_idx] = (is_truncated && !is_terminated) ? 1.0F : 0.0F;
         if (done) {
           if (goal_scored) {
             labels_ptr[global_idx] = car.team == scoring_team ? 0 : 1;
@@ -494,6 +499,10 @@ const torch::Tensor& BatchedRocketSimCollector::host_terminated() const {
 
 const torch::Tensor& BatchedRocketSimCollector::host_truncated() const {
   return host_truncated_;
+}
+
+const torch::Tensor& BatchedRocketSimCollector::host_bootstrap_truncated() const {
+  return host_bootstrap_truncated_;
 }
 
 const torch::Tensor& BatchedRocketSimCollector::host_terminal_outcome_labels() const {

@@ -55,6 +55,7 @@ class BatchedRocketSimCollector {
   void set_self_play_assignment_fn(AssignmentFn assignment_fn);
   void update_mechanic_rewards(const MechanicRewardConfig& cfg);
   void reset_all(CollectorTimings* timings = nullptr);
+  void reset_es_episode(int update_index, int episode_index, int eval_envs_per_member, CollectorTimings* timings = nullptr);
 
   [[nodiscard]] std::size_t num_envs() const;
   [[nodiscard]] std::size_t total_agents() const;
@@ -79,6 +80,7 @@ class BatchedRocketSimCollector {
   [[nodiscard]] const torch::Tensor& host_episode_ball_touch() const;
   [[nodiscard]] const torch::Tensor& host_mechanic_rewards() const;
   [[nodiscard]] const torch::Tensor& host_env_touched() const;
+  [[nodiscard]] const torch::Tensor& host_bootstrap_truncated() const;
 
  private:
   struct HostBuffers {
@@ -125,6 +127,7 @@ class BatchedRocketSimCollector {
   torch::Tensor host_episode_ball_touch_;
   torch::Tensor host_mechanic_rewards_;
   torch::Tensor host_env_touched_;
+  torch::Tensor host_bootstrap_truncated_;
   std::vector<AgentMechanicState> agent_mechanic_states_;
   std::vector<EnvMechanicState> env_mechanic_states_;
   MechanicDetector mechanic_detector_;
