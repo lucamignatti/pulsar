@@ -1820,13 +1820,6 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     TrainerMetrics next_coll_metrics{};
     std::int64_t next_coll_steps = 0;
     const bool has_next = train_forever || index + 1 < updates;
-    std::future<void> next_collection;
-    if (has_next) {
-      PPOActor collection_actor = actor_snapshot_;
-      next_collection = std::async(std::launch::async, [this, &next_coll_metrics, &next_coll_steps, collection_actor] {
-        collect_rollout(rollout_B_, next_coll_metrics, &next_coll_steps, collection_actor);
-      });
-    }
 
     std::cout << "update_actor_start update=" << update_index << '\n' << std::flush;
     TrainerMetrics train_metrics = update_actor(rollout_);
@@ -1840,8 +1833,8 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     actor_snapshot_->eval();
 
     if (has_next) {
-      std::cout << "next_rollout_wait update=" << update_index << '\n' << std::flush;
-      next_collection.get();
+      std::cout << "next_rollout_start update=" << update_index << '\n' << std::flush;
+      collect_rollout(rollout_B_, next_coll_metrics, &next_coll_steps, actor_snapshot_);
       std::cout << "next_rollout_done update=" << update_index
                 << " collected_agent_steps=" << next_coll_steps
                 << " completed_eps=" << next_coll_metrics.completed_episodes
