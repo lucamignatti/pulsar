@@ -15,9 +15,27 @@
   },
   "outcome": {
     "score": 1.0,
-    "concede": -1.0,
+    "concede": -0.8,
     "neutral": 0.0,
-    "neutral_no_touch": -1.0
+    "neutral_no_touch": 0.0
+  },
+  "mechanic_rewards": {
+    "kickoff_first_touch": 0.05,
+    "speed_flip": 0.05,
+    "wavedash": 0.04,
+    "chain_dash_bonus": 0.02,
+    "half_flip": 0.03,
+    "wall_dash": 0.05,
+    "air_dribble_base": 0.05,
+    "air_dribble_scale": 0.025,
+    "flip_reset": 0.10,
+    "ceiling_shot": 0.08,
+    "double_tap": 0.10,
+    "preflip": 0.06,
+    "redirect": 0.08,
+    "pogo": 0.05,
+    "pinch": 0.08,
+    "team_pinch": 0.12
   },
   "action_table": {
     "builtin": "rlgym_lookup_v1",

@@ -53,6 +53,7 @@ BatchedRocketSimCollector::BatchedRocketSimCollector(
       obs_builder_(std::move(obs_builder)),
       action_parser_(std::move(action_parser)),
       done_condition_(std::move(done_condition)),
+      mechanic_detector_(config_.mechanic_rewards),
       executor_(static_cast<std::size_t>(config_.ppo.collection_workers)) {
   initialize(make_default_engines(config_), pin_host_memory);
 }
@@ -68,6 +69,7 @@ BatchedRocketSimCollector::BatchedRocketSimCollector(
       obs_builder_(std::move(obs_builder)),
       action_parser_(std::move(action_parser)),
       done_condition_(std::move(done_condition)),
+      mechanic_detector_(config_.mechanic_rewards),
       executor_(static_cast<std::size_t>(config_.ppo.collection_workers)) {
   initialize(std::move(engines), pin_host_memory);
 }
@@ -134,6 +136,9 @@ void BatchedRocketSimCollector::initialize(
   host_goal_positions_ = torch::zeros({static_cast<long>(total_agents_), 3}, f32);
   host_ball_proximity_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   host_episode_ball_touch_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
+  host_mechanic_rewards_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
+  agent_mechanic_states_.resize(total_agents_);
+  env_mechanic_states_.resize(envs_.size());
 
   for (std::size_t env_idx = 0; env_idx < envs_.size(); ++env_idx) {
     assign_env(env_idx, envs_[env_idx].reset_seed);
@@ -171,6 +176,9 @@ void BatchedRocketSimCollector::reset_all(CollectorTimings* timings) {
   host_goal_positions_.zero_();
   host_ball_proximity_.zero_();
   host_episode_ball_touch_.zero_();
+  host_mechanic_rewards_.zero_();
+  agent_mechanic_states_.assign(total_agents_, AgentMechanicState{});
+  env_mechanic_states_.assign(envs_.size(), EnvMechanicState{});
   current_buffers_.episode_starts.fill_(1.0F);
   rebuild_host_buffers(current_buffers_, timings);
   if (timings != nullptr) {
@@ -300,6 +308,7 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
   host_terminal_observations_.zero_();
   host_goal_positions_.zero_();
   host_ball_proximity_.zero_();
+  host_mechanic_rewards_.zero_();
 
   executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
     for (std::size_t env_idx = begin; env_idx < end; ++env_idx) {
@@ -331,6 +340,13 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         float& accumulated = episode_touch_ptr[global_idx];
         accumulated = std::max(accumulated, step_touch);
         ball_touch_ptr[global_idx] = step_touch;
+
+        float mechanic_r = mechanic_detector_.update(
+            current_state.tick, car, current_state,
+            static_cast<int>(config_.env.team_size),
+            agent_mechanic_states_[global_idx],
+            env_mechanic_states_[env_idx]);
+        host_mechanic_rewards_.data_ptr<float>()[global_idx] = mechanic_r;
 
         const bool is_terminated = envs_[env_idx].terminated_scratch[idx] != 0;
         const bool is_truncated = envs_[env_idx].truncated_scratch[idx] != 0;
@@ -364,6 +380,7 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         envs_[env_idx].reset_seed += static_cast<std::uint64_t>(envs_.size());
         envs_[env_idx].engine->reset(envs_[env_idx].reset_seed);
         assign_env(env_idx, envs_[env_idx].reset_seed);
+        env_mechanic_states_[env_idx] = EnvMechanicState{};
         for (std::size_t idx = 0; idx < count; ++idx) {
           episode_touch_ptr[agent_begin + idx] = 0.0F;
         }
@@ -480,6 +497,10 @@ const torch::Tensor& BatchedRocketSimCollector::host_ball_proximity() const {
 
 const torch::Tensor& BatchedRocketSimCollector::host_episode_ball_touch() const {
   return host_episode_ball_touch_;
+}
+
+const torch::Tensor& BatchedRocketSimCollector::host_mechanic_rewards() const {
+  return host_mechanic_rewards_;
 }
 
 }  // namespace pulsar

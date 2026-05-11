@@ -220,6 +220,7 @@ void RocketSimTransitionEngine::sync_state_from_arena() {
       car.boost = car_state.boost;
       car.on_ground = car_state.isOnGround;
       car.has_flip = car_state.HasFlipOrJump();
+      car.has_flip_reset = car_state.HasFlipReset();
       car.ball_touched = false;
       car.is_holding_jump = car_state.lastControls.jump;
       car.has_jumped = car_state.hasJumped;

@@ -17,6 +17,7 @@
 #include "pulsar/env/obs_builder.hpp"
 #include "pulsar/env/rocketsim_engine.hpp"
 #include "pulsar/rl/interfaces.hpp"
+#include "pulsar/training/mechanic_detector.hpp"
 
 namespace pulsar {
 
@@ -75,6 +76,7 @@ class BatchedRocketSimCollector {
   [[nodiscard]] const torch::Tensor& host_goal_positions() const;
   [[nodiscard]] const torch::Tensor& host_ball_proximity() const;
   [[nodiscard]] const torch::Tensor& host_episode_ball_touch() const;
+  [[nodiscard]] const torch::Tensor& host_mechanic_rewards() const;
 
  private:
   struct HostBuffers {
@@ -119,6 +121,10 @@ class BatchedRocketSimCollector {
   torch::Tensor host_goal_positions_;
   torch::Tensor host_ball_proximity_;
   torch::Tensor host_episode_ball_touch_;
+  torch::Tensor host_mechanic_rewards_;
+  std::vector<AgentMechanicState> agent_mechanic_states_;
+  std::vector<EnvMechanicState> env_mechanic_states_;
+  MechanicDetector mechanic_detector_;
   std::size_t total_agents_ = 0;
   int obs_dim_ = 0;
   int action_dim_ = 0;

@@ -17,6 +17,25 @@ struct OutcomeConfig {
   float neutral_no_touch = -1.0F;
 };
 
+struct MechanicRewardConfig {
+  float kickoff_first_touch = 0.05F;
+  float speed_flip = 0.05F;
+  float wavedash = 0.04F;
+  float chain_dash_bonus = 0.02F;
+  float half_flip = 0.03F;
+  float wall_dash = 0.05F;
+  float air_dribble_base = 0.05F;
+  float air_dribble_scale = 0.025F;
+  float flip_reset = 0.10F;
+  float ceiling_shot = 0.08F;
+  float double_tap = 0.10F;
+  float preflip = 0.06F;
+  float redirect = 0.08F;
+  float pogo = 0.05F;
+  float pinch = 0.08F;
+  float team_pinch = 0.12F;
+};
+
 struct ActionTableConfig {
   std::string builtin = "rlgym_lookup_v1";
   std::vector<ControllerState> actions{};
@@ -161,6 +180,7 @@ struct ExperimentConfig {
   int obs_schema_version = 2;
   EnvConfig env{};
   OutcomeConfig outcome{};
+  MechanicRewardConfig mechanic_rewards{};
   ActionTableConfig action_table{};
   ModelConfig model{};
   PPOConfig ppo{};
@@ -189,6 +209,8 @@ void from_json(const nlohmann::json& j, ControllerState& value);
 
 void to_json(nlohmann::json& j, const OutcomeConfig& value);
 void from_json(const nlohmann::json& j, OutcomeConfig& value);
+void to_json(nlohmann::json& j, const MechanicRewardConfig& value);
+void from_json(const nlohmann::json& j, MechanicRewardConfig& value);
 void to_json(nlohmann::json& j, const ActionTableConfig& value);
 void from_json(const nlohmann::json& j, ActionTableConfig& value);
 void to_json(nlohmann::json& j, const EnvConfig& value);

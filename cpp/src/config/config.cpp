@@ -72,6 +72,46 @@ void from_json(const json& j, OutcomeConfig& value) {
   value.neutral_no_touch = j.value("neutral_no_touch", -1.0F);
 }
 
+void to_json(json& j, const MechanicRewardConfig& value) {
+  j = json{
+      {"kickoff_first_touch", value.kickoff_first_touch},
+      {"speed_flip", value.speed_flip},
+      {"wavedash", value.wavedash},
+      {"chain_dash_bonus", value.chain_dash_bonus},
+      {"half_flip", value.half_flip},
+      {"wall_dash", value.wall_dash},
+      {"air_dribble_base", value.air_dribble_base},
+      {"air_dribble_scale", value.air_dribble_scale},
+      {"flip_reset", value.flip_reset},
+      {"ceiling_shot", value.ceiling_shot},
+      {"double_tap", value.double_tap},
+      {"preflip", value.preflip},
+      {"redirect", value.redirect},
+      {"pogo", value.pogo},
+      {"pinch", value.pinch},
+      {"team_pinch", value.team_pinch},
+  };
+}
+
+void from_json(const json& j, MechanicRewardConfig& value) {
+  value.kickoff_first_touch = j.value("kickoff_first_touch", 0.05F);
+  value.speed_flip = j.value("speed_flip", 0.05F);
+  value.wavedash = j.value("wavedash", 0.04F);
+  value.chain_dash_bonus = j.value("chain_dash_bonus", 0.02F);
+  value.half_flip = j.value("half_flip", 0.03F);
+  value.wall_dash = j.value("wall_dash", 0.05F);
+  value.air_dribble_base = j.value("air_dribble_base", 0.05F);
+  value.air_dribble_scale = j.value("air_dribble_scale", 0.025F);
+  value.flip_reset = j.value("flip_reset", 0.10F);
+  value.ceiling_shot = j.value("ceiling_shot", 0.08F);
+  value.double_tap = j.value("double_tap", 0.10F);
+  value.preflip = j.value("preflip", 0.06F);
+  value.redirect = j.value("redirect", 0.08F);
+  value.pogo = j.value("pogo", 0.05F);
+  value.pinch = j.value("pinch", 0.08F);
+  value.team_pinch = j.value("team_pinch", 0.12F);
+}
+
 void to_json(json& j, const ActionTableConfig& value) {
   j = json{{"builtin", value.builtin}, {"actions", value.actions}};
 }
@@ -376,6 +416,7 @@ void to_json(json& j, const ExperimentConfig& value) {
       {"obs_schema_version", value.obs_schema_version},
       {"env", value.env},
       {"outcome", value.outcome},
+      {"mechanic_rewards", value.mechanic_rewards},
       {"action_table", value.action_table},
       {"model", value.model},
       {"ppo", value.ppo},
@@ -410,6 +451,7 @@ void from_json(const json& j, ExperimentConfig& value) {
   value.obs_schema_version = j.value("obs_schema_version", 2);
   value.env = j.value("env", EnvConfig{});
   value.outcome = j.value("outcome", OutcomeConfig{});
+  value.mechanic_rewards = j.value("mechanic_rewards", MechanicRewardConfig{});
   value.action_table = j.value("action_table", ActionTableConfig{});
   value.model = j.value("model", ModelConfig{});
   value.ppo = j.value("ppo", PPOConfig{});

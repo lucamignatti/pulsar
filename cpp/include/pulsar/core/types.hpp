@@ -55,6 +55,7 @@ struct CarState {
   float boost = 0.0F;
   bool on_ground = true;
   bool has_flip = true;
+  bool has_flip_reset = false;
   bool ball_touched = false;
   bool is_holding_jump = false;
   bool has_jumped = false;

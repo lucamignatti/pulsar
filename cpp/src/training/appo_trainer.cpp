@@ -1140,6 +1140,7 @@ void APPOTrainer::collect_rollout(
   }
 
   double total_sparse_reward = 0.0;
+  double total_mechanic_reward = 0.0;
   int64_t total_steps = 0;
   int64_t total_learner_steps = 0;
   double accumulated_sampled_value = 0.0;
@@ -1264,7 +1265,8 @@ void APPOTrainer::collect_rollout(
         auto& collector = *collectors_[shard_step.shard];
         torch::Tensor dones_host = collector.host_dones();
         torch::Tensor terminal_labels = collector.host_terminal_outcome_labels();
-        torch::Tensor extrinsic_rewards_host = map_outcome_labels_to_rewards(terminal_labels) * dones_host;
+        torch::Tensor mechanic_r_host = collector.host_mechanic_rewards();
+        torch::Tensor extrinsic_rewards_host = map_outcome_labels_to_rewards(terminal_labels) * dones_host + mechanic_r_host;
         const auto* dones_ptr = dones_host.data_ptr<float>();
 
         torch::Tensor ball_prox_host = collector.host_ball_proximity();
@@ -1315,6 +1317,7 @@ void APPOTrainer::collect_rollout(
 
         const auto learner_step_count = static_cast<std::int64_t>(shard_step.learner_active_host.sum().item<float>());
         total_sparse_reward += extrinsic_rewards_host.sum().item<double>();
+        total_mechanic_reward += mechanic_r_host.sum().item<double>();
         total_steps += extrinsic_rewards_host.numel();
         total_learner_steps += learner_step_count;
 
@@ -1435,7 +1438,8 @@ void APPOTrainer::collect_rollout(
       PULSAR_TRACE_SCOPE_CAT("trainer", "collect_post_step");
       torch::Tensor dones_host = collector_->host_dones();
     torch::Tensor terminal_labels = collector_->host_terminal_outcome_labels();
-    torch::Tensor extrinsic_rewards_host = map_outcome_labels_to_rewards(terminal_labels) * dones_host;
+    torch::Tensor mechanic_r_host = collector_->host_mechanic_rewards();
+    torch::Tensor extrinsic_rewards_host = map_outcome_labels_to_rewards(terminal_labels) * dones_host + mechanic_r_host;
     const auto* dones_ptr = dones_host.data_ptr<float>();
 
     torch::Tensor ball_prox_host = collector_->host_ball_proximity();
@@ -1484,6 +1488,7 @@ void APPOTrainer::collect_rollout(
 
     const auto learner_step_count = static_cast<std::int64_t>(learner_active_host.sum().item<float>());
     total_sparse_reward += extrinsic_rewards_host.sum().item<double>();
+    total_mechanic_reward += mechanic_r_host.sum().item<double>();
     total_steps += extrinsic_rewards_host.numel();
     total_learner_steps += learner_step_count;
 
@@ -1615,6 +1620,7 @@ void APPOTrainer::collect_rollout(
 
   if (total_learner_steps > 0) {
     metrics.sparse_reward_mean = total_sparse_reward / static_cast<double>(total_learner_steps);
+    metrics.mechanic_reward_mean = total_mechanic_reward / static_cast<double>(total_learner_steps);
     metrics.mean_goal_distance = total_goal_distance / static_cast<double>(std::max(dest.rollout_length(), 1));
   }
   metrics.min_goal_distance = min_goal_distance;
@@ -1839,6 +1845,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " entropy=" << metrics.entropy
               << " grad_norm=" << metrics.grad_norm
               << " sparse_reward=" << metrics.sparse_reward_mean
+              << " mechanic_reward=" << metrics.mechanic_reward_mean
               << " rollout_steps=" << metrics.rollout_steps
               << " completed_eps=" << metrics.completed_episodes
               << " scored_eps=" << metrics.scored_episodes
@@ -1856,7 +1863,9 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"policy_loss", metrics.policy_loss},
           {"value_loss", metrics.value_loss},
           {"entropy", metrics.entropy},
-          {"sparse_reward_mean", metrics.sparse_reward_mean},
+      {"sparse_reward_mean", metrics.sparse_reward_mean},
+      {"mechanic_reward_mean", metrics.mechanic_reward_mean},
+          {"mechanic_reward_mean", metrics.mechanic_reward_mean},
           {"sampled_value_win_mean", metrics.sampled_value_win_mean},
           {"rollout_steps", metrics.rollout_steps},
           {"completed_episodes", metrics.completed_episodes},
