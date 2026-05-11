@@ -860,7 +860,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             int stored_traces = static_cast<int>(success_actions_.size());
             int bc_batch = std::min(config_.ppo.success_bc_batch, stored_traces);
             if (bc_batch > 0) {
-              auto bc_options = active_advantages.options();
+              auto bc_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
               torch::Tensor bc_obs = torch::empty({bc_batch, obs_dim}, bc_options);
               torch::Tensor bc_acts = torch::empty({bc_batch}, bc_options.dtype(torch::kLong));
               float* bc_obs_ptr = bc_obs.data_ptr<float>();
@@ -915,7 +915,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             int stored_traces = static_cast<int>(success_actions_.size());
             int bc_batch = std::min(config_.ppo.success_bc_batch, stored_traces);
             if (bc_batch > 0) {
-              auto bc_options = active_advantages.options();
+              auto bc_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
               torch::Tensor bc_obs = torch::empty({bc_batch, obs_dim}, bc_options);
               torch::Tensor bc_acts = torch::empty({bc_batch}, bc_options.dtype(torch::kLong));
               float* bc_obs_ptr = bc_obs.data_ptr<float>();
