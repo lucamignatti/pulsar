@@ -383,6 +383,7 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         env_mechanic_states_[env_idx] = EnvMechanicState{};
         for (std::size_t idx = 0; idx < count; ++idx) {
           episode_touch_ptr[agent_begin + idx] = 0.0F;
+          agent_mechanic_states_[agent_begin + idx] = AgentMechanicState{};
         }
       }
     }
