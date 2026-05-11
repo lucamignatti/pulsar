@@ -3,6 +3,7 @@
 #include <cmath>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -655,6 +656,12 @@ void validate_experiment_config(const ExperimentConfig& config) {
   if (config.ppo.entropy_floor_coef < 0.0F) {
     throw std::invalid_argument("ppo.entropy_floor_coef must be non-negative.");
   }
+  if (config.env.team_size <= 0 || config.env.team_size > 4) {
+    throw std::invalid_argument("env.team_size must be between 1 and 4.");
+  }
+  if (config.env.tick_rate != 120) {
+    std::cerr << "Warning: env.tick_rate is currently ignored. Simulation hardcodes 120 Hz.\n";
+  }
 }
 
 ExperimentConfig load_experiment_config(const std::string& path) {
@@ -696,7 +703,11 @@ std::string hash_string(const std::string& value) {
 }
 
 std::string config_hash(const ExperimentConfig& config) {
-  return hash_string(stable_json(config));
+  ExperimentConfig copy = config;
+  if (copy.action_table.actions.empty() && !copy.action_table.builtin.empty()) {
+    copy.action_table = ControllerActionTable::make_builtin(copy.action_table.builtin);
+  }
+  return hash_string(stable_json(copy));
 }
 
 std::string action_table_hash(const ActionTableConfig& config) {

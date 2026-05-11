@@ -27,7 +27,8 @@ torch::Tensor compute_gae(
     const torch::Tensor& dones,
     float gamma,
     float gae_lambda,
-    const torch::Tensor& next_values = {});
+    const torch::Tensor& next_values = {},
+    const torch::Tensor& truncated = {});
 torch::Tensor clipped_ppo_policy_loss(
     const torch::Tensor& current_log_probs,
     const torch::Tensor& old_log_probs,

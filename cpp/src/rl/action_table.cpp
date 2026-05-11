@@ -152,9 +152,15 @@ std::vector<std::uint8_t> DiscreteActionParser::build_action_mask(const EnvState
   }
 
   const CarState& car = state.cars[agent_id];
-  std::vector<std::uint8_t> mask(action_table_.size(), static_cast<std::uint8_t>(1));
+  std::vector<std::uint8_t> mask(action_table_.size(), static_cast<std::uint8_t>(0));
+  bool any_valid = false;
   for (std::size_t index = 0; index < action_table_.size(); ++index) {
-    mask[index] = static_cast<std::uint8_t>(action_is_valid(action_table_.at(index), car) ? 1 : 0);
+    const bool valid = action_is_valid(action_table_.at(index), car);
+    mask[index] = static_cast<std::uint8_t>(valid ? 1 : 0);
+    any_valid = any_valid || valid;
+  }
+  if (!any_valid && !mask.empty()) {
+    mask[0] = 1;
   }
   return mask;
 }
@@ -176,8 +182,14 @@ void DiscreteActionParser::build_action_mask_batch(const EnvState& state, std::s
   for (std::size_t agent_id = 0; agent_id < state.cars.size(); ++agent_id) {
     const CarState& car = state.cars[agent_id];
     std::uint8_t* dst = out.data() + static_cast<std::ptrdiff_t>(agent_id * stride);
+    bool any_valid = false;
     for (std::size_t index = 0; index < stride; ++index) {
-      dst[index] = static_cast<std::uint8_t>(action_is_valid(action_table_.at(index), car) ? 1 : 0);
+      const bool valid = action_is_valid(action_table_.at(index), car);
+      dst[index] = static_cast<std::uint8_t>(valid ? 1 : 0);
+      any_valid = any_valid || valid;
+    }
+    if (!any_valid && stride > 0) {
+      dst[0] = 1;
     }
   }
 }

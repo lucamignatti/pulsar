@@ -137,6 +137,7 @@ void BatchedRocketSimCollector::initialize(
   host_ball_proximity_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   host_episode_ball_touch_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   host_mechanic_rewards_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
+  host_env_touched_ = torch::zeros({static_cast<long>(envs_.size())}, f32);
   agent_mechanic_states_.resize(total_agents_);
   env_mechanic_states_.resize(envs_.size());
 
@@ -181,6 +182,7 @@ void BatchedRocketSimCollector::reset_all(CollectorTimings* timings) {
   host_ball_proximity_.zero_();
   host_episode_ball_touch_.zero_();
   host_mechanic_rewards_.zero_();
+  host_env_touched_.zero_();
   agent_mechanic_states_.assign(total_agents_, AgentMechanicState{});
   env_mechanic_states_.assign(envs_.size(), EnvMechanicState{});
   current_buffers_.episode_starts.fill_(1.0F);
@@ -385,6 +387,16 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         envs_[env_idx].engine->reset(envs_[env_idx].reset_seed);
         assign_env(env_idx, envs_[env_idx].reset_seed);
         env_mechanic_states_[env_idx] = EnvMechanicState{};
+        bool any_touch = false;
+        for (std::size_t idx = 0; idx < count; ++idx) {
+          if (episode_touch_ptr[agent_begin + idx] > 0.5F) {
+            any_touch = true;
+            break;
+          }
+        }
+        if (any_touch) {
+          host_env_touched_.data_ptr<float>()[env_idx] = 1.0F;
+        }
         for (std::size_t idx = 0; idx < count; ++idx) {
           episode_touch_ptr[agent_begin + idx] = 0.0F;
           agent_mechanic_states_[agent_begin + idx] = AgentMechanicState{};
@@ -506,6 +518,10 @@ const torch::Tensor& BatchedRocketSimCollector::host_episode_ball_touch() const 
 
 const torch::Tensor& BatchedRocketSimCollector::host_mechanic_rewards() const {
   return host_mechanic_rewards_;
+}
+
+const torch::Tensor& BatchedRocketSimCollector::host_env_touched() const {
+  return host_env_touched_;
 }
 
 }  // namespace pulsar

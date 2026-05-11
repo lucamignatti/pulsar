@@ -78,6 +78,7 @@ class BatchedRocketSimCollector {
   [[nodiscard]] const torch::Tensor& host_ball_proximity() const;
   [[nodiscard]] const torch::Tensor& host_episode_ball_touch() const;
   [[nodiscard]] const torch::Tensor& host_mechanic_rewards() const;
+  [[nodiscard]] const torch::Tensor& host_env_touched() const;
 
  private:
   struct HostBuffers {
@@ -123,6 +124,7 @@ class BatchedRocketSimCollector {
   torch::Tensor host_ball_proximity_;
   torch::Tensor host_episode_ball_touch_;
   torch::Tensor host_mechanic_rewards_;
+  torch::Tensor host_env_touched_;
   std::vector<AgentMechanicState> agent_mechanic_states_;
   std::vector<EnvMechanicState> env_mechanic_states_;
   MechanicDetector mechanic_detector_;

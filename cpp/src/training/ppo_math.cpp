@@ -87,7 +87,8 @@ torch::Tensor compute_gae(
     const torch::Tensor& dones,
     float gamma,
     float gae_lambda,
-    const torch::Tensor& next_values) {
+    const torch::Tensor& next_values,
+    const torch::Tensor& truncated) {
   PULSAR_TRACE_SCOPE_CAT("ppo_math", "compute_gae");
   const int64_t steps = values.size(0);
   const int64_t agents = values.size(1);
@@ -100,8 +101,11 @@ torch::Tensor compute_gae(
 
   for (int64_t t = steps - 1; t >= 0; --t) {
     const torch::Tensor next_value = (t < steps - 1) ? values[t + 1] : boundary_value;
-    const torch::Tensor non_terminal = 1.0 - dones[t];
-    const torch::Tensor delta = rewards[t] + gamma * next_value * non_terminal - values[t];
+    const torch::Tensor non_terminal = 1.0F - dones[t];
+    const torch::Tensor boot_mask = truncated.defined()
+        ? (1.0F - dones[t] + truncated[t])
+        : non_terminal;
+    const torch::Tensor delta = rewards[t] + gamma * next_value * boot_mask - values[t];
     last_gae = delta + gamma * gae_lambda * non_terminal * last_gae;
     advantages[t] = last_gae.clone();
   }

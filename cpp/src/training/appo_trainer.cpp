@@ -93,7 +93,7 @@ std::vector<CapturedGrad> capture_gradients(torch::nn::Module& module) {
     if (p.grad().defined()) {
       out.push_back({p, p.grad().detach().clone()});
     } else {
-      out.push_back({p, torch::zeros_like(p)});
+      out.push_back({p, torch::Tensor{}});
     }
   }
   return out;
@@ -109,19 +109,34 @@ void zero_existing_gradients(torch::nn::Module& module) {
 }
 
 void apply_pcgrad(std::vector<CapturedGrad>& group_a, std::vector<CapturedGrad>& group_b) {
+  std::vector<torch::Tensor> flat_a_parts, flat_b_parts;
   for (size_t i = 0; i < group_a.size(); ++i) {
-    torch::Tensor ga = group_a[i].grad;
-    torch::Tensor gb = group_b[i].grad;
-    torch::Tensor ga_flat = ga.view({-1});
-    torch::Tensor gb_flat = gb.view({-1});
-    float dot = ga_flat.dot(gb_flat).item<float>();
-    if (dot < 0.0F) {
-      float norm_a_sq = ga_flat.dot(ga_flat).item<float>() + 1.0e-12F;
-      float norm_b_sq = gb_flat.dot(gb_flat).item<float>() + 1.0e-12F;
-      torch::Tensor ga_proj = ga - (dot / norm_b_sq) * gb;
-      torch::Tensor gb_proj = gb - (dot / norm_a_sq) * ga;
-      group_a[i].grad = ga_proj;
-      group_b[i].grad = gb_proj;
+    if (group_a[i].grad.defined() && group_b[i].grad.defined()) {
+      flat_a_parts.push_back(group_a[i].grad.view({-1}));
+      flat_b_parts.push_back(group_b[i].grad.view({-1}));
+    }
+  }
+  if (flat_a_parts.empty()) return;
+
+  torch::Tensor ga_all = torch::cat(flat_a_parts, 0);
+  torch::Tensor gb_all = torch::cat(flat_b_parts, 0);
+
+  float dot = ga_all.dot(gb_all).item<float>();
+  if (dot < 0.0F) {
+    float norm_a_sq = ga_all.dot(ga_all).item<float>() + 1.0e-12F;
+    float norm_b_sq = gb_all.dot(gb_all).item<float>() + 1.0e-12F;
+    ga_all = ga_all - (dot / norm_b_sq) * gb_all;
+    gb_all = gb_all - (dot / norm_a_sq) * ga_all;
+
+    size_t offset_a = 0, offset_b = 0;
+    for (size_t i = 0; i < group_a.size(); ++i) {
+      if (group_a[i].grad.defined() && group_b[i].grad.defined()) {
+        auto sz = static_cast<int64_t>(group_a[i].grad.numel());
+        group_a[i].grad = ga_all.slice(0, static_cast<int64_t>(offset_a), static_cast<int64_t>(offset_a) + sz).view(group_a[i].grad.sizes()).clone();
+        group_b[i].grad = gb_all.slice(0, static_cast<int64_t>(offset_b), static_cast<int64_t>(offset_b) + sz).view(group_b[i].grad.sizes()).clone();
+        offset_a += static_cast<size_t>(sz);
+        offset_b += static_cast<size_t>(sz);
+      }
     }
   }
 }
@@ -191,6 +206,12 @@ OutcomeFilterStats keep_only_scored_episode_segments(RolloutStorage& rollout, in
       }
       segment_start = step + 1;
     }
+    // When train_only_scored_episodes is enabled, incomplete episodes at chunk
+    // boundaries are intentionally zeroed out (dropped) below.  This is by design:
+    // only complete episodes whose terminal outcome is known are kept for training,
+    // so that the learner_active mask reflects scored/neutral outcome filtering.
+    // Episodes that span across two rollout chunks and thus have no terminal label
+    // within the current chunk are excluded.
     if (segment_start < steps) {
       zero_active_segment(learner_active, total_agents, segment_start, steps - 1, agent_begin, agent_count);
       stats.unfinished_segments++;
@@ -376,6 +397,12 @@ APPOTrainer::APPOTrainer(
   if (collectors_.empty()) {
     throw std::invalid_argument("APPOTrainer requires at least one collector.");
   }
+  if (actor_->policy_lora()->out_features() != action_dim_for_collectors(collectors_)) {
+    throw std::invalid_argument("model.action_dim must match the action table size.");
+  }
+  if (config_.model.observation_dim != collectors_.front()->obs_dim()) {
+    throw std::invalid_argument("model.observation_dim must match obs builder output.");
+  }
   total_agents_ = total_agents_for_collectors(collectors_);
   if (total_agents_ == 0) {
     throw std::invalid_argument("APPOTrainer collectors must contain agents.");
@@ -555,6 +582,27 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
   if (metadata.extra.contains("curriculum_agent_steps")) {
     curriculum_agent_steps_ = metadata.extra["curriculum_agent_steps"].get<std::int64_t>();
   }
+  if (metadata.extra.contains("curriculum_promotion_counter")) {
+    curriculum_promotion_counter_ = metadata.extra["curriculum_promotion_counter"].get<int>();
+  }
+  if (metadata.extra.contains("curriculum_touch_rates")) {
+    curriculum_touch_rates_.clear();
+    for (const auto& v : metadata.extra["curriculum_touch_rates"]) {
+      curriculum_touch_rates_.push_back(v.get<double>());
+    }
+  }
+  if (metadata.extra.contains("curriculum_scored_rates")) {
+    curriculum_scored_rates_.clear();
+    for (const auto& v : metadata.extra["curriculum_scored_rates"]) {
+      curriculum_scored_rates_.push_back(v.get<double>());
+    }
+  }
+  if (metadata.extra.contains("recent_scored_rates")) {
+    recent_scored_rates_.clear();
+    for (const auto& v : metadata.extra["recent_scored_rates"]) {
+      recent_scored_rates_.push_back(v.get<double>());
+    }
+  }
   if (self_play_manager_ && self_play_manager_->enabled()) {
     if (metadata.extra.contains("self_play_rng_state")) {
       self_play_manager_->restore_rng_state(metadata.extra["self_play_rng_state"].get<std::string>());
@@ -628,6 +676,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   const torch::Tensor extrinsic_values = all_values.at("extrinsic").narrow(0, 0, rollout_steps);
   const torch::Tensor extrinsic_rewards = all_rewards.at("extrinsic").narrow(0, 0, rollout_steps);
   const torch::Tensor rollout_dones = rollout.dones.narrow(0, 0, rollout_steps);
+  const torch::Tensor rollout_truncated = rollout.truncated.narrow(0, 0, rollout_steps);
 
   torch::Tensor active_mask = rollout.learner_active.narrow(0, 0, rollout_steps) > 0.5F;
   torch::Tensor sparse_advantages;
@@ -640,7 +689,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       rollout_dones,
       config_.ppo.gamma,
       config_.ppo.gae_lambda,
-      rollout.final_values().count("extrinsic") ? rollout.final_values().at("extrinsic") : torch::Tensor{});
+      rollout.final_values().count("extrinsic") ? rollout.final_values().at("extrinsic") : torch::Tensor{},
+      rollout_truncated);
     normalized_advantages = normalize_advantage(sparse_advantages, active_mask);
   }
   torch::Tensor sparse_returns = sparse_advantages + extrinsic_values.detach();
@@ -806,7 +856,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             torch::Tensor sampled = sample_masked_actions(
                 logit_sub.detach(), mask_sub.detach(), false, nullptr);
             actor_goal_loss = -actor_->goal_critic()->forward(
-                feat_sub.detach(), sampled.detach(), goal_sub).mean();
+                feat_sub, sampled.detach(), goal_sub).mean();
           } else {
             sa_emb = actor_->goal_critic()->sa_embedding(active_features, active_actions);
             g_emb = actor_->goal_critic()->goal_embedding(active_future_goal_pos);
@@ -814,7 +864,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             torch::Tensor sampled = sample_masked_actions(
                 active_logits.detach(), active_masks.detach(), false, nullptr);
             actor_goal_loss = -actor_->goal_critic()->forward(
-                active_features.detach(), sampled.detach(), active_future_goal_pos).mean();
+                active_features, sampled.detach(), active_future_goal_pos).mean();
           }
           const torch::Tensor sa_logits = compute_pairwise_negative_l2_logits(sa_emb, g_emb);
           goal_loss = compute_symmetric_infonce_loss(sa_logits, config_.goal_critic.logsumexp_penalty_coeff);
@@ -892,7 +942,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           apply_pcgrad(grads_a, grads_b);
 
           for (size_t i = 0; i < grads_a.size(); ++i) {
-            torch::Tensor combined = grads_a[i].grad + grads_b[i].grad;
+            if (!grads_a[i].grad.defined()) continue;
+            torch::Tensor combined = grads_a[i].grad;
+            if (grads_b[i].grad.defined()) combined = combined + grads_b[i].grad;
             if (saved_grads[i].defined()) {
               grads_a[i].param.mutable_grad() = saved_grads[i] + combined;
             } else {
@@ -1022,9 +1074,11 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
       .to(torch::kBool);
   const torch::Tensor controlled_float = controlled_mask.to(torch::kFloat32).view({pop, member_agents});
 
+  auto eval_collector = make_es_eval_collector(
+      config_, total_envs, eval_envs, update_index, 0, use_pinned_host_buffers_);
+
   for (int ep = 0; ep < es_cfg.eval_episodes_per_member; ++ep) {
-    auto eval_collector = make_es_eval_collector(
-        config_, total_envs, eval_envs, update_index, ep, use_pinned_host_buffers_);
+    eval_collector->reset_all();
 
     for (int step = 0; step < es_cfg.eval_rollout_length; ++step) {
       torch::Tensor raw_obs = eval_collector->host_observations().to(device_, use_pinned_host_buffers_);
@@ -1370,6 +1424,7 @@ void APPOTrainer::collect_rollout(
 
         auto& collector = *collectors_[shard_step.shard];
         torch::Tensor dones_host = collector.host_dones();
+        torch::Tensor truncated_host = collector.host_truncated();
         torch::Tensor terminal_labels = collector.host_terminal_outcome_labels();
         torch::Tensor mechanic_r_host = collector.host_mechanic_rewards();
         torch::Tensor extrinsic_rewards_host = map_outcome_labels_to_rewards(terminal_labels) * dones_host + mechanic_r_host;
@@ -1381,15 +1436,23 @@ void APPOTrainer::collect_rollout(
 
         const auto* tl_ptr = terminal_labels.data_ptr<std::int64_t>();
         const auto* la_ptr = shard_step.learner_active_host.data_ptr<float>();
-        torch::Tensor ep_touch_host = collector.host_episode_ball_touch();
-        const auto* ep_touch_ptr = ep_touch_host.data_ptr<float>();
-        for (int64_t i = 0; i < terminal_labels.numel(); ++i) {
-          if (la_ptr[i] > 0.5F && dones_ptr[i] > 0.5F) {
-            if (tl_ptr[i] == 0) {
-              total_goals_scored++;
-            } else if (tl_ptr[i] == 1) {
-              total_goals_conceded++;
+        torch::Tensor env_touch_host = collector.host_env_touched();
+        const auto* env_touch_ptr = env_touch_host.data_ptr<float>();
+        for (int64_t env_agent_begin = 0; env_agent_begin < terminal_labels.numel(); env_agent_begin += agents_per_env) {
+          const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + agents_per_env, terminal_labels.numel());
+          bool env_done = false;
+          bool env_scored = false;
+          bool env_conceded = false;
+          for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
+            if (la_ptr[i] > 0.5F && dones_ptr[i] > 0.5F) {
+              env_done = true;
+              if (tl_ptr[i] == 0) env_scored = true;
+              if (tl_ptr[i] == 1) env_conceded = true;
             }
+          }
+          if (env_done) {
+            if (env_scored) total_goals_scored++;
+            if (env_conceded) total_goals_conceded++;
           }
         }
         for (int64_t env_agent_begin = 0; env_agent_begin < dones_host.numel(); env_agent_begin += agents_per_env) {
@@ -1405,14 +1468,10 @@ void APPOTrainer::collect_rollout(
              if (env_scored) {
                scored_episodes++;
              }
-             bool touched = false;
-             for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
-               if (la_ptr[i] > 0.5F && ep_touch_ptr[i] > 0.5F) {
-                 touched = true;
-                 break;
-               }
+             const int64_t env_idx = env_agent_begin / agents_per_env;
+             if (env_touch_ptr[env_idx] > 0.5F) {
+               touched_episodes++;
              }
-             if (touched) touched_episodes++;
            }
          }
 
@@ -1455,6 +1514,7 @@ void APPOTrainer::collect_rollout(
             all_values,
             all_rewards,
             dones_host,
+            truncated_host,
             goal_pos_host,
             terminal_labels);
 
@@ -1553,6 +1613,7 @@ void APPOTrainer::collect_rollout(
     {
       PULSAR_TRACE_SCOPE_CAT("trainer", "collect_post_step");
       torch::Tensor dones_host = collector_->host_dones();
+    torch::Tensor truncated_host = collector_->host_truncated();
     torch::Tensor terminal_labels = collector_->host_terminal_outcome_labels();
     torch::Tensor mechanic_r_host = collector_->host_mechanic_rewards();
     torch::Tensor extrinsic_rewards_host = map_outcome_labels_to_rewards(terminal_labels) * dones_host + mechanic_r_host;
@@ -1564,8 +1625,8 @@ void APPOTrainer::collect_rollout(
 
     const auto* tl_ptr = terminal_labels.data_ptr<std::int64_t>();
     const auto* la_ptr = learner_active_host.data_ptr<float>();
-    torch::Tensor ep_touch_host = collector_->host_episode_ball_touch();
-    const auto* ep_touch_ptr = ep_touch_host.data_ptr<float>();
+    torch::Tensor env_touch_host = collector_->host_env_touched();
+    const auto* env_touch_ptr = env_touch_host.data_ptr<float>();
     for (int64_t i = 0; i < terminal_labels.numel(); ++i) {
       if (la_ptr[i] > 0.5F && dones_ptr[i] > 0.5F) {
         if (tl_ptr[i] == 0) {
@@ -1588,14 +1649,10 @@ void APPOTrainer::collect_rollout(
         if (env_scored) {
           scored_episodes++;
         }
-        bool touched = false;
-        for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
-          if (la_ptr[i] > 0.5F && ep_touch_ptr[i] > 0.5F) {
-            touched = true;
-            break;
-          }
+        const int64_t env_idx = env_agent_begin / agents_per_env;
+        if (env_touch_ptr[env_idx] > 0.5F) {
+          touched_episodes++;
         }
-        if (touched) touched_episodes++;
       }
     }
 
@@ -1635,6 +1692,7 @@ void APPOTrainer::collect_rollout(
         all_values,
         all_rewards,
         dones_host,
+        truncated_host,
         goal_pos_host,
         terminal_labels);
 
@@ -1673,47 +1731,22 @@ void APPOTrainer::collect_rollout(
     const std::int64_t* labels_ptr = dest.terminal_outcome_labels.narrow(0, 0, steps).data_ptr<std::int64_t>();
     const float* obs_ptr = dest.obs.narrow(0, 0, steps).data_ptr<float>();
     const std::int64_t* act_ptr = dest.actions.narrow(0, 0, steps).data_ptr<std::int64_t>();
-    std::vector<int> episode_offsets;
-    episode_offsets.push_back(0);
-    for (int s = 1; s <= steps; ++s) {
-      bool any_new_ep = false;
-      if (s < steps) {
-        for (int a = 0; a < all_agents; ++a) {
-          if (starts_ptr[s * all_agents + a] > 0.5F) {
-            any_new_ep = true;
-            break;
+    for (int a = 0; a < all_agents; ++a) {
+      int ep_start = 0;
+      for (int s = 0; s < steps; ++s) {
+        int idx = s * all_agents + a;
+        if (s > ep_start && starts_ptr[idx] > 0.5F) {
+          ep_start = s;
+        }
+        if (dones_ptr[idx] > 0.5F && labels_ptr[idx] == 0) {
+          int trace_len = std::min(s - ep_start + 1, max_trace);
+          int trace_start = s - trace_len + 1;
+          for (int t = trace_start; t <= s; ++t) {
+            int buf_idx = t * all_agents + a;
+            const float* o = obs_ptr + static_cast<std::ptrdiff_t>(buf_idx) * obs_dim;
+            success_obs_.insert(success_obs_.end(), o, o + obs_dim);
+            success_actions_.push_back(act_ptr[buf_idx]);
           }
-        }
-      } else {
-        any_new_ep = true;
-      }
-      if (any_new_ep) {
-        episode_offsets.push_back(s);
-      }
-    }
-    for (size_t ep = 0; ep + 1 < episode_offsets.size(); ++ep) {
-      int ep_start = episode_offsets[ep];
-      int ep_end = episode_offsets[ep + 1];
-      if (ep_end <= ep_start) continue;
-      int done_step = ep_end - 1;
-      bool scored = false;
-      std::vector<int> scoring_agents;
-      for (int a = 0; a < all_agents; ++a) {
-        int idx = done_step * all_agents + a;
-        if (labels_ptr[idx] == 0) {
-          scored = true;
-          scoring_agents.push_back(a);
-        }
-      }
-      if (!scored) continue;
-      int trace_len = std::min(ep_end - ep_start, max_trace);
-      for (int a : scoring_agents) {
-        int trace_start = ep_end - trace_len;
-        for (int t = trace_start; t < ep_end; ++t) {
-          int buf_idx = t * all_agents + a;
-          const float* o = obs_ptr + static_cast<std::ptrdiff_t>(buf_idx) * obs_dim;
-          success_obs_.insert(success_obs_.end(), o, o + obs_dim);
-          success_actions_.push_back(act_ptr[buf_idx]);
         }
       }
     }
@@ -1792,6 +1825,20 @@ CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
   }
   extra["curriculum_stage"] = curriculum_stage_;
   extra["curriculum_agent_steps"] = curriculum_agent_steps_;
+  extra["curriculum_promotion_counter"] = curriculum_promotion_counter_;
+  nlohmann::json touch_rates_json = nlohmann::json::array();
+  for (double v : curriculum_touch_rates_) touch_rates_json.push_back(v);
+  extra["curriculum_touch_rates"] = touch_rates_json;
+  nlohmann::json scored_rates_json = nlohmann::json::array();
+  for (double v : curriculum_scored_rates_) scored_rates_json.push_back(v);
+  extra["curriculum_scored_rates"] = scored_rates_json;
+  {
+    nlohmann::json recent_json = nlohmann::json::array();
+    for (double v : recent_scored_rates_) recent_json.push_back(v);
+    extra["recent_scored_rates"] = recent_json;
+  }
+  extra["success_obs_size"] = static_cast<std::int64_t>(success_obs_.size());
+  extra["success_actions_size"] = static_cast<std::int64_t>(success_actions_.size());
   return CheckpointMetadata{
       .schema_version = config_.schema_version,
       .obs_schema_version = config_.obs_schema_version,
@@ -1886,6 +1933,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
   std::cout << "train_start curriculum_enabled=" << (config_.curriculum.enabled ? 1 : 0)
             << " stages=" << config_.curriculum.stages.size()
             << '\n';
+  std::filesystem::create_directories(checkpoint_dir);
   WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "dappo_train");
   std::int64_t global_step = resumed_global_step_;
 
@@ -1936,7 +1984,6 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     metrics.policy_loss = train_metrics.policy_loss;
     metrics.value_loss = train_metrics.value_loss;
     metrics.entropy = train_metrics.entropy;
-    metrics.scored_episode_rate = train_metrics.scored_episode_rate;
     metrics.effective_entropy_coef = train_metrics.effective_entropy_coef;
     metrics.effective_success_bc_coef = train_metrics.effective_success_bc_coef;
     metrics.grad_norm = train_metrics.grad_norm;
