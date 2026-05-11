@@ -1906,13 +1906,6 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     TrainerMetrics next_coll_metrics{};
     std::int64_t next_coll_steps = 0;
     const bool has_next = train_forever || index + 1 < updates;
-    std::future<void> next_collection;
-    if (has_next) {
-      PPOActor collection_actor = actor_snapshot_;
-      next_collection = std::async(std::launch::async, [this, &next_coll_metrics, &next_coll_steps, collection_actor] {
-        collect_rollout(rollout_B_, next_coll_metrics, &next_coll_steps, collection_actor);
-      });
-    }
 
     TrainerMetrics train_metrics = update_actor(rollout_);
 
@@ -1921,7 +1914,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     actor_snapshot_->eval();
 
     if (has_next) {
-      next_collection.get();
+      collect_rollout(rollout_B_, next_coll_metrics, &next_coll_steps, actor_snapshot_);
     }
 
     global_step += next_coll_steps;
