@@ -1800,10 +1800,22 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
             << '\n'
             << std::flush;
 
-  for (int index = 0; train_forever || index < updates; ++index) {
+  std::cout << "train_loop_ready train_forever=" << (train_forever ? 1 : 0)
+            << " updates=" << updates
+            << '\n'
+            << std::flush;
+
+  for (int index = 0;; ++index) {
+    if (!train_forever && index >= updates) {
+      break;
+    }
     PULSAR_TRACE_SCOPE_CAT("trainer", "train_iteration");
     const auto iter_start = std::chrono::steady_clock::now();
     const int update_index = static_cast<int>(resumed_update_index_) + index + 1;
+    std::cout << "train_iteration_start update=" << update_index
+              << " has_next=" << ((train_forever || index + 1 < updates) ? 1 : 0)
+              << '\n'
+              << std::flush;
 
     TrainerMetrics next_coll_metrics{};
     std::int64_t next_coll_steps = 0;
@@ -1816,14 +1828,26 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       });
     }
 
+    std::cout << "update_actor_start update=" << update_index << '\n' << std::flush;
     TrainerMetrics train_metrics = update_actor(rollout_);
+    std::cout << "update_actor_done update=" << update_index
+              << " update_seconds=" << train_metrics.update_seconds
+              << '\n'
+              << std::flush;
 
     synchronize_cuda_if_needed(device_, "snapshot clone");
     actor_snapshot_ = clone_ppo_actor(actor_, device_);
     actor_snapshot_->eval();
 
     if (has_next) {
+      std::cout << "next_rollout_wait update=" << update_index << '\n' << std::flush;
       next_collection.get();
+      std::cout << "next_rollout_done update=" << update_index
+                << " collected_agent_steps=" << next_coll_steps
+                << " completed_eps=" << next_coll_metrics.completed_episodes
+                << " touch_rate=" << next_coll_metrics.touch_episode_rate
+                << '\n'
+                << std::flush;
     }
 
     global_step += next_coll_steps;
