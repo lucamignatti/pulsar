@@ -99,6 +99,15 @@ std::vector<CapturedGrad> capture_gradients(torch::nn::Module& module) {
   return out;
 }
 
+void zero_existing_gradients(torch::nn::Module& module) {
+  for (auto& p : module.parameters()) {
+    torch::Tensor grad = p.mutable_grad();
+    if (grad.defined()) {
+      grad.zero_();
+    }
+  }
+}
+
 void apply_pcgrad(std::vector<CapturedGrad>& group_a, std::vector<CapturedGrad>& group_b) {
   for (size_t i = 0; i < group_a.size(); ++i) {
     torch::Tensor ga = group_a[i].grad;
@@ -769,7 +778,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             saved_grads.push_back(p.grad().defined() ? p.grad().clone() : torch::Tensor{});
           }
 
-          actor_->zero_grad();
+          zero_existing_gradients(*actor_);
           if (log_microbatch) {
             std::cout << "pcgrad_loss_a_backward_start\n" << std::flush;
           }
@@ -785,8 +794,14 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             std::cout << "pcgrad_capture_a_done\n" << std::flush;
           }
 
+          if (log_microbatch) {
+            std::cout << "pcgrad_loss_b_build_start\n" << std::flush;
+          }
           torch::Tensor loss_b = (config_.goal_critic.lambda_Zg * goal_loss
               + config_.goal_critic.lambda_goal_actor * actor_goal_loss) * sample_weight;
+          if (log_microbatch) {
+            std::cout << "pcgrad_loss_b_build_done\n" << std::flush;
+          }
 
           if (effective_bc_coef > 0.0F && !success_obs_.empty()) {
             int obs_dim = config_.model.observation_dim;
@@ -817,7 +832,13 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             }
           }
 
-          actor_->zero_grad();
+          if (log_microbatch) {
+            std::cout << "pcgrad_zero_before_b_start\n" << std::flush;
+          }
+          zero_existing_gradients(*actor_);
+          if (log_microbatch) {
+            std::cout << "pcgrad_zero_before_b_done\n" << std::flush;
+          }
           if (log_microbatch) {
             std::cout << "pcgrad_loss_b_backward_start\n" << std::flush;
           }
@@ -832,7 +853,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           if (log_microbatch) {
             std::cout << "pcgrad_capture_b_done\n" << std::flush;
           }
-          actor_->zero_grad();
+          zero_existing_gradients(*actor_);
 
           if (log_microbatch) {
             std::cout << "pcgrad_project_start\n" << std::flush;
