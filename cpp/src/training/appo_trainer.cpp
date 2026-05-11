@@ -107,9 +107,12 @@ void apply_pcgrad(std::vector<CapturedGrad>& group_a, std::vector<CapturedGrad>&
     torch::Tensor gb_flat = gb.view({-1});
     float dot = ga_flat.dot(gb_flat).item<float>();
     if (dot < 0.0F) {
-      float norm_sq = ga_flat.dot(ga_flat).item<float>() + 1.0e-12F;
-      float proj = dot / norm_sq;
-      group_b[i].grad = gb - proj * ga;
+      float norm_a_sq = ga_flat.dot(ga_flat).item<float>() + 1.0e-12F;
+      float norm_b_sq = gb_flat.dot(gb_flat).item<float>() + 1.0e-12F;
+      torch::Tensor ga_proj = ga - (dot / norm_b_sq) * gb;
+      torch::Tensor gb_proj = gb - (dot / norm_a_sq) * ga;
+      group_a[i].grad = ga_proj;
+      group_b[i].grad = gb_proj;
     }
   }
 }
@@ -590,7 +593,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         {
           PULSAR_TRACE_SCOPE_CAT("trainer", "update_forward_sequence");
           const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_critic.goal_dim);
-          output = actor_->forward_sequence(obs);
+          output = actor_->forward_sequence(obs, goal_values);
         }
 
         if (loss_steps <= 0) {
@@ -735,10 +738,14 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
               + entropy_floor_loss
               - effective_entropy_coef * entropy) * sample_weight;
 
+          std::vector<torch::Tensor> saved_grads;
+          for (auto& p : actor_->parameters()) {
+            saved_grads.push_back(p.grad().defined() ? p.grad().clone() : torch::Tensor{});
+          }
+
           actor_->zero_grad();
           loss_a.backward({}, true);
           auto grads_a = capture_gradients(*actor_);
-          actor_->zero_grad();
 
           torch::Tensor loss_b = (config_.goal_critic.lambda_Zg * goal_loss
               + config_.goal_critic.lambda_goal_actor * actor_goal_loss) * sample_weight;
@@ -768,7 +775,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
               torch::Tensor bc_ce = torch::nn::functional::cross_entropy(
                   bc_output.policy_logits, bc_acts,
                   torch::nn::functional::CrossEntropyFuncOptions().reduction(torch::kMean));
-              loss_b = loss_b + effective_bc_coef * bc_ce;
+              loss_b = loss_b + effective_bc_coef * bc_ce * sample_weight;
             }
           }
 
@@ -781,7 +788,11 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
           for (size_t i = 0; i < grads_a.size(); ++i) {
             torch::Tensor combined = grads_a[i].grad + grads_b[i].grad;
-            grads_a[i].param.mutable_grad() = combined;
+            if (saved_grads[i].defined()) {
+              grads_a[i].param.mutable_grad() = saved_grads[i] + combined;
+            } else {
+              grads_a[i].param.mutable_grad() = combined;
+            }
           }
         } else {
           const torch::Tensor loss =
@@ -819,7 +830,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
               torch::Tensor bc_ce = torch::nn::functional::cross_entropy(
                   bc_output.policy_logits, bc_acts,
                   torch::nn::functional::CrossEntropyFuncOptions().reduction(torch::kMean));
-              combined_loss = combined_loss + effective_bc_coef * bc_ce;
+              combined_loss = combined_loss + effective_bc_coef * bc_ce * sample_weight;
             }
           }
 
@@ -985,13 +996,13 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
   const auto tensor_options = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
   torch::Tensor A_stack;
   torch::Tensor B_stack;
-  if (es_cfg.antithetic_sampling) {
-    const int half_pop = pop / 2;
-    torch::Tensor A_half = torch::randn({half_pop, rank, in_features}, tensor_options);
-    torch::Tensor B_half = torch::randn({half_pop, out_features, rank}, tensor_options);
-    A_stack = torch::cat({A_half, -A_half}, 0);
-    B_stack = torch::cat({B_half, -B_half}, 0);
-  } else {
+      if (es_cfg.antithetic_sampling) {
+        const int half_pop = pop / 2;
+        torch::Tensor A_half = torch::randn({half_pop, rank, in_features}, tensor_options);
+        torch::Tensor B_half = torch::randn({half_pop, out_features, rank}, tensor_options);
+        A_stack = torch::cat({A_half, A_half}, 0);
+        B_stack = torch::cat({B_half, -B_half}, 0);
+      } else {
     A_stack = torch::randn({pop, rank, in_features}, tensor_options);
     B_stack = torch::randn({pop, out_features, rank}, tensor_options);
   }
