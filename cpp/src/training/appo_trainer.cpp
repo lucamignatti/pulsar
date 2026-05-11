@@ -412,26 +412,34 @@ APPOTrainer::~APPOTrainer() {
 void APPOTrainer::apply_curriculum_stage() {
   const auto& stages = config_.curriculum.stages;
   if (stages.empty()) return;
+  std::cerr << "apply_stage_enter stages=" << stages.size() << '\n';
 
   if (curriculum_stage_ < 0) {
     curriculum_stage_ = 0;
   }
   const int idx = std::min(curriculum_stage_, static_cast<int>(stages.size()) - 1);
   const auto& stage = stages[static_cast<std::size_t>(idx)];
+  std::cerr << "apply_stage idx=" << idx << " name=" << stage.name << '\n';
 
   config_.outcome = stage.outcome_override;
+  std::cerr << "apply_stage outcome_set score=" << config_.outcome.score << '\n';
   config_.mechanic_rewards = stage.mechanic_rewards_override;
+  std::cerr << "apply_stage mech_set\n";
   config_.ppo.learning_rate = stage.learning_rate;
+  std::cerr << "apply_stage lr_set\n";
 
   for (auto& opt_group : actor_optimizer_.param_groups()) {
     opt_group.options().set_lr(stage.learning_rate);
   }
+  std::cerr << "apply_stage opt_set\n";
 
   for (auto& collector : collectors_) {
     if (collector) {
+      std::cerr << "apply_stage updating_collector\n";
       collector->update_mechanic_rewards(config_.mechanic_rewards);
     }
   }
+  std::cerr << "apply_stage collectors_done\n";
 
   curriculum_promotion_counter_ = 0;
   curriculum_agent_steps_ = 0;
@@ -1066,6 +1074,7 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
   }
 
   if (config_.curriculum.enabled && !config_.curriculum.stages.empty()) {
+    std::cerr << "constructor calling apply_curriculum_stage stages=" << config_.curriculum.stages.size() << '\n';
     apply_curriculum_stage();
   }
 }
