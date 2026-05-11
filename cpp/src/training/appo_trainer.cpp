@@ -436,11 +436,9 @@ void APPOTrainer::apply_curriculum_stage() {
   curriculum_promotion_counter_ = 0;
   curriculum_agent_steps_ = 0;
 
-  if (log_initialization_) {
-    std::cout << "curriculum_stage=" << idx
-              << " name=" << stage.name
-              << " lr=" << stage.learning_rate << '\n';
-  }
+  std::cerr << "curriculum_stage=" << idx
+            << " name=" << stage.name
+            << " lr=" << stage.learning_rate << '\n';
 }
 
 bool APPOTrainer::check_curriculum_promotion(
@@ -1220,6 +1218,7 @@ void APPOTrainer::collect_rollout(
     std::int64_t* collected_agent_steps,
     PPOActor rollout_actor) {
   PULSAR_TRACE_SCOPE_CAT("trainer", "collect_rollout");
+  std::cerr << "collect_rollout_start" << std::endl;
   if (!rollout_actor) {
     throw std::invalid_argument("APPOTrainer::collect_rollout requires a policy snapshot.");
   }
@@ -1879,6 +1878,8 @@ void APPOTrainer::prune_old_checkpoints(const std::filesystem::path& checkpoint_
 }
 
 void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const std::string& config_path) {
+  std::cerr << "train_start curriculum_enabled=" << config_.curriculum.enabled
+            << " stages=" << config_.curriculum.stages.size() << std::endl;
   WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "dappo_train");
   std::int64_t global_step = resumed_global_step_;
   const bool train_forever = updates <= 0;

@@ -26,6 +26,9 @@ float MechanicDetector::update(
     int env_team_size,
     AgentMechanicState& s,
     EnvMechanicState& env_s) const {
+  // Guard against uninitialized config pointer
+  if (cfg_ == nullptr) return 0.0F;
+
   float reward = 0.0F;
   const int prev_wavedash_tick = s.last_wavedash_tick;
 
