@@ -10,6 +10,7 @@
 #include <future>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <system_error>
 #include <unordered_set>
 
@@ -1776,14 +1777,28 @@ void APPOTrainer::prune_old_checkpoints(const std::filesystem::path& checkpoint_
 }
 
 void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const std::string& config_path) {
+  const bool train_forever = updates <= 0;
+  std::cout << "train_start updates=" << (train_forever ? "forever" : std::to_string(updates))
+            << " checkpoint_dir=" << checkpoint_dir
+            << " config=" << config_path
+            << " num_envs=" << config_.ppo.num_envs
+            << " rollout_length=" << config_.ppo.rollout_length
+            << '\n'
+            << std::flush;
   WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "dappo_train");
   std::int64_t global_step = resumed_global_step_;
-  const bool train_forever = updates <= 0;
 
   TrainerMetrics coll_metrics{};
   std::int64_t coll_steps = 0;
+  std::cout << "initial_rollout_start\n" << std::flush;
   collect_rollout(rollout_, coll_metrics, &coll_steps, actor_snapshot_);
   global_step += coll_steps;
+  std::cout << "initial_rollout_done collected_agent_steps=" << coll_steps
+            << " rollout_steps=" << coll_metrics.rollout_steps
+            << " completed_eps=" << coll_metrics.completed_episodes
+            << " touch_rate=" << coll_metrics.touch_episode_rate
+            << '\n'
+            << std::flush;
 
   for (int index = 0; train_forever || index < updates; ++index) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "train_iteration");
