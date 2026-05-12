@@ -38,6 +38,23 @@
     "team_pinch": 0.0,
     "mechanic_reward_cap_per_episode": 0.0
   },
+  "dense_rewards": {
+    "ball_touch_vel_weight": 0.0,
+    "speed_toward_ball_weight": 0.0,
+    "speed_toward_ball_decay": 300.0,
+    "face_ball_weight": 0.0,
+    "air_reward_weight": 0.0,
+    "air_reward_ball_z_min": 200.0,
+    "velocity_ball_to_goal_weight": 0.0,
+    "max_ball_speed": 6000.0,
+    "air_touch_weight": 0.0,
+    "air_touch_max_air_time": 1.75,
+    "save_boost_weight": 0.0,
+    "boost_pickup_big_weight": 0.0,
+    "boost_pickup_small_weight": 0.0,
+    "boost_pickup_big_threshold": 0.5,
+    "dense_reward_cap_per_episode": 0.0
+  },
   "curriculum": {
     "enabled": true,
     "stages": [
@@ -68,6 +85,23 @@
           "team_pinch": 0.0,
           "mechanic_reward_cap_per_episode": 0.0
         },
+        "dense_rewards_override": {
+          "ball_touch_vel_weight": 50.0,
+          "speed_toward_ball_weight": 5.0,
+          "speed_toward_ball_decay": 300.0,
+          "face_ball_weight": 1.0,
+          "air_reward_weight": 0.15,
+          "air_reward_ball_z_min": 200.0,
+          "velocity_ball_to_goal_weight": 0.0,
+          "max_ball_speed": 6000.0,
+          "air_touch_weight": 0.0,
+          "air_touch_max_air_time": 1.75,
+          "save_boost_weight": 0.0,
+          "boost_pickup_big_weight": 0.0,
+          "boost_pickup_small_weight": 0.0,
+          "boost_pickup_big_threshold": 0.5,
+          "dense_reward_cap_per_episode": 0.0
+        },
         "learning_rate": 0.0002,
         "min_agent_steps": 20000000,
         "promotion_window_updates": 5,
@@ -75,12 +109,12 @@
         "required_scored_episode_rate": 0.0
       },
       {
-        "name": "stage1-score-only",
+        "name": "stage1-strong-touches",
         "outcome_override": {
-          "score": 1.0,
-          "concede": -1.0,
-          "neutral": 0.0,
-          "neutral_no_touch": 0.0
+          "score": 0.0,
+          "concede": 0.0,
+          "neutral": 1.0,
+          "neutral_no_touch": -1.0
         },
         "mechanic_rewards_override": {
           "kickoff_first_touch": 0.0,
@@ -101,6 +135,73 @@
           "team_pinch": 0.0,
           "mechanic_reward_cap_per_episode": 0.0
         },
+        "dense_rewards_override": {
+          "ball_touch_vel_weight": 15.0,
+          "speed_toward_ball_weight": 3.0,
+          "speed_toward_ball_decay": 300.0,
+          "face_ball_weight": 0.5,
+          "air_reward_weight": 0.15,
+          "air_reward_ball_z_min": 200.0,
+          "velocity_ball_to_goal_weight": 0.0,
+          "max_ball_speed": 6000.0,
+          "air_touch_weight": 0.0,
+          "air_touch_max_air_time": 1.75,
+          "save_boost_weight": 0.0,
+          "boost_pickup_big_weight": 0.0,
+          "boost_pickup_small_weight": 0.0,
+          "boost_pickup_big_threshold": 0.5,
+          "dense_reward_cap_per_episode": 0.0
+        },
+        "learning_rate": 0.0002,
+        "min_agent_steps": 15000000,
+        "promotion_window_updates": 5,
+        "required_touch_episode_rate": 0.5,
+        "required_scored_episode_rate": 0.0
+      },
+      {
+        "name": "stage2-learn-to-score",
+        "outcome_override": {
+          "score": 10.0,
+          "concede": -8.0,
+          "neutral": 0.0,
+          "neutral_no_touch": -1.0
+        },
+        "mechanic_rewards_override": {
+          "kickoff_first_touch": 0.0,
+          "speed_flip": 0.0,
+          "wavedash": 0.0,
+          "chain_dash_bonus": 0.0,
+          "half_flip": 0.0,
+          "wall_dash": 0.0,
+          "air_dribble_base": 0.0,
+          "air_dribble_scale": 0.0,
+          "flip_reset": 0.0,
+          "ceiling_shot": 0.0,
+          "double_tap": 0.0,
+          "preflip": 0.0,
+          "redirect": 0.0,
+          "pogo": 0.0,
+          "pinch": 0.0,
+          "team_pinch": 0.0,
+          "mechanic_reward_cap_per_episode": 0.0
+        },
+        "dense_rewards_override": {
+          "ball_touch_vel_weight": 5.0,
+          "speed_toward_ball_weight": 2.0,
+          "speed_toward_ball_decay": 300.0,
+          "face_ball_weight": 0.3,
+          "air_reward_weight": 0.1,
+          "air_reward_ball_z_min": 200.0,
+          "velocity_ball_to_goal_weight": 10.0,
+          "max_ball_speed": 6000.0,
+          "air_touch_weight": 0.0,
+          "air_touch_max_air_time": 1.75,
+          "save_boost_weight": 0.0,
+          "boost_pickup_big_weight": 0.0,
+          "boost_pickup_small_weight": 0.0,
+          "boost_pickup_big_threshold": 0.5,
+          "dense_reward_cap_per_episode": 0.0
+        },
         "learning_rate": 0.0001,
         "min_agent_steps": 50000000,
         "promotion_window_updates": 5,
@@ -108,12 +209,62 @@
         "required_scored_episode_rate": 0.05
       },
       {
-        "name": "stage2-mechanics",
+        "name": "stage3-boost-aerials",
         "outcome_override": {
-          "score": 1.0,
-          "concede": -1.0,
+          "score": 10.0,
+          "concede": -8.0,
           "neutral": 0.0,
-          "neutral_no_touch": 0.0
+          "neutral_no_touch": -1.0
+        },
+        "mechanic_rewards_override": {
+          "kickoff_first_touch": 0.0,
+          "speed_flip": 0.0,
+          "wavedash": 0.0,
+          "chain_dash_bonus": 0.0,
+          "half_flip": 0.0,
+          "wall_dash": 0.0,
+          "air_dribble_base": 0.0,
+          "air_dribble_scale": 0.0,
+          "flip_reset": 0.0,
+          "ceiling_shot": 0.0,
+          "double_tap": 0.0,
+          "preflip": 0.0,
+          "redirect": 0.0,
+          "pogo": 0.0,
+          "pinch": 0.0,
+          "team_pinch": 0.0,
+          "mechanic_reward_cap_per_episode": 0.0
+        },
+        "dense_rewards_override": {
+          "ball_touch_vel_weight": 3.0,
+          "speed_toward_ball_weight": 1.0,
+          "speed_toward_ball_decay": 300.0,
+          "face_ball_weight": 0.2,
+          "air_reward_weight": 0.1,
+          "air_reward_ball_z_min": 200.0,
+          "velocity_ball_to_goal_weight": 10.0,
+          "max_ball_speed": 6000.0,
+          "air_touch_weight": 5.0,
+          "air_touch_max_air_time": 1.75,
+          "save_boost_weight": 2.0,
+          "boost_pickup_big_weight": 3.0,
+          "boost_pickup_small_weight": 10.0,
+          "boost_pickup_big_threshold": 0.5,
+          "dense_reward_cap_per_episode": 0.0
+        },
+        "learning_rate": 0.0001,
+        "min_agent_steps": 30000000,
+        "promotion_window_updates": 5,
+        "required_touch_episode_rate": 0.0,
+        "required_scored_episode_rate": 0.1
+      },
+      {
+        "name": "stage4-mechanics",
+        "outcome_override": {
+          "score": 10.0,
+          "concede": -8.0,
+          "neutral": 0.0,
+          "neutral_no_touch": -1.0
         },
         "mechanic_rewards_override": {
           "kickoff_first_touch": 0.005,
@@ -134,11 +285,78 @@
           "team_pinch": 0.005,
           "mechanic_reward_cap_per_episode": 0.05
         },
+        "dense_rewards_override": {
+          "ball_touch_vel_weight": 2.0,
+          "speed_toward_ball_weight": 0.5,
+          "speed_toward_ball_decay": 300.0,
+          "face_ball_weight": 0.1,
+          "air_reward_weight": 0.05,
+          "air_reward_ball_z_min": 200.0,
+          "velocity_ball_to_goal_weight": 8.0,
+          "max_ball_speed": 6000.0,
+          "air_touch_weight": 3.0,
+          "air_touch_max_air_time": 1.75,
+          "save_boost_weight": 1.0,
+          "boost_pickup_big_weight": 2.0,
+          "boost_pickup_small_weight": 5.0,
+          "boost_pickup_big_threshold": 0.5,
+          "dense_reward_cap_per_episode": 0.0
+        },
         "learning_rate": 0.0001,
         "min_agent_steps": 50000000,
         "promotion_window_updates": 5,
         "required_touch_episode_rate": 0.0,
-        "required_scored_episode_rate": 0.1
+        "required_scored_episode_rate": 0.15
+      },
+      {
+        "name": "stage5-aggression",
+        "outcome_override": {
+          "score": 10.0,
+          "concede": -6.0,
+          "neutral": 0.0,
+          "neutral_no_touch": -1.0
+        },
+        "mechanic_rewards_override": {
+          "kickoff_first_touch": 0.005,
+          "speed_flip": 0.001,
+          "wavedash": 0.001,
+          "chain_dash_bonus": 0.005,
+          "half_flip": 0.001,
+          "wall_dash": 0.001,
+          "air_dribble_base": 0.002,
+          "air_dribble_scale": 0.001,
+          "flip_reset": 0.005,
+          "ceiling_shot": 0.002,
+          "double_tap": 0.002,
+          "preflip": 0.002,
+          "redirect": 0.002,
+          "pogo": 0.002,
+          "pinch": 0.005,
+          "team_pinch": 0.005,
+          "mechanic_reward_cap_per_episode": 0.05
+        },
+        "dense_rewards_override": {
+          "ball_touch_vel_weight": 2.0,
+          "speed_toward_ball_weight": 0.5,
+          "speed_toward_ball_decay": 300.0,
+          "face_ball_weight": 0.1,
+          "air_reward_weight": 0.05,
+          "air_reward_ball_z_min": 200.0,
+          "velocity_ball_to_goal_weight": 8.0,
+          "max_ball_speed": 6000.0,
+          "air_touch_weight": 3.0,
+          "air_touch_max_air_time": 1.75,
+          "save_boost_weight": 1.0,
+          "boost_pickup_big_weight": 2.0,
+          "boost_pickup_small_weight": 5.0,
+          "boost_pickup_big_threshold": 0.5,
+          "dense_reward_cap_per_episode": 0.0
+        },
+        "learning_rate": 0.00005,
+        "min_agent_steps": 50000000,
+        "promotion_window_updates": 5,
+        "required_touch_episode_rate": 0.0,
+        "required_scored_episode_rate": 0.0
       }
     ]
   },
@@ -193,7 +411,7 @@
     "plasticity_shrink": 0.999,
     "plasticity_noise": 0.0001,
     "pcgrad": true,
-    "success_bc_coef": 0.1,
+    "success_bc_coef": 0.0,
     "success_bc_batch": 256,
     "success_buffer_size": 20000,
     "success_bc_min_score": 0.25,

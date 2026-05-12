@@ -110,6 +110,7 @@ if(PULSAR_ENABLE_TORCH)
       cpp/src/training/rollout_storage.cpp
       cpp/src/training/ppo_math.cpp
       cpp/src/training/mechanic_detector.cpp
+      cpp/src/training/dense_reward_calculator.cpp
       cpp/src/training/batched_rocketsim_collector.cpp
       cpp/src/training/appo_trainer.cpp
       cpp/src/training/self_play_manager.cpp

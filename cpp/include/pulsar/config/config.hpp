@@ -37,10 +37,29 @@ struct MechanicRewardConfig {
   float mechanic_reward_cap_per_episode = 0.10F;
 };
 
+struct DenseRewardConfig {
+  float ball_touch_vel_weight = 0.0F;
+  float speed_toward_ball_weight = 0.0F;
+  float speed_toward_ball_decay = 300.0F;
+  float face_ball_weight = 0.0F;
+  float air_reward_weight = 0.0F;
+  float air_reward_ball_z_min = 200.0F;
+  float velocity_ball_to_goal_weight = 0.0F;
+  float max_ball_speed = 6000.0F;
+  float air_touch_weight = 0.0F;
+  float air_touch_max_air_time = 1.75F;
+  float save_boost_weight = 0.0F;
+  float boost_pickup_big_weight = 0.0F;
+  float boost_pickup_small_weight = 0.0F;
+  float boost_pickup_big_threshold = 0.5F;
+  float dense_reward_cap_per_episode = 0.0F;
+};
+
 struct CurriculumStageConfig {
   std::string name;
   OutcomeConfig outcome_override{};
   MechanicRewardConfig mechanic_rewards_override{};
+  DenseRewardConfig dense_rewards_override{};
   float learning_rate = 0.0001F;
   int64_t min_agent_steps = 20'000'000LL;
   int promotion_window_updates = 5;
@@ -198,6 +217,7 @@ struct ExperimentConfig {
   EnvConfig env{};
   OutcomeConfig outcome{};
   MechanicRewardConfig mechanic_rewards{};
+  DenseRewardConfig dense_rewards{};
   CurriculumConfig curriculum{};
   ActionTableConfig action_table{};
   ModelConfig model{};
@@ -229,6 +249,8 @@ void to_json(nlohmann::json& j, const OutcomeConfig& value);
 void from_json(const nlohmann::json& j, OutcomeConfig& value);
 void to_json(nlohmann::json& j, const MechanicRewardConfig& value);
 void from_json(const nlohmann::json& j, MechanicRewardConfig& value);
+void to_json(nlohmann::json& j, const DenseRewardConfig& value);
+void from_json(const nlohmann::json& j, DenseRewardConfig& value);
 void to_json(nlohmann::json& j, const CurriculumStageConfig& value);
 void from_json(const nlohmann::json& j, CurriculumStageConfig& value);
 void to_json(nlohmann::json& j, const CurriculumConfig& value);

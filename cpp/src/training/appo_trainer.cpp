@@ -240,6 +240,7 @@ void append_metrics_line(
       {"grad_norm", metrics.grad_norm},
       {"sparse_reward_mean", metrics.sparse_reward_mean},
       {"mechanic_reward_mean", metrics.mechanic_reward_mean},
+      {"dense_reward_mean", metrics.dense_reward_mean},
       {"sampled_value_win_mean", metrics.sampled_value_win_mean},
       {"rollout_steps", metrics.rollout_steps},
       {"completed_episodes", metrics.completed_episodes},
@@ -459,6 +460,7 @@ void APPOTrainer::apply_curriculum_stage() {
 
   config_.outcome = stage.outcome_override;
   config_.mechanic_rewards = stage.mechanic_rewards_override;
+  config_.dense_rewards = stage.dense_rewards_override;
   config_.ppo.learning_rate = stage.learning_rate;
 
   for (auto& opt_group : actor_optimizer_.param_groups()) {
@@ -468,6 +470,7 @@ void APPOTrainer::apply_curriculum_stage() {
   for (auto& collector : collectors_) {
     if (collector) {
       collector->update_mechanic_rewards(config_.mechanic_rewards);
+      collector->update_dense_rewards(config_.dense_rewards);
     }
   }
 
@@ -1335,6 +1338,7 @@ void APPOTrainer::collect_rollout(
 
   double total_sparse_reward = 0.0;
   double total_mechanic_reward = 0.0;
+  double total_dense_reward = 0.0;
   int64_t total_steps = 0;
   int64_t total_learner_steps = 0;
   double accumulated_sampled_value = 0.0;
@@ -1463,7 +1467,8 @@ void APPOTrainer::collect_rollout(
         torch::Tensor bootstrap_truncated_host = collector.host_bootstrap_truncated();
         torch::Tensor terminal_labels = collector.host_terminal_outcome_labels();
         torch::Tensor mechanic_r_host = collector.host_mechanic_rewards();
-        torch::Tensor extrinsic_rewards_host = map_outcome_labels_to_rewards(terminal_labels) * dones_host + mechanic_r_host;
+        torch::Tensor dense_r_host = collector.host_dense_rewards();
+        torch::Tensor extrinsic_rewards_host = map_outcome_labels_to_rewards(terminal_labels) * dones_host + mechanic_r_host + dense_r_host;
         const auto* dones_ptr = dones_host.data_ptr<float>();
 
         torch::Tensor ball_prox_host = collector.host_ball_proximity();
@@ -1531,6 +1536,7 @@ void APPOTrainer::collect_rollout(
         const auto learner_step_count = static_cast<std::int64_t>(shard_step.learner_active_host.sum().item<float>());
         total_sparse_reward += extrinsic_rewards_host.sum().item<double>();
         total_mechanic_reward += mechanic_r_host.sum().item<double>();
+        total_dense_reward += dense_r_host.sum().item<double>();
         total_steps += extrinsic_rewards_host.numel();
         total_learner_steps += learner_step_count;
 
@@ -1656,8 +1662,9 @@ void APPOTrainer::collect_rollout(
     torch::Tensor truncated_host = collector_->host_truncated();
     torch::Tensor bootstrap_truncated_host = collector_->host_bootstrap_truncated();
     torch::Tensor terminal_labels = collector_->host_terminal_outcome_labels();
-    torch::Tensor mechanic_r_host = collector_->host_mechanic_rewards();
-    torch::Tensor extrinsic_rewards_host = map_outcome_labels_to_rewards(terminal_labels) * dones_host + mechanic_r_host;
+      torch::Tensor mechanic_r_host = collector_->host_mechanic_rewards();
+      torch::Tensor dense_r_host = collector_->host_dense_rewards();
+      torch::Tensor extrinsic_rewards_host = map_outcome_labels_to_rewards(terminal_labels) * dones_host + mechanic_r_host + dense_r_host;
     const auto* dones_ptr = dones_host.data_ptr<float>();
 
     torch::Tensor ball_prox_host = collector_->host_ball_proximity();
@@ -1719,6 +1726,7 @@ void APPOTrainer::collect_rollout(
     const auto learner_step_count = static_cast<std::int64_t>(learner_active_host.sum().item<float>());
     total_sparse_reward += extrinsic_rewards_host.sum().item<double>();
     total_mechanic_reward += mechanic_r_host.sum().item<double>();
+    total_dense_reward += dense_r_host.sum().item<double>();
     total_steps += extrinsic_rewards_host.numel();
     total_learner_steps += learner_step_count;
 
@@ -1829,6 +1837,7 @@ void APPOTrainer::collect_rollout(
   if (total_learner_steps > 0) {
     metrics.sparse_reward_mean = total_sparse_reward / static_cast<double>(total_learner_steps);
     metrics.mechanic_reward_mean = total_mechanic_reward / static_cast<double>(total_learner_steps);
+    metrics.dense_reward_mean = total_dense_reward / static_cast<double>(total_learner_steps);
     metrics.mean_goal_distance = total_goal_distance / static_cast<double>(std::max(dest.rollout_length(), 1));
   }
   metrics.min_goal_distance = min_goal_distance;
@@ -2115,6 +2124,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " grad_norm=" << coll_metrics.grad_norm
               << " sparse_reward=" << coll_metrics.sparse_reward_mean
               << " mechanic_reward=" << coll_metrics.mechanic_reward_mean
+              << " dense_reward=" << coll_metrics.dense_reward_mean
               << " rollout_steps=" << coll_metrics.rollout_steps
               << " completed_eps=" << coll_metrics.completed_episodes
               << " scored_eps=" << coll_metrics.scored_episodes

@@ -38,6 +38,23 @@
     "team_pinch": 0.0,
     "mechanic_reward_cap_per_episode": 0.0
   },
+  "dense_rewards": {
+    "ball_touch_vel_weight": 5.0,
+    "speed_toward_ball_weight": 2.0,
+    "speed_toward_ball_decay": 300.0,
+    "face_ball_weight": 0.3,
+    "air_reward_weight": 0.1,
+    "air_reward_ball_z_min": 200.0,
+    "velocity_ball_to_goal_weight": 10.0,
+    "max_ball_speed": 6000.0,
+    "air_touch_weight": 0.0,
+    "air_touch_max_air_time": 1.75,
+    "save_boost_weight": 0.0,
+    "boost_pickup_big_weight": 0.0,
+    "boost_pickup_small_weight": 0.0,
+    "boost_pickup_big_threshold": 0.5,
+    "dense_reward_cap_per_episode": 0.0
+  },
   "action_table": {
     "builtin": "rlgym_lookup_v1",
     "actions": []

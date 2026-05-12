@@ -49,6 +49,7 @@ struct TrainerMetrics {
   double self_play_eval_seconds = 0.0;
   double sparse_reward_mean = 0.0;
   double mechanic_reward_mean = 0.0;
+  double dense_reward_mean = 0.0;
   double sampled_value_win_mean = 0.0;
   int64_t rollout_steps = 0;
   int64_t completed_episodes = 0;

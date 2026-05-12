@@ -115,11 +115,50 @@ void from_json(const json& j, MechanicRewardConfig& value) {
   value.mechanic_reward_cap_per_episode = j.value("mechanic_reward_cap_per_episode", 0.10F);
 }
 
+void to_json(json& j, const DenseRewardConfig& value) {
+  j = json{
+      {"ball_touch_vel_weight", value.ball_touch_vel_weight},
+      {"speed_toward_ball_weight", value.speed_toward_ball_weight},
+      {"speed_toward_ball_decay", value.speed_toward_ball_decay},
+      {"face_ball_weight", value.face_ball_weight},
+      {"air_reward_weight", value.air_reward_weight},
+      {"air_reward_ball_z_min", value.air_reward_ball_z_min},
+      {"velocity_ball_to_goal_weight", value.velocity_ball_to_goal_weight},
+      {"max_ball_speed", value.max_ball_speed},
+      {"air_touch_weight", value.air_touch_weight},
+      {"air_touch_max_air_time", value.air_touch_max_air_time},
+      {"save_boost_weight", value.save_boost_weight},
+      {"boost_pickup_big_weight", value.boost_pickup_big_weight},
+      {"boost_pickup_small_weight", value.boost_pickup_small_weight},
+      {"boost_pickup_big_threshold", value.boost_pickup_big_threshold},
+      {"dense_reward_cap_per_episode", value.dense_reward_cap_per_episode},
+  };
+}
+
+void from_json(const json& j, DenseRewardConfig& value) {
+  value.ball_touch_vel_weight = j.value("ball_touch_vel_weight", 0.0F);
+  value.speed_toward_ball_weight = j.value("speed_toward_ball_weight", 0.0F);
+  value.speed_toward_ball_decay = j.value("speed_toward_ball_decay", 300.0F);
+  value.face_ball_weight = j.value("face_ball_weight", 0.0F);
+  value.air_reward_weight = j.value("air_reward_weight", 0.0F);
+  value.air_reward_ball_z_min = j.value("air_reward_ball_z_min", 200.0F);
+  value.velocity_ball_to_goal_weight = j.value("velocity_ball_to_goal_weight", 0.0F);
+  value.max_ball_speed = j.value("max_ball_speed", 6000.0F);
+  value.air_touch_weight = j.value("air_touch_weight", 0.0F);
+  value.air_touch_max_air_time = j.value("air_touch_max_air_time", 1.75F);
+  value.save_boost_weight = j.value("save_boost_weight", 0.0F);
+  value.boost_pickup_big_weight = j.value("boost_pickup_big_weight", 0.0F);
+  value.boost_pickup_small_weight = j.value("boost_pickup_small_weight", 0.0F);
+  value.boost_pickup_big_threshold = j.value("boost_pickup_big_threshold", 0.5F);
+  value.dense_reward_cap_per_episode = j.value("dense_reward_cap_per_episode", 0.0F);
+}
+
 void to_json(json& j, const CurriculumStageConfig& value) {
   j = json{
       {"name", value.name},
       {"outcome_override", value.outcome_override},
       {"mechanic_rewards_override", value.mechanic_rewards_override},
+      {"dense_rewards_override", value.dense_rewards_override},
       {"learning_rate", value.learning_rate},
       {"min_agent_steps", value.min_agent_steps},
       {"promotion_window_updates", value.promotion_window_updates},
@@ -132,6 +171,7 @@ void from_json(const json& j, CurriculumStageConfig& value) {
   value.name = j.value("name", std::string{});
   value.outcome_override = j.value("outcome_override", OutcomeConfig{});
   value.mechanic_rewards_override = j.value("mechanic_rewards_override", MechanicRewardConfig{});
+  value.dense_rewards_override = j.value("dense_rewards_override", DenseRewardConfig{});
   value.learning_rate = j.value("learning_rate", 0.0001F);
   value.min_agent_steps = j.value("min_agent_steps", 20'000'000LL);
   value.promotion_window_updates = j.value("promotion_window_updates", 5);
@@ -456,6 +496,7 @@ void to_json(json& j, const ExperimentConfig& value) {
       {"env", value.env},
       {"outcome", value.outcome},
       {"mechanic_rewards", value.mechanic_rewards},
+      {"dense_rewards", value.dense_rewards},
       {"curriculum", value.curriculum},
       {"action_table", value.action_table},
       {"model", value.model},
@@ -492,6 +533,7 @@ void from_json(const json& j, ExperimentConfig& value) {
   value.env = j.value("env", EnvConfig{});
   value.outcome = j.value("outcome", OutcomeConfig{});
   value.mechanic_rewards = j.value("mechanic_rewards", MechanicRewardConfig{});
+  value.dense_rewards = j.value("dense_rewards", DenseRewardConfig{});
   value.curriculum = j.value("curriculum", CurriculumConfig{});
   value.action_table = j.value("action_table", ActionTableConfig{});
   value.model = j.value("model", ModelConfig{});
