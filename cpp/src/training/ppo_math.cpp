@@ -66,8 +66,9 @@ torch::Tensor sample_masked_actions(
   {
     const torch::Tensor all_invalid = action_masks.to(torch::kFloat32).sum(-1) <= 0.5F;
     if (all_invalid.any().item<bool>()) {
-      const torch::Tensor fallback_logit = logits.index({torch::indexing::Ellipsis, 0});
-      masked.index_put_({torch::indexing::Ellipsis, 0}, fallback_logit);
+      throw std::invalid_argument(
+          "sample_masked_actions: all actions invalid for at least one agent. "
+          "The action mask builder must guarantee at least one valid noop action.");
     }
   }
   const torch::Tensor actions = deterministic ? masked.argmax(-1) : sample_categorical_from_logits(masked);

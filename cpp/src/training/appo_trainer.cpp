@@ -963,6 +963,11 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             } else if (has_b) {
               combined = grads_b[i].grad;
             } else {
+              // No gradient from either group this micro-batch — restore
+              // any previously accumulated gradient so it isn't dropped.
+              if (saved_grads[i].defined()) {
+                grads_a[i].param.mutable_grad() = saved_grads[i];
+              }
               continue;
             }
             if (saved_grads[i].defined()) {
