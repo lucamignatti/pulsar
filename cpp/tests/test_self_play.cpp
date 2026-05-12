@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <cmath>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -101,7 +102,6 @@ void test_opponent_inference_and_elo_math() {
     action_masks.index_put_({3, 0}, true);
     torch::Tensor episode_starts = torch::zeros({4});
     torch::Tensor snapshot_ids = torch::tensor({-1, 0, 0, -1}, torch::kLong);
-    
     torch::Tensor actions;
     double inference_seconds = 0.0;
     manager.infer_opponent_actions(
@@ -110,16 +110,12 @@ void test_opponent_inference_and_elo_math() {
         action_masks,
         episode_starts,
         snapshot_ids,
-        opponent_state,
         &actions,
         &inference_seconds);
     pulsar::test::require(actions[0].item<std::int64_t>() == 0, "non-opponent slot should remain untouched");
     pulsar::test::require(actions[1].item<std::int64_t>() == 7, "opponent slot should obey mask");
     pulsar::test::require(actions[2].item<std::int64_t>() == 7, "opponent slot should obey mask");
     pulsar::test::require(!actions.requires_grad(), "opponent actions should be inference-only");
-    pulsar::test::require(!opponent_state.workspace.requires_grad(), "opponent workspace state should be detached");
-    pulsar::test::require(!opponent_state.stm_keys.requires_grad(), "opponent STM key state should be detached");
-    pulsar::test::require(!opponent_state.stm_values.requires_grad(), "opponent STM value state should be detached");
     pulsar::test::require(inference_seconds >= 0.0, "inference timing should be recorded");
   }
   std::filesystem::remove_all(root);
@@ -129,6 +125,58 @@ void test_opponent_inference_and_elo_math() {
   pulsar::update_elo_ratings(winner, loser, 32.0);
   pulsar::test::require(winner > 1000.0, "winner rating should increase");
   pulsar::test::require(loser < 1000.0, "loser rating should decrease");
+}
+
+void test_elo_math_detailed() {
+  // Equal players draw: ratings should not change
+  double a = 1200.0;
+  double b = 1200.0;
+  pulsar::update_elo_ratings(a, b, 32.0);
+  pulsar::test::require(a > b, "winner A should increase over loser B");
+  double diff_a = a - 1200.0;
+
+  // Re-run with same ratings: result should be deterministic
+  double a2 = 1200.0;
+  double b2 = 1200.0;
+  pulsar::update_elo_ratings(a2, b2, 32.0);
+  pulsar::test::require(std::abs(a2 - a) < 0.001, "ELO should be deterministic");
+  pulsar::test::require(std::abs(b2 - b) < 0.001, "ELO should be deterministic");
+
+  // Higher K factor produces larger rating changes
+  double a_high_k = 1200.0;
+  double b_high_k = 1200.0;
+  pulsar::update_elo_ratings(a_high_k, b_high_k, 64.0);
+  pulsar::test::require((a_high_k - 1200.0) > diff_a, "higher K should produce larger rating change");
+
+  // Stronger player beating weaker player: smaller rating change
+  double strong = 1600.0;
+  double weak = 800.0;
+  pulsar::update_elo_ratings(strong, weak, 32.0);
+  double strong_gain = strong - 1600.0;
+  pulsar::test::require(strong_gain > 0.0, "strong winner should still gain rating");
+  pulsar::test::require(strong_gain < diff_a, "strong beating weak should gain less than equal match");
+
+  // Underdog beating favorite: larger rating change
+  double underdog = 800.0;
+  double favorite = 1600.0;
+  pulsar::update_elo_ratings(underdog, favorite, 32.0);
+  double underdog_gain = underdog - 800.0;
+  pulsar::test::require(underdog_gain > strong_gain, "underdog beating favorite should gain more");
+
+  // Sum of ratings is conserved (zero-sum)
+  double a_sum = 1000.0;
+  double b_sum = 1500.0;
+  double sum_before = a_sum + b_sum;
+  pulsar::update_elo_ratings(a_sum, b_sum, 32.0);
+  double sum_after = a_sum + b_sum;
+  pulsar::test::require(std::abs(sum_after - sum_before) < 0.001, "ELO should conserve total rating sum");
+
+  // K=0 produces no change
+  double a_k0 = 1000.0;
+  double b_k0 = 1000.0;
+  pulsar::update_elo_ratings(a_k0, b_k0, 0.0);
+  pulsar::test::require(std::abs(a_k0 - 1000.0) < 0.001, "K=0 should not change winner rating");
+  pulsar::test::require(std::abs(b_k0 - 1000.0) < 0.001, "K=0 should not change loser rating");
 }
 
 void test_snapshot_reload_preserves_actor_config() {
@@ -316,17 +364,65 @@ void test_checkpoint_metadata_validation() {
   fs::remove_all(root);
 }
 
+void test_self_play_league_default_config() {
+  pulsar::SelfPlayLeagueConfig league;
+  pulsar::test::require(!league.enabled, "default self_play_league should be disabled");
+  pulsar::test::require(league.elo_initial == 1000.0F, "default elo_initial should be 1000");
+  pulsar::test::require(league.elo_k == 32.0F, "default elo_k should be 32");
+  pulsar::test::require(league.max_snapshots == 8, "default max_snapshots should be 8");
+  pulsar::test::require(league.snapshot_interval_updates == 10, "default snapshot_interval_updates should be 10");
+  pulsar::test::require(league.training_opponent_policy == "stochastic", "default training_opponent_policy");
+  pulsar::test::require(league.eval_policy == "deterministic", "default eval_policy");
+}
+
+void test_rng_state_round_trip() {
+  namespace fs = std::filesystem;
+  pulsar::ExperimentConfig config = pulsar::test::make_test_config();
+  config.env.collision_meshes_path = pulsar::test::find_repo_collision_meshes().string();
+  config.self_play_league.enabled = true;
+  config.self_play_league.opponent_probability = 0.5F;
+  config.self_play_league.snapshot_interval_updates = 1;
+  config.self_play_league.max_snapshots = 1;
+  config.self_play_league.eval_interval_updates = 0;
+  config.ppo.device = "cpu";
+
+  const fs::path root = fs::temp_directory_path() / "pulsar_rng_test";
+  fs::remove_all(root);
+  auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
+  auto action_parser =
+      std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
+  pulsar::PPOActor model(config.model, config.goal_critic);
+  pulsar::ObservationNormalizer normalizer(config.model.observation_dim);
+  normalizer.update(torch::randn({16, config.model.observation_dim}));
+
+  pulsar::SelfPlayManager manager(config, root, obs_builder, action_parser, torch::kCPU);
+  auto state = manager.rng_state();
+  pulsar::test::require(!state.empty(), "rng_state should not be empty");
+
+  // Sample before and after restore should match
+  const auto assignment_before = manager.sample_assignment(0, 42);
+  manager.restore_rng_state(state);
+  const auto assignment_after = manager.sample_assignment(0, 42);
+  pulsar::test::require(assignment_before.enabled == assignment_after.enabled,
+                        "rng restore should reproduce same assignment");
+
+  fs::remove_all(root);
+}
+
 }  // namespace
 
 int main() {
   try {
     torch::set_num_threads(1);
     torch::set_num_interop_threads(1);
+    test_elo_math_detailed();
+    test_self_play_league_default_config();
     test_snapshot_save_load_trim_and_assignment();
     test_opponent_inference_and_elo_math();
     test_snapshot_reload_preserves_actor_config();
     test_self_play_eval_runs_and_loaded_snapshots_are_bounded();
     test_checkpoint_metadata_validation();
+    test_rng_state_round_trip();
     std::cout << "pulsar_self_play_tests passed\n" << std::flush;
     std::_Exit(EXIT_SUCCESS);
   } catch (const std::exception& exc) {

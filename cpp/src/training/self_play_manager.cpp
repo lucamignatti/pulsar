@@ -110,16 +110,41 @@ SelfPlayAssignment SelfPlayManager::sample_assignment(std::size_t, std::uint64_t
     return assignment;
   }
 
-  std::uniform_int_distribution<int> snapshot_dist(0, static_cast<int>(snapshots_.size() - 1));
+  // prefer stage-matched snapshots, fall back to any
+  std::vector<int> matching_indices;
+  for (int i = 0; i < static_cast<int>(snapshots_.size()); ++i) {
+    if (curriculum_stage_ < 0 || snapshots_[i].curriculum_stage == curriculum_stage_) {
+      matching_indices.push_back(i);
+    }
+  }
+
+  if (matching_indices.empty()) {
+    // fallback: previous stage or any snapshot
+    for (int i = 0; i < static_cast<int>(snapshots_.size()); ++i) {
+      matching_indices.push_back(i);
+    }
+  }
+
+  if (matching_indices.empty()) return assignment;
+
+  std::uniform_int_distribution<int> snapshot_dist(0, static_cast<int>(matching_indices.size()) - 1);
   std::uniform_int_distribution<int> team_dist(0, 1);
   assignment.enabled = true;
-  assignment.snapshot_index = snapshot_dist(rng_);
+  assignment.snapshot_index = matching_indices[static_cast<std::size_t>(snapshot_dist(rng_))];
   assignment.learner_team = team_dist(rng_) == 0 ? Team::Blue : Team::Orange;
   return assignment;
 }
 
 bool SelfPlayManager::has_snapshots() const {
   return !snapshots_.empty();
+}
+
+void SelfPlayManager::set_curriculum_stage(int stage_index) {
+  curriculum_stage_ = stage_index;
+}
+
+int SelfPlayManager::curriculum_stage() const {
+  return curriculum_stage_;
 }
 
 void SelfPlayManager::infer_opponent_actions(
@@ -244,6 +269,7 @@ void SelfPlayManager::load_existing_snapshots() {
     Snapshot snapshot{
         .global_step = metadata.global_step,
         .update_index = static_cast<int>(metadata.update_index),
+        .curriculum_stage = metadata.extra.value("curriculum_stage", -1),
         .model = PPOActor(snapshot_config.model, snapshot_config.goal_critic, snapshot_config.es_lora),
         .normalizer = ObservationNormalizer(snapshot_config.model.observation_dim),
         .ratings = {},
@@ -276,6 +302,8 @@ void SelfPlayManager::save_snapshot(const Snapshot& snapshot) const {
   try {
     std::filesystem::create_directories(staging);
     save_experiment_config(config_, (staging / "config.json").string());
+    nlohmann::json extra = nlohmann::json::object();
+    extra["curriculum_stage"] = snapshot.curriculum_stage;
     save_checkpoint_metadata(
         CheckpointMetadata{
             .schema_version = config_.schema_version,
@@ -287,6 +315,7 @@ void SelfPlayManager::save_snapshot(const Snapshot& snapshot) const {
             .global_step = snapshot.global_step,
             .update_index = snapshot.update_index,
             .critic_heads = snapshot.model->enabled_critic_heads(),
+            .extra = extra,
         },
         (staging / "metadata.json").string());
 
@@ -329,6 +358,7 @@ void SelfPlayManager::add_snapshot(
   Snapshot snapshot{
       .global_step = global_step,
       .update_index = update_index,
+      .curriculum_stage = curriculum_stage_,
       .model = clone_ppo_actor(current_model, device_),
       .normalizer = current_normalizer.clone(),
       .ratings = current_ratings_,

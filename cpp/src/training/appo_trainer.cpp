@@ -21,6 +21,7 @@
 #include "pulsar/env/obs_builder.hpp"
 #include "pulsar/env/rocketsim_engine.hpp"
 #include "pulsar/training/cuda_utils.hpp"
+#include "pulsar/training/curriculum.hpp"
 #include "pulsar/training/ppo_math.hpp"
 #include "pulsar/tracing/tracing.hpp"
 
@@ -150,77 +151,6 @@ torch::Tensor policy_goal_values_like(const torch::Tensor& obs, int goal_dim) {
   }
   return torch::zeros({obs.size(0), goal_dim}, options);
 }
-struct OutcomeFilterStats {
-  int64_t scored_episodes = 0;
-  int64_t neutral_episodes = 0;
-  int64_t unfinished_segments = 0;
-};
-
-void zero_active_segment(
-    float* learner_active,
-    int total_agents,
-    int start_step,
-    int end_step,
-    int agent_begin,
-    int agent_count) {
-  if (end_step < start_step || agent_count <= 0) {
-    return;
-  }
-  for (int step = start_step; step <= end_step; ++step) {
-    float* row = learner_active + static_cast<std::ptrdiff_t>(step * total_agents + agent_begin);
-    std::fill(row, row + agent_count, 0.0F);
-  }
-}
-
-OutcomeFilterStats keep_only_scored_episode_segments(RolloutStorage& rollout, int agents_per_env) {
-  OutcomeFilterStats stats{};
-  const int steps = rollout.rollout_length();
-  if (steps <= 0) {
-    return stats;
-  }
-  const int total_agents = rollout.num_agents();
-  float* learner_active = rollout.learner_active.data_ptr<float>();
-  const float* starts = rollout.episode_starts.data_ptr<float>();
-  const float* dones = rollout.dones.data_ptr<float>();
-  const std::int64_t* labels = rollout.terminal_outcome_labels.data_ptr<std::int64_t>();
-  for (int agent_begin = 0; agent_begin < total_agents; agent_begin += agents_per_env) {
-    const int agent_count = std::min(agents_per_env, total_agents - agent_begin);
-    int segment_start = 0;
-    for (int step = 0; step < steps; ++step) {
-      const int row_offset = step * total_agents + agent_begin;
-      if (step > segment_start && starts[row_offset] > 0.5F) {
-        zero_active_segment(learner_active, total_agents, segment_start, step - 1, agent_begin, agent_count);
-        stats.unfinished_segments++;
-        segment_start = step;
-      }
-      if (dones[row_offset] <= 0.5F) {
-        continue;
-      }
-      bool scored = false;
-      for (int local = 0; local < agent_count; ++local) {
-        scored = scored || (labels[row_offset + local] == 0 || labels[row_offset + local] == 1);
-      }
-      if (scored) {
-        stats.scored_episodes++;
-      } else {
-        zero_active_segment(learner_active, total_agents, segment_start, step, agent_begin, agent_count);
-        stats.neutral_episodes++;
-      }
-      segment_start = step + 1;
-    }
-    // When train_only_scored_episodes is enabled, incomplete episodes at chunk
-    // boundaries are intentionally zeroed out (dropped) below.  This is by design:
-    // only complete episodes whose terminal outcome is known are kept for training,
-    // so that the learner_active mask reflects scored/neutral outcome filtering.
-    // Episodes that span across two rollout chunks and thus have no terminal label
-    // within the current chunk are excluded.
-    if (segment_start < steps) {
-      zero_active_segment(learner_active, total_agents, segment_start, steps - 1, agent_begin, agent_count);
-      stats.unfinished_segments++;
-    }
-  }
-  return stats;
-}
 
 void append_metrics_line(
     const std::filesystem::path& checkpoint_dir,
@@ -238,9 +168,9 @@ void append_metrics_line(
       {"value_loss", metrics.value_loss},
       {"entropy", metrics.entropy},
       {"grad_norm", metrics.grad_norm},
-      {"sparse_reward_mean", metrics.sparse_reward_mean},
+      {"total_reward_mean", metrics.total_reward_mean},
+      {"gameplay_reward_mean", metrics.gameplay_reward_mean},
       {"mechanic_reward_mean", metrics.mechanic_reward_mean},
-      {"dense_reward_mean", metrics.dense_reward_mean},
       {"sampled_value_win_mean", metrics.sampled_value_win_mean},
       {"rollout_steps", metrics.rollout_steps},
       {"completed_episodes", metrics.completed_episodes},
@@ -273,7 +203,6 @@ void append_metrics_line(
       {"es_seconds", metrics.es_seconds},
       {"scored_episode_rate", metrics.scored_episode_rate},
       {"effective_entropy_coef", metrics.effective_entropy_coef},
-      {"effective_success_bc_coef", metrics.effective_success_bc_coef},
   };
   for (const auto& [mode, rating] : metrics.elo_ratings) {
     line["elo_" + mode] = rating;
@@ -381,6 +310,7 @@ APPOTrainer::APPOTrainer(
     : config_(std::move(config)),
       collectors_(std::move(collectors)),
       self_play_manager_(std::move(self_play_manager)),
+      curriculum_(config_.curriculum),
       action_table_(config_.action_table),
       actor_(PPOActor(config_.model, config_.goal_critic, config_.es_lora)),
       actor_normalizer_(config_.model.observation_dim),
@@ -448,104 +378,29 @@ APPOTrainer::~APPOTrainer() {
   synchronize_cuda_if_needed(device_, "trainer shutdown");
 }
 
-void APPOTrainer::apply_curriculum_stage() {
-  const auto& stages = config_.curriculum.stages;
-  if (stages.empty()) return;
-
-  if (curriculum_stage_ < 0) {
-    curriculum_stage_ = 0;
-  }
-  const int idx = std::min(curriculum_stage_, static_cast<int>(stages.size()) - 1);
-  const auto& stage = stages[static_cast<std::size_t>(idx)];
-
-  config_.outcome = stage.outcome_override;
-  config_.mechanic_rewards = stage.mechanic_rewards_override;
-  config_.dense_rewards = stage.dense_rewards_override;
-  config_.ppo.learning_rate = stage.learning_rate;
-
-  for (auto& opt_group : actor_optimizer_.param_groups()) {
-    opt_group.options().set_lr(stage.learning_rate);
-  }
-
+void APPOTrainer::apply_curriculum_to_collectors() {
+  if (!curriculum_.enabled()) return;
+  curriculum_.initialize_stage();
+  auto cfg = config_;
+  cfg.outcome = curriculum_.outcome();
+  cfg.mechanic_rewards = curriculum_.mechanic_rewards();
+  cfg.dense_rewards = curriculum_.dense_rewards();
   for (auto& collector : collectors_) {
     if (collector) {
-      collector->update_mechanic_rewards(config_.mechanic_rewards);
-      collector->update_dense_rewards(config_.dense_rewards);
+      collector->update_reward_config(cfg);
+      collector->update_unlocked_mechanics(curriculum_.unlocked_mechanics());
     }
   }
-
-  curriculum_promotion_counter_ = 0;
-  curriculum_agent_steps_ = 0;
-
-  std::cout << "curriculum_stage=" << idx
-            << " name=" << stage.name
-            << " lr=" << stage.learning_rate << '\n';
+  if (self_play_manager_) {
+    self_play_manager_->set_curriculum_stage(curriculum_.stage_index());
+  }
 }
 
-bool APPOTrainer::check_curriculum_promotion(
-    const TrainerMetrics& metrics, std::int64_t agent_steps) {
-  const auto& stages = config_.curriculum.stages;
-  if (stages.empty()) return false;
-
-  curriculum_agent_steps_ += agent_steps;
-
-  const int idx = std::min(curriculum_stage_, static_cast<int>(stages.size()) - 1);
-  if (idx < 0 || idx >= static_cast<int>(stages.size()) - 1) return false;
-
-  const auto& stage = stages[static_cast<std::size_t>(idx)];
-
-  if (curriculum_agent_steps_ < stage.min_agent_steps) return false;
-  if (stage.promotion_window_updates <= 0) return false;
-
-  curriculum_touch_rates_.push_back(metrics.touch_episode_rate);
-  curriculum_scored_rates_.push_back(metrics.scored_episode_rate);
-
-  const int window = stage.promotion_window_updates;
-  while (static_cast<int>(curriculum_touch_rates_.size()) > window) curriculum_touch_rates_.pop_front();
-  while (static_cast<int>(curriculum_scored_rates_.size()) > window) curriculum_scored_rates_.pop_front();
-
-  if (static_cast<int>(curriculum_touch_rates_.size()) < window) return false;
-
-  double avg_touch = 0.0;
-  for (double v : curriculum_touch_rates_) avg_touch += v;
-  avg_touch /= static_cast<double>(curriculum_touch_rates_.size());
-
-  double avg_scored = 0.0;
-  for (double v : curriculum_scored_rates_) avg_scored += v;
-  avg_scored /= static_cast<double>(curriculum_scored_rates_.size());
-
-  bool touch_ok = stage.required_touch_episode_rate <= 0.0F ||
-                  avg_touch >= static_cast<double>(stage.required_touch_episode_rate);
-  bool score_ok = stage.required_scored_episode_rate <= 0.0F ||
-                  avg_scored >= static_cast<double>(stage.required_scored_episode_rate);
-
-  if (!touch_ok || !score_ok) {
-    curriculum_promotion_counter_ = 0;
-    return false;
+void APPOTrainer::apply_curriculum_lr() {
+  float lr = curriculum_.learning_rate();
+  for (auto& opt_group : actor_optimizer_.param_groups()) {
+    opt_group.options().set_lr(lr);
   }
-
-  curriculum_promotion_counter_++;
-
-  if (curriculum_promotion_counter_ >= stage.promotion_window_updates) {
-    curriculum_stage_++;
-    curriculum_promotion_counter_ = 0;
-    curriculum_touch_rates_.clear();
-    curriculum_scored_rates_.clear();
-    apply_curriculum_stage();
-    std::cout << "curriculum_promoted stage=" << curriculum_stage_ << '\n';
-    return true;
-  }
-
-  return false;
-}
-
-torch::Tensor APPOTrainer::map_outcome_labels_to_rewards(const torch::Tensor& labels) const {
-  torch::Tensor rewards = torch::zeros_like(labels, torch::TensorOptions().dtype(torch::kFloat32));
-  rewards.masked_fill_(labels == 0, config_.outcome.score);
-  rewards.masked_fill_(labels == 1, config_.outcome.concede);
-  rewards.masked_fill_(labels == 2, config_.outcome.neutral);
-  rewards.masked_fill_(labels == 3, config_.outcome.neutral_no_touch);
-  return rewards;
 }
 
 void APPOTrainer::maybe_initialize_from_checkpoint() {
@@ -581,27 +436,6 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
   if (metadata.extra.contains("wandb_run_id")) {
     config_.wandb.run_id = metadata.extra["wandb_run_id"].get<std::string>();
   }
-  if (metadata.extra.contains("curriculum_stage")) {
-    curriculum_stage_ = metadata.extra["curriculum_stage"].get<int>();
-  }
-  if (metadata.extra.contains("curriculum_agent_steps")) {
-    curriculum_agent_steps_ = metadata.extra["curriculum_agent_steps"].get<std::int64_t>();
-  }
-  if (metadata.extra.contains("curriculum_promotion_counter")) {
-    curriculum_promotion_counter_ = metadata.extra["curriculum_promotion_counter"].get<int>();
-  }
-  if (metadata.extra.contains("curriculum_touch_rates")) {
-    curriculum_touch_rates_.clear();
-    for (const auto& v : metadata.extra["curriculum_touch_rates"]) {
-      curriculum_touch_rates_.push_back(v.get<double>());
-    }
-  }
-  if (metadata.extra.contains("curriculum_scored_rates")) {
-    curriculum_scored_rates_.clear();
-    for (const auto& v : metadata.extra["curriculum_scored_rates"]) {
-      curriculum_scored_rates_.push_back(v.get<double>());
-    }
-  }
   if (metadata.extra.contains("recent_scored_rates")) {
     recent_scored_rates_.clear();
     for (const auto& v : metadata.extra["recent_scored_rates"]) {
@@ -612,6 +446,28 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
     if (metadata.extra.contains("self_play_rng_state")) {
       self_play_manager_->restore_rng_state(metadata.extra["self_play_rng_state"].get<std::string>());
     }
+  }
+  if (metadata.extra.contains("curriculum_stage") && curriculum_.enabled()) {
+    CurriculumState restored;
+    restored.stage_index = metadata.extra["curriculum_stage"].get<int>();
+    restored.agent_steps_in_stage = metadata.extra.value("curriculum_agent_steps", 0LL);
+    restored.promotion_counter = metadata.extra.value("curriculum_promotion_counter", 0);
+    restored.demotion_counter = metadata.extra.value("curriculum_demotion_counter", 0);
+    restored.current_mode = metadata.extra.value("curriculum_current_mode", std::string{"1v1"});
+    if (metadata.extra.contains("curriculum_touch_rates")) {
+      for (const auto& v : metadata.extra["curriculum_touch_rates"]) {
+        restored.touch_rates.push_back(v.get<double>());
+      }
+    }
+    if (metadata.extra.contains("curriculum_scored_rates")) {
+      for (const auto& v : metadata.extra["curriculum_scored_rates"]) {
+        restored.scored_rates.push_back(v.get<double>());
+      }
+    }
+    curriculum_.restore_state(restored);
+    std::cout << "restored_curriculum stage=" << restored.stage_index
+              << " mode=" << restored.current_mode
+              << " steps_in_stage=" << restored.agent_steps_in_stage << '\n';
   }
   if (log_initialization_) {
     std::cout << "initialized_from_checkpoint=" << base.string() << '\n';
@@ -645,22 +501,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
     effective_entropy_floor_coef = config_.ppo.entropy_floor_coef * static_cast<float>(1.0 - progress);
   }
 
-  float effective_bc_coef = config_.ppo.success_bc_coef;
-  if (config_.ppo.success_bc_coef > 0.0F) {
-    bool bc_active = true;
-    if (!recent_scored_rates_.empty()) {
-      double sum = 0.0;
-      for (double v : recent_scored_rates_) sum += v;
-      double recent_score = sum / static_cast<double>(recent_scored_rates_.size());
-      if (recent_score < static_cast<double>(config_.ppo.success_bc_min_score)) {
-        bc_active = false;
-        effective_bc_coef = 0.0F;
-      } else if (recent_score >= static_cast<double>(config_.ppo.success_bc_decay_score)) {
-        effective_bc_coef = config_.ppo.success_bc_coef * config_.ppo.success_bc_decay;
-      }
-    }
-    success_bc_active_ = bc_active;
-  }
   const int seq_len = std::max(1, config_.ppo.rollout_length);
   const int logical_agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
   const int max_forward_samples = std::max(1, config_.model.transformer_max_batch_size);
@@ -929,35 +769,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           torch::Tensor loss_b = (config_.goal_critic.lambda_Zg * goal_loss
               + config_.goal_critic.lambda_goal_actor * actor_goal_loss) * sample_weight;
 
-          if (effective_bc_coef > 0.0F && !success_obs_.empty()) {
-            int obs_dim = config_.model.observation_dim;
-            int stored_traces = static_cast<int>(success_actions_.size());
-            int bc_batch = std::min(config_.ppo.success_bc_batch, stored_traces);
-            if (bc_batch > 0) {
-              auto bc_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-              torch::Tensor bc_obs = torch::empty({bc_batch, obs_dim}, bc_options);
-              torch::Tensor bc_acts = torch::empty({bc_batch}, bc_options.dtype(torch::kLong));
-              float* bc_obs_ptr = bc_obs.data_ptr<float>();
-              std::int64_t* bc_acts_ptr = bc_acts.data_ptr<std::int64_t>();
-              torch::Tensor rand_idx = torch::randint(0, stored_traces, {bc_batch},
-                                                       torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
-              auto* rand_ptr = rand_idx.data_ptr<std::int64_t>();
-              for (int i = 0; i < bc_batch; ++i) {
-                int src = static_cast<int>(rand_ptr[i]);
-                std::copy(success_obs_.begin() + src * obs_dim,
-                          success_obs_.begin() + (src + 1) * obs_dim, bc_obs_ptr + i * obs_dim);
-                bc_acts_ptr[i] = success_actions_[src];
-              }
-              bc_obs = bc_obs.to(device_);
-              bc_acts = bc_acts.to(device_);
-              ActorStepOutput bc_output = actor_->forward_step(bc_obs);
-              torch::Tensor bc_ce = torch::nn::functional::cross_entropy(
-                  bc_output.policy_logits, bc_acts,
-                  torch::nn::functional::CrossEntropyFuncOptions().reduction(torch::kMean));
-              loss_b = loss_b + effective_bc_coef * bc_ce * sample_weight;
-            }
-          }
-
           zero_existing_gradients(*actor_);
           loss_b.backward();
           auto grads_b = capture_gradients(*actor_);
@@ -1000,35 +811,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
           torch::Tensor combined_loss = loss * sample_weight;
 
-          if (effective_bc_coef > 0.0F && !success_obs_.empty()) {
-            int obs_dim = config_.model.observation_dim;
-            int stored_traces = static_cast<int>(success_actions_.size());
-            int bc_batch = std::min(config_.ppo.success_bc_batch, stored_traces);
-            if (bc_batch > 0) {
-              auto bc_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-              torch::Tensor bc_obs = torch::empty({bc_batch, obs_dim}, bc_options);
-              torch::Tensor bc_acts = torch::empty({bc_batch}, bc_options.dtype(torch::kLong));
-              float* bc_obs_ptr = bc_obs.data_ptr<float>();
-              std::int64_t* bc_acts_ptr = bc_acts.data_ptr<std::int64_t>();
-              torch::Tensor rand_idx = torch::randint(0, stored_traces, {bc_batch},
-                                                       torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
-              auto* rand_ptr = rand_idx.data_ptr<std::int64_t>();
-              for (int i = 0; i < bc_batch; ++i) {
-                int src = static_cast<int>(rand_ptr[i]);
-                std::copy(success_obs_.begin() + src * obs_dim,
-                          success_obs_.begin() + (src + 1) * obs_dim, bc_obs_ptr + i * obs_dim);
-                bc_acts_ptr[i] = success_actions_[src];
-              }
-              bc_obs = bc_obs.to(device_);
-              bc_acts = bc_acts.to(device_);
-              ActorStepOutput bc_output = actor_->forward_step(bc_obs);
-              torch::Tensor bc_ce = torch::nn::functional::cross_entropy(
-                  bc_output.policy_logits, bc_acts,
-                  torch::nn::functional::CrossEntropyFuncOptions().reduction(torch::kMean));
-              combined_loss = combined_loss + effective_bc_coef * bc_ce * sample_weight;
-            }
-          }
-
           combined_loss.backward();
         }
 
@@ -1063,7 +845,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
     metrics.mean_sampled_goal_distance = accumulated_sampled_goal_distance / static_cast<double>(metric_steps);
   }
   metrics.effective_entropy_coef = static_cast<double>(effective_entropy_coef);
-  metrics.effective_success_bc_coef = static_cast<double>(effective_bc_coef);
   metrics.update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count();
   return metrics;
 }
@@ -1193,13 +974,13 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
   const auto tensor_options = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
   torch::Tensor A_stack;
   torch::Tensor B_stack;
-      if (es_cfg.antithetic_sampling) {
-        const int half_pop = pop / 2;
-        torch::Tensor A_half = torch::randn({half_pop, rank, in_features}, tensor_options);
-        torch::Tensor B_half = torch::randn({half_pop, out_features, rank}, tensor_options);
-        A_stack = torch::cat({A_half, -A_half}, 0);
-        B_stack = torch::cat({B_half, -B_half}, 0);
-      } else {
+  if (es_cfg.antithetic_sampling) {
+    const int half_pop = pop / 2;
+    torch::Tensor A_half = torch::randn({half_pop, rank, in_features}, tensor_options);
+    torch::Tensor B_half = torch::randn({half_pop, out_features, rank}, tensor_options);
+    A_stack = torch::cat({A_half, -A_half}, 0);
+    B_stack = torch::cat({B_half, -B_half}, 0);
+  } else {
     A_stack = torch::randn({pop, rank, in_features}, tensor_options);
     B_stack = torch::randn({pop, out_features, rank}, tensor_options);
   }
@@ -1325,20 +1106,10 @@ void APPOTrainer::collect_rollout(
   std::int64_t local_collected_steps = 0;
 
   const auto collection_start = std::chrono::steady_clock::now();
-  if (config_.ppo.train_only_scored_episodes) {
-    if (collectors_.size() > 1) {
-      for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
-        collectors_[shard]->reset_all(&collector_timings);
-        const auto shard_agents = static_cast<std::int64_t>(collectors_[shard]->total_agents());
-      }
-    } else {
-      collector_->reset_all(&collector_timings);
-    }
-  }
 
-  double total_sparse_reward = 0.0;
+  double total_reward = 0.0;
+  double total_gameplay_reward = 0.0;
   double total_mechanic_reward = 0.0;
-  double total_dense_reward = 0.0;
   int64_t total_steps = 0;
   int64_t total_learner_steps = 0;
   double accumulated_sampled_value = 0.0;
@@ -1353,8 +1124,6 @@ void APPOTrainer::collect_rollout(
   int scored_episodes = 0;
   int touched_episodes = 0;
   const int agents_per_env = std::max(1, config_.env.team_size * 2);
-  const int early_update_completed_episodes = config_.ppo.early_update_completed_episodes;
-  const int min_rollout_steps = early_update_completed_episodes > 0 ? 1 : config_.ppo.rollout_length;
 
   if (collectors_.size() > 1) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "collect_loop_sharded");
@@ -1371,9 +1140,6 @@ void APPOTrainer::collect_rollout(
       CollectorTimings timings{};
       std::future<void> step_future{};
     };
-
-    const bool use_completed_for_break =
-        !config_.ppo.train_only_scored_episodes;
 
     for (int step = 0; step < config_.ppo.rollout_length; ++step) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "collect_step_sharded");
@@ -1466,9 +1232,9 @@ void APPOTrainer::collect_rollout(
         torch::Tensor truncated_host = collector.host_truncated();
         torch::Tensor bootstrap_truncated_host = collector.host_bootstrap_truncated();
         torch::Tensor terminal_labels = collector.host_terminal_outcome_labels();
+        torch::Tensor extrinsic_rewards_host = collector.host_rewards();
+        torch::Tensor gameplay_r_host = collector.host_gameplay_rewards();
         torch::Tensor mechanic_r_host = collector.host_mechanic_rewards();
-        torch::Tensor dense_r_host = collector.host_dense_rewards();
-        torch::Tensor extrinsic_rewards_host = map_outcome_labels_to_rewards(terminal_labels) * dones_host + mechanic_r_host + dense_r_host;
         const auto* dones_ptr = dones_host.data_ptr<float>();
 
         torch::Tensor ball_prox_host = collector.host_ball_proximity();
@@ -1534,9 +1300,9 @@ void APPOTrainer::collect_rollout(
         torch::Tensor terminal_obs_host = collector.host_terminal_observations();
 
         const auto learner_step_count = static_cast<std::int64_t>(shard_step.learner_active_host.sum().item<float>());
-        total_sparse_reward += extrinsic_rewards_host.sum().item<double>();
+        total_reward += extrinsic_rewards_host.sum().item<double>();
+        total_gameplay_reward += gameplay_r_host.sum().item<double>();
         total_mechanic_reward += mechanic_r_host.sum().item<double>();
-        total_dense_reward += dense_r_host.sum().item<double>();
         total_steps += extrinsic_rewards_host.numel();
         total_learner_steps += learner_step_count;
 
@@ -1567,11 +1333,6 @@ void APPOTrainer::collect_rollout(
         local_collected_steps += learner_step_count;
       }
 
-      if (early_update_completed_episodes > 0
-          && step + 1 >= min_rollout_steps
-          && (use_completed_for_break ? completed_episodes : scored_episodes) >= early_update_completed_episodes) {
-        break;
-      }
     }
 
     {
@@ -1594,8 +1355,6 @@ void APPOTrainer::collect_rollout(
     }
   } else {
     PULSAR_TRACE_SCOPE_CAT("trainer", "collect_loop");
-    const bool use_completed_for_break =
-        !config_.ppo.train_only_scored_episodes;
     for (int step = 0; step < config_.ppo.rollout_length; ++step) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "collect_step");
       torch::Tensor raw_obs_host = collector_->host_observations();
@@ -1662,9 +1421,9 @@ void APPOTrainer::collect_rollout(
     torch::Tensor truncated_host = collector_->host_truncated();
     torch::Tensor bootstrap_truncated_host = collector_->host_bootstrap_truncated();
     torch::Tensor terminal_labels = collector_->host_terminal_outcome_labels();
+      torch::Tensor extrinsic_rewards_host = collector_->host_rewards();
+      torch::Tensor gameplay_r_host = collector_->host_gameplay_rewards();
       torch::Tensor mechanic_r_host = collector_->host_mechanic_rewards();
-      torch::Tensor dense_r_host = collector_->host_dense_rewards();
-      torch::Tensor extrinsic_rewards_host = map_outcome_labels_to_rewards(terminal_labels) * dones_host + mechanic_r_host + dense_r_host;
     const auto* dones_ptr = dones_host.data_ptr<float>();
 
     torch::Tensor ball_prox_host = collector_->host_ball_proximity();
@@ -1724,9 +1483,9 @@ void APPOTrainer::collect_rollout(
     torch::Tensor terminal_obs_host = collector_->host_terminal_observations();
 
     const auto learner_step_count = static_cast<std::int64_t>(learner_active_host.sum().item<float>());
-    total_sparse_reward += extrinsic_rewards_host.sum().item<double>();
+    total_reward += extrinsic_rewards_host.sum().item<double>();
+    total_gameplay_reward += gameplay_r_host.sum().item<double>();
     total_mechanic_reward += mechanic_r_host.sum().item<double>();
-    total_dense_reward += dense_r_host.sum().item<double>();
     total_steps += extrinsic_rewards_host.numel();
     total_learner_steps += learner_step_count;
 
@@ -1754,11 +1513,6 @@ void APPOTrainer::collect_rollout(
         terminal_obs_host);
 
     local_collected_steps += learner_step_count;
-    if (early_update_completed_episodes > 0
-        && step + 1 >= min_rollout_steps
-        && (use_completed_for_break ? completed_episodes : scored_episodes) >= early_update_completed_episodes) {
-      break;
-    }
     }
   }
   {
@@ -1776,68 +1530,13 @@ void APPOTrainer::collect_rollout(
     }
   }
 
-  if (config_.ppo.success_bc_coef > 0.0F) {
-    PULSAR_TRACE_SCOPE_CAT("trainer", "success_trace_capture");
-    const int steps = dest.rollout_length();
-    const int all_agents = dest.num_agents();
-    if (steps > 0 && all_agents > 0) {
-    const int obs_dim = config_.model.observation_dim;
-    const int max_trace = config_.ppo.success_trace_len;
-    const float* dones_ptr = dest.dones.narrow(0, 0, steps).data_ptr<float>();
-    const float* starts_ptr = dest.episode_starts.narrow(0, 0, steps).data_ptr<float>();
-    const std::int64_t* labels_ptr = dest.terminal_outcome_labels.narrow(0, 0, steps).data_ptr<std::int64_t>();
-    const float* obs_ptr = dest.obs.narrow(0, 0, steps).data_ptr<float>();
-    const std::int64_t* act_ptr = dest.actions.narrow(0, 0, steps).data_ptr<std::int64_t>();
-    for (int a = 0; a < all_agents; ++a) {
-      int ep_start = 0;
-      for (int s = 0; s < steps; ++s) {
-        int idx = s * all_agents + a;
-        if (s > ep_start && starts_ptr[idx] > 0.5F) {
-          ep_start = s;
-        }
-        if (dones_ptr[idx] > 0.5F && labels_ptr[idx] == 0) {
-          int trace_len = std::min(s - ep_start + 1, max_trace);
-          int trace_start = s - trace_len + 1;
-          for (int t = trace_start; t <= s; ++t) {
-            int buf_idx = t * all_agents + a;
-            const float* o = obs_ptr + static_cast<std::ptrdiff_t>(buf_idx) * obs_dim;
-            success_obs_.insert(success_obs_.end(), o, o + obs_dim);
-            success_actions_.push_back(act_ptr[buf_idx]);
-          }
-        }
-      }
-    }
-    int buffer_limit = config_.ppo.success_buffer_size * max_trace;
-    if (static_cast<int>(success_obs_.size()) > buffer_limit * obs_dim) {
-      int excess = static_cast<int>(success_obs_.size()) - buffer_limit * obs_dim;
-      success_obs_.erase(success_obs_.begin(), success_obs_.begin() + excess);
-      int excess_acts = static_cast<int>(success_actions_.size()) - buffer_limit;
-      if (excess_acts > 0) {
-        success_actions_.erase(success_actions_.begin(), success_actions_.begin() + excess_acts);
-      }
-    }
-    }
-  }
-
-  OutcomeFilterStats outcome_filter_stats{};
-  {
-    PULSAR_TRACE_SCOPE_CAT("trainer", "scored_filter");
-    if (config_.ppo.train_only_scored_episodes) {
-      outcome_filter_stats = keep_only_scored_episode_segments(dest, agents_per_env);
-      const torch::Tensor active_train_mask = dest.learner_active.narrow(0, 0, dest.rollout_length());
-      const torch::Tensor reward_train = dest.reward("extrinsic").narrow(0, 0, dest.rollout_length());
-      total_learner_steps = active_train_mask.sum().item<int64_t>();
-      total_sparse_reward = (reward_train * active_train_mask).sum().item<double>();
-    }
-  }
-
   const double collection_seconds =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - collection_start).count();
 
   if (total_learner_steps > 0) {
-    metrics.sparse_reward_mean = total_sparse_reward / static_cast<double>(total_learner_steps);
+    metrics.total_reward_mean = total_reward / static_cast<double>(total_learner_steps);
+    metrics.gameplay_reward_mean = total_gameplay_reward / static_cast<double>(total_learner_steps);
     metrics.mechanic_reward_mean = total_mechanic_reward / static_cast<double>(total_learner_steps);
-    metrics.dense_reward_mean = total_dense_reward / static_cast<double>(total_learner_steps);
     metrics.mean_goal_distance = total_goal_distance / static_cast<double>(std::max(dest.rollout_length(), 1));
   }
   metrics.min_goal_distance = min_goal_distance;
@@ -1845,8 +1544,7 @@ void APPOTrainer::collect_rollout(
   metrics.goals_conceded = total_goals_conceded;
   metrics.rollout_steps = dest.rollout_length();
   metrics.completed_episodes = completed_episodes;
-  const bool filtered = config_.ppo.train_only_scored_episodes;
-  metrics.scored_episodes = filtered ? outcome_filter_stats.scored_episodes : scored_episodes;
+  metrics.scored_episodes = scored_episodes;
   metrics.touch_episode_rate =
       completed_episodes > 0
           ? static_cast<double>(touched_episodes) / static_cast<double>(completed_episodes)
@@ -1881,14 +1579,16 @@ CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
       extra["self_play_rng_state"] = rng;
     }
   }
-  extra["curriculum_stage"] = curriculum_stage_;
-  extra["curriculum_agent_steps"] = curriculum_agent_steps_;
-  extra["curriculum_promotion_counter"] = curriculum_promotion_counter_;
+  extra["curriculum_stage"] = curriculum_.state().stage_index;
+  extra["curriculum_agent_steps"] = curriculum_.state().agent_steps_in_stage;
+  extra["curriculum_promotion_counter"] = curriculum_.state().promotion_counter;
+  extra["curriculum_demotion_counter"] = curriculum_.state().demotion_counter;
+  extra["curriculum_current_mode"] = curriculum_.state().current_mode;
   nlohmann::json touch_rates_json = nlohmann::json::array();
-  for (double v : curriculum_touch_rates_) touch_rates_json.push_back(v);
+  for (double v : curriculum_.state().touch_rates) touch_rates_json.push_back(v);
   extra["curriculum_touch_rates"] = touch_rates_json;
   nlohmann::json scored_rates_json = nlohmann::json::array();
-  for (double v : curriculum_scored_rates_) scored_rates_json.push_back(v);
+  for (double v : curriculum_.state().scored_rates) scored_rates_json.push_back(v);
   extra["curriculum_scored_rates"] = scored_rates_json;
   {
     nlohmann::json recent_json = nlohmann::json::array();
@@ -1937,24 +1637,6 @@ void APPOTrainer::save_training_state(const std::filesystem::path& path) const {
   actor_cpu->save(archive);
   normalizer_cpu.save(archive);
   actor_optimizer_.save(archive);
-  if (!success_obs_.empty()) {
-    int obs_count = static_cast<int>(success_obs_.size() / config_.model.observation_dim);
-    if (obs_count > 0) {
-      torch::Tensor obs_tensor = torch::from_blob(
-          const_cast<float*>(success_obs_.data()),
-          {obs_count, config_.model.observation_dim},
-          torch::TensorOptions().dtype(torch::kFloat32)).clone();
-      archive.write("success_bc_obs", obs_tensor);
-    }
-  }
-  if (!success_actions_.empty()) {
-    int act_count = static_cast<int>(success_actions_.size());
-    torch::Tensor act_tensor = torch::from_blob(
-        const_cast<std::int64_t*>(success_actions_.data()),
-        {act_count},
-        torch::TensorOptions().dtype(torch::kInt64)).clone();
-    archive.write("success_bc_actions", act_tensor);
-  }
   archive.save_to(path.string());
 }
 
@@ -1964,24 +1646,6 @@ void APPOTrainer::load_training_state(const std::filesystem::path& path) {
   actor_->load(archive);
   actor_normalizer_.load(archive);
   actor_optimizer_.load(archive);
-  try {
-    torch::Tensor obs_loaded;
-    archive.read("success_bc_obs", obs_loaded);
-    torch::Tensor act_loaded;
-    archive.read("success_bc_actions", act_loaded);
-    if (obs_loaded.defined() && obs_loaded.numel() > 0) {
-      auto obs_cpu = obs_loaded.to(torch::kCPU).contiguous();
-      int obs_count = static_cast<int>(obs_cpu.size(0));
-      int obs_dim = static_cast<int>(obs_cpu.size(1));
-      success_obs_.assign(obs_cpu.data_ptr<float>(), obs_cpu.data_ptr<float>() + obs_count * obs_dim);
-      if (act_loaded.defined() && act_loaded.numel() > 0) {
-        auto act_cpu = act_loaded.to(torch::kCPU).contiguous();
-        success_actions_.assign(act_cpu.data_ptr<std::int64_t>(),
-                                act_cpu.data_ptr<std::int64_t>() + act_cpu.numel());
-      }
-    }
-  } catch (...) {
-  }
   actor_->to(device_);
   actor_normalizer_.to(device_);
 }
@@ -2022,15 +1686,16 @@ void APPOTrainer::prune_old_checkpoints(const std::filesystem::path& checkpoint_
 
 void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const std::string& config_path) {
   const bool train_forever = updates <= 0;
-  std::cout << "train_start curriculum_enabled=" << (config_.curriculum.enabled ? 1 : 0)
+  std::cout << "train_start curriculum_enabled=" << (curriculum_.enabled() ? 1 : 0)
             << " stages=" << config_.curriculum.stages.size()
             << '\n';
   std::filesystem::create_directories(checkpoint_dir);
   WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "dappo_train");
   std::int64_t global_step = resumed_global_step_;
 
-  if (config_.curriculum.enabled && !config_.curriculum.stages.empty()) {
-    apply_curriculum_stage();
+  if (curriculum_.enabled()) {
+    apply_curriculum_to_collectors();
+    apply_curriculum_lr();
   }
 
   TrainerMetrics coll_metrics{};
@@ -2059,8 +1724,26 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
         recent_scored_rates_.pop_front();
       }
     }
-    if (config_.curriculum.enabled) {
-      check_curriculum_promotion(coll_metrics, coll_steps);
+    if (curriculum_.enabled()) {
+      if (curriculum_.check_promotion(
+          coll_metrics.touch_episode_rate, coll_metrics.scored_episode_rate, coll_steps)) {
+        if (curriculum_.mode_changed()) {
+          std::cout << "curriculum_mode_change new_mode=" << curriculum_.current_mode()
+                    << " (collector rebuild not yet implemented — restart required)\n";
+        }
+        apply_curriculum_to_collectors();
+        apply_curriculum_lr();
+      } else {
+        bool demoted = curriculum_.check_demotion(coll_metrics.scored_episode_rate);
+        if (demoted) {
+          if (curriculum_.mode_changed()) {
+            std::cout << "curriculum_mode_change new_mode=" << curriculum_.current_mode()
+                      << " (collector rebuild not yet implemented — restart required)\n";
+          }
+          apply_curriculum_to_collectors();
+          apply_curriculum_lr();
+        }
+      }
     }
 
     if (self_play_manager_) {
@@ -2098,7 +1781,6 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     coll_metrics.value_loss = train_metrics.value_loss;
     coll_metrics.entropy = train_metrics.entropy;
     coll_metrics.effective_entropy_coef = train_metrics.effective_entropy_coef;
-    coll_metrics.effective_success_bc_coef = train_metrics.effective_success_bc_coef;
     coll_metrics.grad_norm = train_metrics.grad_norm;
     coll_metrics.update_seconds = train_metrics.update_seconds;
     coll_metrics.forward_backward_seconds = train_metrics.forward_backward_seconds;
@@ -2122,9 +1804,9 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " value_loss=" << coll_metrics.value_loss
               << " entropy=" << coll_metrics.entropy
               << " grad_norm=" << coll_metrics.grad_norm
-              << " sparse_reward=" << coll_metrics.sparse_reward_mean
+              << " total_reward=" << coll_metrics.total_reward_mean
+              << " gameplay_reward=" << coll_metrics.gameplay_reward_mean
               << " mechanic_reward=" << coll_metrics.mechanic_reward_mean
-              << " dense_reward=" << coll_metrics.dense_reward_mean
               << " rollout_steps=" << coll_metrics.rollout_steps
               << " completed_eps=" << coll_metrics.completed_episodes
               << " scored_eps=" << coll_metrics.scored_episodes
@@ -2134,9 +1816,9 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " ball_prox=" << coll_metrics.ball_proximity_rate
               << " goals=" << coll_metrics.goals_scored << "/" << coll_metrics.goals_conceded
               << " es_fitness=" << coll_metrics.es_fitness_mean
-              << " curriculum=" << curriculum_stage_
-              << " cur_steps=" << curriculum_agent_steps_
-              << " cur_promo=" << curriculum_promotion_counter_
+              << " curriculum=" << curriculum_.state().stage_index
+              << " cur_steps=" << curriculum_.state().agent_steps_in_stage
+              << " cur_promo=" << curriculum_.state().promotion_counter
               << '\n';
     if (wandb.enabled()) {
       nlohmann::json payload{
@@ -2146,7 +1828,8 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"policy_loss", coll_metrics.policy_loss},
           {"value_loss", coll_metrics.value_loss},
           {"entropy", coll_metrics.entropy},
-      {"sparse_reward_mean", coll_metrics.sparse_reward_mean},
+      {"total_reward_mean", coll_metrics.total_reward_mean},
+      {"gameplay_reward_mean", coll_metrics.gameplay_reward_mean},
       {"mechanic_reward_mean", coll_metrics.mechanic_reward_mean},
           {"sampled_value_win_mean", coll_metrics.sampled_value_win_mean},
           {"rollout_steps", coll_metrics.rollout_steps},
@@ -2163,10 +1846,9 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"goals_conceded", coll_metrics.goals_conceded},
       {"scored_episode_rate", coll_metrics.scored_episode_rate},
           {"effective_entropy_coef", coll_metrics.effective_entropy_coef},
-          {"effective_success_bc_coef", coll_metrics.effective_success_bc_coef},
-          {"curriculum_stage", curriculum_stage_},
-          {"curriculum_agent_steps", curriculum_agent_steps_},
-          {"curriculum_promotion_counter", curriculum_promotion_counter_},
+          {"curriculum_stage", curriculum_.state().stage_index},
+          {"curriculum_agent_steps", curriculum_.state().agent_steps_in_stage},
+          {"curriculum_promotion_counter", curriculum_.state().promotion_counter},
       };
       if (update_index % config_.es_lora.es_interval == 0) {
         payload["es_fitness_mean"] = coll_metrics.es_fitness_mean;

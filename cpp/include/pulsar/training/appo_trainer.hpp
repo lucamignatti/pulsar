@@ -19,6 +19,7 @@
 #include "pulsar/model/ppo_actor.hpp"
 #include "pulsar/rl/action_table.hpp"
 #include "pulsar/training/batched_rocketsim_collector.hpp"
+#include "pulsar/training/curriculum.hpp"
 #include "pulsar/training/rollout_storage.hpp"
 #include "pulsar/training/self_play_manager.hpp"
 
@@ -47,9 +48,9 @@ struct TrainerMetrics {
   double forward_backward_seconds = 0.0;
   double optimizer_step_seconds = 0.0;
   double self_play_eval_seconds = 0.0;
-  double sparse_reward_mean = 0.0;
+  double total_reward_mean = 0.0;
+  double gameplay_reward_mean = 0.0;
   double mechanic_reward_mean = 0.0;
-  double dense_reward_mean = 0.0;
   double sampled_value_win_mean = 0.0;
   int64_t rollout_steps = 0;
   int64_t completed_episodes = 0;
@@ -76,7 +77,6 @@ struct TrainerMetrics {
   double scored_episode_rate = 0.0;
   double touch_episode_rate = 0.0;
   double effective_entropy_coef = 0.0;
-  double effective_success_bc_coef = 0.0;
 
   std::map<std::string, double> elo_ratings{};
 };
@@ -100,7 +100,6 @@ class APPOTrainer {
   void train(int updates, const std::string& checkpoint_dir, const std::string& config_path = "");
 
  private:
-  [[nodiscard]] torch::Tensor map_outcome_labels_to_rewards(const torch::Tensor& labels) const;
   void maybe_initialize_from_checkpoint();
   void save_checkpoint(const std::filesystem::path& directory, std::int64_t global_step, int update_index, const std::string& wandb_run_id) const;
   void save_training_state(const std::filesystem::path& path) const;
@@ -117,8 +116,8 @@ class APPOTrainer {
   void run_es_lora_update(int update_index, TrainerMetrics& metrics);
   std::pair<torch::Tensor, torch::Tensor> compute_es_deltas();
 
-  void apply_curriculum_stage();
-  bool check_curriculum_promotion(const TrainerMetrics& metrics, std::int64_t agent_steps);
+  void apply_curriculum_to_collectors();
+  void apply_curriculum_lr();
 
   struct ESPopulationFitness {
     std::vector<float> fitness{};
@@ -134,6 +133,7 @@ class APPOTrainer {
   ExperimentConfig config_{};
   std::vector<std::unique_ptr<BatchedRocketSimCollector>> collectors_{};
   std::unique_ptr<SelfPlayManager> self_play_manager_{};
+  Curriculum curriculum_{config_.curriculum};
   ControllerActionTable action_table_{};
   PPOActor actor_{nullptr};
   PPOActor actor_snapshot_{nullptr};
@@ -154,14 +154,6 @@ class APPOTrainer {
   torch::Tensor es_delta_B_;
   std::deque<double> recent_scored_rates_{};
   static constexpr int kRecentScoredRateWindow = 20;
-  std::deque<double> curriculum_touch_rates_{};
-  std::deque<double> curriculum_scored_rates_{};
-  int curriculum_stage_ = -1;
-  std::int64_t curriculum_agent_steps_ = 0;
-  int curriculum_promotion_counter_ = 0;
-  std::vector<float> success_obs_{};
-  std::vector<std::int64_t> success_actions_{};
-  bool success_bc_active_ = false;
 #ifdef PULSAR_HAS_CUDA
   std::optional<c10::cuda::CUDAStream> collection_stream_;
   std::optional<c10::cuda::CUDAStream> training_stream_;

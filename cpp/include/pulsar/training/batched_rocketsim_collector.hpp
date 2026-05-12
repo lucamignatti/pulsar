@@ -17,8 +17,7 @@
 #include "pulsar/env/obs_builder.hpp"
 #include "pulsar/env/rocketsim_engine.hpp"
 #include "pulsar/rl/interfaces.hpp"
-#include "pulsar/training/mechanic_detector.hpp"
-#include "pulsar/training/dense_reward_calculator.hpp"
+#include "pulsar/training/reward_engine.hpp"
 
 namespace pulsar {
 
@@ -54,8 +53,8 @@ class BatchedRocketSimCollector {
       bool pin_host_memory);
 
   void set_self_play_assignment_fn(AssignmentFn assignment_fn);
-  void update_mechanic_rewards(const MechanicRewardConfig& cfg);
-  void update_dense_rewards(const DenseRewardConfig& cfg);
+  void update_reward_config(const ExperimentConfig& cfg);
+  void update_unlocked_mechanics(const std::vector<std::string>& mechanics);
   void reset_all(CollectorTimings* timings = nullptr);
   void reset_es_episode(int update_index, int episode_index, int eval_envs_per_member, CollectorTimings* timings = nullptr);
 
@@ -80,8 +79,9 @@ class BatchedRocketSimCollector {
   [[nodiscard]] const torch::Tensor& host_goal_positions() const;
   [[nodiscard]] const torch::Tensor& host_ball_proximity() const;
   [[nodiscard]] const torch::Tensor& host_episode_ball_touch() const;
+  [[nodiscard]] const torch::Tensor& host_rewards() const;
+  [[nodiscard]] const torch::Tensor& host_gameplay_rewards() const;
   [[nodiscard]] const torch::Tensor& host_mechanic_rewards() const;
-  [[nodiscard]] const torch::Tensor& host_dense_rewards() const;
   [[nodiscard]] const torch::Tensor& host_env_touched() const;
   [[nodiscard]] const torch::Tensor& host_bootstrap_truncated() const;
 
@@ -128,15 +128,14 @@ class BatchedRocketSimCollector {
   torch::Tensor host_goal_positions_;
   torch::Tensor host_ball_proximity_;
   torch::Tensor host_episode_ball_touch_;
+  torch::Tensor host_rewards_;
+  torch::Tensor host_gameplay_rewards_;
   torch::Tensor host_mechanic_rewards_;
-  torch::Tensor host_dense_rewards_;
   torch::Tensor host_env_touched_;
   torch::Tensor host_bootstrap_truncated_;
-  std::vector<AgentMechanicState> agent_mechanic_states_;
-  std::vector<EnvMechanicState> env_mechanic_states_;
-  MechanicDetector mechanic_detector_;
-  std::vector<AgentDenseState> agent_dense_states_;
-  DenseRewardCalculator dense_reward_calculator_;
+  std::vector<AgentRewardState> agent_reward_states_;
+  std::vector<EnvRewardState> env_reward_states_;
+  RewardEngine reward_engine_;
   std::size_t total_agents_ = 0;
   int obs_dim_ = 0;
   int action_dim_ = 0;

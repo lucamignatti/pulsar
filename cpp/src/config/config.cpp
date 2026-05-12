@@ -118,6 +118,7 @@ void from_json(const json& j, MechanicRewardConfig& value) {
 void to_json(json& j, const DenseRewardConfig& value) {
   j = json{
       {"ball_touch_vel_weight", value.ball_touch_vel_weight},
+      {"touch_direction_weight", value.touch_direction_weight},
       {"speed_toward_ball_weight", value.speed_toward_ball_weight},
       {"speed_toward_ball_decay", value.speed_toward_ball_decay},
       {"face_ball_weight", value.face_ball_weight},
@@ -128,15 +129,23 @@ void to_json(json& j, const DenseRewardConfig& value) {
       {"air_touch_weight", value.air_touch_weight},
       {"air_touch_max_air_time", value.air_touch_max_air_time},
       {"save_boost_weight", value.save_boost_weight},
+      {"boost_efficiency_weight", value.boost_efficiency_weight},
+      {"boost_used_weight", value.boost_used_weight},
+      {"defensive_positioning_weight", value.defensive_positioning_weight},
+      {"defensive_positioning_decay", value.defensive_positioning_decay},
+      {"shot_accuracy_weight", value.shot_accuracy_weight},
       {"boost_pickup_big_weight", value.boost_pickup_big_weight},
       {"boost_pickup_small_weight", value.boost_pickup_small_weight},
       {"boost_pickup_big_threshold", value.boost_pickup_big_threshold},
+      {"boost_pickup_cap_per_episode", value.boost_pickup_cap_per_episode},
+      {"air_touch_cap_per_episode", value.air_touch_cap_per_episode},
       {"dense_reward_cap_per_episode", value.dense_reward_cap_per_episode},
   };
 }
 
 void from_json(const json& j, DenseRewardConfig& value) {
   value.ball_touch_vel_weight = j.value("ball_touch_vel_weight", 0.0F);
+  value.touch_direction_weight = j.value("touch_direction_weight", 0.0F);
   value.speed_toward_ball_weight = j.value("speed_toward_ball_weight", 0.0F);
   value.speed_toward_ball_decay = j.value("speed_toward_ball_decay", 300.0F);
   value.face_ball_weight = j.value("face_ball_weight", 0.0F);
@@ -147,36 +156,54 @@ void from_json(const json& j, DenseRewardConfig& value) {
   value.air_touch_weight = j.value("air_touch_weight", 0.0F);
   value.air_touch_max_air_time = j.value("air_touch_max_air_time", 1.75F);
   value.save_boost_weight = j.value("save_boost_weight", 0.0F);
+  value.boost_efficiency_weight = j.value("boost_efficiency_weight", 0.0F);
+  value.boost_used_weight = j.value("boost_used_weight", 0.0F);
+  value.defensive_positioning_weight = j.value("defensive_positioning_weight", 0.0F);
+  value.defensive_positioning_decay = j.value("defensive_positioning_decay", 300.0F);
+  value.shot_accuracy_weight = j.value("shot_accuracy_weight", 0.0F);
   value.boost_pickup_big_weight = j.value("boost_pickup_big_weight", 0.0F);
   value.boost_pickup_small_weight = j.value("boost_pickup_small_weight", 0.0F);
   value.boost_pickup_big_threshold = j.value("boost_pickup_big_threshold", 0.5F);
+  value.boost_pickup_cap_per_episode = j.value("boost_pickup_cap_per_episode", 0.0F);
+  value.air_touch_cap_per_episode = j.value("air_touch_cap_per_episode", 0.0F);
   value.dense_reward_cap_per_episode = j.value("dense_reward_cap_per_episode", 0.0F);
 }
 
 void to_json(json& j, const CurriculumStageConfig& value) {
   j = json{
       {"name", value.name},
+      {"mode", value.mode},
       {"outcome_override", value.outcome_override},
       {"mechanic_rewards_override", value.mechanic_rewards_override},
       {"dense_rewards_override", value.dense_rewards_override},
+      {"unlocked_mechanics", value.unlocked_mechanics},
       {"learning_rate", value.learning_rate},
       {"min_agent_steps", value.min_agent_steps},
-      {"promotion_window_updates", value.promotion_window_updates},
+      {"rolling_window_size", value.rolling_window_size},
+      {"consecutive_success_threshold", value.consecutive_success_threshold},
       {"required_touch_episode_rate", value.required_touch_episode_rate},
       {"required_scored_episode_rate", value.required_scored_episode_rate},
+      {"demotion_threshold_rate", value.demotion_threshold_rate},
+      {"demotion_window_updates", value.demotion_window_updates},
   };
 }
 
 void from_json(const json& j, CurriculumStageConfig& value) {
   value.name = j.value("name", std::string{});
+  value.mode = j.value("mode", std::string{"1v1"});
   value.outcome_override = j.value("outcome_override", OutcomeConfig{});
   value.mechanic_rewards_override = j.value("mechanic_rewards_override", MechanicRewardConfig{});
   value.dense_rewards_override = j.value("dense_rewards_override", DenseRewardConfig{});
+  value.unlocked_mechanics = j.value("unlocked_mechanics", std::vector<std::string>{});
   value.learning_rate = j.value("learning_rate", 0.0001F);
   value.min_agent_steps = j.value("min_agent_steps", 20'000'000LL);
-  value.promotion_window_updates = j.value("promotion_window_updates", 5);
+  const int window_size = j.value("promotion_window_updates", j.value("rolling_window_size", 10));
+  value.rolling_window_size = j.value("rolling_window_size", window_size);
+  value.consecutive_success_threshold = j.value("consecutive_success_threshold", window_size);
   value.required_touch_episode_rate = j.value("required_touch_episode_rate", 0.0F);
   value.required_scored_episode_rate = j.value("required_scored_episode_rate", 0.0F);
+  value.demotion_threshold_rate = j.value("demotion_threshold_rate", 0.0F);
+  value.demotion_window_updates = j.value("demotion_window_updates", 10);
 }
 
 void to_json(json& j, const CurriculumConfig& value) {
@@ -359,10 +386,6 @@ void to_json(json& j, const PPOConfig& value) {
       {"checkpoint_interval", value.checkpoint_interval},
       {"max_rolling_checkpoints", value.max_rolling_checkpoints},
 
-      {"early_update_completed_episodes", value.early_update_completed_episodes},
-      {"train_only_scored_episodes", value.train_only_scored_episodes},
-      {"use_adaptive_epsilon", value.use_adaptive_epsilon},
-      {"use_confidence_weighting", value.use_confidence_weighting},
       {"synchronize_cuda_timing", value.synchronize_cuda_timing},
       {"adaptive_entropy", value.adaptive_entropy},
       {"entropy_decay_score", value.entropy_decay_score},
@@ -372,13 +395,6 @@ void to_json(json& j, const PPOConfig& value) {
       {"plasticity_shrink", value.plasticity_shrink},
       {"plasticity_noise", value.plasticity_noise},
       {"pcgrad", value.pcgrad},
-      {"success_bc_coef", value.success_bc_coef},
-      {"success_bc_batch", value.success_bc_batch},
-      {"success_buffer_size", value.success_buffer_size},
-      {"success_bc_min_score", value.success_bc_min_score},
-      {"success_bc_decay_score", value.success_bc_decay_score},
-      {"success_bc_decay", value.success_bc_decay},
-      {"success_trace_len", value.success_trace_len},
   };
 }
 
@@ -403,10 +419,6 @@ void from_json(const json& j, PPOConfig& value) {
   value.checkpoint_interval = j.value("checkpoint_interval", 10);
   value.max_rolling_checkpoints = j.value("max_rolling_checkpoints", 5);
 
-  value.early_update_completed_episodes = j.value("early_update_completed_episodes", 0);
-  value.train_only_scored_episodes = j.value("train_only_scored_episodes", false);
-  value.use_adaptive_epsilon = j.value("use_adaptive_epsilon", true);
-  value.use_confidence_weighting = j.value("use_confidence_weighting", true);
   value.synchronize_cuda_timing = j.value("synchronize_cuda_timing", false);
   value.adaptive_entropy = j.value("adaptive_entropy", false);
   value.entropy_decay_score = j.value("entropy_decay_score", 0.60F);
@@ -416,13 +428,6 @@ void from_json(const json& j, PPOConfig& value) {
   value.plasticity_shrink = j.value("plasticity_shrink", 0.999F);
   value.plasticity_noise = j.value("plasticity_noise", 1.0e-4F);
   value.pcgrad = j.value("pcgrad", false);
-  value.success_bc_coef = j.value("success_bc_coef", 0.0F);
-  value.success_bc_batch = j.value("success_bc_batch", 256);
-  value.success_buffer_size = j.value("success_buffer_size", 20000);
-  value.success_bc_min_score = j.value("success_bc_min_score", 0.0F);
-  value.success_bc_decay_score = j.value("success_bc_decay_score", 0.95F);
-  value.success_bc_decay = j.value("success_bc_decay", 0.35F);
-  value.success_trace_len = j.value("success_trace_len", 48);
 }
 
 void to_json(json& j, const SelfPlayLeagueConfig& value) {
@@ -587,9 +592,6 @@ void validate_experiment_config(const ExperimentConfig& config) {
     throw std::invalid_argument("ppo.collection_shards must be <= ppo.num_envs.");
   }
 
-  if (config.ppo.early_update_completed_episodes < 0) {
-    throw std::invalid_argument("ppo.early_update_completed_episodes must be non-negative.");
-  }
   if (config.model.encoder_dim <= 0) {
     throw std::invalid_argument("model.encoder_dim must be positive.");
   }

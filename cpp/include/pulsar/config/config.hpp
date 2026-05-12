@@ -39,6 +39,7 @@ struct MechanicRewardConfig {
 
 struct DenseRewardConfig {
   float ball_touch_vel_weight = 0.0F;
+  float touch_direction_weight = 0.0F;
   float speed_toward_ball_weight = 0.0F;
   float speed_toward_ball_decay = 300.0F;
   float face_ball_weight = 0.0F;
@@ -49,22 +50,34 @@ struct DenseRewardConfig {
   float air_touch_weight = 0.0F;
   float air_touch_max_air_time = 1.75F;
   float save_boost_weight = 0.0F;
+  float boost_efficiency_weight = 0.0F;
+  float boost_used_weight = 0.0F;
+  float defensive_positioning_weight = 0.0F;
+  float defensive_positioning_decay = 300.0F;
+  float shot_accuracy_weight = 0.0F;
   float boost_pickup_big_weight = 0.0F;
   float boost_pickup_small_weight = 0.0F;
   float boost_pickup_big_threshold = 0.5F;
+  float boost_pickup_cap_per_episode = 0.0F;
+  float air_touch_cap_per_episode = 0.0F;
   float dense_reward_cap_per_episode = 0.0F;
 };
 
 struct CurriculumStageConfig {
   std::string name;
+  std::string mode = "1v1";
   OutcomeConfig outcome_override{};
   MechanicRewardConfig mechanic_rewards_override{};
   DenseRewardConfig dense_rewards_override{};
+  std::vector<std::string> unlocked_mechanics;
   float learning_rate = 0.0001F;
   int64_t min_agent_steps = 20'000'000LL;
-  int promotion_window_updates = 5;
+  int rolling_window_size = 10;
+  int consecutive_success_threshold = 5;
   float required_touch_episode_rate = 0.0F;
   float required_scored_episode_rate = 0.0F;
+  float demotion_threshold_rate = 0.0F;
+  int demotion_window_updates = 10;
 };
 
 struct CurriculumConfig {
@@ -159,10 +172,6 @@ struct PPOConfig {
   std::string device = "cpu";
   int checkpoint_interval = 10;
   int max_rolling_checkpoints = 5;
-  int early_update_completed_episodes = 0;
-  bool train_only_scored_episodes = false;
-  bool use_adaptive_epsilon = true;
-  bool use_confidence_weighting = true;
   bool synchronize_cuda_timing = false;
   bool adaptive_entropy = false;
   float entropy_decay_score = 0.60F;
@@ -172,13 +181,6 @@ struct PPOConfig {
   float plasticity_shrink = 0.999F;
   float plasticity_noise = 1.0e-4F;
   bool pcgrad = false;
-  float success_bc_coef = 0.0F;
-  int success_bc_batch = 256;
-  int success_buffer_size = 20000;
-  float success_bc_min_score = 0.0F;
-  float success_bc_decay_score = 0.95F;
-  float success_bc_decay = 0.35F;
-  int success_trace_len = 48;
 };
 
 struct SelfPlayLeagueConfig {

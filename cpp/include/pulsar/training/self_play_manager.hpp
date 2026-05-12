@@ -38,6 +38,9 @@ class SelfPlayManager {
   [[nodiscard]] SelfPlayAssignment sample_assignment(std::size_t env_idx, std::uint64_t seed);
   [[nodiscard]] bool has_snapshots() const;
 
+  void set_curriculum_stage(int stage_index);
+  [[nodiscard]] int curriculum_stage() const;
+
   [[nodiscard]] const std::map<std::string, double>& current_ratings() const;
   [[nodiscard]] std::string rng_state() const;
   void restore_rng_state(const std::string& state);
@@ -61,6 +64,7 @@ class SelfPlayManager {
   struct Snapshot {
     std::int64_t global_step = 0;
     int update_index = 0;
+    int curriculum_stage = -1;
     PPOActor model{nullptr};
     ObservationNormalizer normalizer{0};
     std::map<std::string, double> ratings{};
@@ -85,6 +89,7 @@ class SelfPlayManager {
   std::vector<Snapshot> snapshots_{};
   std::map<std::string, double> current_ratings_{};
   mutable std::mt19937 rng_;
+  int curriculum_stage_ = -1;
 };
 
 }  // namespace pulsar

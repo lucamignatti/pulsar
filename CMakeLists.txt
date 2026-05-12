@@ -109,8 +109,8 @@ if(PULSAR_ENABLE_TORCH)
       cpp/src/model/normalizer.cpp
       cpp/src/training/rollout_storage.cpp
       cpp/src/training/ppo_math.cpp
-      cpp/src/training/mechanic_detector.cpp
-      cpp/src/training/dense_reward_calculator.cpp
+      cpp/src/training/reward_engine.cpp
+      cpp/src/training/curriculum.cpp
       cpp/src/training/batched_rocketsim_collector.cpp
       cpp/src/training/appo_trainer.cpp
       cpp/src/training/self_play_manager.cpp
@@ -187,21 +187,51 @@ if(PULSAR_ENABLE_TESTS)
       set_tests_properties(pulsar_ppo_math_tests PROPERTIES LABELS "reference")
     endif()
 
-    if(PULSAR_ENABLE_CXX_TORCH_IO_TESTS)
-      add_executable(
-        pulsar_self_play_tests
-        cpp/tests/test_self_play.cpp
-      )
-      target_include_directories(pulsar_self_play_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
-      pulsar_link_torch_whole_core(pulsar_self_play_tests)
-      add_test(NAME pulsar_self_play_tests COMMAND pulsar_self_play_tests)
-      set_tests_properties(
-        pulsar_self_play_tests
-        PROPERTIES
-          ENVIRONMENT "CUDA_VISIBLE_DEVICES=;OMP_NUM_THREADS=1;MKL_NUM_THREADS=1;OPENBLAS_NUM_THREADS=1"
-          TIMEOUT 30
-      )
-    endif()
+    add_executable(
+      pulsar_curriculum_tests
+      cpp/tests/test_curriculum.cpp
+    )
+    target_include_directories(pulsar_curriculum_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
+    pulsar_link_torch_whole_core(pulsar_curriculum_tests)
+    add_test(NAME pulsar_curriculum_tests COMMAND pulsar_curriculum_tests)
+
+    add_executable(
+      pulsar_reward_engine_tests
+      cpp/tests/test_reward_engine.cpp
+    )
+    target_include_directories(pulsar_reward_engine_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
+    pulsar_link_torch_whole_core(pulsar_reward_engine_tests)
+    add_test(NAME pulsar_reward_engine_tests COMMAND pulsar_reward_engine_tests)
+
+    add_executable(
+      pulsar_config_tests
+      cpp/tests/test_config.cpp
+    )
+    target_include_directories(pulsar_config_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
+    pulsar_link_torch_whole_core(pulsar_config_tests)
+    add_test(NAME pulsar_config_tests COMMAND pulsar_config_tests)
+
+    add_executable(
+      pulsar_rollout_storage_tests
+      cpp/tests/test_rollout_storage.cpp
+    )
+    target_include_directories(pulsar_rollout_storage_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
+    pulsar_link_torch_whole_core(pulsar_rollout_storage_tests)
+    add_test(NAME pulsar_rollout_storage_tests COMMAND pulsar_rollout_storage_tests)
+
+    add_executable(
+      pulsar_self_play_tests
+      cpp/tests/test_self_play.cpp
+    )
+    target_include_directories(pulsar_self_play_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
+    pulsar_link_torch_whole_core(pulsar_self_play_tests)
+    add_test(NAME pulsar_self_play_tests COMMAND pulsar_self_play_tests)
+    set_tests_properties(
+      pulsar_self_play_tests
+      PROPERTIES
+        ENVIRONMENT "CUDA_VISIBLE_DEVICES=;OMP_NUM_THREADS=1;MKL_NUM_THREADS=1;OPENBLAS_NUM_THREADS=1"
+        TIMEOUT 30
+    )
 
   endif()
 endif()
