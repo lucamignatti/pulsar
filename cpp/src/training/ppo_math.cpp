@@ -62,7 +62,14 @@ torch::Tensor sample_masked_actions(
     const torch::Tensor& action_masks,
     bool deterministic,
     torch::Tensor* log_probs) {
-  const torch::Tensor masked = apply_action_mask_to_logits(logits, action_masks);
+  torch::Tensor masked = apply_action_mask_to_logits(logits, action_masks);
+  {
+    const torch::Tensor all_invalid = action_masks.to(torch::kFloat32).sum(-1) <= 0.5F;
+    if (all_invalid.any().item<bool>()) {
+      const torch::Tensor fallback_logit = logits.index({torch::indexing::Ellipsis, 0});
+      masked.index_put_({torch::indexing::Ellipsis, 0}, fallback_logit);
+    }
+  }
   const torch::Tensor actions = deterministic ? masked.argmax(-1) : sample_categorical_from_logits(masked);
   if (log_probs != nullptr) {
     *log_probs = torch::log_softmax(masked, -1).gather(-1, actions.unsqueeze(-1)).squeeze(-1);
@@ -88,7 +95,7 @@ torch::Tensor compute_gae(
     float gamma,
     float gae_lambda,
     const torch::Tensor& next_values,
-    const torch::Tensor& bootstrap_truncated,
+    const torch::Tensor& bootstrap_mask,
     const torch::Tensor& bootstrap_values) {
   PULSAR_TRACE_SCOPE_CAT("ppo_math", "compute_gae");
   const int64_t steps = values.size(0);
@@ -103,13 +110,13 @@ torch::Tensor compute_gae(
   for (int64_t t = steps - 1; t >= 0; --t) {
     torch::Tensor next_value = (t < steps - 1) ? values[t + 1] : boundary_value;
     if (bootstrap_values.defined()) {
-      next_value = torch::where(bootstrap_truncated[t] > 0.5F, bootstrap_values[t], next_value);
+      next_value = torch::where(bootstrap_mask[t] > 0.5F, bootstrap_values[t], next_value);
     }
     const torch::Tensor non_terminal = 1.0F - dones[t];
-    const torch::Tensor boot_mask = bootstrap_truncated.defined()
-        ? (1.0F - dones[t] + bootstrap_truncated[t])
+    const torch::Tensor delta_mult = bootstrap_mask.defined()
+        ? torch::where(bootstrap_mask[t] > 0.5F, torch::ones_like(dones[t]), non_terminal)
         : non_terminal;
-    const torch::Tensor delta = rewards[t] + gamma * next_value * boot_mask - values[t];
+    const torch::Tensor delta = rewards[t] + gamma * next_value * delta_mult - values[t];
     last_gae = delta + gamma * gae_lambda * non_terminal * last_gae;
     advantages[t] = last_gae.clone();
   }

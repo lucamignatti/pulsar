@@ -685,6 +685,14 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   torch::Tensor normalized_advantages;
   {
     PULSAR_TRACE_SCOPE_CAT("trainer", "update_gae");
+    torch::Tensor terminal_values;
+    if (rollout_bootstrap_truncated.any().item<bool>()) {
+      torch::Tensor term_obs = rollout.terminal_observations.narrow(0, 0, rollout_steps);
+      auto term_flat = term_obs.reshape({rollout_steps * total_agents, config_.model.observation_dim});
+      auto term_goal_values = policy_goal_values_like(term_flat, config_.goal_critic.goal_dim);
+      auto term_values_flat = actor_->forward_step(term_flat.to(device_), term_goal_values).value_win_logits.squeeze(-1);
+      terminal_values = term_values_flat.reshape({rollout_steps, total_agents}).to(term_obs.device());
+    }
     sparse_advantages = compute_gae(
       extrinsic_values,
       extrinsic_rewards,
@@ -693,7 +701,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       config_.ppo.gae_lambda,
       rollout.final_values().count("extrinsic") ? rollout.final_values().at("extrinsic") : torch::Tensor{},
       rollout_bootstrap_truncated,
-      torch::Tensor{});  // TODO: pass terminal-observation values here once rollout stores them
+      terminal_values);
     normalized_advantages = normalize_advantage(sparse_advantages, active_mask);
   }
   torch::Tensor sparse_returns = sparse_advantages + extrinsic_values.detach();
@@ -1090,7 +1098,7 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
       config_, total_envs, eval_envs, update_index, 0, use_pinned_host_buffers_);
 
   for (int ep = 0; ep < es_cfg.eval_episodes_per_member; ++ep) {
-    eval_collector->reset_all();
+    eval_collector->reset_es_episode(update_index, ep, eval_envs);
 
     for (int step = 0; step < es_cfg.eval_rollout_length; ++step) {
       torch::Tensor raw_obs = eval_collector->host_observations().to(device_, use_pinned_host_buffers_);
@@ -1503,6 +1511,8 @@ void APPOTrainer::collect_rollout(
           min_goal_distance = static_cast<double>(gd_min);
         }
 
+        torch::Tensor terminal_obs_host = collector.host_terminal_observations();
+
         const auto learner_step_count = static_cast<std::int64_t>(shard_step.learner_active_host.sum().item<float>());
         total_sparse_reward += extrinsic_rewards_host.sum().item<double>();
         total_mechanic_reward += mechanic_r_host.sum().item<double>();
@@ -1530,7 +1540,8 @@ void APPOTrainer::collect_rollout(
             truncated_host,
             bootstrap_truncated_host,
             goal_pos_host,
-            terminal_labels);
+            terminal_labels,
+            terminal_obs_host);
 
         local_collected_steps += learner_step_count;
       }
@@ -1688,6 +1699,8 @@ void APPOTrainer::collect_rollout(
       min_goal_distance = static_cast<double>(gd_min);
     }
 
+    torch::Tensor terminal_obs_host = collector_->host_terminal_observations();
+
     const auto learner_step_count = static_cast<std::int64_t>(learner_active_host.sum().item<float>());
     total_sparse_reward += extrinsic_rewards_host.sum().item<double>();
     total_mechanic_reward += mechanic_r_host.sum().item<double>();
@@ -1714,7 +1727,8 @@ void APPOTrainer::collect_rollout(
         truncated_host,
         bootstrap_truncated_host,
         goal_pos_host,
-        terminal_labels);
+        terminal_labels,
+        terminal_obs_host);
 
     local_collected_steps += learner_step_count;
     if (early_update_completed_episodes > 0
@@ -1857,8 +1871,6 @@ CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
     for (double v : recent_scored_rates_) recent_json.push_back(v);
     extra["recent_scored_rates"] = recent_json;
   }
-  extra["success_obs_size"] = static_cast<std::int64_t>(success_obs_.size());
-  extra["success_actions_size"] = static_cast<std::int64_t>(success_actions_.size());
   return CheckpointMetadata{
       .schema_version = config_.schema_version,
       .obs_schema_version = config_.obs_schema_version,
@@ -1901,6 +1913,24 @@ void APPOTrainer::save_training_state(const std::filesystem::path& path) const {
   actor_cpu->save(archive);
   normalizer_cpu.save(archive);
   actor_optimizer_.save(archive);
+  if (!success_obs_.empty()) {
+    int obs_count = static_cast<int>(success_obs_.size() / config_.model.observation_dim);
+    if (obs_count > 0) {
+      torch::Tensor obs_tensor = torch::from_blob(
+          const_cast<float*>(success_obs_.data()),
+          {obs_count, config_.model.observation_dim},
+          torch::TensorOptions().dtype(torch::kFloat32)).clone();
+      archive.write("success_bc_obs", obs_tensor);
+    }
+  }
+  if (!success_actions_.empty()) {
+    int act_count = static_cast<int>(success_actions_.size());
+    torch::Tensor act_tensor = torch::from_blob(
+        const_cast<std::int64_t*>(success_actions_.data()),
+        {act_count},
+        torch::TensorOptions().dtype(torch::kInt64)).clone();
+    archive.write("success_bc_actions", act_tensor);
+  }
   archive.save_to(path.string());
 }
 
@@ -1910,6 +1940,24 @@ void APPOTrainer::load_training_state(const std::filesystem::path& path) {
   actor_->load(archive);
   actor_normalizer_.load(archive);
   actor_optimizer_.load(archive);
+  try {
+    torch::Tensor obs_loaded;
+    archive.read("success_bc_obs", obs_loaded);
+    torch::Tensor act_loaded;
+    archive.read("success_bc_actions", act_loaded);
+    if (obs_loaded.defined() && obs_loaded.numel() > 0) {
+      auto obs_cpu = obs_loaded.to(torch::kCPU).contiguous();
+      int obs_count = static_cast<int>(obs_cpu.size(0));
+      int obs_dim = static_cast<int>(obs_cpu.size(1));
+      success_obs_.assign(obs_cpu.data_ptr<float>(), obs_cpu.data_ptr<float>() + obs_count * obs_dim);
+      if (act_loaded.defined() && act_loaded.numel() > 0) {
+        auto act_cpu = act_loaded.to(torch::kCPU).contiguous();
+        success_actions_.assign(act_cpu.data_ptr<std::int64_t>(),
+                                act_cpu.data_ptr<std::int64_t>() + act_cpu.numel());
+      }
+    }
+  } catch (...) {
+  }
   actor_->to(device_);
   actor_normalizer_.to(device_);
 }

@@ -195,6 +195,41 @@ void BatchedRocketSimCollector::reset_all(CollectorTimings* timings) {
   }
 }
 
+void BatchedRocketSimCollector::reset_es_episode(int update_index, int episode_index, int eval_envs_per_member, CollectorTimings* timings) {
+  PULSAR_TRACE_SCOPE_CAT("collector", "reset_es_episode");
+  const auto reset_start = std::chrono::steady_clock::now();
+  executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
+    for (std::size_t env_idx = begin; env_idx < end; ++env_idx) {
+      const int local_env = static_cast<int>(env_idx) % eval_envs_per_member;
+      envs_[env_idx].reset_seed = static_cast<std::uint64_t>(
+          config_.env.seed + 1'000'003 + update_index * 65'537 + episode_index * 8'191 + local_env);
+      envs_[env_idx].engine->reset(envs_[env_idx].reset_seed);
+    }
+  });
+  for (std::size_t env_idx = 0; env_idx < envs_.size(); ++env_idx) {
+    assign_env(env_idx, envs_[env_idx].reset_seed);
+  }
+  host_dones_.zero_();
+  host_terminated_.zero_();
+  host_truncated_.zero_();
+  host_terminal_outcome_labels_.fill_(2);
+  host_terminal_observations_.zero_();
+  host_goal_positions_.zero_();
+  host_ball_proximity_.zero_();
+  host_episode_ball_touch_.zero_();
+  host_mechanic_rewards_.zero_();
+  host_env_touched_.zero_();
+  host_bootstrap_truncated_.zero_();
+  agent_mechanic_states_.assign(total_agents_, AgentMechanicState{});
+  env_mechanic_states_.assign(envs_.size(), EnvMechanicState{});
+  current_buffers_.episode_starts.fill_(1.0F);
+  rebuild_host_buffers(current_buffers_, timings);
+  if (timings != nullptr) {
+    timings->done_reset_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - reset_start).count();
+  }
+}
+
 std::size_t BatchedRocketSimCollector::num_envs() const {
   return envs_.size();
 }
