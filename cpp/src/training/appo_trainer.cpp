@@ -687,6 +687,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "update_gae");
     torch::Tensor terminal_values;
     if (rollout_bootstrap_truncated.any().item<bool>()) {
+      torch::NoGradGuard no_grad;
       torch::Tensor term_obs = rollout.terminal_observations.narrow(0, 0, rollout_steps);
       auto term_flat = term_obs.reshape({rollout_steps * total_agents, config_.model.observation_dim});
       auto term_goal_values = policy_goal_values_like(term_flat, config_.goal_critic.goal_dim);
