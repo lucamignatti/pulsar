@@ -690,8 +690,17 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       torch::NoGradGuard no_grad;
       torch::Tensor term_obs = rollout.terminal_observations.narrow(0, 0, rollout_steps);
       auto term_flat = term_obs.reshape({rollout_steps * total_agents, config_.model.observation_dim});
-      auto term_goal_values = policy_goal_values_like(term_flat, config_.goal_critic.goal_dim);
-      auto term_values_flat = actor_->forward_step(term_flat.to(device_), term_goal_values).value_win_logits.squeeze(-1);
+      const int total_term_samples = rollout_steps * total_agents;
+      const int max_term_batch = std::max(1, config_.model.transformer_max_batch_size);
+      std::vector<torch::Tensor> term_value_chunks;
+      for (int offset = 0; offset < total_term_samples; offset += max_term_batch) {
+        int batch = std::min(max_term_batch, total_term_samples - offset);
+        auto chunk = term_flat.slice(0, offset, offset + batch).to(device_);
+        auto chunk_goal = policy_goal_values_like(chunk, config_.goal_critic.goal_dim);
+        auto chunk_out = actor_->forward_step(chunk, chunk_goal).value_win_logits.squeeze(-1);
+        term_value_chunks.push_back(chunk_out.to(torch::kCPU));
+      }
+      auto term_values_flat = torch::cat(term_value_chunks, 0);
       terminal_values = term_values_flat.reshape({rollout_steps, total_agents}).to(term_obs.device());
     }
     sparse_advantages = compute_gae(
