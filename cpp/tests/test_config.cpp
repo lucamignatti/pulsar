@@ -134,7 +134,7 @@ int main() {
       pulsar::test::require(prod.curriculum.enabled, "curriculum enabled in production");
       pulsar::test::require(prod.curriculum.stages.size() == 6, "6 stages in production");
       pulsar::test::require(prod.self_play_league.enabled, "self_play_league enabled in production");
-      pulsar::test::require(prod.self_play_league.max_snapshots == 8, "max_snapshots in production");
+      pulsar::test::require(prod.self_play_league.max_snapshots == 12, "max_snapshots in production");
     }
 
     // Test 15: stable_json is deterministic

@@ -325,18 +325,18 @@
     "observation_dim": 172,
     "action_dim": 90,
     "use_layer_norm": true,
-    "encoder_dim": 640,
-    "num_encoder_blocks": 5,
-    "transformer_num_heads": 8,
+    "encoder_dim": 768,
+    "num_encoder_blocks": 6,
+    "transformer_num_heads": 12,
     "transformer_window_size": 16,
     "transformer_max_batch_size": 1024,
     "transformer_token_group_size": 4,
     "transformer_ffn_multiplier": 2,
-    "value_hidden_dim": 256,
+    "value_hidden_dim": 384,
     "policy_hidden_dim": 0
   },
   "ppo": {
-    "num_envs": 64,
+    "num_envs": 256,
     "collection_workers": 0,
     "collection_shards": 1,
     "init_checkpoint": "",
@@ -353,8 +353,8 @@
     "learning_rate": 0.0003,
     "max_grad_norm": 1.0,
     "device": "cuda",
-    "checkpoint_interval": 10,
-    "max_rolling_checkpoints": 5,
+    "checkpoint_interval": 50,
+    "max_rolling_checkpoints": 3,
     "synchronize_cuda_timing": true,
     "adaptive_entropy": false,
     "entropy_decay_score": 0.6,
@@ -370,7 +370,7 @@
   },
   "goal_critic": {
     "goal_dim": 3,
-    "hidden_dim": 256,
+    "hidden_dim": 384,
     "embedding_dim": 64,
     "logsumexp_penalty_coeff": 0.01,
     "lambda_Zg": 1.0,
@@ -381,12 +381,12 @@
   "es_lora": {
     "rank": 4,
     "lora_alpha": 4.0,
-    "population_size": 8,
+    "population_size": 16,
     "sigma_ES": 0.05,
     "eta_ES": 0.003,
     "es_interval": 25,
     "eval_episodes_per_member": 2,
-    "eval_num_envs": 8,
+    "eval_num_envs": 16,
     "eval_rollout_length": 450,
     "beta_KL": 0.01,
     "antithetic_sampling": true,
@@ -400,7 +400,7 @@
     "enabled": true,
     "opponent_probability": 0.5,
     "snapshot_interval_updates": 50,
-    "max_snapshots": 8,
+    "max_snapshots": 12,
     "training_opponent_policy": "stochastic",
     "eval_interval_updates": 10,
     "eval_num_envs": 8,
@@ -410,6 +410,6 @@
     "elo_k": 32.0
   },
   "wandb": {
-    "enabled": false
+    "enabled": true
   }
 }
