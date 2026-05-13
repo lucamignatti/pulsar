@@ -358,7 +358,8 @@ float RewardEngine::face_ball(
   };
 
   const float facing = vec3_dot(car.forward, to_ball_norm);
-  return std::max(0.0F, facing) * dense_cfg_.face_ball_weight;
+  const float decay = std::exp(-dist / dense_cfg_.speed_toward_ball_decay);
+  return std::max(0.0F, facing) * decay * dense_cfg_.face_ball_weight;
 }
 
 float RewardEngine::air_reward(

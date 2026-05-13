@@ -1412,7 +1412,7 @@ void APPOTrainer::collect_rollout(
           const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + coll_ape, dones_host.numel());
           for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
             env_done = env_done || dones_ptr[i] > 0.5F;
-            env_scored = env_scored || (dones_ptr[i] > 0.5F && (tl_ptr[i] == 0 || tl_ptr[i] == 1));
+            env_scored = env_scored || (dones_ptr[i] > 0.5F && tl_ptr[i] == 0);
           }
            if (env_done) {
               completed_episodes++;
@@ -1605,7 +1605,7 @@ void APPOTrainer::collect_rollout(
       const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + coll_ape, dones_host.numel());
       for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
         env_done = env_done || dones_ptr[i] > 0.5F;
-        env_scored = env_scored || (dones_ptr[i] > 0.5F && (tl_ptr[i] == 0 || tl_ptr[i] == 1));
+        env_scored = env_scored || (dones_ptr[i] > 0.5F && tl_ptr[i] == 0);
       }
       if (env_done) {
         completed_episodes++;

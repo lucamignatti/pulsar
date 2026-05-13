@@ -265,7 +265,7 @@ int main() {
       agent_state.prev_boost = 0.0f;
       pulsar::EnvRewardState env_state{};
       auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
-      require_close(bd.terms.at("gameplay.face_ball"), 1.0f, "face_ball facing");
+      require_close(bd.terms.at("gameplay.face_ball"), 0.367879f, "face_ball facing");
     }
 
     // =========================================================================
@@ -1294,7 +1294,7 @@ int main() {
       agent_state.episode_dense_reward = 0.0f;
       pulsar::EnvRewardState env_state{};
       auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
-      require_close(bd.gameplay, 1.0f, "gameplay under cap");
+      require_close(bd.gameplay, 0.367879f, "gameplay under cap");
     }
 
     // =========================================================================
@@ -1417,10 +1417,10 @@ int main() {
       agent_state.prev_is_flipping = false;
       pulsar::EnvRewardState env_state{};
       auto bd = engine.compute(0, car, env, 2, agent_state, env_state, true, 0);
-      require_close(bd.gameplay, 1.0f, "combined gameplay");
+      require_close(bd.gameplay, 0.367879f, "combined gameplay");
       require_close(bd.mechanic, 0.5f, "combined mechanic");
       require_close(bd.terminal, 10.0f, "combined terminal");
-      require_close(bd.total, 11.5f, "combined total");
+      require_close(bd.total, 10.867879f, "combined total");
     }
 
     std::cout << "test_reward_engine passed\n";

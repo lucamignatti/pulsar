@@ -70,10 +70,10 @@
         "name": "bronze-touch-1v1",
         "mode": "1v1",
         "learning_rate": 0.0002,
-        "min_agent_steps": 5000000,
+        "min_agent_steps": 2500000,
         "rolling_window_size": 5,
         "consecutive_success_threshold": 3,
-        "required_touch_episode_rate": 0.3,
+        "required_touch_episode_rate": 0.15,
         "required_scored_episode_rate": 0.0,
         "demotion_threshold_rate": 0.0,
         "demotion_window_updates": 0,
@@ -81,16 +81,16 @@
         "outcome_override": {
           "score": 0.0,
           "concede": 0.0,
-          "neutral": 1.0,
-          "neutral_no_touch": -1.0
+          "neutral": 2.0,
+          "neutral_no_touch": -5.0
         },
         "mechanic_rewards_override": {},
         "dense_rewards_override": {
           "ball_touch_vel_weight": 5.0,
-          "speed_toward_ball_weight": 2.0,
+          "speed_toward_ball_weight": 1.0,
           "face_ball_weight": 0.5,
           "air_reward_weight": 0.15,
-          "dense_reward_cap_per_episode": 10.0
+          "dense_reward_cap_per_episode": 3.0
         }
       },
       {
