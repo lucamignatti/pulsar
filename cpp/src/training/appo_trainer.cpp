@@ -242,10 +242,12 @@ std::unique_ptr<BatchedRocketSimCollector> make_es_eval_collector(
     engines.push_back(std::make_shared<RocketSimTransitionEngine>(env_config, reset_mutator));
   }
 
+  auto obs_builder_cfg = config.env;
+  obs_builder_cfg.team_size = 3;
   return std::make_unique<BatchedRocketSimCollector>(
       eval_config,
       std::move(engines),
-      std::make_shared<PulsarObsBuilder>(config.env),
+      std::make_shared<PulsarObsBuilder>(obs_builder_cfg),
       std::make_shared<DiscreteActionParser>(ControllerActionTable(config.action_table)),
       std::make_shared<SimpleDoneCondition>(config.env),
       pin_host_memory);
