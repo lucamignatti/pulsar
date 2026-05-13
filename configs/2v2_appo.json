@@ -329,14 +329,14 @@
     "num_encoder_blocks": 5,
     "transformer_num_heads": 8,
     "transformer_window_size": 16,
-    "transformer_max_batch_size": 8192,
+    "transformer_max_batch_size": 1024,
     "transformer_token_group_size": 4,
     "transformer_ffn_multiplier": 2,
     "value_hidden_dim": 384,
     "policy_hidden_dim": 0
   },
   "ppo": {
-    "num_envs": 384,
+    "num_envs": 256,
     "collection_workers": 0,
     "collection_shards": 1,
     "init_checkpoint": "",
