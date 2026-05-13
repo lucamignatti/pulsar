@@ -58,6 +58,14 @@ std::shared_ptr<MutatorSequence> make_eval_reset_mutator(const EnvConfig& config
       });
 }
 
+int team_size_from_mode_str(const std::string& mode) {
+  if (mode == "1v1") return 1;
+  if (mode == "2v2") return 2;
+  if (mode == "3v3") return 3;
+  if (mode == "4v4") return 4;
+  return 1;
+}
+
 std::optional<std::int64_t> parse_snapshot_step(const std::filesystem::path& path) {
   const std::string name = path.filename().string();
   if (name.empty() || !std::all_of(name.begin(), name.end(), [](char ch) { return ch >= '0' && ch <= '9'; })) {
@@ -88,7 +96,7 @@ SelfPlayManager::SelfPlayManager(
       action_parser_(std::move(action_parser)),
       device_(std::move(device)),
       rng_(static_cast<std::mt19937::result_type>(config_.env.seed)) {
-  current_ratings_[mode_name()] = config_.self_play_league.elo_initial;
+  current_mode_ = std::to_string(config_.env.team_size) + "v" + std::to_string(config_.env.team_size);
   if (!snapshot_root_.empty()) {
     std::filesystem::create_directories(snapshot_root_);
     load_existing_snapshots();
@@ -110,10 +118,12 @@ SelfPlayAssignment SelfPlayManager::sample_assignment(std::size_t, std::uint64_t
     return assignment;
   }
 
-  // prefer stage-matched snapshots, fall back to any
+  // prefer stage+mode-matched snapshots, fall back to any
   std::vector<int> matching_indices;
   for (int i = 0; i < static_cast<int>(snapshots_.size()); ++i) {
-    if (curriculum_stage_ < 0 || snapshots_[i].curriculum_stage == curriculum_stage_) {
+    const bool stage_match = (curriculum_stage_ < 0) || (snapshots_[i].curriculum_stage == curriculum_stage_);
+    const bool mode_match = current_mode_.empty() || (snapshots_[i].mode == current_mode_);
+    if (stage_match && mode_match) {
       matching_indices.push_back(i);
     }
   }
@@ -145,6 +155,14 @@ void SelfPlayManager::set_curriculum_stage(int stage_index) {
 
 int SelfPlayManager::curriculum_stage() const {
   return curriculum_stage_;
+}
+
+void SelfPlayManager::set_current_mode(const std::string& mode) {
+  current_mode_ = mode;
+}
+
+const std::string& SelfPlayManager::current_mode() const {
+  return current_mode_;
 }
 
 void SelfPlayManager::infer_opponent_actions(
@@ -270,6 +288,7 @@ void SelfPlayManager::load_existing_snapshots() {
         .global_step = metadata.global_step,
         .update_index = static_cast<int>(metadata.update_index),
         .curriculum_stage = metadata.extra.value("curriculum_stage", -1),
+        .mode = metadata.extra.value("mode", std::string{"1v1"}),
         .model = PPOActor(snapshot_config.model, snapshot_config.goal_critic, snapshot_config.es_lora),
         .normalizer = ObservationNormalizer(snapshot_config.model.observation_dim),
         .ratings = {},
@@ -304,6 +323,7 @@ void SelfPlayManager::save_snapshot(const Snapshot& snapshot) const {
     save_experiment_config(config_, (staging / "config.json").string());
     nlohmann::json extra = nlohmann::json::object();
     extra["curriculum_stage"] = snapshot.curriculum_stage;
+    extra["mode"] = snapshot.mode;
     save_checkpoint_metadata(
         CheckpointMetadata{
             .schema_version = config_.schema_version,
@@ -359,6 +379,7 @@ void SelfPlayManager::add_snapshot(
       .global_step = global_step,
       .update_index = update_index,
       .curriculum_stage = curriculum_stage_,
+      .mode = current_mode_,
       .model = clone_ppo_actor(current_model, device_),
       .normalizer = current_normalizer.clone(),
       .ratings = current_ratings_,
@@ -381,8 +402,6 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
   }
 
   const auto start = std::chrono::steady_clock::now();
-  const auto reset_mutator = make_eval_reset_mutator(config_.env);
-  const std::string mode = mode_name();
   const auto* discrete = dynamic_cast<const DiscreteActionParser*>(action_parser_.get());
   const bool deterministic = config_.self_play_league.eval_policy == "deterministic";
   if (discrete == nullptr) {
@@ -392,11 +411,19 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
   torch::NoGradGuard no_grad;
   for (std::size_t snapshot_index = 0; snapshot_index < snapshots_.size(); ++snapshot_index) {
     Snapshot& snapshot = snapshots_[snapshot_index];
+    const std::string eval_mode = snapshot.mode.empty() ? "1v1" : snapshot.mode;
+    const int eval_team_size = team_size_from_mode_str(eval_mode);
+
+    EnvConfig eval_env_base = config_.env;
+    eval_env_base.team_size = eval_team_size;
+    eval_env_base.spawn_opponents = (eval_team_size >= 1);
+
     for (int match = 0; match < config_.self_play_league.eval_matches_per_snapshot; ++match) {
+      const auto reset_mutator = make_eval_reset_mutator(eval_env_base);
       std::vector<std::shared_ptr<RocketSimTransitionEngine>> engines;
       engines.reserve(static_cast<std::size_t>(config_.self_play_league.eval_num_envs));
       for (int env_idx = 0; env_idx < config_.self_play_league.eval_num_envs; ++env_idx) {
-        EnvConfig env_config = config_.env;
+        EnvConfig env_config = eval_env_base;
         env_config.seed += static_cast<std::uint64_t>(snapshot_index * 997 + match * 131 + env_idx);
         engines.push_back(std::make_shared<RocketSimTransitionEngine>(env_config, reset_mutator));
       }
@@ -410,7 +437,7 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
           {static_cast<long>(total_agents), static_cast<long>(discrete->action_table().size())},
           torch::TensorOptions().dtype(torch::kUInt8).device(device_));
       torch::Tensor episode_starts = torch::ones({static_cast<long>(total_agents)}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-      
+
       const Team current_team = (match % 2 == 0) ? Team::Blue : Team::Orange;
       std::vector<bool> env_done(engines.size(), false);
       int active_envs = static_cast<int>(engines.size());
@@ -439,7 +466,7 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
         const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_critic.goal_dim);
         const ActorStepOutput current_out =
             current_model->forward_step(current_obs, goal_values);
-          const ActorStepOutput snapshot_out =
+        const ActorStepOutput snapshot_out =
             snapshot.model->forward_step(snapshot_obs, goal_values);
         const torch::Tensor action_masks = masks.to(torch::kBool);
         const torch::Tensor current_actions =
@@ -477,8 +504,8 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
             const bool current_won =
                 (state.blue_score > state.orange_score && current_team == Team::Blue) ||
                 (state.orange_score > state.blue_score && current_team == Team::Orange);
-            auto [current_it, _] = current_ratings_.emplace(mode, config_.self_play_league.elo_initial);
-            auto [snapshot_it, __] = snapshot.ratings.emplace(mode, config_.self_play_league.elo_initial);
+            auto [current_it, _] = current_ratings_.emplace(eval_mode, config_.self_play_league.elo_initial);
+            auto [snapshot_it, __] = snapshot.ratings.emplace(eval_mode, config_.self_play_league.elo_initial);
             if (current_won) {
               update_elo_ratings(current_it->second, snapshot_it->second, config_.self_play_league.elo_k);
             } else {
@@ -490,11 +517,10 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
         }
       }
 
-      // Handle draws: environments that reached max_episode_ticks without a goal.
       for (std::size_t env_idx = 0; env_idx < engines.size(); ++env_idx) {
         if (!env_done[env_idx]) {
-          auto [current_it, _] = current_ratings_.emplace(mode, config_.self_play_league.elo_initial);
-          auto [snapshot_it, __] = snapshot.ratings.emplace(mode, config_.self_play_league.elo_initial);
+          auto [current_it, _] = current_ratings_.emplace(eval_mode, config_.self_play_league.elo_initial);
+          auto [snapshot_it, __] = snapshot.ratings.emplace(eval_mode, config_.self_play_league.elo_initial);
           update_elo_draw_impl(current_it->second, snapshot_it->second, config_.self_play_league.elo_k);
           env_done[env_idx] = true;
         }
@@ -510,11 +536,15 @@ SelfPlayMetrics SelfPlayManager::evaluate_current(
 }
 
 std::string SelfPlayManager::mode_name() const {
-  return std::to_string(config_.env.team_size) + "v" + std::to_string(config_.env.team_size);
+  return current_mode_.empty() ? "1v1" : current_mode_;
 }
 
 const std::map<std::string, double>& SelfPlayManager::current_ratings() const {
   return current_ratings_;
+}
+
+void SelfPlayManager::restore_ratings(const std::map<std::string, double>& ratings) {
+  current_ratings_ = ratings;
 }
 
 std::string SelfPlayManager::rng_state() const {

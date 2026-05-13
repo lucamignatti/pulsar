@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -15,8 +16,8 @@ struct CurriculumState {
   int promotion_counter = 0;
   int demotion_counter = 0;
   std::string current_mode = "1v1";
-  std::deque<double> touch_rates{};
-  std::deque<double> scored_rates{};
+  std::map<std::string, std::deque<double>> mode_touch_rates{};
+  std::map<std::string, std::deque<double>> mode_scored_rates{};
 };
 
 class Curriculum {
@@ -28,6 +29,9 @@ class Curriculum {
   int stage_index() const;
   const std::string& current_mode() const;
   bool mode_changed() const;
+  bool mode_allocation_changed() const;
+  const std::map<std::string, float>& mode_allocation() const;
+  std::string primary_mode() const;
 
   const OutcomeConfig& outcome() const;
   const MechanicRewardConfig& mechanic_rewards() const;
@@ -35,8 +39,11 @@ class Curriculum {
   const std::vector<std::string>& unlocked_mechanics() const;
   float learning_rate() const;
 
-  bool check_promotion(double touch_episode_rate, double scored_episode_rate, std::int64_t agent_steps);
-  bool check_demotion(double scored_episode_rate);
+  bool check_promotion(
+      const std::map<std::string, double>& mode_touch_rates,
+      const std::map<std::string, double>& mode_scored_rates,
+      std::int64_t agent_steps);
+  bool check_demotion(const std::map<std::string, double>& mode_scored_rates);
   void initialize_stage();
 
   const CurriculumState& state() const;

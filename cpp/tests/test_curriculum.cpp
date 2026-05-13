@@ -10,6 +10,13 @@
 
 namespace {
 
+std::map<std::string, double> mode_map(double v) {
+  return {{"1v1", v}};
+}
+
+std::map<std::string, double> mode_touch(double v) { return mode_map(v); }
+std::map<std::string, double> mode_scored(double v) { return mode_map(v); }
+
 void require_eq(int actual, int expected, const std::string& msg) {
   if (actual != expected) {
     throw std::runtime_error(
@@ -38,6 +45,7 @@ pulsar::CurriculumConfig make_two_stage_config() {
   stage0.consecutive_success_threshold = 3;
   stage0.required_touch_episode_rate = 0.3f;
   stage0.required_scored_episode_rate = 0.0f;
+  stage0.mode_allocation["1v1"] = 1.0F;
   stage0.outcome_override.score = 1.0f;
   stage0.outcome_override.concede = -1.0f;
   stage0.outcome_override.neutral = 0.0f;
@@ -51,6 +59,7 @@ pulsar::CurriculumConfig make_two_stage_config() {
   stage1.consecutive_success_threshold = 3;
   stage1.required_touch_episode_rate = 0.0f;
   stage1.required_scored_episode_rate = 0.1f;
+  stage1.mode_allocation["1v1"] = 1.0F;
   stage1.outcome_override.score = 10.0f;
   stage1.outcome_override.concede = -8.0f;
   config.stages.push_back(stage1);
@@ -73,14 +82,14 @@ void test_basic_initialization() {
   require_eq(state.stage_index, 0, "state stage_index");
   require_eq(state.promotion_counter, 0, "state promotion_counter");
   pulsar::test::require(state.agent_steps_in_stage == 0, "state agent_steps_in_stage");
-  pulsar::test::require(state.touch_rates.empty(), "state touch_rates empty");
+  pulsar::test::require(state.mode_touch_rates.empty(), "state touch_rates empty");
 }
 
 void test_no_promotion_before_min_steps() {
   auto cfg = make_two_stage_config();
   pulsar::Curriculum curriculum(cfg);
 
-  bool promoted = curriculum.check_promotion(1.0, 1.0, 500);
+  bool promoted = curriculum.check_promotion(mode_touch(1.0), mode_scored(1.0), 500);
   pulsar::test::require(!promoted, "no promotion when steps < min_agent_steps");
   require_eq(curriculum.stage_index(), 0, "still at stage 0");
 }
@@ -90,11 +99,11 @@ void test_no_promotion_before_window_filled() {
   pulsar::Curriculum curriculum(cfg);
 
   // window=3, first call: size 1 < 3
-  bool promoted = curriculum.check_promotion(1.0, 1.0, 2000);
+  bool promoted = curriculum.check_promotion(mode_touch(1.0), mode_scored(1.0), 2000);
   pulsar::test::require(!promoted, "no promotion with 1 sample (window=3)");
 
   // second call: size 2 < 3
-  promoted = curriculum.check_promotion(1.0, 1.0, 0);
+  promoted = curriculum.check_promotion(mode_touch(1.0), mode_scored(1.0), 0);
   pulsar::test::require(!promoted, "no promotion with 2 samples (window=3)");
   require_eq(curriculum.stage_index(), 0, "still stage 0");
 }
@@ -107,7 +116,7 @@ void test_promotion_after_consecutive_passing_windows() {
   // then 2 more passing evaluations to reach counter=3 and promote.
   bool promoted = false;
   for (int i = 0; i < 5; i++) {
-    promoted = curriculum.check_promotion(0.5, 0.0, 2000);
+    promoted = curriculum.check_promotion(mode_touch(0.5), mode_scored(0.0), 2000);
   }
   pulsar::test::require(promoted, "promoted after 5 consecutive passing windows");
   require_eq(curriculum.stage_index(), 1, "now at stage 1");
@@ -118,7 +127,7 @@ void test_stage1_values_after_promotion() {
   pulsar::Curriculum curriculum(cfg);
 
   for (int i = 0; i < 5; i++) {
-    curriculum.check_promotion(0.5, 0.0, 2000);
+    curriculum.check_promotion(mode_touch(0.5), mode_scored(0.0), 2000);
   }
 
   pulsar::test::require(curriculum.current_stage().name == "stage1", "stage 1 name");
@@ -132,12 +141,12 @@ void test_no_promotion_from_last_stage() {
   pulsar::Curriculum curriculum(cfg);
 
   for (int i = 0; i < 5; i++) {
-    curriculum.check_promotion(0.5, 0.0, 2000);
+    curriculum.check_promotion(mode_touch(0.5), mode_scored(0.0), 2000);
   }
   require_eq(curriculum.stage_index(), 1, "at last stage");
 
   // last stage returns false before any threshold evaluation
-  bool promoted = curriculum.check_promotion(1.0, 1.0, 99999);
+  bool promoted = curriculum.check_promotion(mode_touch(1.0), mode_scored(1.0), 99999);
   pulsar::test::require(!promoted, "last stage never promotes");
   require_eq(curriculum.stage_index(), 1, "still at last stage");
 }
@@ -152,13 +161,14 @@ void test_disabled_curriculum_never_promotes() {
   stage.consecutive_success_threshold = 1;
   stage.required_touch_episode_rate = 0.0f;
   stage.required_scored_episode_rate = 0.0f;
+  stage.mode_allocation["1v1"] = 1.0F;
   cfg.stages.push_back(stage);
   cfg.stages.push_back(pulsar::CurriculumStageConfig{});
 
   pulsar::Curriculum curriculum(cfg);
   pulsar::test::require(!curriculum.enabled(), "disabled");
 
-  bool promoted = curriculum.check_promotion(1.0, 1.0, 99999);
+  bool promoted = curriculum.check_promotion(mode_touch(1.0), mode_scored(1.0), 99999);
   pulsar::test::require(!promoted, "disabled never promotes");
   require_eq(curriculum.stage_index(), 0, "disabled stays at stage 0");
 }
@@ -169,13 +179,13 @@ void test_counter_resets_when_touch_threshold_fails() {
 
   // Build counter to 1 (3 calls fill window, all pass)
   for (int i = 0; i < 3; i++) {
-    curriculum.check_promotion(0.35, 0.0, 2000);
+    curriculum.check_promotion(mode_touch(0.35), mode_scored(0.0), 2000);
   }
   require_eq(curriculum.state().promotion_counter, 1,
              "counter is 1 after 3 passing calls");
 
   // Push failing touch rate: (0.35+0.35+0.0)/3 = 0.233 < 0.3
-  curriculum.check_promotion(0.0, 0.0, 0);
+  curriculum.check_promotion(mode_touch(0.0), mode_scored(0.0), 0);
   require_eq(curriculum.state().promotion_counter, 0,
              "counter reset after touch threshold failure");
   require_eq(curriculum.stage_index(), 0, "still at stage 0");
@@ -192,22 +202,24 @@ void test_counter_resets_when_scored_threshold_fails() {
   stage0.consecutive_success_threshold = 2;
   stage0.required_touch_episode_rate = 0.0f;
   stage0.required_scored_episode_rate = 0.4f;
+  stage0.mode_allocation["1v1"] = 1.0F;
   cfg.stages.push_back(stage0);
 
   pulsar::CurriculumStageConfig stage1;
   stage1.name = "stage1";
+  stage1.mode_allocation["1v1"] = 1.0F;
   cfg.stages.push_back(stage1);
 
   pulsar::Curriculum curriculum(cfg);
 
   // 2 calls fill window=2, both pass scored threshold
-  curriculum.check_promotion(0.0, 0.6, 600);
-  curriculum.check_promotion(0.0, 0.6, 0);
+  curriculum.check_promotion(mode_touch(0.0), mode_scored(0.6), 600);
+  curriculum.check_promotion(mode_touch(0.0), mode_scored(0.6), 0);
   require_eq(curriculum.state().promotion_counter, 1,
              "counter=1 after 2 passing scored calls");
 
   // failing scored rate: (0.6+0.1)/2 = 0.35 < 0.4
-  curriculum.check_promotion(0.0, 0.1, 0);
+  curriculum.check_promotion(mode_touch(0.0), mode_scored(0.1), 0);
   require_eq(curriculum.state().promotion_counter, 0,
              "counter reset by scored failure");
   require_eq(curriculum.stage_index(), 0, "still stage 0 after scored failure");
@@ -219,19 +231,19 @@ void test_promotion_after_recovery_from_failure() {
 
   // 3 calls: build counter to 1
   for (int i = 0; i < 3; i++) {
-    curriculum.check_promotion(0.5, 0.0, 2000);
+    curriculum.check_promotion(mode_touch(0.5), mode_scored(0.0), 2000);
   }
   require_eq(curriculum.state().promotion_counter, 1, "counter=1");
 
   // failing calls: need 2 zero-rate calls to flush both remaining 0.5s from window
-  curriculum.check_promotion(0.0, 0.0, 0);
-  curriculum.check_promotion(0.0, 0.0, 0);
+  curriculum.check_promotion(mode_touch(0.0), mode_scored(0.0), 0);
+  curriculum.check_promotion(mode_touch(0.0), mode_scored(0.0), 0);
   require_eq(curriculum.state().promotion_counter, 0, "counter=0 after failure");
 
   // need more passing calls to refill window and re-promote
   bool promoted = false;
   for (int i = 0; i < 10; i++) {
-    if (curriculum.check_promotion(0.5, 0.0, 0)) {
+    if (curriculum.check_promotion(mode_touch(0.5), mode_scored(0.0), 0)) {
       promoted = true;
       break;
     }
@@ -245,26 +257,26 @@ void test_state_resets_after_promotion() {
   pulsar::Curriculum curriculum(cfg);
 
   for (int i = 0; i < 5; i++) {
-    curriculum.check_promotion(0.5, 0.0, 2000);
+    curriculum.check_promotion(mode_touch(0.5), mode_scored(0.0), 2000);
   }
 
   const auto& state = curriculum.state();
   require_eq(state.stage_index, 1, "state stage_index updated");
   require_eq(state.promotion_counter, 0, "promotion_counter reset");
   pulsar::test::require(state.agent_steps_in_stage == 0, "agent_steps_in_stage reset");
-  pulsar::test::require(state.touch_rates.empty(), "touch_rates cleared after promotion");
-  pulsar::test::require(state.scored_rates.empty(), "scored_rates cleared after promotion");
+  pulsar::test::require(state.mode_touch_rates.empty(), "touch_rates cleared after promotion");
+  pulsar::test::require(state.mode_scored_rates.empty(), "scored_rates cleared after promotion");
 }
 
 void test_agent_steps_accumulate_correctly() {
   auto cfg = make_two_stage_config();
   pulsar::Curriculum curriculum(cfg);
 
-  curriculum.check_promotion(0.0, 0.0, 300);
+  curriculum.check_promotion(mode_touch(0.0), mode_scored(0.0), 300);
   pulsar::test::require(curriculum.state().agent_steps_in_stage == 300,
                         "accumulated 300 steps");
 
-  curriculum.check_promotion(0.0, 0.0, 500);
+  curriculum.check_promotion(mode_touch(0.0), mode_scored(0.0), 500);
   pulsar::test::require(curriculum.state().agent_steps_in_stage == 800,
                         "accumulated 800 steps");
 
@@ -283,12 +295,13 @@ void test_single_stage_never_promotes() {
   stage.consecutive_success_threshold = 1;
   stage.required_touch_episode_rate = 0.0f;
   stage.required_scored_episode_rate = 0.0f;
+  stage.mode_allocation["1v1"] = 1.0F;
   cfg.stages.push_back(stage);
 
   pulsar::Curriculum curriculum(cfg);
   require_eq(curriculum.stage_index(), 0, "single stage index");
 
-  bool promoted = curriculum.check_promotion(1.0, 1.0, 99999);
+  bool promoted = curriculum.check_promotion(mode_touch(1.0), mode_scored(1.0), 99999);
   pulsar::test::require(!promoted, "single stage never promotes");
   require_eq(curriculum.stage_index(), 0, "still at single stage");
 }
@@ -300,7 +313,7 @@ void test_empty_stages_never_promotes() {
   pulsar::Curriculum curriculum(cfg);
   pulsar::test::require(curriculum.enabled(), "enabled with empty stages");
 
-  bool promoted = curriculum.check_promotion(1.0, 1.0, 99999);
+  bool promoted = curriculum.check_promotion(mode_touch(1.0), mode_scored(1.0), 99999);
   pulsar::test::require(!promoted, "empty stages never promotes");
 }
 
@@ -346,7 +359,7 @@ void test_mechanic_rewards_and_dense_rewards() {
 
   // promote to stage 1
   for (int i = 0; i < 5; i++) {
-    curriculum.check_promotion(0.5, 0.0, 2000);
+    curriculum.check_promotion(mode_touch(0.5), mode_scored(0.0), 2000);
   }
 
   require_approx(curriculum.mechanic_rewards().wavedash, 0.5f,

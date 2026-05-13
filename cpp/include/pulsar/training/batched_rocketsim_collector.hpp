@@ -55,6 +55,8 @@ class BatchedRocketSimCollector {
   void set_self_play_assignment_fn(AssignmentFn assignment_fn);
   void update_reward_config(const ExperimentConfig& cfg);
   void update_unlocked_mechanics(const std::vector<std::string>& mechanics);
+  void set_mode(const std::string& mode);
+  [[nodiscard]] const std::string& mode() const;
   void reset_all(CollectorTimings* timings = nullptr);
   void reset_es_episode(int update_index, int episode_index, int eval_envs_per_member, CollectorTimings* timings = nullptr);
 
@@ -136,6 +138,7 @@ class BatchedRocketSimCollector {
   std::vector<AgentRewardState> agent_reward_states_;
   std::vector<EnvRewardState> env_reward_states_;
   RewardEngine reward_engine_;
+  std::string mode_ = "1v1";
   std::size_t total_agents_ = 0;
   int obs_dim_ = 0;
   int action_dim_ = 0;

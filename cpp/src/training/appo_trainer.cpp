@@ -396,6 +396,117 @@ void APPOTrainer::apply_curriculum_to_collectors() {
   }
 }
 
+int team_size_from_mode(const std::string& mode) {
+  if (mode == "1v1") return 1;
+  if (mode == "2v2") return 2;
+  if (mode == "3v3") return 3;
+  return 1;
+}
+
+void APPOTrainer::rebuild_collectors() {
+  const auto& alloc = curriculum_.mode_allocation();
+  if (alloc.empty()) return;
+
+  // compute max team size across all active modes so the obs builder
+  // produces constant-dimension observations regardless of mode
+  int max_team_size = 1;
+  for (const auto& [mode, frac] : alloc) {
+    max_team_size = std::max(max_team_size, team_size_from_mode(mode));
+  }
+
+  // create obs builder with max team size so obs_dim is constant across modes
+  auto obs_builder_cfg = config_.env;
+  obs_builder_cfg.team_size = max_team_size;
+  auto obs_builder = std::make_shared<PulsarObsBuilder>(obs_builder_cfg);
+  auto action_parser = std::make_shared<DiscreteActionParser>(ControllerActionTable(config_.action_table));
+  auto done_condition = std::make_shared<SimpleDoneCondition>(config_.env);
+  const bool pin_host = device_.is_cuda();
+
+  const int total_envs = config_.ppo.num_envs;
+
+  // allocate envs per mode, rounding to nearest integer
+  std::vector<std::pair<std::string, int>> mode_envs;
+  int allocated = 0;
+  float fractional_sum = 0.0F;
+  for (const auto& [mode, frac] : alloc) {
+    int envs = static_cast<int>(std::round(static_cast<float>(total_envs) * frac));
+    if (envs <= 0) envs = 1;
+    mode_envs.emplace_back(mode, envs);
+    allocated += envs;
+  }
+  // adjust to match total envs exactly (last mode absorbs the difference)
+  if (!mode_envs.empty()) {
+    mode_envs.back().second += (total_envs - allocated);
+    if (mode_envs.back().second <= 0) mode_envs.back().second = 1;
+  }
+
+  // save self-play state before rebuild
+  const bool self_play_was_enabled = self_play_manager_ && self_play_manager_->enabled();
+  const auto self_play_rng = self_play_was_enabled ? self_play_manager_->rng_state() : std::string{};
+
+  // destroy old collectors
+  collectors_.clear();
+
+  int env_seed_offset = 0;
+  for (const auto& [mode, env_count] : mode_envs) {
+    auto mode_cfg = config_;
+    mode_cfg.env.team_size = team_size_from_mode(mode);
+    mode_cfg.env.spawn_opponents = (mode_cfg.env.team_size >= 1);
+    mode_cfg.ppo.num_envs = env_count;
+    mode_cfg.env.seed += static_cast<std::uint64_t>(env_seed_offset);
+    env_seed_offset += env_count;
+
+    auto collector = std::make_unique<BatchedRocketSimCollector>(
+        mode_cfg, obs_builder, action_parser, done_condition, pin_host);
+    collector->set_mode(mode);
+    collectors_.push_back(std::move(collector));
+  }
+
+  // recompute agent counts
+  total_agents_ = total_agents_for_collectors(collectors_);
+  if (total_agents_ == 0) {
+    throw std::invalid_argument("rebuild_collectors produced zero agents");
+  }
+
+  // rebuild rollout storage
+  const int action_dim = action_dim_for_collectors(collectors_);
+  rollout_ = make_rollout_storage(config_, static_cast<int>(total_agents_), action_dim);
+  rollout_B_ = make_rollout_storage(config_, static_cast<int>(total_agents_), action_dim);
+
+  // recompute shard agent offsets
+  shard_agent_offsets_.clear();
+  std::int64_t agent_offset = 0;
+  for (const auto& collector : collectors_) {
+    if (!collector) continue;
+    shard_agent_offsets_.push_back(agent_offset);
+    agent_offset += static_cast<std::int64_t>(collector->total_agents());
+  }
+
+  // rebuild self-play assignments
+  if (self_play_manager_ && self_play_was_enabled) {
+    self_play_manager_->restore_rng_state(self_play_rng);
+    std::size_t env_offset = 0;
+    for (auto& collector : collectors_) {
+      if (!collector) continue;
+      const std::size_t shard_env_offset = env_offset;
+      const std::string collector_mode = collector->mode();
+      collector->set_self_play_assignment_fn(
+          [this, shard_env_offset, collector_mode](std::size_t env_idx, std::uint64_t seed) {
+            self_play_manager_->set_current_mode(collector_mode);
+            return self_play_manager_->sample_assignment(shard_env_offset + env_idx, seed);
+          });
+      env_offset += collector->num_envs();
+    }
+  }
+
+  // re-apply curriculum
+  apply_curriculum_to_collectors();
+
+  std::cout << "rebuilt_collectors modes=" << mode_envs.size()
+            << " total_agents=" << total_agents_
+            << " rollout_length=" << config_.ppo.rollout_length << '\n';
+}
+
 void APPOTrainer::apply_curriculum_lr() {
   float lr = curriculum_.learning_rate();
   for (auto& opt_group : actor_optimizer_.param_groups()) {
@@ -446,6 +557,13 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
     if (metadata.extra.contains("self_play_rng_state")) {
       self_play_manager_->restore_rng_state(metadata.extra["self_play_rng_state"].get<std::string>());
     }
+    if (metadata.extra.contains("self_play_ratings")) {
+      std::map<std::string, double> ratings;
+      for (const auto& [mode, v] : metadata.extra["self_play_ratings"].items()) {
+        ratings[mode] = v.get<double>();
+      }
+      self_play_manager_->restore_ratings(ratings);
+    }
   }
   if (metadata.extra.contains("curriculum_stage") && curriculum_.enabled()) {
     CurriculumState restored;
@@ -454,15 +572,32 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
     restored.promotion_counter = metadata.extra.value("curriculum_promotion_counter", 0);
     restored.demotion_counter = metadata.extra.value("curriculum_demotion_counter", 0);
     restored.current_mode = metadata.extra.value("curriculum_current_mode", std::string{"1v1"});
-    if (metadata.extra.contains("curriculum_touch_rates")) {
-      for (const auto& v : metadata.extra["curriculum_touch_rates"]) {
-        restored.touch_rates.push_back(v.get<double>());
+    if (metadata.extra.contains("curriculum_mode_touch_rates")) {
+      for (const auto& [mode, arr] : metadata.extra["curriculum_mode_touch_rates"].items()) {
+        std::deque<double> deq;
+        for (const auto& v : arr) deq.push_back(v.get<double>());
+        restored.mode_touch_rates[mode] = deq;
       }
     }
-    if (metadata.extra.contains("curriculum_scored_rates")) {
-      for (const auto& v : metadata.extra["curriculum_scored_rates"]) {
-        restored.scored_rates.push_back(v.get<double>());
+    if (metadata.extra.contains("curriculum_mode_scored_rates")) {
+      for (const auto& [mode, arr] : metadata.extra["curriculum_mode_scored_rates"].items()) {
+        std::deque<double> deq;
+        for (const auto& v : arr) deq.push_back(v.get<double>());
+        restored.mode_scored_rates[mode] = deq;
       }
+    }
+    // backward compat: old single-mode deques
+    if (metadata.extra.contains("curriculum_touch_rates") && restored.mode_touch_rates.empty()) {
+      const auto& arr = metadata.extra["curriculum_touch_rates"];
+      std::deque<double> deq;
+      for (const auto& v : arr) deq.push_back(v.get<double>());
+      restored.mode_touch_rates[restored.current_mode] = deq;
+    }
+    if (metadata.extra.contains("curriculum_scored_rates") && restored.mode_scored_rates.empty()) {
+      const auto& arr = metadata.extra["curriculum_scored_rates"];
+      std::deque<double> deq;
+      for (const auto& v : arr) deq.push_back(v.get<double>());
+      restored.mode_scored_rates[restored.current_mode] = deq;
     }
     curriculum_.restore_state(restored);
     std::cout << "restored_curriculum stage=" << restored.stage_index
@@ -1123,7 +1258,9 @@ void APPOTrainer::collect_rollout(
   int completed_episodes = 0;
   int scored_episodes = 0;
   int touched_episodes = 0;
-  const int agents_per_env = std::max(1, config_.env.team_size * 2);
+  std::map<std::string, int> mode_completed;
+  std::map<std::string, int> mode_touched;
+  std::map<std::string, int> mode_scored;
 
   if (collectors_.size() > 1) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "collect_loop_sharded");
@@ -1245,8 +1382,11 @@ void APPOTrainer::collect_rollout(
         const auto* la_ptr = shard_step.learner_active_host.data_ptr<float>();
         torch::Tensor env_touch_host = collector.host_env_touched();
         const auto* env_touch_ptr = env_touch_host.data_ptr<float>();
-        for (int64_t env_agent_begin = 0; env_agent_begin < terminal_labels.numel(); env_agent_begin += agents_per_env) {
-          const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + agents_per_env, terminal_labels.numel());
+        const int64_t coll_agents = static_cast<int64_t>(collector.total_agents());
+        const int64_t coll_num_envs = static_cast<int64_t>(collector.num_envs());
+        const int64_t coll_ape = (coll_num_envs > 0) ? (coll_agents / coll_num_envs) : 2;
+        for (int64_t env_agent_begin = 0; env_agent_begin < terminal_labels.numel(); env_agent_begin += coll_ape) {
+          const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + coll_ape, terminal_labels.numel());
           bool env_done = false;
           bool env_scored = false;
           bool env_conceded = false;
@@ -1262,24 +1402,29 @@ void APPOTrainer::collect_rollout(
             if (env_conceded) total_goals_conceded++;
           }
         }
-        for (int64_t env_agent_begin = 0; env_agent_begin < dones_host.numel(); env_agent_begin += agents_per_env) {
+        for (int64_t env_agent_begin = 0; env_agent_begin < dones_host.numel(); env_agent_begin += coll_ape) {
           bool env_done = false;
           bool env_scored = false;
-          const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + agents_per_env, dones_host.numel());
+          const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + coll_ape, dones_host.numel());
           for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
             env_done = env_done || dones_ptr[i] > 0.5F;
             env_scored = env_scored || (dones_ptr[i] > 0.5F && (tl_ptr[i] == 0 || tl_ptr[i] == 1));
           }
-          if (env_done) {
-             completed_episodes++;
-             if (env_scored) {
-               scored_episodes++;
-             }
-             const int64_t env_idx = env_agent_begin / agents_per_env;
-             if (env_touch_ptr[env_idx] > 0.5F) {
-               touched_episodes++;
-             }
-           }
+           if (env_done) {
+              completed_episodes++;
+              if (env_scored) {
+                scored_episodes++;
+              }
+              const int64_t env_idx = env_agent_begin / coll_ape;
+              if (env_touch_ptr[env_idx] > 0.5F) {
+                touched_episodes++;
+              }
+              // per-mode tracking
+              const std::string& cmode = collector.mode();
+              mode_completed[cmode]++;
+              if (env_touch_ptr[env_idx] > 0.5F) mode_touched[cmode]++;
+              if (env_scored) mode_scored[cmode]++;
+            }
          }
 
          const torch::Tensor sampled_value_cpu = shard_step.sampled_value.to(torch::kCPU);
@@ -1434,8 +1579,11 @@ void APPOTrainer::collect_rollout(
     const auto* la_ptr = learner_active_host.data_ptr<float>();
     torch::Tensor env_touch_host = collector_->host_env_touched();
     const auto* env_touch_ptr = env_touch_host.data_ptr<float>();
-    for (int64_t env_agent_begin = 0; env_agent_begin < terminal_labels.numel(); env_agent_begin += agents_per_env) {
-      const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + agents_per_env, terminal_labels.numel());
+    const int64_t coll_agents = static_cast<int64_t>(collector_->total_agents());
+    const int64_t coll_num_envs = static_cast<int64_t>(collector_->num_envs());
+    const int64_t coll_ape = (coll_num_envs > 0) ? (coll_agents / coll_num_envs) : 2;
+    for (int64_t env_agent_begin = 0; env_agent_begin < terminal_labels.numel(); env_agent_begin += coll_ape) {
+      const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + coll_ape, terminal_labels.numel());
       bool env_goal_scored = false;
       bool env_goal_conceded = false;
       for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
@@ -1447,10 +1595,10 @@ void APPOTrainer::collect_rollout(
       if (env_goal_scored) total_goals_scored++;
       if (env_goal_conceded) total_goals_conceded++;
     }
-    for (int64_t env_agent_begin = 0; env_agent_begin < dones_host.numel(); env_agent_begin += agents_per_env) {
+    for (int64_t env_agent_begin = 0; env_agent_begin < dones_host.numel(); env_agent_begin += coll_ape) {
       bool env_done = false;
       bool env_scored = false;
-      const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + agents_per_env, dones_host.numel());
+      const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + coll_ape, dones_host.numel());
       for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
         env_done = env_done || dones_ptr[i] > 0.5F;
         env_scored = env_scored || (dones_ptr[i] > 0.5F && (tl_ptr[i] == 0 || tl_ptr[i] == 1));
@@ -1460,10 +1608,14 @@ void APPOTrainer::collect_rollout(
         if (env_scored) {
           scored_episodes++;
         }
-        const int64_t env_idx = env_agent_begin / agents_per_env;
+        const int64_t env_idx = env_agent_begin / coll_ape;
         if (env_touch_ptr[env_idx] > 0.5F) {
           touched_episodes++;
         }
+        const std::string& cmode = collector_->mode();
+        mode_completed[cmode]++;
+        if (env_touch_ptr[env_idx] > 0.5F) mode_touched[cmode]++;
+        if (env_scored) mode_scored[cmode]++;
       }
     }
 
@@ -1549,6 +1701,14 @@ void APPOTrainer::collect_rollout(
       completed_episodes > 0
           ? static_cast<double>(touched_episodes) / static_cast<double>(completed_episodes)
           : 0.0;
+  for (const auto& [mode, comp] : mode_completed) {
+    metrics.mode_touch_rates[mode] = comp > 0
+        ? static_cast<double>(mode_touched[mode]) / static_cast<double>(comp)
+        : 0.0;
+    metrics.mode_scored_rates[mode] = comp > 0
+        ? static_cast<double>(mode_scored[mode]) / static_cast<double>(comp)
+        : 0.0;
+  }
   if (total_ball_proximity_denom > 0) {
     metrics.ball_proximity_rate = static_cast<double>(total_ball_proximity_steps) / static_cast<double>(total_ball_proximity_denom);
   }
@@ -1584,12 +1744,20 @@ CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
   extra["curriculum_promotion_counter"] = curriculum_.state().promotion_counter;
   extra["curriculum_demotion_counter"] = curriculum_.state().demotion_counter;
   extra["curriculum_current_mode"] = curriculum_.state().current_mode;
-  nlohmann::json touch_rates_json = nlohmann::json::array();
-  for (double v : curriculum_.state().touch_rates) touch_rates_json.push_back(v);
-  extra["curriculum_touch_rates"] = touch_rates_json;
-  nlohmann::json scored_rates_json = nlohmann::json::array();
-  for (double v : curriculum_.state().scored_rates) scored_rates_json.push_back(v);
-  extra["curriculum_scored_rates"] = scored_rates_json;
+  nlohmann::json mode_touch_json = nlohmann::json::object();
+  for (const auto& [mode, deq] : curriculum_.state().mode_touch_rates) {
+    nlohmann::json arr = nlohmann::json::array();
+    for (double v : deq) arr.push_back(v);
+    mode_touch_json[mode] = arr;
+  }
+  extra["curriculum_mode_touch_rates"] = mode_touch_json;
+  nlohmann::json mode_scored_json = nlohmann::json::object();
+  for (const auto& [mode, deq] : curriculum_.state().mode_scored_rates) {
+    nlohmann::json arr = nlohmann::json::array();
+    for (double v : deq) arr.push_back(v);
+    mode_scored_json[mode] = arr;
+  }
+  extra["curriculum_mode_scored_rates"] = mode_scored_json;
   {
     nlohmann::json recent_json = nlohmann::json::array();
     for (double v : recent_scored_rates_) recent_json.push_back(v);
@@ -1726,19 +1894,17 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     }
     if (curriculum_.enabled()) {
       if (curriculum_.check_promotion(
-          coll_metrics.touch_episode_rate, coll_metrics.scored_episode_rate, coll_steps)) {
-        if (curriculum_.mode_changed()) {
-          std::cout << "curriculum_mode_change new_mode=" << curriculum_.current_mode()
-                    << " (collector rebuild not yet implemented — restart required)\n";
+          coll_metrics.mode_touch_rates, coll_metrics.mode_scored_rates, coll_steps)) {
+        if (curriculum_.mode_allocation_changed()) {
+          rebuild_collectors();
         }
         apply_curriculum_to_collectors();
         apply_curriculum_lr();
       } else {
-        bool demoted = curriculum_.check_demotion(coll_metrics.scored_episode_rate);
+        bool demoted = curriculum_.check_demotion(coll_metrics.mode_scored_rates);
         if (demoted) {
-          if (curriculum_.mode_changed()) {
-            std::cout << "curriculum_mode_change new_mode=" << curriculum_.current_mode()
-                      << " (collector rebuild not yet implemented — restart required)\n";
+          if (curriculum_.mode_allocation_changed()) {
+            rebuild_collectors();
           }
           apply_curriculum_to_collectors();
           apply_curriculum_lr();

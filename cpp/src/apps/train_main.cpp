@@ -34,7 +34,13 @@ int main(int argc, char** argv) {
     PULSAR_TRACE_SET_THREAD_NAME("main");
     const pulsar::ExperimentConfig config = pulsar::load_experiment_config(argv[1]);
 
-    auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
+    // use max team size for the obs builder so observation dimension is
+    // constant across all modes (1v1 / 2v2 / 3v3); missing car slots are
+    // zero-padded by PulsarObsBuilder
+    constexpr int kObsMaxTeamSize = 3;
+    auto obs_builder_cfg = config.env;
+    obs_builder_cfg.team_size = kObsMaxTeamSize;
+    auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(obs_builder_cfg);
     auto action_parser = std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
     auto done_condition = std::make_shared<pulsar::SimpleDoneCondition>(config.env);
     std::vector<std::unique_ptr<pulsar::BatchedRocketSimCollector>> collectors;

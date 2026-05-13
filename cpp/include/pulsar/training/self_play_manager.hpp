@@ -40,8 +40,11 @@ class SelfPlayManager {
 
   void set_curriculum_stage(int stage_index);
   [[nodiscard]] int curriculum_stage() const;
+  void set_current_mode(const std::string& mode);
+  [[nodiscard]] const std::string& current_mode() const;
 
   [[nodiscard]] const std::map<std::string, double>& current_ratings() const;
+  void restore_ratings(const std::map<std::string, double>& ratings);
   [[nodiscard]] std::string rng_state() const;
   void restore_rng_state(const std::string& state);
 
@@ -65,6 +68,7 @@ class SelfPlayManager {
     std::int64_t global_step = 0;
     int update_index = 0;
     int curriculum_stage = -1;
+    std::string mode = "1v1";
     PPOActor model{nullptr};
     ObservationNormalizer normalizer{0};
     std::map<std::string, double> ratings{};
@@ -90,6 +94,7 @@ class SelfPlayManager {
   std::map<std::string, double> current_ratings_{};
   mutable std::mt19937 rng_;
   int curriculum_stage_ = -1;
+  std::string current_mode_ = "1v1";
 };
 
 }  // namespace pulsar

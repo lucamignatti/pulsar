@@ -29,6 +29,42 @@ bool Curriculum::mode_changed() const {
   return current_stage().mode != state_.current_mode;
 }
 
+bool Curriculum::mode_allocation_changed() const {
+  const auto& stages = config_.stages;
+  // compare new stage's allocation with the allocation before promotion/demotion
+  // on promotion, stage_index was incremented (go back 1 for previous stage)
+  // on demotion, stage_index was decremented (go forward 1 for previous)
+  // we don't know which happened, so we rebuild whenever current and previous differ
+  if (stages.size() <= 1) return false;
+  const int curr = state_.stage_index;
+  for (std::size_t i = 0; i < stages.size(); ++i) {
+    if (static_cast<int>(i) != curr && stages[i].mode_allocation != current_stage().mode_allocation) {
+      return true;
+    }
+  }
+  return false;
+}
+
+const std::map<std::string, float>& Curriculum::mode_allocation() const {
+  return current_stage().mode_allocation;
+}
+
+std::string Curriculum::primary_mode() const {
+  const auto& alloc = current_stage().mode_allocation;
+  float best = -1.0F;
+  std::string best_mode = "1v1";
+  for (const auto& [mode, frac] : alloc) {
+    if (frac > best) {
+      best = frac;
+      best_mode = mode;
+    }
+  }
+  if (best < 0.0F && !alloc.empty()) {
+    best_mode = alloc.begin()->first;
+  }
+  return best_mode;
+}
+
 const OutcomeConfig& Curriculum::outcome() const {
   return current_stage().outcome_override;
 }
@@ -63,22 +99,25 @@ void Curriculum::initialize_stage() {
   state_.agent_steps_in_stage = 0;
   state_.promotion_counter = 0;
   state_.demotion_counter = 0;
-  state_.touch_rates.clear();
-  state_.scored_rates.clear();
+  state_.mode_touch_rates.clear();
+  state_.mode_scored_rates.clear();
 
   const auto& stage = stages[static_cast<std::size_t>(idx)];
-  state_.current_mode = stage.mode;
+  state_.current_mode = primary_mode();
 
   std::cout << "curriculum_stage=" << idx
             << " name=" << stage.name
-            << " mode=" << stage.mode
+            << " primary_mode=" << state_.current_mode
+            << " modes=" << stage.mode_allocation.size()
             << " lr=" << stage.learning_rate
             << " mechanics_unlocked=" << stage.unlocked_mechanics.size()
             << '\n';
 }
 
 bool Curriculum::check_promotion(
-    double touch_episode_rate, double scored_episode_rate, std::int64_t agent_steps) {
+    const std::map<std::string, double>& mode_touch_rates,
+    const std::map<std::string, double>& mode_scored_rates,
+    std::int64_t agent_steps) {
   if (!config_.enabled) return false;
 
   const auto& stages = config_.stages;
@@ -96,28 +135,58 @@ bool Curriculum::check_promotion(
   const int window_size = stage.rolling_window_size;
   if (window_size <= 0) return false;
 
-  state_.touch_rates.push_back(touch_episode_rate);
-  state_.scored_rates.push_back(scored_episode_rate);
+  // push per-mode rates into deques
+  for (const auto& [mode, frac] : stage.mode_allocation) {
+    auto touch_it = mode_touch_rates.find(mode);
+    if (touch_it != mode_touch_rates.end()) {
+      state_.mode_touch_rates[mode].push_back(touch_it->second);
+    } else {
+      state_.mode_touch_rates[mode].push_back(0.0);
+    }
 
-  while (static_cast<int>(state_.touch_rates.size()) > window_size) state_.touch_rates.pop_front();
-  while (static_cast<int>(state_.scored_rates.size()) > window_size) state_.scored_rates.pop_front();
+    auto scored_it = mode_scored_rates.find(mode);
+    if (scored_it != mode_scored_rates.end()) {
+      state_.mode_scored_rates[mode].push_back(scored_it->second);
+    } else {
+      state_.mode_scored_rates[mode].push_back(0.0);
+    }
 
-  if (static_cast<int>(state_.touch_rates.size()) < window_size) return false;
+    while (static_cast<int>(state_.mode_touch_rates[mode].size()) > window_size) {
+      state_.mode_touch_rates[mode].pop_front();
+    }
+    while (static_cast<int>(state_.mode_scored_rates[mode].size()) > window_size) {
+      state_.mode_scored_rates[mode].pop_front();
+    }
+  }
 
-  double avg_touch = 0.0;
-  for (double v : state_.touch_rates) avg_touch += v;
-  avg_touch /= static_cast<double>(state_.touch_rates.size());
+  // check all modes have filled their windows
+  for (const auto& [mode, frac] : stage.mode_allocation) {
+    if (static_cast<int>(state_.mode_touch_rates[mode].size()) < window_size) return false;
+  }
 
-  double avg_scored = 0.0;
-  for (double v : state_.scored_rates) avg_scored += v;
-  avg_scored /= static_cast<double>(state_.scored_rates.size());
+  // every mode must independently pass both thresholds
+  bool all_pass = true;
+  for (const auto& [mode, frac] : stage.mode_allocation) {
+    double avg_touch = 0.0;
+    for (double v : state_.mode_touch_rates[mode]) avg_touch += v;
+    avg_touch /= static_cast<double>(state_.mode_touch_rates[mode].size());
 
-  bool touch_ok = stage.required_touch_episode_rate <= 0.0F ||
-                  avg_touch >= static_cast<double>(stage.required_touch_episode_rate);
-  bool score_ok = stage.required_scored_episode_rate <= 0.0F ||
-                  avg_scored >= static_cast<double>(stage.required_scored_episode_rate);
+    double avg_scored = 0.0;
+    for (double v : state_.mode_scored_rates[mode]) avg_scored += v;
+    avg_scored /= static_cast<double>(state_.mode_scored_rates[mode].size());
 
-  if (!touch_ok || !score_ok) {
+    bool touch_ok = stage.required_touch_episode_rate <= 0.0F ||
+                    avg_touch >= static_cast<double>(stage.required_touch_episode_rate);
+    bool score_ok = stage.required_scored_episode_rate <= 0.0F ||
+                    avg_scored >= static_cast<double>(stage.required_scored_episode_rate);
+
+    if (!touch_ok || !score_ok) {
+      all_pass = false;
+      break;
+    }
+  }
+
+  if (!all_pass) {
     state_.promotion_counter = 0;
     return false;
   }
@@ -127,18 +196,19 @@ bool Curriculum::check_promotion(
   if (state_.promotion_counter >= stage.consecutive_success_threshold) {
     state_.stage_index++;
     state_.promotion_counter = 0;
-    state_.touch_rates.clear();
-    state_.scored_rates.clear();
+    state_.mode_touch_rates.clear();
+    state_.mode_scored_rates.clear();
     initialize_stage();
     std::cout << "curriculum_promoted stage=" << state_.stage_index
-              << " mode=" << state_.current_mode << '\n';
+              << " primary_mode=" << state_.current_mode
+              << " alloc_modes=" << stage.mode_allocation.size() << '\n';
     return true;
   }
 
   return false;
 }
 
-bool Curriculum::check_demotion(double scored_episode_rate) {
+bool Curriculum::check_demotion(const std::map<std::string, double>& mode_scored_rates) {
   if (!config_.enabled) return false;
 
   const auto& stages = config_.stages;
@@ -155,7 +225,18 @@ bool Curriculum::check_demotion(double scored_episode_rate) {
 
   const float threshold = stage.required_scored_episode_rate * stage.demotion_threshold_rate;
 
-  if (scored_episode_rate >= static_cast<double>(threshold)) {
+  // all active modes must be below threshold
+  bool all_below = true;
+  for (const auto& [mode, frac] : stage.mode_allocation) {
+    auto it = mode_scored_rates.find(mode);
+    double rate = (it != mode_scored_rates.end()) ? it->second : 0.0;
+    if (rate >= static_cast<double>(threshold)) {
+      all_below = false;
+      break;
+    }
+  }
+
+  if (!all_below) {
     state_.demotion_counter = 0;
     return false;
   }
@@ -166,11 +247,11 @@ bool Curriculum::check_demotion(double scored_episode_rate) {
     state_.stage_index--;
     state_.promotion_counter = 0;
     state_.demotion_counter = 0;
-    state_.touch_rates.clear();
-    state_.scored_rates.clear();
+    state_.mode_touch_rates.clear();
+    state_.mode_scored_rates.clear();
     initialize_stage();
     std::cout << "curriculum_demoted stage=" << state_.stage_index
-              << " mode=" << state_.current_mode << '\n';
+              << " primary_mode=" << state_.current_mode << '\n';
     return true;
   }
 

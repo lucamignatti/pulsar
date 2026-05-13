@@ -419,7 +419,7 @@ float RewardEngine::boost_efficiency(const CarState& car, const EnvState& env) c
   }
 
   // small penalty for hoarding boost while idle
-  if (car_speed < 200.0F && dist_to_ball > 2000.0F && car.boost > 50.0F) {
+  if (car_speed < 200.0F && dist_to_ball > 2000.0F && car.boost > 0.5F) {
     return -boost_amt * dense_cfg_.boost_efficiency_weight * 0.1F;
   }
 
@@ -492,8 +492,8 @@ float RewardEngine::defensive_positioning(const CarState& car, const EnvState& e
   const float facing_own_goal = vec3_dot(car.forward, to_own_goal_norm);
   const float exp_dist = std::exp(-dist_to_ball / dense_cfg_.defensive_positioning_decay);
 
-  // reward being between ball and own goal, facing the ball
-  const float ball_goal_dot = vec3_dot(to_ball_norm, to_own_goal_norm);
+  // reward being between ball and own goal: car should be goal-side of the ball
+  const float ball_goal_dot = vec3_dot({-to_ball_norm.x, -to_ball_norm.y, -to_ball_norm.z}, to_own_goal_norm);
   return std::max(0.0F, ball_goal_dot) * exp_dist * dense_cfg_.defensive_positioning_weight;
 }
 

@@ -168,6 +168,14 @@ void BatchedRocketSimCollector::update_unlocked_mechanics(const std::vector<std:
   reward_engine_.set_unlocked_mechanics(mechanics);
 }
 
+void BatchedRocketSimCollector::set_mode(const std::string& mode) {
+  mode_ = mode;
+}
+
+const std::string& BatchedRocketSimCollector::mode() const {
+  return mode_;
+}
+
 void BatchedRocketSimCollector::reset_all(CollectorTimings* timings) {
   PULSAR_TRACE_SCOPE_CAT("collector", "reset_all");
   const auto reset_start = std::chrono::steady_clock::now();

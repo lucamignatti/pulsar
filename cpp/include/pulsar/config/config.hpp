@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -70,6 +71,7 @@ struct CurriculumStageConfig {
   MechanicRewardConfig mechanic_rewards_override{};
   DenseRewardConfig dense_rewards_override{};
   std::vector<std::string> unlocked_mechanics;
+  std::map<std::string, float> mode_allocation;
   float learning_rate = 0.0001F;
   int64_t min_agent_steps = 20'000'000LL;
   int rolling_window_size = 10;

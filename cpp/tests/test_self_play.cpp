@@ -409,6 +409,74 @@ void test_rng_state_round_trip() {
   fs::remove_all(root);
 }
 
+void test_restore_ratings() {
+  namespace fs = std::filesystem;
+  pulsar::ExperimentConfig config = pulsar::test::make_test_config();
+  config.self_play_league.enabled = true;
+  config.self_play_league.eval_interval_updates = 0;
+  config.ppo.device = "cpu";
+
+  const fs::path root = fs::temp_directory_path() / "pulsar_ratings_restore_test";
+  fs::remove_all(root);
+  auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
+  auto action_parser =
+      std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
+
+  {
+    pulsar::SelfPlayManager manager(config, root, obs_builder, action_parser, torch::kCPU);
+    std::map<std::string, double> ratings;
+    ratings["1v1"] = 1100.0;
+    ratings["2v2"] = 1050.0;
+    manager.restore_ratings(ratings);
+    const auto& restored = manager.current_ratings();
+    pulsar::test::require(restored.at("1v1") == 1100.0, "1v1 rating should be 1100");
+    pulsar::test::require(restored.at("2v2") == 1050.0, "2v2 rating should be 1050");
+  }
+  fs::remove_all(root);
+}
+
+void test_snapshot_mode_is_preserved() {
+  namespace fs = std::filesystem;
+  pulsar::ExperimentConfig config = pulsar::test::make_test_config();
+  config.env.collision_meshes_path = pulsar::test::find_repo_collision_meshes().string();
+  config.self_play_league.enabled = true;
+  config.self_play_league.opponent_probability = 1.0F;
+  config.self_play_league.snapshot_interval_updates = 1;
+  config.self_play_league.max_snapshots = 2;
+  config.self_play_league.eval_interval_updates = 0;
+  config.ppo.device = "cpu";
+
+  const fs::path root = fs::temp_directory_path() / "pulsar_snapshot_mode_test";
+  fs::remove_all(root);
+  auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
+  auto action_parser =
+      std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
+  pulsar::PPOActor model(config.model, config.goal_critic);
+  pulsar::ObservationNormalizer normalizer(config.model.observation_dim);
+  normalizer.update(torch::randn({16, config.model.observation_dim}));
+
+  {
+    pulsar::SelfPlayManager manager(config, root, obs_builder, action_parser, torch::kCPU);
+    manager.set_current_mode("2v2");
+    manager.on_update(model, normalizer, 10, 1);
+  }
+
+  {
+    auto metadata = pulsar::load_checkpoint_metadata((root / "10" / "metadata.json").string());
+    std::string mode = metadata.extra.value("mode", std::string{"1v1"});
+    pulsar::test::require(mode == "2v2", "snapshot mode should be 2v2 after set_current_mode");
+  }
+
+  {
+    pulsar::SelfPlayManager reloaded(config, root, obs_builder, action_parser, torch::kCPU);
+    pulsar::test::require(reloaded.has_snapshots(), "reloaded manager should see snapshots");
+    const auto assignment = reloaded.sample_assignment(0, 7);
+    pulsar::test::require(assignment.enabled, "assignment should be enabled");
+  }
+
+  fs::remove_all(root);
+}
+
 }  // namespace
 
 int main() {
@@ -423,6 +491,8 @@ int main() {
     test_self_play_eval_runs_and_loaded_snapshots_are_bounded();
     test_checkpoint_metadata_validation();
     test_rng_state_round_trip();
+    test_restore_ratings();
+    test_snapshot_mode_is_preserved();
     std::cout << "pulsar_self_play_tests passed\n" << std::flush;
     std::_Exit(EXIT_SUCCESS);
   } catch (const std::exception& exc) {

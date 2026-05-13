@@ -513,6 +513,153 @@ int main() {
     }
 
     // =========================================================================
+    // 24a. touch_direction - hit ball toward opponent goal
+    // =========================================================================
+    {
+      auto cfg = make_reward_test_config();
+      cfg.dense_rewards.touch_direction_weight = 20.0f;
+      pulsar::RewardEngine engine(cfg);
+      auto car = make_neutral_car(pulsar::Team::Blue);
+      car.ball_touched = true;
+      pulsar::EnvState env{};
+      env.ball.position = {100.0f, 0.0f, 17.0f};
+      env.ball.velocity = {500.0f, 800.0f, 0.0f};
+      pulsar::AgentRewardState agent_state{};
+      agent_state.prev_ball_velocity = {0.0f, 0.0f, 0.0f};
+      pulsar::EnvRewardState env_state{};
+      auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
+      float vel_mag = std::sqrt(500.0f * 500.0f + 800.0f * 800.0f);
+      float toward_goal = 800.0f / vel_mag;  // Blue goal is +y
+      float delta_frac = vel_mag / 6000.0f;
+      float expected = toward_goal * delta_frac * 20.0f;
+      require_close(bd.terms.at("gameplay.touch_direction"), expected, "touch_direction toward goal");
+    }
+
+    // =========================================================================
+    // 24b. touch_direction - hit toward own goal (should be zero)
+    // =========================================================================
+    {
+      auto cfg = make_reward_test_config();
+      cfg.dense_rewards.touch_direction_weight = 20.0f;
+      pulsar::RewardEngine engine(cfg);
+      auto car = make_neutral_car(pulsar::Team::Blue);
+      car.ball_touched = true;
+      pulsar::EnvState env{};
+      env.ball.velocity = {0.0f, -800.0f, 0.0f};  // toward Blue own goal (-y)
+      pulsar::AgentRewardState agent_state{};
+      agent_state.prev_ball_velocity = {0.0f, 0.0f, 0.0f};
+      pulsar::EnvRewardState env_state{};
+      auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
+      require_close(bd.terms.at("gameplay.touch_direction"), 0.0f, "touch_direction zero when own goal");
+    }
+
+    // =========================================================================
+    // 24c. boost_efficiency - engaged (near ball, full boost)
+    // =========================================================================
+    {
+      auto cfg = make_reward_test_config();
+      cfg.dense_rewards.boost_efficiency_weight = 2.0f;
+      pulsar::RewardEngine engine(cfg);
+      auto car = make_neutral_car(pulsar::Team::Blue);
+      car.boost = 1.0f;  // 100 boost
+      car.velocity = {1500.0f, 0.0f, 0.0f};  // high speed → engaged
+      pulsar::EnvState env{};
+      env.ball.position = {50.0f, 0.0f, 17.0f};  // ball nearby
+      pulsar::AgentRewardState agent_state{};
+      pulsar::EnvRewardState env_state{};
+      auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
+      float expected = std::sqrt(1.0f) * 2.0f;  // sqrt(boost) * weight
+      require_close(bd.terms.at("gameplay.boost_efficiency"), expected, "boost_efficiency engaged");
+    }
+
+    // =========================================================================
+    // 24d. boost_efficiency - idle hoarding (far, slow, full boost → penalty)
+    // =========================================================================
+    {
+      auto cfg = make_reward_test_config();
+      cfg.dense_rewards.boost_efficiency_weight = 2.0f;
+      pulsar::RewardEngine engine(cfg);
+      auto car = make_neutral_car(pulsar::Team::Blue);
+      car.boost = 0.6f;  // 60 boost (> 50 threshold)
+      car.velocity = {100.0f, 0.0f, 0.0f};  // slow (< 200)
+      pulsar::EnvState env{};
+      env.ball.position = {5000.0f, 0.0f, 17.0f};  // ball very far (> 2000)
+      pulsar::AgentRewardState agent_state{};
+      pulsar::EnvRewardState env_state{};
+      auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
+      float boost_amt = std::sqrt(0.6f);
+      float expected = -boost_amt * 2.0f * 0.1f;  // penalty
+      require_close(bd.terms.at("gameplay.boost_efficiency"), expected, "boost_efficiency idle penalty");
+    }
+
+    // =========================================================================
+    // 24e. boost_used - boosting toward goal
+    // =========================================================================
+    {
+      auto cfg = make_reward_test_config();
+      cfg.dense_rewards.boost_used_weight = 2.0f;
+      pulsar::RewardEngine engine(cfg);
+      auto car = make_neutral_car(pulsar::Team::Blue);
+      car.is_boosting = true;
+      car.boost = 0.33f;
+      car.velocity = {0.0f, 1000.0f, 0.0f};  // toward Blue goal (+y)
+      pulsar::EnvState env{};
+      pulsar::AgentRewardState agent_state{};
+      agent_state.prev_boost = 0.66f;
+      pulsar::EnvRewardState env_state{};
+      auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
+      float boost_delta = 0.66f - 0.33f;
+      float toward_goal_frac = 1.0f;  // velocity is all +y, Blue goal is +y
+      require(bd.terms.at("gameplay.boost_used") > 0.0f, "boost_used positive");
+    }
+
+    // =========================================================================
+    // 24f. defensive_positioning - between ball and own goal
+    // =========================================================================
+    {
+      auto cfg = make_reward_test_config();
+      cfg.dense_rewards.defensive_positioning_weight = 3.0f;
+      pulsar::RewardEngine engine(cfg);
+      auto car = make_neutral_car(pulsar::Team::Blue);
+      car.position = {0.0f, 0.0f, 17.0f};
+      car.forward = {0.0f, -1.0f, 0.0f};  // facing own goal (-y for Blue)
+      pulsar::EnvState env{};
+      env.ball.position = {0.0f, 500.0f, 17.0f};
+      // opponent closer to ball
+      pulsar::CarState opponent;
+      opponent.id = 1;
+      opponent.team = pulsar::Team::Orange;
+      opponent.position = {0.0f, 400.0f, 17.0f};
+      env.cars.push_back(opponent);
+      pulsar::AgentRewardState agent_state{};
+      pulsar::EnvRewardState env_state{};
+      auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
+      // car is between ball and own goal, opponent has ball → positive reward
+      require(bd.terms.at("gameplay.defensive_positioning") > 0.0f, "defensive_positioning positive");
+    }
+
+    // =========================================================================
+    // 24g. shot_accuracy - ball heading toward goal from offensive half after touch
+    // =========================================================================
+    {
+      auto cfg = make_reward_test_config();
+      cfg.dense_rewards.shot_accuracy_weight = 5.0f;
+      pulsar::RewardEngine engine(cfg);
+      auto car = make_neutral_car(pulsar::Team::Blue);
+      car.position = {0.0f, 500.0f, 17.0f};  // in offensive half (+y)
+      car.ball_touched = true;
+      pulsar::EnvState env{};
+      env.ball.velocity = {0.0f, 3000.0f, 0.0f};  // toward Blue goal (+y), fast
+      pulsar::AgentRewardState agent_state{};
+      pulsar::EnvRewardState env_state{};
+      auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
+      float toward_goal = 1.0f;
+      float speed_frac = 3000.0f / 6000.0f;
+      float expected = toward_goal * speed_frac * 5.0f;
+      require_close(bd.terms.at("gameplay.shot_accuracy"), expected, "shot_accuracy positive");
+    }
+
+    // =========================================================================
     // 25. speed_flip - on ground, transition to flipping, boosting
     // =========================================================================
     {
@@ -1229,6 +1376,11 @@ int main() {
       require(bd.terms.find("gameplay.air_touch") != bd.terms.end(), "terms has air_touch");
       require(bd.terms.find("gameplay.save_boost") != bd.terms.end(), "terms has save_boost");
       require(bd.terms.find("gameplay.boost_pickup") != bd.terms.end(), "terms has boost_pickup");
+      require(bd.terms.find("gameplay.touch_direction") != bd.terms.end(), "terms has touch_direction");
+      require(bd.terms.find("gameplay.boost_efficiency") != bd.terms.end(), "terms has boost_efficiency");
+      require(bd.terms.find("gameplay.boost_used") != bd.terms.end(), "terms has boost_used");
+      require(bd.terms.find("gameplay.defensive_positioning") != bd.terms.end(), "terms has defensive_positioning");
+      require(bd.terms.find("gameplay.shot_accuracy") != bd.terms.end(), "terms has shot_accuracy");
       require(bd.terms.find("mechanic.speed_flip") != bd.terms.end(), "terms has speed_flip");
       require(bd.terms.find("mechanic.wavedash") != bd.terms.end(), "terms has wavedash");
       require(bd.terms.find("mechanic.chain_dash") != bd.terms.end(), "terms has chain_dash");

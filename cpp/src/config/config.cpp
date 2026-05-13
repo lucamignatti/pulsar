@@ -173,6 +173,7 @@ void to_json(json& j, const CurriculumStageConfig& value) {
   j = json{
       {"name", value.name},
       {"mode", value.mode},
+      {"mode_allocation", value.mode_allocation},
       {"outcome_override", value.outcome_override},
       {"mechanic_rewards_override", value.mechanic_rewards_override},
       {"dense_rewards_override", value.dense_rewards_override},
@@ -204,6 +205,38 @@ void from_json(const json& j, CurriculumStageConfig& value) {
   value.required_scored_episode_rate = j.value("required_scored_episode_rate", 0.0F);
   value.demotion_threshold_rate = j.value("demotion_threshold_rate", 0.0F);
   value.demotion_window_updates = j.value("demotion_window_updates", 10);
+
+  // mode_allocation: if present in JSON, use it; otherwise derive from single "mode" field
+  if (j.contains("mode_allocation")) {
+    value.mode_allocation = j["mode_allocation"].get<std::map<std::string, float>>();
+  }
+  if (value.mode_allocation.empty()) {
+    // backward compat: use the single mode field with 100% allocation
+    value.mode_allocation[value.mode] = 1.0F;
+  }
+}
+
+void validate_mode_allocation(const std::map<std::string, float>& alloc, const std::string& stage_name) {
+  if (alloc.empty()) {
+    throw std::invalid_argument("curriculum stage " + stage_name + " has empty mode_allocation");
+  }
+  float sum = 0.0F;
+  for (const auto& [mode, frac] : alloc) {
+    if (frac < 0.0F) {
+      throw std::invalid_argument("negative allocation for mode " + mode + " in stage " + stage_name);
+    }
+    if (frac > 1.0F) {
+      throw std::invalid_argument("allocation > 1.0 for mode " + mode + " in stage " + stage_name);
+    }
+    if (mode != "1v1" && mode != "2v2" && mode != "3v3") {
+      throw std::invalid_argument("unknown mode \"" + mode + "\" in stage " + stage_name);
+    }
+    sum += frac;
+  }
+  if (std::abs(sum - 1.0F) > 0.01F) {
+    throw std::invalid_argument(
+        "mode allocations sum to " + std::to_string(sum) + " (expected 1.0) in stage " + stage_name);
+  }
 }
 
 void to_json(json& j, const CurriculumConfig& value) {
@@ -705,6 +738,14 @@ void validate_experiment_config(const ExperimentConfig& config) {
   }
   if (config.env.tick_rate != 120) {
     std::cerr << "Warning: env.tick_rate is currently ignored. Simulation hardcodes 120 Hz.\n";
+  }
+
+  if (config.curriculum.enabled) {
+    for (const auto& stage : config.curriculum.stages) {
+      if (!stage.mode_allocation.empty()) {
+        validate_mode_allocation(stage.mode_allocation, stage.name);
+      }
+    }
   }
 }
 

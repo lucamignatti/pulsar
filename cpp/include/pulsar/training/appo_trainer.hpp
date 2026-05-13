@@ -79,6 +79,8 @@ struct TrainerMetrics {
   double effective_entropy_coef = 0.0;
 
   std::map<std::string, double> elo_ratings{};
+  std::map<std::string, double> mode_touch_rates{};
+  std::map<std::string, double> mode_scored_rates{};
 };
 
 class APPOTrainer {
@@ -118,6 +120,7 @@ class APPOTrainer {
 
   void apply_curriculum_to_collectors();
   void apply_curriculum_lr();
+  void rebuild_collectors();
 
   struct ESPopulationFitness {
     std::vector<float> fitness{};
