@@ -28,6 +28,8 @@
 namespace pulsar {
 namespace {
 
+constexpr int kEsLoraMinStage = 3;  // enable ES LoRA automatically at stage 3+ (platinum-aerials)
+
 torch::Device resolve_runtime_device(const std::string& device_name) {
   torch::Device device(device_name);
   if (device.is_cuda() && !device.has_index()) {
@@ -1921,7 +1923,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       coll_metrics.elo_ratings = self_play_metrics.ratings;
     }
 
-    if (update_index % config_.es_lora.es_interval == 0) {
+    if (curriculum_.stage_index() >= kEsLoraMinStage && update_index % config_.es_lora.es_interval == 0) {
       run_es_lora_update(update_index, coll_metrics);
     }
 
@@ -2018,7 +2020,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"curriculum_agent_steps", curriculum_.state().agent_steps_in_stage},
           {"curriculum_promotion_counter", curriculum_.state().promotion_counter},
       };
-      if (update_index % config_.es_lora.es_interval == 0) {
+      if (curriculum_.stage_index() >= kEsLoraMinStage && update_index % config_.es_lora.es_interval == 0) {
         payload["es_fitness_mean"] = coll_metrics.es_fitness_mean;
         payload["es_fitness_std"] = coll_metrics.es_fitness_std;
         payload["es_fitness_best"] = coll_metrics.es_fitness_best;
