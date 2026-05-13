@@ -86,11 +86,11 @@
         },
         "mechanic_rewards_override": {},
         "dense_rewards_override": {
-          "ball_touch_vel_weight": 50.0,
-          "speed_toward_ball_weight": 5.0,
-          "face_ball_weight": 1.0,
+          "ball_touch_vel_weight": 5.0,
+          "speed_toward_ball_weight": 2.0,
+          "face_ball_weight": 0.5,
           "air_reward_weight": 0.15,
-          "dense_reward_cap_per_episode": 0.0
+          "dense_reward_cap_per_episode": 10.0
         }
       },
       {
@@ -116,11 +116,11 @@
           "wavedash": 0.001
         },
         "dense_rewards_override": {
-          "ball_touch_vel_weight": 15.0,
-          "touch_direction_weight": 20.0,
-          "speed_toward_ball_weight": 3.0,
-          "velocity_ball_to_goal_weight": 8.0,
-          "dense_reward_cap_per_episode": 0.0
+          "ball_touch_vel_weight": 3.0,
+          "touch_direction_weight": 5.0,
+          "speed_toward_ball_weight": 1.5,
+          "velocity_ball_to_goal_weight": 3.0,
+          "dense_reward_cap_per_episode": 3.0
         }
       },
       {
@@ -149,13 +149,13 @@
           "preflip": 0.002
         },
         "dense_rewards_override": {
-          "touch_direction_weight": 15.0,
-          "velocity_ball_to_goal_weight": 10.0,
-          "shot_accuracy_weight": 5.0,
-          "defensive_positioning_weight": 3.0,
-          "boost_efficiency_weight": 2.0,
-          "boost_used_weight": 2.0,
-          "dense_reward_cap_per_episode": 0.0
+          "touch_direction_weight": 5.0,
+          "velocity_ball_to_goal_weight": 3.0,
+          "shot_accuracy_weight": 3.0,
+          "defensive_positioning_weight": 2.0,
+          "boost_efficiency_weight": 1.5,
+          "boost_used_weight": 1.5,
+          "dense_reward_cap_per_episode": 3.0
         }
       },
       {
@@ -193,18 +193,18 @@
           "mechanic_reward_cap_per_episode": 0.05
         },
         "dense_rewards_override": {
-          "touch_direction_weight": 10.0,
-          "velocity_ball_to_goal_weight": 8.0,
-          "air_touch_weight": 5.0,
+          "touch_direction_weight": 3.0,
+          "velocity_ball_to_goal_weight": 3.0,
+          "air_touch_weight": 3.0,
           "air_touch_cap_per_episode": 0.5,
-          "boost_efficiency_weight": 2.0,
-          "boost_used_weight": 2.0,
-          "defensive_positioning_weight": 3.0,
-          "shot_accuracy_weight": 5.0,
+          "boost_efficiency_weight": 1.5,
+          "boost_used_weight": 1.5,
+          "defensive_positioning_weight": 2.0,
+          "shot_accuracy_weight": 3.0,
           "boost_pickup_big_weight": 1.0,
           "boost_pickup_small_weight": 1.5,
           "boost_pickup_cap_per_episode": 1.0,
-          "dense_reward_cap_per_episode": 0.0
+          "dense_reward_cap_per_episode": 3.0
         }
       },
       {
@@ -246,18 +246,18 @@
           "mechanic_reward_cap_per_episode": 0.05
         },
         "dense_rewards_override": {
-          "touch_direction_weight": 10.0,
-          "velocity_ball_to_goal_weight": 8.0,
-          "air_touch_weight": 5.0,
+          "touch_direction_weight": 3.0,
+          "velocity_ball_to_goal_weight": 3.0,
+          "air_touch_weight": 3.0,
           "air_touch_cap_per_episode": 0.5,
-          "boost_efficiency_weight": 2.0,
-          "boost_used_weight": 2.0,
-          "defensive_positioning_weight": 3.0,
-          "shot_accuracy_weight": 5.0,
+          "boost_efficiency_weight": 1.5,
+          "boost_used_weight": 1.5,
+          "defensive_positioning_weight": 2.0,
+          "shot_accuracy_weight": 3.0,
           "boost_pickup_big_weight": 1.0,
           "boost_pickup_small_weight": 1.5,
           "boost_pickup_cap_per_episode": 1.0,
-          "dense_reward_cap_per_episode": 0.0
+          "dense_reward_cap_per_episode": 3.0
         }
       },
       {
@@ -302,18 +302,18 @@
           "mechanic_reward_cap_per_episode": 0.05
         },
         "dense_rewards_override": {
-          "touch_direction_weight": 8.0,
-          "velocity_ball_to_goal_weight": 6.0,
-          "air_touch_weight": 5.0,
+          "touch_direction_weight": 2.0,
+          "velocity_ball_to_goal_weight": 2.0,
+          "air_touch_weight": 2.0,
           "air_touch_cap_per_episode": 0.5,
-          "boost_efficiency_weight": 2.0,
-          "boost_used_weight": 2.0,
-          "defensive_positioning_weight": 3.0,
-          "shot_accuracy_weight": 5.0,
+          "boost_efficiency_weight": 1.5,
+          "boost_used_weight": 1.5,
+          "defensive_positioning_weight": 2.0,
+          "shot_accuracy_weight": 2.0,
           "boost_pickup_big_weight": 1.0,
           "boost_pickup_small_weight": 1.5,
           "boost_pickup_cap_per_episode": 1.0,
-          "dense_reward_cap_per_episode": 0.0
+          "dense_reward_cap_per_episode": 3.0
         }
       }
     ]
@@ -325,7 +325,7 @@
     "observation_dim": 172,
     "action_dim": 90,
     "use_layer_norm": true,
-    "encoder_dim": 384,
+    "encoder_dim": 512,
     "num_encoder_blocks": 4,
     "transformer_num_heads": 8,
     "transformer_window_size": 16,
@@ -336,17 +336,17 @@
     "policy_hidden_dim": 0
   },
   "ppo": {
-    "num_envs": 512,
+    "num_envs": 256,
     "collection_workers": 0,
     "collection_shards": 1,
     "init_checkpoint": "",
-    "rollout_length": 64,
+    "rollout_length": 128,
     "minibatch_size": 32768,
-    "update_epochs": 2,
+    "update_epochs": 3,
     "clip_range": 0.2,
-    "entropy_coef": 0.01,
-    "entropy_floor": 0.0,
-    "entropy_floor_coef": 0.0,
+    "entropy_coef": 0.03,
+    "entropy_floor": 0.08,
+    "entropy_floor_coef": 0.005,
     "value_coef": 1.0,
     "gamma": 0.99,
     "gae_lambda": 0.95,
@@ -384,7 +384,7 @@
     "population_size": 16,
     "sigma_ES": 0.05,
     "eta_ES": 0.003,
-    "es_interval": 25,
+    "es_interval": 1000000,
     "eval_episodes_per_member": 2,
     "eval_num_envs": 16,
     "eval_rollout_length": 450,
