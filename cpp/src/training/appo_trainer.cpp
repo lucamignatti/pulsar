@@ -411,11 +411,14 @@ void APPOTrainer::rebuild_collectors() {
   const auto& alloc = curriculum_.mode_allocation();
   if (alloc.empty()) return;
 
-  // compute max team size across all active modes so the obs builder
-  // produces constant-dimension observations regardless of mode
+  // compute max team size across ALL curriculum stages so the obs builder
+  // produces constant-dimension observations regardless of mode (matches
+  // the global kObsMaxTeamSize in train_main.cpp)
   int max_team_size = 1;
-  for (const auto& [mode, frac] : alloc) {
-    max_team_size = std::max(max_team_size, team_size_from_mode(mode));
+  for (const auto& stage : config_.curriculum.stages) {
+    for (const auto& [mode, frac] : stage.mode_allocation) {
+      max_team_size = std::max(max_team_size, team_size_from_mode(mode));
+    }
   }
 
   // create obs builder with max team size so obs_dim is constant across modes
@@ -572,6 +575,7 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
   if (metadata.extra.contains("curriculum_stage") && curriculum_.enabled()) {
     CurriculumState restored;
     restored.stage_index = metadata.extra["curriculum_stage"].get<int>();
+    restored.previous_stage_index = metadata.extra.value("curriculum_previous_stage", -1);
     restored.agent_steps_in_stage = metadata.extra.value("curriculum_agent_steps", 0LL);
     restored.promotion_counter = metadata.extra.value("curriculum_promotion_counter", 0);
     restored.demotion_counter = metadata.extra.value("curriculum_demotion_counter", 0);
@@ -1744,6 +1748,7 @@ CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
     }
   }
   extra["curriculum_stage"] = curriculum_.state().stage_index;
+  extra["curriculum_previous_stage"] = curriculum_.state().previous_stage_index;
   extra["curriculum_agent_steps"] = curriculum_.state().agent_steps_in_stage;
   extra["curriculum_promotion_counter"] = curriculum_.state().promotion_counter;
   extra["curriculum_demotion_counter"] = curriculum_.state().demotion_counter;

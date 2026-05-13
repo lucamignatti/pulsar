@@ -31,18 +31,13 @@ bool Curriculum::mode_changed() const {
 
 bool Curriculum::mode_allocation_changed() const {
   const auto& stages = config_.stages;
-  // compare new stage's allocation with the allocation before promotion/demotion
-  // on promotion, stage_index was incremented (go back 1 for previous stage)
-  // on demotion, stage_index was decremented (go forward 1 for previous)
-  // we don't know which happened, so we rebuild whenever current and previous differ
   if (stages.size() <= 1) return false;
   const int curr = state_.stage_index;
-  for (std::size_t i = 0; i < stages.size(); ++i) {
-    if (static_cast<int>(i) != curr && stages[i].mode_allocation != current_stage().mode_allocation) {
-      return true;
-    }
-  }
-  return false;
+  const int prev = state_.previous_stage_index;
+  if (prev < 0 || prev >= static_cast<int>(stages.size())) return false;
+  if (curr < 0 || curr >= static_cast<int>(stages.size())) return false;
+  return stages[static_cast<std::size_t>(prev)].mode_allocation
+      != stages[static_cast<std::size_t>(curr)].mode_allocation;
 }
 
 const std::map<std::string, float>& Curriculum::mode_allocation() const {
@@ -194,6 +189,7 @@ bool Curriculum::check_promotion(
   state_.promotion_counter++;
 
   if (state_.promotion_counter >= stage.consecutive_success_threshold) {
+    state_.previous_stage_index = state_.stage_index;
     state_.stage_index++;
     state_.promotion_counter = 0;
     state_.mode_touch_rates.clear();
@@ -244,6 +240,7 @@ bool Curriculum::check_demotion(const std::map<std::string, double>& mode_scored
   state_.demotion_counter++;
 
   if (state_.demotion_counter >= stage.demotion_window_updates) {
+    state_.previous_stage_index = state_.stage_index;
     state_.stage_index--;
     state_.promotion_counter = 0;
     state_.demotion_counter = 0;

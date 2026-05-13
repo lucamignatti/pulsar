@@ -12,6 +12,7 @@ namespace pulsar {
 
 struct CurriculumState {
   int stage_index = 0;
+  int previous_stage_index = -1;
   std::int64_t agent_steps_in_stage = 0;
   int promotion_counter = 0;
   int demotion_counter = 0;
