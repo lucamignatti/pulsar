@@ -338,15 +338,18 @@ int main() {
 
     // =========================================================================
     // 15. velocity_ball_to_goal - blue team, ball toward orange goal
+    //     last_touch_agent must match car.id and be within the window.
     // =========================================================================
     {
       auto cfg = make_reward_test_config();
       pulsar::RewardEngine engine(cfg);
-      auto car = make_neutral_car(pulsar::Team::Blue);
+      auto car = make_neutral_car(pulsar::Team::Blue);  // car.id = 0
       pulsar::EnvState env{};
       env.ball.velocity = {0.0f, 3000.0f, 0.0f};
+      env.last_touch_agent = car.id;   // this agent is credited
+      env.last_touch_tick  = 0;        // touched this tick
+      env.tick             = 0;
       pulsar::AgentRewardState agent_state{};
-      agent_state.prev_boost = 0.0f;
       pulsar::EnvRewardState env_state{};
       auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
       float expected = (3000.0f / 6000.0f) * 3.0f;
@@ -354,16 +357,18 @@ int main() {
     }
 
     // =========================================================================
-    // 16. velocity_ball_to_goal - orange team, ball toward blue goal
+    // 16. velocity_ball_to_goal - orange team, ball toward their goal
     // =========================================================================
     {
       auto cfg = make_reward_test_config();
       pulsar::RewardEngine engine(cfg);
-      auto car = make_neutral_car(pulsar::Team::Orange);
+      auto car = make_neutral_car(pulsar::Team::Orange);  // car.id = 0
       pulsar::EnvState env{};
       env.ball.velocity = {0.0f, -3000.0f, 0.0f};
+      env.last_touch_agent = car.id;
+      env.last_touch_tick  = 0;
+      env.tick             = 0;
       pulsar::AgentRewardState agent_state{};
-      agent_state.prev_boost = 0.0f;
       pulsar::EnvRewardState env_state{};
       auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
       float expected = (3000.0f / 6000.0f) * 3.0f;
@@ -371,16 +376,19 @@ int main() {
     }
 
     // =========================================================================
-    // 17. velocity_ball_to_goal - ball moving the wrong way
+    // 17. velocity_ball_to_goal - ball moving the wrong way (no reward even
+    //     when the touch gate is satisfied).
     // =========================================================================
     {
       auto cfg = make_reward_test_config();
       pulsar::RewardEngine engine(cfg);
       auto car = make_neutral_car(pulsar::Team::Blue);
       pulsar::EnvState env{};
-      env.ball.velocity = {0.0f, -3000.0f, 0.0f};
+      env.ball.velocity    = {0.0f, -3000.0f, 0.0f};  // toward own goal
+      env.last_touch_agent = car.id;  // gate satisfied — direction must reject
+      env.last_touch_tick  = 0;
+      env.tick             = 0;
       pulsar::AgentRewardState agent_state{};
-      agent_state.prev_boost = 0.0f;
       pulsar::EnvRewardState env_state{};
       auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
       require_close(bd.terms.at("gameplay.velocity_ball_to_goal"), 0.0f, "vbtg wrong way");

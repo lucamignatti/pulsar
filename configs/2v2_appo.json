@@ -90,7 +90,7 @@
           "speed_toward_ball_weight": 1.0,
           "face_ball_weight": 0.5,
           "air_reward_weight": 0.15,
-          "dense_reward_cap_per_episode": 3.0
+          "dense_reward_cap_per_episode": 5.0
         }
       },
       {
@@ -109,7 +109,7 @@
           "score": 5.0,
           "concede": -4.0,
           "neutral": 0.0,
-          "neutral_no_touch": 0.0
+          "neutral_no_touch": -2.0
         },
         "mechanic_rewards_override": {
           "speed_flip": 0.001,
@@ -120,7 +120,7 @@
           "touch_direction_weight": 5.0,
           "speed_toward_ball_weight": 1.5,
           "velocity_ball_to_goal_weight": 3.0,
-          "dense_reward_cap_per_episode": 3.0
+          "dense_reward_cap_per_episode": 10.0
         }
       },
       {
@@ -134,12 +134,18 @@
         "required_scored_episode_rate": 0.1,
         "demotion_threshold_rate": 0.5,
         "demotion_window_updates": 10,
-        "unlocked_mechanics": ["speed_flip", "wavedash", "half_flip", "wall_dash", "preflip"],
+        "unlocked_mechanics": [
+          "speed_flip",
+          "wavedash",
+          "half_flip",
+          "wall_dash",
+          "preflip"
+        ],
         "outcome_override": {
           "score": 10.0,
           "concede": -8.0,
           "neutral": 0.0,
-          "neutral_no_touch": 0.0
+          "neutral_no_touch": -1.5
         },
         "mechanic_rewards_override": {
           "speed_flip": 0.001,
@@ -155,7 +161,7 @@
           "defensive_positioning_weight": 2.0,
           "boost_efficiency_weight": 1.5,
           "boost_used_weight": 1.5,
-          "dense_reward_cap_per_episode": 3.0
+          "dense_reward_cap_per_episode": 10.0
         }
       },
       {
@@ -170,14 +176,21 @@
         "demotion_threshold_rate": 0.5,
         "demotion_window_updates": 10,
         "unlocked_mechanics": [
-          "speed_flip", "wavedash", "chain_dash", "half_flip", "wall_dash",
-          "air_dribble", "flip_reset", "ceiling_shot", "redirect"
+          "speed_flip",
+          "wavedash",
+          "chain_dash",
+          "half_flip",
+          "wall_dash",
+          "air_dribble",
+          "flip_reset",
+          "ceiling_shot",
+          "redirect"
         ],
         "outcome_override": {
           "score": 10.0,
           "concede": -8.0,
           "neutral": 0.0,
-          "neutral_no_touch": 0.0
+          "neutral_no_touch": -1.0
         },
         "mechanic_rewards_override": {
           "speed_flip": 0.001,
@@ -203,31 +216,42 @@
           "shot_accuracy_weight": 3.0,
           "boost_pickup_big_weight": 1.0,
           "boost_pickup_small_weight": 1.5,
+          "boost_pickup_big_threshold": 15.0,
           "boost_pickup_cap_per_episode": 1.0,
-          "dense_reward_cap_per_episode": 3.0
+          "dense_reward_cap_per_episode": 10.0
         }
       },
       {
         "name": "diamond-teamplay",
-        "mode_allocation": {"1v1": 0.5, "2v2": 0.5},
+        "mode_allocation": { "1v1": 0.5, "2v2": 0.5 },
         "learning_rate": 0.0001,
         "min_agent_steps": 40000000,
         "rolling_window_size": 10,
         "consecutive_success_threshold": 5,
         "required_touch_episode_rate": 0.0,
-        "required_scored_episode_rate": 0.12,
+        "required_scored_episode_rate": 0.09,
+        "mode_scored_thresholds": { "1v1": 0.12, "2v2": 0.08 },
         "demotion_threshold_rate": 0.5,
         "demotion_window_updates": 10,
         "unlocked_mechanics": [
-          "speed_flip", "wavedash", "chain_dash", "half_flip", "wall_dash",
-          "air_dribble", "flip_reset", "ceiling_shot", "redirect",
-          "double_tap", "team_pinch", "kickoff_first_touch"
+          "speed_flip",
+          "wavedash",
+          "chain_dash",
+          "half_flip",
+          "wall_dash",
+          "air_dribble",
+          "flip_reset",
+          "ceiling_shot",
+          "redirect",
+          "double_tap",
+          "team_pinch",
+          "kickoff_first_touch"
         ],
         "outcome_override": {
           "score": 10.0,
           "concede": -8.0,
           "neutral": 0.0,
-          "neutral_no_touch": 0.0
+          "neutral_no_touch": -1.0
         },
         "mechanic_rewards_override": {
           "speed_flip": 0.001,
@@ -256,13 +280,14 @@
           "shot_accuracy_weight": 3.0,
           "boost_pickup_big_weight": 1.0,
           "boost_pickup_small_weight": 1.5,
+          "boost_pickup_big_threshold": 15.0,
           "boost_pickup_cap_per_episode": 1.0,
-          "dense_reward_cap_per_episode": 3.0
+          "dense_reward_cap_per_episode": 10.0
         }
       },
       {
         "name": "champion-aggression",
-        "mode_allocation": {"1v1": 0.34, "2v2": 0.33, "3v3": 0.33},
+        "mode_allocation": { "1v1": 0.34, "2v2": 0.33, "3v3": 0.33 },
         "learning_rate": 0.00005,
         "min_agent_steps": 50000000,
         "rolling_window_size": 10,
@@ -272,15 +297,27 @@
         "demotion_threshold_rate": 0.0,
         "demotion_window_updates": 0,
         "unlocked_mechanics": [
-          "speed_flip", "wavedash", "chain_dash", "half_flip", "wall_dash",
-          "air_dribble", "flip_reset", "ceiling_shot", "redirect",
-          "double_tap", "preflip", "pogo", "pinch", "team_pinch", "kickoff_first_touch"
+          "speed_flip",
+          "wavedash",
+          "chain_dash",
+          "half_flip",
+          "wall_dash",
+          "air_dribble",
+          "flip_reset",
+          "ceiling_shot",
+          "redirect",
+          "double_tap",
+          "preflip",
+          "pogo",
+          "pinch",
+          "team_pinch",
+          "kickoff_first_touch"
         ],
         "outcome_override": {
           "score": 10.0,
           "concede": -6.0,
           "neutral": 0.0,
-          "neutral_no_touch": 0.0
+          "neutral_no_touch": -0.5
         },
         "mechanic_rewards_override": {
           "speed_flip": 0.001,
@@ -312,8 +349,9 @@
           "shot_accuracy_weight": 2.0,
           "boost_pickup_big_weight": 1.0,
           "boost_pickup_small_weight": 1.5,
+          "boost_pickup_big_threshold": 15.0,
           "boost_pickup_cap_per_episode": 1.0,
-          "dense_reward_cap_per_episode": 3.0
+          "dense_reward_cap_per_episode": 10.0
         }
       }
     ]

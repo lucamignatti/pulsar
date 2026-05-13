@@ -78,6 +78,10 @@ struct CurriculumStageConfig {
   int consecutive_success_threshold = 5;
   float required_touch_episode_rate = 0.0F;
   float required_scored_episode_rate = 0.0F;
+  // Per-mode overrides for promotion thresholds.  When non-empty, the value
+  // for a given mode takes precedence over the scalar fields above.
+  std::map<std::string, float> mode_scored_thresholds{};
+  std::map<std::string, float> mode_touch_thresholds{};
   float demotion_threshold_rate = 0.0F;
   int demotion_window_updates = 10;
 };

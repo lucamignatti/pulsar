@@ -85,6 +85,9 @@ class RewardEngine {
   static constexpr int kChainDashWindowTicks = 30;
   static constexpr int kDoubleTapWindowTicks = 30;
   static constexpr float kCeilingThreshold = 1800.0F;
+  // velocity_ball_to_goal: how long after a touch the agent is credited, in
+  // arena ticks at 120 Hz (120 ticks ≈ 1 second of real time).
+  static constexpr int kVbtgTouchWindowTicks = 120;
 
   bool is_mechanic_unlocked(const std::string& name) const;
 

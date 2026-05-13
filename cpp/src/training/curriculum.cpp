@@ -170,10 +170,21 @@ bool Curriculum::check_promotion(
     for (double v : state_.mode_scored_rates[mode]) avg_scored += v;
     avg_scored /= static_cast<double>(state_.mode_scored_rates[mode].size());
 
-    bool touch_ok = stage.required_touch_episode_rate <= 0.0F ||
-                    avg_touch >= static_cast<double>(stage.required_touch_episode_rate);
-    bool score_ok = stage.required_scored_episode_rate <= 0.0F ||
-                    avg_scored >= static_cast<double>(stage.required_scored_episode_rate);
+    // Per-mode threshold overrides take precedence over the scalar fields.
+    float touch_threshold = stage.required_touch_episode_rate;
+    {
+      auto it = stage.mode_touch_thresholds.find(mode);
+      if (it != stage.mode_touch_thresholds.end()) touch_threshold = it->second;
+    }
+    float score_threshold = stage.required_scored_episode_rate;
+    {
+      auto it = stage.mode_scored_thresholds.find(mode);
+      if (it != stage.mode_scored_thresholds.end()) score_threshold = it->second;
+    }
+    bool touch_ok = touch_threshold <= 0.0F ||
+                    avg_touch >= static_cast<double>(touch_threshold);
+    bool score_ok = score_threshold <= 0.0F ||
+                    avg_scored >= static_cast<double>(score_threshold);
 
     if (!touch_ok || !score_ok) {
       all_pass = false;

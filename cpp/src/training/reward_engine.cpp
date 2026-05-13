@@ -376,6 +376,13 @@ float RewardEngine::velocity_ball_to_goal(
     const CarState& car, const EnvState& env) const {
   if (dense_cfg_.velocity_ball_to_goal_weight <= 0.0F) return 0.0F;
 
+  // Only credit the agent who last touched the ball, and only within a
+  // recency window.  Without this gate the reward fires passively every tick
+  // from ball state the agent had no part in creating, exhausting the dense
+  // cap in a few steps and incentivising a single hit-and-coast strategy.
+  if (env.last_touch_agent != car.id) return 0.0F;
+  if ((env.tick - env.last_touch_tick) > kVbtgTouchWindowTicks) return 0.0F;
+
   const float team_sign = (car.team == Team::Blue) ? 1.0F : -1.0F;
   const float vel_toward = env.ball.velocity.y * team_sign;
   const float frac = clamp(vel_toward / std::max(dense_cfg_.max_ball_speed, 1.0F), 0.0F, 1.0F);
@@ -494,9 +501,12 @@ float RewardEngine::defensive_positioning(const CarState& car, const EnvState& e
   const float facing_own_goal = vec3_dot(car.forward, to_own_goal_norm);
   const float exp_dist = std::exp(-dist_to_ball / dense_cfg_.defensive_positioning_decay);
 
-  // reward being between ball and own goal: car should be goal-side of the ball
+  // reward being between ball and own goal AND actively facing it.
+  // Multiplying by max(0, facing_own_goal) requires the car to have rotated
+  // to face its goal — a passive defender who never turns to face goal (e.g.
+  // one that yielded possession and is just standing there) gets zero reward.
   const float ball_goal_dot = vec3_dot({-to_ball_norm.x, -to_ball_norm.y, -to_ball_norm.z}, to_own_goal_norm);
-  return std::max(0.0F, ball_goal_dot) * exp_dist * dense_cfg_.defensive_positioning_weight;
+  return std::max(0.0F, ball_goal_dot) * std::max(0.0F, facing_own_goal) * exp_dist * dense_cfg_.defensive_positioning_weight;
 }
 
 float RewardEngine::shot_accuracy(const CarState& car, const EnvState& env) const {
@@ -519,7 +529,10 @@ float RewardEngine::shot_accuracy(const CarState& car, const EnvState& env) cons
   };
   const float toward_goal = ball_vel_norm.y * goal_dir;
 
-  if (toward_goal < 0.7F) return 0.0F;
+  // Threshold lowered from 0.7 to 0.5 (was ~45-degree cone, now ~60-degree).
+  // The 0.7 cliff was too conservative — the bot would only shoot when nearly
+  // perfectly aligned with goal, ignoring many viable shooting angles.
+  if (toward_goal < 0.5F) return 0.0F;
 
   const float speed_frac = clamp(ball_speed / std::max(dense_cfg_.max_ball_speed, 1.0F), 0.0F, 1.0F);
   return toward_goal * speed_frac * dense_cfg_.shot_accuracy_weight;

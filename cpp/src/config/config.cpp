@@ -187,6 +187,12 @@ void to_json(json& j, const CurriculumStageConfig& value) {
       {"demotion_threshold_rate", value.demotion_threshold_rate},
       {"demotion_window_updates", value.demotion_window_updates},
   };
+  if (!value.mode_scored_thresholds.empty()) {
+    j["mode_scored_thresholds"] = value.mode_scored_thresholds;
+  }
+  if (!value.mode_touch_thresholds.empty()) {
+    j["mode_touch_thresholds"] = value.mode_touch_thresholds;
+  }
 }
 
 void from_json(const json& j, CurriculumStageConfig& value) {
@@ -205,6 +211,12 @@ void from_json(const json& j, CurriculumStageConfig& value) {
   value.required_scored_episode_rate = j.value("required_scored_episode_rate", 0.0F);
   value.demotion_threshold_rate = j.value("demotion_threshold_rate", 0.0F);
   value.demotion_window_updates = j.value("demotion_window_updates", 10);
+  if (j.contains("mode_scored_thresholds")) {
+    value.mode_scored_thresholds = j["mode_scored_thresholds"].get<std::map<std::string, float>>();
+  }
+  if (j.contains("mode_touch_thresholds")) {
+    value.mode_touch_thresholds = j["mode_touch_thresholds"].get<std::map<std::string, float>>();
+  }
 
   // mode_allocation: if present in JSON, use it; otherwise derive from single "mode" field
   if (j.contains("mode_allocation")) {
