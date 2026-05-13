@@ -18,6 +18,7 @@ struct AgentRewardState {
   float episode_air_touch_reward = 0.0F;
 
   bool prev_on_ground = true;
+  float prev_car_velocity_z = 0.0F;
   bool prev_has_flip = true;
   bool prev_has_flipped = false;
   bool prev_is_flipping = false;

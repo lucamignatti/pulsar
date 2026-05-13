@@ -660,13 +660,13 @@ int main() {
     }
 
     // =========================================================================
-    // 25. speed_flip - on ground, transition to flipping, boosting
+    // 25. speed_flip - airborne, transition to flipping, boosting
     // =========================================================================
     {
       auto cfg = make_reward_test_config();
       pulsar::RewardEngine engine(cfg);
       auto car = make_neutral_car(pulsar::Team::Blue);
-      car.on_ground = true;
+      car.on_ground = false;  // speed flip is an airborne maneuver
       car.is_flipping = true;
       car.is_boosting = true;
       pulsar::EnvState env{};
@@ -967,9 +967,8 @@ int main() {
 
     // =========================================================================
     // 41. double_tap - state tracking (ball_hit_backboard, last_toucher)
-    //     Note: detect_double_tap updates last_ball_touch_tick before the
-    //     reward check, so the (tick - last_ball_touch_tick) > 0 guard
-    //     prevents the reward from firing on the same tick.
+    //     The reward check runs BEFORE last_ball_touch_tick is updated, so
+    //     the tick delta is correctly > 0 on subsequent touches.
     // =========================================================================
     {
       auto cfg = make_reward_test_config();
@@ -1074,6 +1073,8 @@ int main() {
       pulsar::EnvState env{};
       pulsar::AgentRewardState agent_state{};
       agent_state.prev_on_ground = false;
+      // pogo checks the PRE-LANDING velocity (saved from the previous tick)
+      agent_state.prev_car_velocity_z = 300.0f;
       pulsar::EnvRewardState env_state{};
       auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
       require_close(bd.terms.at("mechanic.pogo"), 0.65f, "pogo");
@@ -1342,7 +1343,7 @@ int main() {
       cfg.mechanic_rewards.mechanic_reward_cap_per_episode = 1.0f;
       pulsar::RewardEngine engine(cfg);
       auto car = make_neutral_car(pulsar::Team::Blue);
-      car.on_ground = true;
+      car.on_ground = false;  // speed_flip is airborne
       car.is_flipping = true;
       car.is_boosting = true;
       pulsar::EnvState env{};
@@ -1408,7 +1409,7 @@ int main() {
       pulsar::RewardEngine engine(cfg);
       auto car = make_neutral_car(pulsar::Team::Blue);
       car.forward = {0.0f, 1.0f, 0.0f};
-      car.on_ground = true;
+      car.on_ground = false;  // speed_flip is airborne
       car.is_flipping = true;
       car.is_boosting = true;
       pulsar::EnvState env{};

@@ -262,6 +262,7 @@ RewardBreakdown RewardEngine::compute(
 
   // --- state bookkeeping ---
   agent_state.prev_on_ground = car.on_ground;
+  agent_state.prev_car_velocity_z = car.velocity.z;
   agent_state.prev_has_flip = car.has_flip;
   agent_state.prev_has_flipped = car.has_flipped;
   agent_state.prev_is_flipping = car.is_flipping;
@@ -545,7 +546,7 @@ float RewardEngine::boost_pickup(
 float RewardEngine::detect_speed_flip(const CarState& car, AgentRewardState& s) const {
   if (!is_mechanic_unlocked("speed_flip")) return 0.0F;
   if (mechanic_cfg_.speed_flip <= 0.0F) return 0.0F;
-  if (car.on_ground && !s.prev_is_flipping && car.is_flipping && car.is_boosting) {
+  if (!car.on_ground && !s.prev_is_flipping && car.is_flipping && car.is_boosting) {
     return mechanic_cfg_.speed_flip;
   }
   return 0.0F;
@@ -587,7 +588,12 @@ float RewardEngine::detect_half_flip(const CarState& car, AgentRewardState& s) c
         car.velocity.z / vel_mag,
     };
     const float fwd_dot_vel = vec3_dot(car.forward, vel_norm);
-    if (fwd_dot_vel < -0.3F && car.handbrake > 0.5F) {
+    // car.handbrake is the ANALOG powerslide value (handbrakeVal), which rises
+    // at POWERSLIDE_RISE_RATE = 5/s → ~0.042 per tick at 120 Hz.  The old
+    // threshold of 0.5 required ~12 continuous ticks of powerslide BEFORE the
+    // flip, making this reward essentially unreachable.  Use 0.01 instead,
+    // which is satisfied after just one tick of handbrake input.
+    if (fwd_dot_vel < -0.3F && car.handbrake > 0.01F) {
       return mechanic_cfg_.half_flip;
     }
   }
@@ -646,7 +652,16 @@ float RewardEngine::detect_ceiling_shot(const CarState& car, AgentRewardState& s
   if (!is_mechanic_unlocked("ceiling_shot")) return 0.0F;
   if (mechanic_cfg_.ceiling_shot <= 0.0F) return 0.0F;
 
-  if (!car.on_ground && car.position.z > kCeilingThreshold) {
+  // In RocketSim, isOnGround = (numWheelsInContact >= 3), which is TRUE when
+  // the car is DRIVING ON THE CEILING as well as the floor.  The original
+  // check "!car.on_ground && z > kCeilingThreshold" therefore never fired
+  // while the car was actually on the ceiling surface, and the reset
+  // "if (car.on_ground)" cleared the flag the moment the car touched the
+  // ceiling, making ceiling shots from ceiling rides impossible to detect.
+  //
+  // Fix: set the flag whenever z is above the threshold (regardless of ground
+  // state), and reset it only when on a FLOOR surface (z < kCeilingThreshold).
+  if (car.position.z > kCeilingThreshold) {
     s.was_on_ceiling = true;
   }
 
@@ -657,7 +672,8 @@ float RewardEngine::detect_ceiling_shot(const CarState& car, AgentRewardState& s
     }
   }
 
-  if (car.on_ground) {
+  // Only reset when landing on the floor, not the ceiling surface.
+  if (car.on_ground && car.position.z < kCeilingThreshold) {
     s.was_on_ceiling = false;
   }
 
@@ -669,20 +685,16 @@ float RewardEngine::detect_double_tap(int tick, const CarState& car, const EnvSt
   if (!is_mechanic_unlocked("double_tap")) return 0.0F;
   if (mechanic_cfg_.double_tap <= 0.0F) return 0.0F;
 
-  if (car.ball_touched) {
-    s.last_ball_touch_tick = tick;
-    s.last_toucher_id = car.id;
-  }
-
-  // improved backboard detection: ball must be near back wall
+  // improved backboard detection: ball must be near back wall.
+  // Only set the flag — never unconditionally clear it so it persists
+  // after the ball bounces back away from the board.
   const float abs_y = std::abs(env.ball.position.y);
   if (abs_y > 5000.0F) {
     s.ball_hit_backboard = true;
-  } else {
-    s.ball_hit_backboard = false;
   }
 
-  // require agent was airborne for the touch
+  // Check for the second (air) touch BEFORE updating last_ball_touch_tick so
+  // that (tick - last_ball_touch_tick) > 0 can actually be true.
   if (car.ball_touched && s.ball_hit_backboard && s.last_toucher_id == car.id &&
       !car.on_ground &&
       (tick - s.last_ball_touch_tick) <= kDoubleTapWindowTicks &&
@@ -690,6 +702,13 @@ float RewardEngine::detect_double_tap(int tick, const CarState& car, const EnvSt
     s.ball_hit_backboard = false;
     s.last_ball_touch_tick = tick;
     return mechanic_cfg_.double_tap;
+  }
+
+  // Record the touch AFTER the detection check so the first touch sets the
+  // baseline tick and the next touch can measure the elapsed time.
+  if (car.ball_touched) {
+    s.last_ball_touch_tick = tick;
+    s.last_toucher_id = car.id;
   }
 
   return 0.0F;
@@ -754,8 +773,10 @@ float RewardEngine::detect_pogo(const CarState& car, AgentRewardState& s) const 
 
   if (!s.prev_on_ground && car.on_ground) {
     if (!car.is_jumping && !car.has_jumped) {
-      const float vz = car.velocity.z;
-      if (vz > 200.0F) {
+      // Use the z-velocity from the PREVIOUS tick (before the landing
+      // collision zeroes it out).  s.prev_car_velocity_z is saved in
+      // compute() after all reward functions run.
+      if (s.prev_car_velocity_z > 200.0F) {
         return mechanic_cfg_.pogo;
       }
     }
