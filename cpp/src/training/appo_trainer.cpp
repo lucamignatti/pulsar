@@ -739,7 +739,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       std::vector<torch::Tensor> term_value_chunks;
       for (int offset = 0; offset < total_term_samples; offset += max_term_batch) {
         int batch = std::min(max_term_batch, total_term_samples - offset);
-        auto chunk = term_flat.slice(0, offset, offset + batch);
+        auto chunk = term_flat.slice(0, offset, offset + batch).to(device_);
         auto chunk_goal = policy_goal_values_like(chunk, config_.goal_critic.goal_dim);
         auto chunk_out = actor_->forward_step(chunk, chunk_goal).value_win_logits.squeeze(-1);
         term_value_chunks.push_back(chunk_out);
