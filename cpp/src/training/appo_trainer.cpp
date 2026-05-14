@@ -743,7 +743,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
   for (int epoch = 0; epoch < config_.ppo.update_epochs; ++epoch) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "update_epoch");
-    const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(device_));
+    const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
     for (int agent_offset = 0; agent_offset < total_agents; agent_offset += logical_agents_per_batch) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "update_minibatch");
       const int count = std::min(logical_agents_per_batch, total_agents - agent_offset);
@@ -776,7 +776,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       for (int micro_agent_offset = 0; micro_agent_offset < count; micro_agent_offset += agents_per_forward) {
         PULSAR_TRACE_SCOPE_CAT("trainer", "update_microbatch");
         const int micro_count = std::min(agents_per_forward, count - micro_agent_offset);
-        const torch::Tensor micro_agent_indices = agent_indices.narrow(0, micro_agent_offset, micro_count);
+        const torch::Tensor micro_agent_indices_cpu = agent_indices.narrow(0, micro_agent_offset, micro_count);
+        const torch::Tensor micro_agent_indices = micro_agent_indices_cpu.to(device_);
 
       for (int seq_start = 0; seq_start < rollout.rollout_length(); seq_start += seq_len) {
         const int chunk_start = seq_start;
@@ -869,11 +870,11 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
         {
           torch::Tensor chunk_goal_pos =
-              rollout.goal_positions.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
+              rollout.goal_positions.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices_cpu);
           torch::Tensor chunk_dones =
-              rollout.dones.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
+              rollout.dones.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices_cpu);
           torch::Tensor chunk_ep_starts =
-              rollout.episode_starts.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
+              rollout.episode_starts.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices_cpu);
           torch::Tensor future_goal_pos = sample_future_goal_positions(
               chunk_goal_pos,
               chunk_dones,
