@@ -373,7 +373,7 @@
     "num_encoder_blocks": 4,
     "transformer_num_heads": 8,
     "transformer_window_size": 16,
-    "transformer_max_batch_size": 32768,
+    "transformer_max_batch_size": 16384,
     "transformer_token_group_size": 4,
     "transformer_ffn_multiplier": 2,
     "value_hidden_dim": 384,
