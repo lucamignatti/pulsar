@@ -52,6 +52,23 @@ int main() {
     if (output.features.sizes() != torch::IntArrayRef({4, actor->feature_dim()})) {
       throw std::runtime_error("actor feature shape mismatch");
     }
+    {
+      const torch::Tensor loss = output.policy_logits.square().mean()
+          + output.value_win_logits.square().mean()
+          + output.features.square().mean();
+      loss.backward();
+      bool saw_encoder_grad = false;
+      for (const auto& item : actor->named_parameters(true)) {
+        if (item.key().find("encoder.") == 0 && item.value().grad().defined()) {
+          saw_encoder_grad = true;
+          break;
+        }
+      }
+      if (!saw_encoder_grad) {
+        throw std::runtime_error("actor backward did not populate encoder gradients");
+      }
+      actor->zero_grad();
+    }
 
     {
       const torch::Tensor obs = torch::randn({2, model_config.observation_dim});

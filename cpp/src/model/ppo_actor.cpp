@@ -204,22 +204,28 @@ torch::Tensor SlidingWindowSelfAttentionImpl::forward(const torch::Tensor& token
   const auto sequence = tokens.size(1);
 
   torch::Tensor qkv = qkv_->forward(tokens)
-      .view({batch, sequence, 3, num_heads_, head_dim_})
-      .permute({2, 0, 3, 1, 4});
-  const auto parts = qkv.unbind(0);
+      .view({batch, sequence, 3, num_heads_, head_dim_});
+  const auto parts = qkv.unbind(2);
   const torch::Tensor q = parts[0];
   const torch::Tensor k = parts[1];
   const torch::Tensor v = parts[2];
 
-  const torch::Tensor mask = attention_mask_.to(q.device()).narrow(2, 0, sequence).narrow(3, 0, sequence);
+  const torch::Tensor mask = attention_mask_.to(q.device()).narrow(2, 0, sequence).narrow(3, 0, sequence).squeeze(1);
   const float scale = 1.0F / std::sqrt(static_cast<float>(head_dim_));
-  torch::Tensor attention_scores = torch::matmul(q, k.transpose(-2, -1)) * scale;
-  attention_scores = attention_scores.masked_fill(mask.logical_not(), -std::numeric_limits<float>::infinity());
-  torch::Tensor attended = torch::matmul(torch::softmax(attention_scores, -1), v)
-      .transpose(1, 2)
-      .contiguous()
-      .view({batch, sequence, embed_dim_});
-  return out_proj_->forward(attended);
+  torch::Tensor attended_heads = torch::empty(
+      {batch, sequence, num_heads_, head_dim_},
+      tokens.options());
+  // Keep the final layout contiguous without allocating a second full attended tensor.
+  for (int head = 0; head < num_heads_; ++head) {
+    const torch::Tensor q_head = q.select(2, head);
+    const torch::Tensor k_head = k.select(2, head);
+    const torch::Tensor v_head = v.select(2, head);
+    torch::Tensor attention_scores = torch::bmm(q_head, k_head.transpose(1, 2)) * scale;
+    attention_scores = attention_scores.masked_fill(mask.logical_not(), -std::numeric_limits<float>::infinity());
+    const torch::Tensor attended_head = torch::bmm(torch::softmax(attention_scores, -1), v_head);
+    attended_heads.select(2, head).copy_(attended_head);
+  }
+  return out_proj_->forward(attended_heads.view({batch, sequence, embed_dim_}));
 }
 
 SWATransformerBlockImpl::SWATransformerBlockImpl(
