@@ -111,7 +111,8 @@ class APPOTrainer {
       RolloutStorage& dest,
       TrainerMetrics& metrics,
       std::int64_t* collected_agent_steps,
-      PPOActor rollout_actor);
+      PPOActor rollout_actor,
+      ObservationNormalizer& normalizer);
   TrainerMetrics update_actor(RolloutStorage& rollout);
   CheckpointMetadata make_checkpoint_metadata(std::int64_t global_step, int update_index, const std::string& wandb_run_id) const;
 

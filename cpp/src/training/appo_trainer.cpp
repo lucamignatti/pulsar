@@ -1270,7 +1270,8 @@ void APPOTrainer::collect_rollout(
     RolloutStorage& dest,
     TrainerMetrics& metrics,
     std::int64_t* collected_agent_steps,
-    PPOActor rollout_actor) {
+    PPOActor rollout_actor,
+    ObservationNormalizer& normalizer) {
   PULSAR_TRACE_SCOPE_CAT("trainer", "collect_rollout");
   if (!rollout_actor) {
     throw std::invalid_argument("APPOTrainer::collect_rollout requires a policy snapshot.");
@@ -1353,8 +1354,8 @@ void APPOTrainer::collect_rollout(
         {
           PULSAR_TRACE_SCOPE_CAT("trainer", "policy_forward_shard");
           torch::NoGradGuard no_grad;
-          actor_normalizer_.update(raw_obs);
-          normalized_obs = actor_normalizer_.normalize(raw_obs);
+          normalizer.update(raw_obs);
+          normalized_obs = normalizer.normalize(raw_obs);
           const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
           output = rollout_actor->forward_step(normalized_obs, goal_values);
           actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
@@ -1544,7 +1545,7 @@ void APPOTrainer::collect_rollout(
         }
 #endif
         torch::Tensor final_raw_obs = collector.host_observations().to(device_, use_pinned_host_buffers_);
-        torch::Tensor final_normalized = actor_normalizer_.normalize(final_raw_obs);
+        torch::Tensor final_normalized = normalizer.normalize(final_raw_obs);
         torch::Tensor final_starts = collector.host_episode_starts().to(device_, use_pinned_host_buffers_);
         const torch::Tensor final_goal_values = policy_goal_values_like(final_normalized, config_.goal_critic.goal_dim);
         ActorStepOutput final_output = rollout_actor->forward_step(final_normalized, final_goal_values);
@@ -1577,8 +1578,8 @@ void APPOTrainer::collect_rollout(
     {
       PULSAR_TRACE_SCOPE_CAT("trainer", "policy_forward");
       torch::NoGradGuard no_grad;
-      actor_normalizer_.update(raw_obs);
-      normalized_obs = actor_normalizer_.normalize(raw_obs);
+      normalizer.update(raw_obs);
+      normalized_obs = normalizer.normalize(raw_obs);
       const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
       output = rollout_actor->forward_step(normalized_obs, goal_values);
       actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
@@ -1729,7 +1730,7 @@ void APPOTrainer::collect_rollout(
     PULSAR_TRACE_SCOPE_CAT("trainer", "bootstrap_forward");
     torch::NoGradGuard no_grad;
     torch::Tensor final_raw_obs = collector_->host_observations().to(device_, use_pinned_host_buffers_);
-    torch::Tensor final_normalized = actor_normalizer_.normalize(final_raw_obs);
+    torch::Tensor final_normalized = normalizer.normalize(final_raw_obs);
     torch::Tensor final_starts = collector_->host_episode_starts().to(device_, use_pinned_host_buffers_);
     const torch::Tensor final_goal_values = policy_goal_values_like(final_normalized, config_.goal_critic.goal_dim);
     ActorStepOutput final_output = rollout_actor->forward_step(final_normalized, final_goal_values);
@@ -1930,7 +1931,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
 
   TrainerMetrics coll_metrics{};
   std::int64_t coll_steps = 0;
-  collect_rollout(rollout_, coll_metrics, &coll_steps, actor_snapshot_);
+  collect_rollout(rollout_, coll_metrics, &coll_steps, actor_snapshot_, actor_normalizer_);
   global_step += coll_steps;
 
   for (int index = 0; train_forever || index < updates; ++index) {
@@ -1942,8 +1943,24 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     std::int64_t next_coll_steps = 0;
     const bool has_next = train_forever || index + 1 < updates;
 
-    TrainerMetrics train_metrics = update_actor(rollout_);
+    // Clone normalizer for collection thread to avoid race with self-play eval
+    ObservationNormalizer collection_normalizer = actor_normalizer_.clone();
 
+    // 1. Launch training (GPU on training_stream_) and collection (GPU on shard streams + CPU stepping) concurrently
+    std::future<TrainerMetrics> train_future = std::async(std::launch::async, [&]() {
+      return update_actor(rollout_);
+    });
+
+    std::future<std::int64_t> collect_future;
+    if (has_next) {
+      collect_future = std::async(std::launch::async, [&]() {
+        std::int64_t steps = 0;
+        collect_rollout(rollout_B_, next_coll_metrics, &steps, actor_snapshot_, collection_normalizer);
+        return steps;
+      });
+    }
+
+    // 2. Main thread CPU work that overlaps with GPU training+collection
     {
       double scored = static_cast<double>(coll_metrics.scored_episodes);
       double completed = static_cast<double>(std::max(coll_metrics.completed_episodes, static_cast<int64_t>(1)));
@@ -1954,32 +1971,11 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
         recent_scored_rates_.pop_front();
       }
     }
-    if (curriculum_.enabled()) {
-      if (curriculum_.check_promotion(
-          coll_metrics.mode_touch_rates, coll_metrics.mode_scored_rates, coll_steps)) {
-        if (curriculum_.mode_allocation_changed()) {
-          rebuild_collectors();
-        }
-        apply_curriculum_to_collectors();
-        apply_curriculum_lr();
-      } else {
-        bool demoted = curriculum_.check_demotion(coll_metrics.mode_scored_rates);
-        if (demoted) {
-          if (curriculum_.mode_allocation_changed()) {
-            rebuild_collectors();
-          }
-          apply_curriculum_to_collectors();
-          apply_curriculum_lr();
-        }
-      }
-    }
 
-#ifdef PULSAR_HAS_CUDA
-    if (training_stream_.has_value()) {
-      training_stream_->synchronize();
-    }
-#endif
+    // 3. Wait for training to finish before touching actor_
+    TrainerMetrics train_metrics = train_future.get();
 
+    // 4. Self-play / ES-LoRA / plasticity (touch actor_, safe now)
     if (self_play_manager_) {
       const SelfPlayMetrics self_play_metrics =
           self_play_manager_->on_update(actor_, actor_normalizer_, global_step, update_index);
@@ -2001,12 +1997,35 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       }
     }
 
-    synchronize_cuda_if_needed(device_, "snapshot clone");
-    actor_snapshot_ = clone_ppo_actor(actor_, device_);
-    actor_snapshot_->eval();
+    // 5. Curriculum checks + rebuild (may touch collectors, safe after collection)
+    if (curriculum_.enabled()) {
+      if (curriculum_.check_promotion(
+          coll_metrics.mode_touch_rates, coll_metrics.mode_scored_rates, coll_steps)) {
+        if (curriculum_.mode_allocation_changed()) {
+          rebuild_collectors();
+        }
+        apply_curriculum_to_collectors();
+        apply_curriculum_lr();
+      } else {
+        bool demoted = curriculum_.check_demotion(coll_metrics.mode_scored_rates);
+        if (demoted) {
+          if (curriculum_.mode_allocation_changed()) {
+            rebuild_collectors();
+          }
+          apply_curriculum_to_collectors();
+          apply_curriculum_lr();
+        }
+      }
+    }
 
+    // 6. Clone snapshot for next iteration's collection
+    synchronize_cuda_if_needed(device_, "snapshot clone");
+    PPOActor new_snapshot = clone_ppo_actor(actor_, device_);
+    new_snapshot->eval();
+
+    // 7. Wait for collection to finish
     if (has_next) {
-      collect_rollout(rollout_B_, next_coll_metrics, &next_coll_steps, actor_snapshot_);
+      next_coll_steps = collect_future.get();
     }
 
     global_step += next_coll_steps;
@@ -2107,6 +2126,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     if (has_next) {
       std::swap(rollout_, rollout_B_);
       coll_metrics = std::move(next_coll_metrics);
+      actor_snapshot_ = std::move(new_snapshot);
     }
     coll_steps = next_coll_steps;
   }
