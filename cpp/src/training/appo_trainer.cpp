@@ -347,6 +347,17 @@ APPOTrainer::APPOTrainer(
   seed_everything(config_.env.seed);
   configure_cuda_runtime(device_);
   use_pinned_host_buffers_ = device_.is_cuda();
+#ifdef PULSAR_HAS_CUDA
+  if (device_.is_cuda()) {
+    training_stream_ = at::cuda::getStreamFromPool(false, device_.index());
+    const std::size_t num_shards = collectors_.size();
+    shard_collection_streams_.reserve(num_shards);
+    for (std::size_t i = 0; i < num_shards; ++i) {
+      shard_collection_streams_.push_back(
+          at::cuda::getStreamFromPool(false, device_.index()));
+    }
+  }
+#endif
   actor_->to(device_);
   actor_normalizer_.to(device_);
 
@@ -474,6 +485,16 @@ void APPOTrainer::rebuild_collectors() {
   if (total_agents_ == 0) {
     throw std::invalid_argument("rebuild_collectors produced zero agents");
   }
+
+#ifdef PULSAR_HAS_CUDA
+  if (device_.is_cuda()) {
+    shard_collection_streams_.clear();
+    for (std::size_t i = 0; i < collectors_.size(); ++i) {
+      shard_collection_streams_.push_back(
+          at::cuda::getStreamFromPool(false, device_.index()));
+    }
+  }
+#endif
 
   // rebuild rollout storage
   const int action_dim = action_dim_for_collectors(collectors_);
@@ -620,11 +641,8 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
 TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   PULSAR_TRACE_SCOPE_CAT("trainer", "update_actor");
 #ifdef PULSAR_HAS_CUDA
-  std::optional<c10::cuda::CUDAStream> _prev_train_stream;
-  if (training_stream_.has_value()) {
-    _prev_train_stream = c10::cuda::getCurrentCUDAStream(device_.index());
-    c10::cuda::setCurrentCUDAStream(*training_stream_);
-  }
+  c10::cuda::CUDAStream prev_train_stream = c10::cuda::getCurrentCUDAStream(device_.index());
+  c10::cuda::setCurrentCUDAStream(training_stream_);
 #endif
   const auto update_start = std::chrono::steady_clock::now();
   TrainerMetrics metrics{};
@@ -989,6 +1007,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   }
   metrics.effective_entropy_coef = static_cast<double>(effective_entropy_coef);
   metrics.update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count();
+#ifdef PULSAR_HAS_CUDA
+  c10::cuda::setCurrentCUDAStream(prev_train_stream);
+#endif
   return metrics;
 }
 
@@ -1242,6 +1263,12 @@ void APPOTrainer::collect_rollout(
   if (!rollout_actor) {
     throw std::invalid_argument("APPOTrainer::collect_rollout requires a policy snapshot.");
   }
+#ifdef PULSAR_HAS_CUDA
+  c10::cuda::CUDAStream prev_collect_stream = c10::cuda::getCurrentCUDAStream(device_.index());
+  const c10::cuda::CUDAStream default_collect_stream = shard_collection_streams_.empty()
+      ? prev_collect_stream
+      : shard_collection_streams_[0];
+#endif
   dest.clear();
   const auto update_start = std::chrono::steady_clock::now();
   CollectorTimings collector_timings{};
@@ -1293,6 +1320,11 @@ void APPOTrainer::collect_rollout(
 
       for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
         auto& collector = *collectors_[shard];
+#ifdef PULSAR_HAS_CUDA
+        if (shard < shard_collection_streams_.size()) {
+          c10::cuda::setCurrentCUDAStream(shard_collection_streams_[shard]);
+        }
+#endif
         torch::Tensor raw_obs_host = collector.host_observations();
         torch::Tensor episode_starts_host = collector.host_episode_starts();
         torch::Tensor action_masks_host = collector.host_action_masks();
@@ -1495,6 +1527,11 @@ void APPOTrainer::collect_rollout(
       final_values.reserve(collectors_.size());
       for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
         auto& collector = *collectors_[shard];
+#ifdef PULSAR_HAS_CUDA
+        if (shard < shard_collection_streams_.size()) {
+          c10::cuda::setCurrentCUDAStream(shard_collection_streams_[shard]);
+        }
+#endif
         torch::Tensor final_raw_obs = collector.host_observations().to(device_, use_pinned_host_buffers_);
         torch::Tensor final_normalized = actor_normalizer_.normalize(final_raw_obs);
         torch::Tensor final_starts = collector.host_episode_starts().to(device_, use_pinned_host_buffers_);
@@ -1508,6 +1545,9 @@ void APPOTrainer::collect_rollout(
     }
   } else {
     PULSAR_TRACE_SCOPE_CAT("trainer", "collect_loop");
+#ifdef PULSAR_HAS_CUDA
+    c10::cuda::setCurrentCUDAStream(default_collect_stream);
+#endif
     for (int step = 0; step < config_.ppo.rollout_length; ++step) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "collect_step");
       torch::Tensor raw_obs_host = collector_->host_observations();
@@ -1732,6 +1772,9 @@ void APPOTrainer::collect_rollout(
   metrics.collection_agent_steps_per_second =
       local_collected_steps > 0 ? static_cast<double>(local_collected_steps) / collection_seconds : 0.0;
 
+#ifdef PULSAR_HAS_CUDA
+  c10::cuda::setCurrentCUDAStream(prev_collect_stream);
+#endif
   *collected_agent_steps = local_collected_steps;
 }
 
@@ -1920,6 +1963,10 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
         }
       }
     }
+
+#ifdef PULSAR_HAS_CUDA
+    training_stream_.synchronize();
+#endif
 
     if (self_play_manager_) {
       const SelfPlayMetrics self_play_metrics =
