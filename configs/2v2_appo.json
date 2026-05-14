@@ -67,7 +67,7 @@
     "enabled": true,
     "stages": [
       {
-        "name": "bronze-touch-1v1",
+        "name": "touch-1v1",
         "mode": "1v1",
         "learning_rate": 0.0002,
         "min_agent_steps": 2500000,
@@ -94,7 +94,7 @@
         }
       },
       {
-        "name": "silver-direction-1v1",
+        "name": "direction-1v1",
         "mode": "1v1",
         "learning_rate": 0.0002,
         "min_agent_steps": 15000000,
@@ -125,7 +125,7 @@
         }
       },
       {
-        "name": "gold-scoring-1v1",
+        "name": "scoring-1v1",
         "mode": "1v1",
         "learning_rate": 0.0001,
         "min_agent_steps": 25000000,
@@ -168,14 +168,14 @@
         }
       },
       {
-        "name": "platinum-aerials-1v1",
+        "name": "aerials-1v1",
         "mode": "1v1",
         "learning_rate": 0.0001,
         "min_agent_steps": 30000000,
         "rolling_window_size": 10,
         "consecutive_success_threshold": 5,
         "required_touch_episode_rate": 0.0,
-        "required_scored_episode_rate": 0.10,
+        "required_scored_episode_rate": 0.1,
         "demotion_threshold_rate": 0.5,
         "demotion_window_updates": 10,
         "unlocked_mechanics": [
@@ -226,7 +226,7 @@
         }
       },
       {
-        "name": "diamond-teamplay",
+        "name": "teamplay",
         "mode_allocation": { "1v1": 0.5, "2v2": 0.5 },
         "learning_rate": 0.0001,
         "min_agent_steps": 40000000,
@@ -291,7 +291,7 @@
         }
       },
       {
-        "name": "champion-aggression",
+        "name": "aggression",
         "mode_allocation": { "1v1": 0.34, "2v2": 0.33, "3v3": 0.33 },
         "learning_rate": 0.00005,
         "min_agent_steps": 50000000,

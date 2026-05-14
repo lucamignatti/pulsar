@@ -732,15 +732,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   }
   torch::Tensor sparse_returns = sparse_advantages + extrinsic_values.detach();
 
-  // Transfer rollout data to GPU once for all epochs to eliminate per-micro-batch H2D copies.
-  // The tensors are already pinned (RolloutStorage uses pinned_memory=true when CUDA is active),
-  // so the transfer is efficient. Total cache ~1.9 GB at 3072 envs / 3v3 / 128 steps.
-  torch::Tensor gpu_obs = rollout.obs.narrow(0, 0, rollout_steps).to(device_);
-  torch::Tensor gpu_action_masks = rollout.action_masks.narrow(0, 0, rollout_steps).to(device_);
-  torch::Tensor gpu_learner_active = rollout.learner_active.narrow(0, 0, rollout_steps).to(device_);
-  torch::Tensor gpu_actions = rollout.actions.narrow(0, 0, rollout_steps).to(device_);
-  torch::Tensor gpu_action_log_probs = rollout.action_log_probs.narrow(0, 0, rollout_steps).to(device_);
-
   for (int epoch = 0; epoch < config_.ppo.update_epochs; ++epoch) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "update_epoch");
     const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
@@ -771,13 +762,23 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         continue;
       }
 
+      // Prefetch this minibatch to GPU — all micro-batches use zero-copy narrow().
+      // Size: ~150 MB for 1024 agents × 128 steps × (obs+masks+actions+log_probs+learner_active+adv+returns).
+      torch::Tensor gpu_obs_mb = rollout.obs.narrow(0, 0, rollout_steps).index_select(1, agent_indices).to(device_);
+      torch::Tensor gpu_action_masks_mb = rollout.action_masks.narrow(0, 0, rollout_steps).index_select(1, agent_indices).to(device_);
+      torch::Tensor gpu_learner_active_mb = rollout.learner_active.narrow(0, 0, rollout_steps).index_select(1, agent_indices).to(device_);
+      torch::Tensor gpu_actions_mb = rollout.actions.narrow(0, 0, rollout_steps).index_select(1, agent_indices).to(device_);
+      torch::Tensor gpu_action_log_probs_mb = rollout.action_log_probs.narrow(0, 0, rollout_steps).index_select(1, agent_indices).to(device_);
+      torch::Tensor agent_indices_gpu = agent_indices.to(device_);
+      torch::Tensor gpu_advantages_mb = normalized_advantages.narrow(0, 0, rollout_steps).index_select(1, agent_indices_gpu);
+      torch::Tensor gpu_returns_mb = sparse_returns.narrow(0, 0, rollout_steps).index_select(1, agent_indices_gpu);
+
       actor_optimizer_.zero_grad();
 
       for (int micro_agent_offset = 0; micro_agent_offset < count; micro_agent_offset += agents_per_forward) {
         PULSAR_TRACE_SCOPE_CAT("trainer", "update_microbatch");
         const int micro_count = std::min(agents_per_forward, count - micro_agent_offset);
         const torch::Tensor micro_agent_indices_cpu = agent_indices.narrow(0, micro_agent_offset, micro_count);
-        const torch::Tensor micro_agent_indices = micro_agent_indices_cpu.to(device_);
 
       for (int seq_start = 0; seq_start < rollout.rollout_length(); seq_start += seq_len) {
         const int chunk_start = seq_start;
@@ -788,7 +789,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         const int loss_steps = chunk_steps;
 
         const torch::Tensor obs =
-            gpu_obs.narrow(0, chunk_start, chunk_steps).index_select(1, micro_agent_indices);
+            gpu_obs_mb.narrow(0, chunk_start, chunk_steps).narrow(1, micro_agent_offset, micro_count);
 
         const auto forward_start = std::chrono::steady_clock::now();
         ActorSequenceOutput output;
@@ -806,15 +807,15 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         torch::Tensor features = output.features;
 
         const torch::Tensor action_masks =
-            gpu_action_masks.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices).to(torch::kBool);
+            gpu_action_masks_mb.narrow(0, loss_start, loss_steps).narrow(1, micro_agent_offset, micro_count).to(torch::kBool);
         const torch::Tensor learner_active =
-            gpu_learner_active.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
+            gpu_learner_active_mb.narrow(0, loss_start, loss_steps).narrow(1, micro_agent_offset, micro_count);
         const torch::Tensor old_actions =
-            gpu_actions.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
+            gpu_actions_mb.narrow(0, loss_start, loss_steps).narrow(1, micro_agent_offset, micro_count);
         const torch::Tensor old_log_probs =
-            gpu_action_log_probs.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
+            gpu_action_log_probs_mb.narrow(0, loss_start, loss_steps).narrow(1, micro_agent_offset, micro_count);
         const torch::Tensor chunk_advantages =
-            normalized_advantages.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
+            gpu_advantages_mb.narrow(0, loss_start, loss_steps).narrow(1, micro_agent_offset, micro_count);
 
         const auto samples = loss_steps * micro_count;
         const torch::Tensor flat_active = learner_active.reshape({samples}) > 0.5F;
@@ -854,7 +855,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         }
 
         torch::Tensor chunk_returns =
-            sparse_returns.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices).reshape({samples});
+            gpu_returns_mb.narrow(0, loss_start, loss_steps).narrow(1, micro_agent_offset, micro_count).reshape({samples});
         torch::Tensor active_returns = chunk_returns.index({flat_active});
 
         torch::Tensor value_win_chunk = output.value_win_logits;
