@@ -657,8 +657,8 @@ void validate_experiment_config(const ExperimentConfig& config) {
   if (config.model.transformer_window_size <= 0) {
     throw std::invalid_argument("model.transformer_window_size must be positive.");
   }
-  if (config.model.transformer_max_batch_size <= 0) {
-    throw std::invalid_argument("model.transformer_max_batch_size must be positive.");
+  if (config.model.transformer_max_batch_size < 0) {
+    throw std::invalid_argument("model.transformer_max_batch_size must be non-negative (0 = unlimited).");
   }
   if (config.model.transformer_token_group_size <= 0) {
     throw std::invalid_argument("model.transformer_token_group_size must be positive.");
