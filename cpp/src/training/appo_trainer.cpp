@@ -9,6 +9,7 @@
 #include <fstream>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -155,6 +156,37 @@ torch::Tensor policy_goal_values_like(const torch::Tensor& obs, int goal_dim) {
     return torch::zeros({obs.size(0), obs.size(1), goal_dim}, options);
   }
   return torch::zeros({obs.size(0), goal_dim}, options);
+}
+
+int transformer_sequence_length(const ModelConfig& config) {
+  const auto token_group_size = static_cast<std::int64_t>(std::max(1, config.transformer_token_group_size));
+  const auto observation_dim = static_cast<std::int64_t>(std::max(1, config.observation_dim));
+  const auto padded_observation_dim =
+      ((observation_dim + token_group_size - 1) / token_group_size) * token_group_size;
+  return static_cast<int>(padded_observation_dim / token_group_size + 1);
+}
+
+int cuda_autograd_forward_sample_cap(const ModelConfig& config) {
+  constexpr std::int64_t kFfnActivationBudgetBytes = 384LL * 1024LL * 1024LL;
+  const auto sequence = static_cast<std::int64_t>(transformer_sequence_length(config));
+  const auto ffn_dim = static_cast<std::int64_t>(std::max(1, config.encoder_dim))
+      * static_cast<std::int64_t>(std::max(1, config.transformer_ffn_multiplier));
+  const std::int64_t bytes_per_sample = sequence * ffn_dim * static_cast<std::int64_t>(sizeof(float));
+  if (bytes_per_sample <= 0) {
+    return std::max(1, config.transformer_max_batch_size);
+  }
+  const std::int64_t sample_cap = std::max<std::int64_t>(1, kFfnActivationBudgetBytes / bytes_per_sample);
+  return static_cast<int>(std::min<std::int64_t>(
+      sample_cap,
+      static_cast<std::int64_t>(std::numeric_limits<int>::max())));
+}
+
+int effective_transformer_max_batch_size(const ModelConfig& config, const torch::Device& device) {
+  const int configured = std::max(1, config.transformer_max_batch_size);
+  if (!device.is_cuda()) {
+    return configured;
+  }
+  return std::max(1, std::min(configured, cuda_autograd_forward_sample_cap(config)));
 }
 
 void append_metrics_line(
@@ -672,7 +704,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
   const int seq_len = std::max(1, config_.ppo.rollout_length);
   const int logical_agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
-  const int max_forward_samples = std::max(1, config_.model.transformer_max_batch_size);
+  const int max_forward_samples = effective_transformer_max_batch_size(config_.model, device_);
   const int agents_per_forward = std::max(1, max_forward_samples / seq_len);
   const int total_agents = rollout.num_agents();
   const int rollout_steps = rollout.rollout_length();
@@ -703,7 +735,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       torch::Tensor term_obs = rollout.terminal_observations.narrow(0, 0, rollout_steps);
       auto term_flat = term_obs.reshape({rollout_steps * total_agents, config_.model.observation_dim});
       const int total_term_samples = rollout_steps * total_agents;
-      const int max_term_batch = std::max(1, config_.model.transformer_max_batch_size);
+      const int max_term_batch = effective_transformer_max_batch_size(config_.model, device_);
       std::vector<torch::Tensor> term_value_chunks;
       for (int offset = 0; offset < total_term_samples; offset += max_term_batch) {
         int batch = std::min(max_term_batch, total_term_samples - offset);
