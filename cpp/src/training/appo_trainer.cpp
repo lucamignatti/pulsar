@@ -743,7 +743,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
   for (int epoch = 0; epoch < config_.ppo.update_epochs; ++epoch) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "update_epoch");
-    const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
+    const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(device_));
     for (int agent_offset = 0; agent_offset < total_agents; agent_offset += logical_agents_per_batch) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "update_minibatch");
       const int count = std::min(logical_agents_per_batch, total_agents - agent_offset);
