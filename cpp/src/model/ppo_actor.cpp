@@ -53,7 +53,9 @@ void validate_model_config(const ModelConfig& config) {
   require_positive(config.num_encoder_blocks, "num_encoder_blocks");
   require_positive(config.transformer_num_heads, "transformer_num_heads");
   require_positive(config.transformer_window_size, "transformer_window_size");
-  require_positive(config.transformer_max_batch_size, "transformer_max_batch_size");
+  if (config.transformer_max_batch_size < 0) {
+    throw std::invalid_argument("ModelConfig.transformer_max_batch_size must be non-negative (0 = unlimited).");
+  }
   require_positive(config.transformer_token_group_size, "transformer_token_group_size");
   require_positive(config.transformer_ffn_multiplier, "transformer_ffn_multiplier");
   require_positive(config.value_hidden_dim, "value_hidden_dim");
