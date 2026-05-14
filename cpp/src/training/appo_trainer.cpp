@@ -52,13 +52,14 @@ void synchronize_cuda_if_needed(const torch::Device& device, const char* context
 RolloutStorage make_rollout_storage(
     const ExperimentConfig& config,
     int num_agents,
-    int action_dim) {
+    int action_dim,
+    const torch::Device& device) {
   return RolloutStorage(
       config.ppo.rollout_length,
       num_agents,
       config.model.observation_dim,
       action_dim,
-      torch::Device(torch::kCPU));
+      device);
 }
 
 void require_finite(const torch::Tensor& tensor, const std::string& name) {
@@ -319,15 +320,17 @@ APPOTrainer::APPOTrainer(
       actor_(PPOActor(config_.model, config_.goal_critic, config_.es_lora)),
       actor_normalizer_(config_.model.observation_dim),
       actor_optimizer_(actor_->parameters(), torch::optim::AdamOptions(config_.ppo.learning_rate).eps(1.0e-5F)),
+      device_(resolve_runtime_device(config_.ppo.device)),
       rollout_(make_rollout_storage(
           config_,
           static_cast<int>(total_agents_for_collectors(collectors_)),
-          action_dim_for_collectors(collectors_))),
+          action_dim_for_collectors(collectors_),
+          device_)),
       rollout_B_(make_rollout_storage(
           config_,
           static_cast<int>(total_agents_for_collectors(collectors_)),
-          action_dim_for_collectors(collectors_))),
-      device_(resolve_runtime_device(config_.ppo.device)),
+          action_dim_for_collectors(collectors_),
+          device_)),
       run_output_root_(std::move(run_output_root)),
       log_initialization_(log_initialization) {
   validate_experiment_config(config_);
@@ -498,8 +501,8 @@ void APPOTrainer::rebuild_collectors() {
 
   // rebuild rollout storage
   const int action_dim = action_dim_for_collectors(collectors_);
-  rollout_ = make_rollout_storage(config_, static_cast<int>(total_agents_), action_dim);
-  rollout_B_ = make_rollout_storage(config_, static_cast<int>(total_agents_), action_dim);
+  rollout_ = make_rollout_storage(config_, static_cast<int>(total_agents_), action_dim, device_);
+  rollout_B_ = make_rollout_storage(config_, static_cast<int>(total_agents_), action_dim, device_);
 
   // recompute shard agent offsets
   shard_agent_offsets_.clear();
@@ -702,21 +705,25 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       std::vector<torch::Tensor> term_value_chunks;
       for (int offset = 0; offset < total_term_samples; offset += max_term_batch) {
         int batch = std::min(max_term_batch, total_term_samples - offset);
-        auto chunk = term_flat.slice(0, offset, offset + batch).to(device_);
+        auto chunk = term_flat.slice(0, offset, offset + batch);
         auto chunk_goal = policy_goal_values_like(chunk, config_.goal_critic.goal_dim);
         auto chunk_out = actor_->forward_step(chunk, chunk_goal).value_win_logits.squeeze(-1);
-        term_value_chunks.push_back(chunk_out.to(torch::kCPU));
+        term_value_chunks.push_back(chunk_out);
       }
       auto term_values_flat = torch::cat(term_value_chunks, 0);
-      terminal_values = term_values_flat.reshape({rollout_steps, total_agents}).to(term_obs.device());
+      terminal_values = term_values_flat.reshape({rollout_steps, total_agents});
     }
+    auto final_values_map = rollout.final_values();
+    torch::Tensor final_extrinsic_values = final_values_map.count("extrinsic") && final_values_map.at("extrinsic").defined()
+        ? final_values_map.at("extrinsic")
+        : torch::Tensor{};
     sparse_advantages = compute_gae(
       extrinsic_values,
       extrinsic_rewards,
       rollout_dones,
       config_.ppo.gamma,
       config_.ppo.gae_lambda,
-      rollout.final_values().count("extrinsic") ? rollout.final_values().at("extrinsic") : torch::Tensor{},
+      final_extrinsic_values,
       rollout_bootstrap_truncated,
       terminal_values);
     normalized_advantages = normalize_advantage(sparse_advantages, active_mask);
@@ -725,7 +732,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
   for (int epoch = 0; epoch < config_.ppo.update_epochs; ++epoch) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "update_epoch");
-    const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
+    const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(device_));
     for (int agent_offset = 0; agent_offset < total_agents; agent_offset += logical_agents_per_batch) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "update_minibatch");
       const int count = std::min(logical_agents_per_batch, total_agents - agent_offset);
@@ -769,7 +776,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         const int loss_steps = chunk_steps;
 
         const torch::Tensor obs =
-            rollout.obs.narrow(0, chunk_start, chunk_steps).index_select(1, micro_agent_indices).to(device_);
+            rollout.obs.narrow(0, chunk_start, chunk_steps).index_select(1, micro_agent_indices);
 
         const auto forward_start = std::chrono::steady_clock::now();
         ActorSequenceOutput output;
@@ -787,15 +794,15 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         torch::Tensor features = output.features;
 
         const torch::Tensor action_masks =
-            rollout.action_masks.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices).to(device_).to(torch::kBool);
+            rollout.action_masks.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices).to(torch::kBool);
         const torch::Tensor learner_active =
-            rollout.learner_active.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices).to(device_);
+            rollout.learner_active.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
         const torch::Tensor old_actions =
-            rollout.actions.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices).to(device_);
+            rollout.actions.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
         const torch::Tensor old_log_probs =
-            rollout.action_log_probs.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices).to(device_);
+            rollout.action_log_probs.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
         const torch::Tensor chunk_advantages =
-            normalized_advantages.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices).to(device_);
+            normalized_advantages.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
 
         const auto samples = loss_steps * micro_count;
         const torch::Tensor flat_active = learner_active.reshape({samples}) > 0.5F;
@@ -835,7 +842,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         }
 
         torch::Tensor chunk_returns =
-            sparse_returns.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices).to(device_).reshape({samples});
+            sparse_returns.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices).reshape({samples});
         torch::Tensor active_returns = chunk_returns.index({flat_active});
 
         torch::Tensor value_win_chunk = output.value_win_logits;
@@ -863,7 +870,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
               config_.goal_critic.max_future_horizon);
           const int goal_dim = config_.goal_critic.goal_dim;
 
-          torch::Tensor flat_future_goal_pos = future_goal_pos.to(device_).reshape({samples, goal_dim});
+          torch::Tensor flat_future_goal_pos = future_goal_pos.reshape({samples, goal_dim});
           torch::Tensor active_future_goal_pos = flat_future_goal_pos.index({flat_active});
 
           const auto active_count = active_features.size(0);
@@ -1099,8 +1106,8 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
           action_indices_cpu.data_ptr<std::int64_t>(),
           static_cast<std::size_t>(action_indices_cpu.numel())));
 
-      torch::Tensor dones_cpu = eval_collector->host_dones().to(torch::kCPU);
-      torch::Tensor labels_cpu = eval_collector->host_terminal_outcome_labels().to(torch::kCPU);
+      torch::Tensor dones_cpu = eval_collector->host_dones();
+      torch::Tensor labels_cpu = eval_collector->host_terminal_outcome_labels();
       const auto* dones_ptr = dones_cpu.data_ptr<float>();
       const auto* labels_ptr = labels_cpu.data_ptr<std::int64_t>();
       for (std::size_t i = 0; i < controlled_host.size(); ++i) {
@@ -1472,9 +1479,8 @@ void APPOTrainer::collect_rollout(
             }
          }
 
-         const torch::Tensor sampled_value_cpu = shard_step.sampled_value.to(torch::kCPU);
-        accumulated_sampled_value += sampled_value_cpu.sum().item<double>();
-        accumulated_value_count += static_cast<int64_t>(sampled_value_cpu.numel());
+        accumulated_sampled_value += shard_step.sampled_value.sum().item<double>();
+        accumulated_value_count += static_cast<int64_t>(shard_step.sampled_value.numel());
 
         torch::Tensor goal_pos_host = collector.host_goal_positions();
         torch::Tensor goal_norms = goal_pos_host.norm(2, 1);
@@ -1497,7 +1503,7 @@ void APPOTrainer::collect_rollout(
         total_learner_steps += learner_step_count;
 
         std::unordered_map<std::string, torch::Tensor> all_values;
-        all_values["extrinsic"] = sampled_value_cpu;
+        all_values["extrinsic"] = shard_step.sampled_value;
 
         std::unordered_map<std::string, torch::Tensor> all_rewards;
         all_rewards["extrinsic"] = extrinsic_rewards_host;
@@ -1505,12 +1511,12 @@ void APPOTrainer::collect_rollout(
         dest.append_slice(
             step,
             shard_step.agent_offset,
-            shard_step.normalized_obs.to(torch::kCPU),
+            shard_step.normalized_obs,
             shard_step.episode_starts_host.to(torch::kBool),
             shard_step.action_masks_host,
             shard_step.learner_active_host,
             shard_step.action_indices_cpu,
-            shard_step.action_log_probs.to(torch::kCPU),
+            shard_step.action_log_probs,
             all_values,
             all_rewards,
             dones_host,
@@ -1542,7 +1548,7 @@ void APPOTrainer::collect_rollout(
         torch::Tensor final_starts = collector.host_episode_starts().to(device_, use_pinned_host_buffers_);
         const torch::Tensor final_goal_values = policy_goal_values_like(final_normalized, config_.goal_critic.goal_dim);
         ActorStepOutput final_output = rollout_actor->forward_step(final_normalized, final_goal_values);
-        final_values.push_back(final_output.value_win_logits.squeeze(-1).to(torch::kCPU));
+        final_values.push_back(final_output.value_win_logits.squeeze(-1));
       }
       std::unordered_map<std::string, torch::Tensor> bootstrap_values;
       bootstrap_values["extrinsic"] = torch::cat(final_values, 0);
@@ -1672,9 +1678,8 @@ void APPOTrainer::collect_rollout(
       }
     }
 
-    const torch::Tensor sampled_value_cpu = sampled_value.to(torch::kCPU);
-    accumulated_sampled_value += sampled_value_cpu.sum().item<double>();
-    accumulated_value_count += static_cast<int64_t>(sampled_value_cpu.numel());
+    accumulated_sampled_value += sampled_value.sum().item<double>();
+    accumulated_value_count += static_cast<int64_t>(sampled_value.numel());
 
     torch::Tensor goal_pos_host = collector_->host_goal_positions();
     torch::Tensor goal_norms = goal_pos_host.norm(2, 1);
@@ -1695,19 +1700,19 @@ void APPOTrainer::collect_rollout(
     total_learner_steps += learner_step_count;
 
     std::unordered_map<std::string, torch::Tensor> all_values;
-    all_values["extrinsic"] = sampled_value_cpu;
+    all_values["extrinsic"] = sampled_value;
 
     std::unordered_map<std::string, torch::Tensor> all_rewards;
     all_rewards["extrinsic"] = extrinsic_rewards_host;
 
     dest.append(
         step,
-        normalized_obs.to(torch::kCPU),
+        normalized_obs,
         episode_starts_host.to(torch::kBool),
         action_masks_host,
         learner_active_host,
         action_indices_cpu,
-        action_log_probs.to(torch::kCPU),
+        action_log_probs,
         all_values,
         all_rewards,
         dones_host,
@@ -1730,7 +1735,7 @@ void APPOTrainer::collect_rollout(
     ActorStepOutput final_output = rollout_actor->forward_step(final_normalized, final_goal_values);
 
     std::unordered_map<std::string, torch::Tensor> bootstrap_values;
-    bootstrap_values["extrinsic"] = final_output.value_win_logits.squeeze(-1).to(torch::kCPU);
+    bootstrap_values["extrinsic"] = final_output.value_win_logits.squeeze(-1);
     dest.set_final_values(bootstrap_values);
     }
   }

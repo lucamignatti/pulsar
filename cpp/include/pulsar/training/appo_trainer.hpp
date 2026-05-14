@@ -142,9 +142,9 @@ class APPOTrainer {
   PPOActor actor_snapshot_{nullptr};
   ObservationNormalizer actor_normalizer_;
   torch::optim::Adam actor_optimizer_;
+  torch::Device device_{torch::kCPU};
   RolloutStorage rollout_;
   RolloutStorage rollout_B_;
-  torch::Device device_{torch::kCPU};
   std::filesystem::path run_output_root_{};
   bool log_initialization_ = true;
   std::int64_t resumed_global_step_ = 0;
