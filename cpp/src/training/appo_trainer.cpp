@@ -349,11 +349,11 @@ APPOTrainer::APPOTrainer(
   use_pinned_host_buffers_ = device_.is_cuda();
 #ifdef PULSAR_HAS_CUDA
   if (device_.is_cuda()) {
-    training_stream_ = at::cuda::getStreamFromPool(false, device_.index());
+    training_stream_.emplace(at::cuda::getStreamFromPool(false, device_.index()));
     const std::size_t num_shards = collectors_.size();
     shard_collection_streams_.reserve(num_shards);
     for (std::size_t i = 0; i < num_shards; ++i) {
-      shard_collection_streams_.push_back(
+      shard_collection_streams_.emplace_back(
           at::cuda::getStreamFromPool(false, device_.index()));
     }
   }
@@ -641,8 +641,11 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
 TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   PULSAR_TRACE_SCOPE_CAT("trainer", "update_actor");
 #ifdef PULSAR_HAS_CUDA
-  c10::cuda::CUDAStream prev_train_stream = c10::cuda::getCurrentCUDAStream(device_.index());
-  c10::cuda::setCurrentCUDAStream(training_stream_);
+  std::optional<c10::cuda::CUDAStream> prev_train_stream;
+  if (training_stream_.has_value()) {
+    prev_train_stream = c10::cuda::getCurrentCUDAStream(device_.index());
+    c10::cuda::setCurrentCUDAStream(*training_stream_);
+  }
 #endif
   const auto update_start = std::chrono::steady_clock::now();
   TrainerMetrics metrics{};
@@ -1008,7 +1011,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   metrics.effective_entropy_coef = static_cast<double>(effective_entropy_coef);
   metrics.update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count();
 #ifdef PULSAR_HAS_CUDA
-  c10::cuda::setCurrentCUDAStream(prev_train_stream);
+  if (prev_train_stream.has_value()) {
+    c10::cuda::setCurrentCUDAStream(*prev_train_stream);
+  }
 #endif
   return metrics;
 }
@@ -1965,7 +1970,9 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     }
 
 #ifdef PULSAR_HAS_CUDA
-    training_stream_.synchronize();
+    if (training_stream_.has_value()) {
+      training_stream_->synchronize();
+    }
 #endif
 
     if (self_play_manager_) {

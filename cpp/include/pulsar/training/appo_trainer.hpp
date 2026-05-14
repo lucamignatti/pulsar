@@ -159,7 +159,7 @@ class APPOTrainer {
   static constexpr int kRecentScoredRateWindow = 20;
 #ifdef PULSAR_HAS_CUDA
   std::vector<c10::cuda::CUDAStream> shard_collection_streams_;
-  c10::cuda::CUDAStream training_stream_;
+  std::optional<c10::cuda::CUDAStream> training_stream_;
 #endif
 };
 
