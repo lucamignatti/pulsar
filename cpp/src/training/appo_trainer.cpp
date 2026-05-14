@@ -1918,11 +1918,20 @@ TrainerBenchmarkMetrics APPOTrainer::benchmark(int updates) {
     TrainerMetrics collection_metrics{};
     std::int64_t collected_steps = 0;
 
+    std::cout << "bench_update_start update=" << (index + 1)
+              << "/" << bounded_updates << '\n' << std::flush;
     const auto collection_start = std::chrono::steady_clock::now();
     collect_rollout(rollout_, collection_metrics, &collected_steps, actor_snapshot_, actor_normalizer_);
     synchronize_cuda_if_needed(device_, "benchmark collection");
-    result.collection_seconds +=
+    const double collection_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - collection_start).count();
+    result.collection_seconds += collection_seconds;
+    std::cout << "bench_collection_done update=" << (index + 1)
+              << " agent_steps=" << collected_steps
+              << " seconds=" << collection_seconds
+              << " agent_steps_per_second="
+              << (collected_steps > 0 ? static_cast<double>(collected_steps) / std::max(collection_seconds, 1.0e-9) : 0.0)
+              << '\n' << std::flush;
 
     TrainerMetrics update_metrics = update_actor(rollout_);
     result.agent_steps += collected_steps;
@@ -1933,6 +1942,13 @@ TrainerBenchmarkMetrics APPOTrainer::benchmark(int updates) {
     result.value_loss += update_metrics.value_loss;
     result.entropy += update_metrics.entropy;
     result.grad_norm += update_metrics.grad_norm;
+    std::cout << "bench_update_done update=" << (index + 1)
+              << " update_seconds=" << update_metrics.update_seconds
+              << " forward_backward_seconds=" << update_metrics.forward_backward_seconds
+              << " optimizer_step_seconds=" << update_metrics.optimizer_step_seconds
+              << " ppo_update_agent_steps_per_second="
+              << (collected_steps > 0 ? static_cast<double>(collected_steps) / std::max(update_metrics.update_seconds, 1.0e-9) : 0.0)
+              << '\n' << std::flush;
 
     synchronize_cuda_if_needed(device_, "benchmark snapshot clone");
     actor_snapshot_ = clone_ppo_actor(actor_, device_);
