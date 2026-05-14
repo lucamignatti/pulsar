@@ -407,7 +407,7 @@
     "plasticity_interval": 40,
     "plasticity_shrink": 0.999,
     "plasticity_noise": 0.0001,
-    "pcgrad": false
+    "pcgrad": true
   },
   "goal_mapping": {
     "arena_max_distance": 8192.0

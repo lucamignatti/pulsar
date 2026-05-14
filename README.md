@@ -64,7 +64,7 @@ For CUDA setup, see [docs/cuda_linux.md](docs/cuda_linux.md).
 
 ```bash
 ctest --test-dir build/release --output-on-failure
-./build/release/pulsar_bench
+./build/release/pulsar_bench 20 configs/2v2_appo.json cuda:0
 ```
 
 ## Core Binary

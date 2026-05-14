@@ -83,6 +83,20 @@ struct TrainerMetrics {
   std::map<std::string, double> mode_scored_rates{};
 };
 
+struct TrainerBenchmarkMetrics {
+  int updates = 0;
+  std::int64_t agent_steps = 0;
+  double total_seconds = 0.0;
+  double collection_seconds = 0.0;
+  double update_seconds = 0.0;
+  double forward_backward_seconds = 0.0;
+  double optimizer_step_seconds = 0.0;
+  double policy_loss = 0.0;
+  double value_loss = 0.0;
+  double entropy = 0.0;
+  double grad_norm = 0.0;
+};
+
 class APPOTrainer {
  public:
   APPOTrainer(
@@ -100,6 +114,7 @@ class APPOTrainer {
   ~APPOTrainer();
 
   void train(int updates, const std::string& checkpoint_dir, const std::string& config_path = "");
+  TrainerBenchmarkMetrics benchmark(int updates);
 
  private:
   void maybe_initialize_from_checkpoint();

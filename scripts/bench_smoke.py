@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -11,12 +13,34 @@ def main() -> int:
         raise SystemExit("usage: bench_smoke.py <pulsar_bench>")
 
     bench_binary = Path(sys.argv[1]).resolve()
-    result = subprocess.run(
-        [str(bench_binary), "1", "0"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    repo_root = bench_binary.parents[2]
+    base_config = json.loads((repo_root / "configs" / "2v2_appo.json").read_text(encoding="utf-8"))
+    base_config["model"].update({
+        "encoder_dim": 64,
+        "num_encoder_blocks": 1,
+        "transformer_num_heads": 4,
+        "transformer_max_batch_size": 256,
+        "value_hidden_dim": 64,
+    })
+    base_config["ppo"]["rollout_length"] = 8
+    base_config["ppo"]["minibatch_size"] = 32
+    base_config["ppo"]["num_envs"] = 2
+    base_config["ppo"]["collection_shards"] = 1
+    base_config["ppo"]["collection_workers"] = 0
+    base_config["ppo"]["device"] = "cpu"
+    base_config["wandb"]["enabled"] = False
+    base_config["env"]["collision_meshes_path"] = str((repo_root / "collision_meshes").resolve())
+    base_config["goal_critic"]["hidden_dim"] = 64
+    base_config["goal_critic"]["contrastive_batch_size"] = 16
+    with tempfile.TemporaryDirectory(prefix="pulsar_bench_smoke_") as tmp:
+        config_path = Path(tmp) / "config.json"
+        config_path.write_text(json.dumps(base_config), encoding="utf-8")
+        result = subprocess.run(
+            [str(bench_binary), "1", str(config_path), "cpu"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
     metrics = {}
     for line in result.stdout.splitlines():
         if "=" not in line:
@@ -27,8 +51,9 @@ def main() -> int:
     required = {
         "collection_agent_steps_per_second",
         "ppo_update_agent_steps_per_second",
-        "policy_forward_seconds",
-        "ppo_forward_backward_seconds",
+        "overall_agent_steps_per_second",
+        "forward_backward_seconds",
+        "optimizer_step_seconds",
     }
     missing = sorted(required - metrics.keys())
     if missing:

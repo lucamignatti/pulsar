@@ -1903,6 +1903,53 @@ void APPOTrainer::save_checkpoint(const std::filesystem::path& directory, std::i
   }
 }
 
+TrainerBenchmarkMetrics APPOTrainer::benchmark(int updates) {
+  const int bounded_updates = std::max(1, updates);
+  TrainerBenchmarkMetrics result{};
+  result.updates = bounded_updates;
+
+  if (curriculum_.enabled()) {
+    apply_curriculum_to_collectors();
+    apply_curriculum_lr();
+  }
+
+  const auto benchmark_start = std::chrono::steady_clock::now();
+  for (int index = 0; index < bounded_updates; ++index) {
+    TrainerMetrics collection_metrics{};
+    std::int64_t collected_steps = 0;
+
+    const auto collection_start = std::chrono::steady_clock::now();
+    collect_rollout(rollout_, collection_metrics, &collected_steps, actor_snapshot_, actor_normalizer_);
+    synchronize_cuda_if_needed(device_, "benchmark collection");
+    result.collection_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - collection_start).count();
+
+    TrainerMetrics update_metrics = update_actor(rollout_);
+    result.agent_steps += collected_steps;
+    result.update_seconds += update_metrics.update_seconds;
+    result.forward_backward_seconds += update_metrics.forward_backward_seconds;
+    result.optimizer_step_seconds += update_metrics.optimizer_step_seconds;
+    result.policy_loss += update_metrics.policy_loss;
+    result.value_loss += update_metrics.value_loss;
+    result.entropy += update_metrics.entropy;
+    result.grad_norm += update_metrics.grad_norm;
+
+    synchronize_cuda_if_needed(device_, "benchmark snapshot clone");
+    actor_snapshot_ = clone_ppo_actor(actor_, device_);
+    actor_snapshot_->eval();
+    rollout_.clear();
+  }
+
+  result.total_seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - benchmark_start).count();
+  const double denom = static_cast<double>(bounded_updates);
+  result.policy_loss /= denom;
+  result.value_loss /= denom;
+  result.entropy /= denom;
+  result.grad_norm /= denom;
+  return result;
+}
+
 void APPOTrainer::save_training_state(const std::filesystem::path& path) const {
   torch::NoGradGuard no_grad;
   PPOActor actor_cpu = clone_ppo_actor(actor_, torch::Device(torch::kCPU));

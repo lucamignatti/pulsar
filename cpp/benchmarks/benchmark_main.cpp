@@ -1,103 +1,127 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
+#include <memory>
+#include <string>
+#include <vector>
 
-#include <torch/cuda.h>
+#include <torch/torch.h>
 
-#include "pulsar/model/ppo_actor.hpp"
-#include "pulsar/training/ppo_math.hpp"
+#include "pulsar/config/config.hpp"
+#include "pulsar/env/done.hpp"
+#include "pulsar/env/obs_builder.hpp"
+#include "pulsar/rl/action_table.hpp"
+#include "pulsar/training/appo_trainer.hpp"
+#include "pulsar/training/batched_rocketsim_collector.hpp"
+#include "pulsar/training/self_play_manager.hpp"
 
 namespace {
 
-double seconds_since(std::chrono::steady_clock::time_point start) {
-  return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+bool should_pin_host_memory(const std::string& device) {
+  return device.rfind("cuda", 0) == 0;
 }
 
-void synchronize_if_cuda(const torch::Device& device) {
-  if (device.is_cuda()) {
-    torch::cuda::synchronize(device.index());
+int positive_arg_or(int argc, char** argv, int index, int fallback) {
+  if (argc <= index) {
+    return fallback;
   }
+  const int value = std::atoi(argv[index]);
+  return value > 0 ? value : fallback;
 }
 
-pulsar::ModelConfig benchmark_model_config() {
-  pulsar::ModelConfig config;
-  config.observation_dim = 132;
-  config.action_dim = 90;
-  config.encoder_dim = 64;
-  config.num_encoder_blocks = 2;
-  config.value_hidden_dim = 128;
-  return config;
+torch::Device resolve_runtime_device(const std::string& device_name) {
+  torch::Device device(device_name);
+  if (device.is_cuda() && !device.has_index()) {
+    return torch::Device(torch::kCUDA, 0);
+  }
+  return device;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-  const int updates = argc > 1 ? std::max(1, std::atoi(argv[1])) : 1;
-  const int batch = argc > 2 ? std::max(1, std::atoi(argv[2])) : 4096;
-  const torch::Device device =
-      argc > 3 ? torch::Device(argv[3])
-               : (torch::cuda::is_available() ? torch::Device(torch::kCUDA, 0) : torch::Device(torch::kCPU));
-  const int sequence = 8;
+  const int updates = positive_arg_or(argc, argv, 1, 3);
+  const std::filesystem::path config_path =
+      argc > 2 ? std::filesystem::path(argv[2]) : std::filesystem::path{"configs/2v2_appo.json"};
 
-  const pulsar::ModelConfig model_config = benchmark_model_config();
-  pulsar::PPOActor actor(model_config, pulsar::GoalCriticConfig{});
-  actor->to(device);
-  torch::optim::Adam optimizer(actor->parameters(), torch::optim::AdamOptions(3.0e-4));
+  try {
+    pulsar::ExperimentConfig config = pulsar::load_experiment_config(config_path.string());
+    pulsar::validate_experiment_config(config);
+    if (argc > 3) {
+      config.ppo.device = resolve_runtime_device(argv[3]).str();
+    }
+    config.wandb.enabled = false;
+    config.ppo.checkpoint_interval = 0;
 
-  std::cout << "device=" << device.str() << '\n';
+    constexpr int kObsMaxTeamSize = 3;
+    auto obs_builder_cfg = config.env;
+    obs_builder_cfg.team_size = kObsMaxTeamSize;
+    auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(obs_builder_cfg);
+    auto action_parser = std::make_shared<pulsar::DiscreteActionParser>(
+        pulsar::ControllerActionTable(config.action_table));
+    auto done_condition = std::make_shared<pulsar::SimpleDoneCondition>(config.env);
 
-  double policy_forward_seconds = 0.0;
-  double ppo_seconds = 0.0;
-  std::int64_t samples = 0;
+    std::vector<std::unique_ptr<pulsar::BatchedRocketSimCollector>> collectors;
+    const int collection_shards = std::max(1, std::min(config.ppo.collection_shards, config.ppo.num_envs));
+    collectors.reserve(static_cast<std::size_t>(collection_shards));
+    int env_offset = 0;
+    for (int shard = 0; shard < collection_shards; ++shard) {
+      pulsar::ExperimentConfig shard_config = config;
+      const int base_envs = config.ppo.num_envs / collection_shards;
+      const int extra_envs = shard < (config.ppo.num_envs % collection_shards) ? 1 : 0;
+      shard_config.ppo.num_envs = base_envs + extra_envs;
+      if (config.ppo.collection_workers > 0) {
+        const int base_workers = config.ppo.collection_workers / collection_shards;
+        const int extra_workers = shard < (config.ppo.collection_workers % collection_shards) ? 1 : 0;
+        shard_config.ppo.collection_workers = std::max(1, base_workers + extra_workers);
+      }
+      shard_config.env.seed += static_cast<std::uint64_t>(env_offset);
+      collectors.push_back(std::make_unique<pulsar::BatchedRocketSimCollector>(
+          shard_config,
+          obs_builder,
+          action_parser,
+          done_condition,
+          should_pin_host_memory(config.ppo.device)));
+      env_offset += shard_config.ppo.num_envs;
+    }
 
-  for (int update = 0; update < updates; ++update) {
-    torch::Tensor obs = torch::randn({sequence, batch, model_config.observation_dim}, device);
-    torch::Tensor starts = torch::zeros({sequence, batch}, device);
-    auto forward_start = std::chrono::steady_clock::now();
-    const pulsar::ActorSequenceOutput output = actor->forward_sequence(obs);
-    synchronize_if_cuda(device);
-    policy_forward_seconds += seconds_since(forward_start);
+    std::unique_ptr<pulsar::SelfPlayManager> self_play_manager;
+    pulsar::APPOTrainer trainer(
+        config,
+        std::move(collectors),
+        std::move(self_play_manager),
+        std::filesystem::path{},
+        false);
 
-    const torch::Tensor logits = output.policy_logits.reshape({sequence * batch, model_config.action_dim});
-    const torch::Tensor masks = torch::ones(logits.sizes(), torch::TensorOptions().dtype(torch::kBool).device(device));
-    const torch::Tensor actions = pulsar::sample_masked_actions(logits, masks, false);
-    const torch::Tensor old_log_probs =
-        torch::log_softmax(pulsar::apply_action_mask_to_logits(logits, masks), -1).gather(1, actions.unsqueeze(1)).squeeze(1);
-    const torch::Tensor values = torch::zeros({sequence * batch}, device);
-    const torch::Tensor rewards = torch::zeros({sequence * batch}, device);
-    const torch::Tensor dones = torch::zeros({sequence * batch}, device);
-    const torch::Tensor advantages = pulsar::compute_gae(
-        values.reshape({sequence, batch}),
-        rewards.reshape({sequence, batch}),
-        dones.reshape({sequence, batch}),
-        0.99F, 0.95F).reshape({sequence * batch});
+    const pulsar::TrainerBenchmarkMetrics metrics = trainer.benchmark(updates);
+    const double total_seconds = std::max(metrics.total_seconds, 1.0e-9);
+    const double update_seconds = std::max(metrics.update_seconds, 1.0e-9);
+    const double collection_seconds = std::max(metrics.collection_seconds, 1.0e-9);
 
-    synchronize_if_cuda(device);
-    auto ppo_start = std::chrono::steady_clock::now();
-    const torch::Tensor current_log_probs =
-        torch::log_softmax(pulsar::apply_action_mask_to_logits(logits, masks), -1).gather(1, actions.unsqueeze(1)).squeeze(1);
-    const torch::Tensor policy_loss =
-        pulsar::clipped_ppo_policy_loss(current_log_probs, old_log_probs.detach(), advantages, 0.2F)
-            .mean();
-    const torch::Tensor entropy_loss = -0.01F * pulsar::masked_action_entropy(logits, masks).mean();
-    const torch::Tensor value_logits = output.value_win_logits.reshape({sequence * batch, 1});
-    const torch::Tensor value_loss = torch::mse_loss(value_logits.squeeze(-1), advantages, torch::Reduction::Mean);
-    const torch::Tensor loss = policy_loss + entropy_loss + 1.0F * value_loss;
-    optimizer.zero_grad();
-    loss.backward();
-    optimizer.step();
-    synchronize_if_cuda(device);
-    ppo_seconds += seconds_since(ppo_start);
-    samples += sequence * batch;
+    std::cout << "config=" << config_path.string() << '\n';
+    std::cout << "device=" << config.ppo.device << '\n';
+    std::cout << "updates=" << metrics.updates << '\n';
+    std::cout << "agent_steps=" << metrics.agent_steps << '\n';
+    std::cout << "total_seconds=" << metrics.total_seconds << '\n';
+    std::cout << "collection_seconds=" << metrics.collection_seconds << '\n';
+    std::cout << "update_seconds=" << metrics.update_seconds << '\n';
+    std::cout << "forward_backward_seconds=" << metrics.forward_backward_seconds << '\n';
+    std::cout << "optimizer_step_seconds=" << metrics.optimizer_step_seconds << '\n';
+    std::cout << "collection_agent_steps_per_second="
+              << static_cast<double>(metrics.agent_steps) / collection_seconds << '\n';
+    std::cout << "ppo_update_agent_steps_per_second="
+              << static_cast<double>(metrics.agent_steps) / update_seconds << '\n';
+    std::cout << "overall_agent_steps_per_second="
+              << static_cast<double>(metrics.agent_steps) / total_seconds << '\n';
+    std::cout << "policy_loss=" << metrics.policy_loss << '\n';
+    std::cout << "value_loss=" << metrics.value_loss << '\n';
+    std::cout << "entropy=" << metrics.entropy << '\n';
+    std::cout << "grad_norm=" << metrics.grad_norm << '\n';
+    return EXIT_SUCCESS;
+  } catch (const std::exception& exc) {
+    std::cerr << "pulsar_bench failed: " << exc.what() << '\n';
+    return EXIT_FAILURE;
   }
-
-  const double total_seconds = std::max(policy_forward_seconds + ppo_seconds, 1.0e-9);
-  std::cout << "collection_agent_steps_per_second=" << static_cast<double>(samples) / total_seconds << '\n';
-  std::cout << "ppo_update_agent_steps_per_second=" << static_cast<double>(samples) / std::max(ppo_seconds, 1.0e-9) << '\n';
-  std::cout << "offline_pretrain_samples_per_second=" << static_cast<double>(samples) / total_seconds << '\n';
-  std::cout << "offline_pretrain_epoch_seconds=" << total_seconds << '\n';
-  std::cout << "policy_forward_seconds=" << policy_forward_seconds << '\n';
-  std::cout << "ppo_forward_backward_seconds=" << ppo_seconds << '\n';
-  return EXIT_SUCCESS;
 }
