@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -39,6 +40,44 @@ torch::Device resolve_runtime_device(const std::string& device_name) {
   return device;
 }
 
+bool parse_bool_override(const std::string& value) {
+  if (value == "1" || value == "true" || value == "TRUE" || value == "yes") {
+    return true;
+  }
+  if (value == "0" || value == "false" || value == "FALSE" || value == "no") {
+    return false;
+  }
+  throw std::invalid_argument("boolean override must be one of 0/1/true/false/yes/no");
+}
+
+void apply_benchmark_override(pulsar::ExperimentConfig& config, const std::string& arg) {
+  const std::size_t equals = arg.find('=');
+  if (equals == std::string::npos || equals == 0 || equals + 1 >= arg.size()) {
+    throw std::invalid_argument("benchmark overrides must use key=value syntax: " + arg);
+  }
+  const std::string key = arg.substr(0, equals);
+  const std::string value = arg.substr(equals + 1);
+  if (key == "num_envs") {
+    config.ppo.num_envs = std::stoi(value);
+  } else if (key == "collection_workers") {
+    config.ppo.collection_workers = std::stoi(value);
+  } else if (key == "collection_shards") {
+    config.ppo.collection_shards = std::stoi(value);
+  } else if (key == "rollout_length") {
+    config.ppo.rollout_length = std::stoi(value);
+  } else if (key == "minibatch_size") {
+    config.ppo.minibatch_size = std::stoi(value);
+  } else if (key == "update_epochs") {
+    config.ppo.update_epochs = std::stoi(value);
+  } else if (key == "max_forward_samples") {
+    config.model.transformer_max_batch_size = std::stoi(value);
+  } else if (key == "pcgrad") {
+    config.ppo.pcgrad = parse_bool_override(value);
+  } else {
+    throw std::invalid_argument("unknown benchmark override: " + key);
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -48,10 +87,15 @@ int main(int argc, char** argv) {
 
   try {
     pulsar::ExperimentConfig config = pulsar::load_experiment_config(config_path.string());
-    pulsar::validate_experiment_config(config);
-    if (argc > 3) {
+    int override_start = 3;
+    if (argc > 3 && std::string(argv[3]).find('=') == std::string::npos) {
       config.ppo.device = resolve_runtime_device(argv[3]).str();
+      override_start = 4;
     }
+    for (int arg_index = override_start; arg_index < argc; ++arg_index) {
+      apply_benchmark_override(config, argv[arg_index]);
+    }
+    pulsar::validate_experiment_config(config);
     config.wandb.enabled = false;
     config.ppo.checkpoint_interval = 0;
 
@@ -103,6 +147,14 @@ int main(int argc, char** argv) {
     std::cout << "config=" << config_path.string() << '\n';
     std::cout << "device=" << config.ppo.device << '\n';
     std::cout << "model_parameters=" << trainer.model_parameter_count() << '\n';
+    std::cout << "num_envs=" << config.ppo.num_envs << '\n';
+    std::cout << "collection_shards=" << config.ppo.collection_shards << '\n';
+    std::cout << "collection_workers=" << config.ppo.collection_workers << '\n';
+    std::cout << "rollout_length=" << config.ppo.rollout_length << '\n';
+    std::cout << "minibatch_size=" << config.ppo.minibatch_size << '\n';
+    std::cout << "update_epochs=" << config.ppo.update_epochs << '\n';
+    std::cout << "max_forward_samples=" << config.model.transformer_max_batch_size << '\n';
+    std::cout << "pcgrad=" << (config.ppo.pcgrad ? 1 : 0) << '\n';
     std::cout << "updates=" << metrics.updates << '\n';
     std::cout << "agent_steps=" << metrics.agent_steps << '\n';
     std::cout << "total_seconds=" << metrics.total_seconds << '\n';
