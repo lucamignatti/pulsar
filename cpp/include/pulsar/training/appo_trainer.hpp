@@ -115,6 +115,7 @@ class APPOTrainer {
 
   void train(int updates, const std::string& checkpoint_dir, const std::string& config_path = "");
   TrainerBenchmarkMetrics benchmark(int updates);
+  [[nodiscard]] std::int64_t model_parameter_count() const;
 
  private:
   void maybe_initialize_from_checkpoint();
@@ -168,6 +169,7 @@ class APPOTrainer {
   std::size_t total_agents_ = 0;
   std::vector<std::int64_t> shard_agent_offsets_{};
   bool use_pinned_host_buffers_ = false;
+  bool benchmark_progress_ = false;
   std::atomic<bool> es_deltas_ready_{false};
   torch::Tensor es_delta_A_;
   torch::Tensor es_delta_B_;

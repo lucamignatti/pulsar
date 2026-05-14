@@ -304,6 +304,7 @@ void to_json(json& j, const ModelConfig& value) {
   j = json{
       {"observation_dim", value.observation_dim},
       {"action_dim", value.action_dim},
+      {"encoder_type", value.encoder_type},
       {"use_layer_norm", value.use_layer_norm},
       {"encoder_dim", value.encoder_dim},
       {"num_encoder_blocks", value.num_encoder_blocks},
@@ -320,6 +321,7 @@ void to_json(json& j, const ModelConfig& value) {
 void from_json(const json& j, ModelConfig& value) {
   value.observation_dim = j.value("observation_dim", 132);
   value.action_dim = j.value("action_dim", 90);
+  value.encoder_type = j.value("encoder_type", std::string{"transformer"});
   value.use_layer_norm = j.value("use_layer_norm", true);
   value.encoder_dim = j.value("encoder_dim", 640);
   value.num_encoder_blocks = j.value("num_encoder_blocks", 5);
@@ -637,6 +639,9 @@ void validate_experiment_config(const ExperimentConfig& config) {
     throw std::invalid_argument("ppo.collection_shards must be <= ppo.num_envs.");
   }
 
+  if (config.model.encoder_type != "transformer" && config.model.encoder_type != "mlp") {
+    throw std::invalid_argument("model.encoder_type must be either \"transformer\" or \"mlp\".");
+  }
   if (config.model.encoder_dim <= 0) {
     throw std::invalid_argument("model.encoder_dim must be positive.");
   }
@@ -646,7 +651,7 @@ void validate_experiment_config(const ExperimentConfig& config) {
   if (config.model.transformer_num_heads <= 0) {
     throw std::invalid_argument("model.transformer_num_heads must be positive.");
   }
-  if (config.model.encoder_dim % config.model.transformer_num_heads != 0) {
+  if (config.model.encoder_type == "transformer" && config.model.encoder_dim % config.model.transformer_num_heads != 0) {
     throw std::invalid_argument("model.encoder_dim must be divisible by model.transformer_num_heads.");
   }
   if (config.model.transformer_window_size <= 0) {

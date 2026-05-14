@@ -57,7 +57,10 @@ void validate_model_config(const ModelConfig& config) {
   require_positive(config.transformer_token_group_size, "transformer_token_group_size");
   require_positive(config.transformer_ffn_multiplier, "transformer_ffn_multiplier");
   require_positive(config.value_hidden_dim, "value_hidden_dim");
-  if (config.encoder_dim % config.transformer_num_heads != 0) {
+  if (config.encoder_type != "transformer" && config.encoder_type != "mlp") {
+    throw std::invalid_argument("ModelConfig.encoder_type must be either \"transformer\" or \"mlp\".");
+  }
+  if (config.encoder_type == "transformer" && config.encoder_dim % config.transformer_num_heads != 0) {
     throw std::invalid_argument("ModelConfig.encoder_dim must be divisible by transformer_num_heads.");
   }
 }
@@ -307,6 +310,28 @@ torch::Tensor SWATransformerEncoderImpl::forward(const torch::Tensor& obs) {
   return tokens.select(1, 0);
 }
 
+MLPEncoderImpl::MLPEncoderImpl(const ModelConfig& config) {
+  network_ = torch::nn::Sequential();
+  network_->push_back(torch::nn::Linear(config.observation_dim, config.encoder_dim));
+  if (config.use_layer_norm) {
+    network_->push_back(torch::nn::LayerNorm(torch::nn::LayerNormOptions({config.encoder_dim})));
+  }
+  network_->push_back(torch::nn::Functional(torch::relu));
+  for (int i = 0; i < config.num_encoder_blocks; ++i) {
+    network_->push_back(torch::nn::Linear(config.encoder_dim, config.encoder_dim));
+    if (config.use_layer_norm) {
+      network_->push_back(torch::nn::LayerNorm(torch::nn::LayerNormOptions({config.encoder_dim})));
+    }
+    network_->push_back(torch::nn::Functional(torch::relu));
+  }
+  register_module("network", network_);
+}
+
+torch::Tensor MLPEncoderImpl::forward(const torch::Tensor& obs) {
+  PULSAR_TRACE_SCOPE_CAT("actor", "mlp_encoder");
+  return network_->forward(obs);
+}
+
 GoalCriticImpl::GoalCriticImpl(int feature_dim, int action_dim, int embedding_dim, int hidden_dim, int goal_dim)
     : action_dim_(action_dim), hidden_dim_(hidden_dim), embedding_dim_(embedding_dim), goal_dim_(goal_dim) {
   sa_encoder_ = torch::nn::Sequential();
@@ -361,8 +386,13 @@ PPOActorImpl::PPOActorImpl(
   validate_model_config(config_);
   validate_es_lora_config(es_lora_config_);
 
-  encoder_ = SWATransformerEncoder(config_);
-  register_module("encoder", encoder_);
+  if (config_.encoder_type == "mlp") {
+    mlp_encoder_ = MLPEncoder(config_);
+    register_module("encoder", mlp_encoder_);
+  } else {
+    transformer_encoder_ = SWATransformerEncoder(config_);
+    register_module("encoder", transformer_encoder_);
+  }
 
   feature_dim_ = config_.encoder_dim;
 
@@ -389,7 +419,7 @@ ActorStepOutput PPOActorImpl::forward_step(
     torch::Tensor obs,
     torch::Tensor goal_values) {
   PULSAR_TRACE_SCOPE_CAT("actor", "forward_step");
-  torch::Tensor encoded = encoder_->forward(obs);
+  torch::Tensor encoded = mlp_encoder_ ? mlp_encoder_->forward(obs) : transformer_encoder_->forward(obs);
 
   torch::Tensor policy_logits;
   if (!policy_hidden_.is_empty()) {
@@ -413,7 +443,8 @@ ActorSequenceOutput PPOActorImpl::forward_sequence(
   const auto time = obs_seq.size(0);
   const auto batch = obs_seq.size(1);
   const auto flat_batch = time * batch;
-  torch::Tensor encoded = encoder_->forward(obs_seq.reshape({flat_batch, config_.observation_dim}));
+  const torch::Tensor flat_obs = obs_seq.reshape({flat_batch, config_.observation_dim});
+  torch::Tensor encoded = mlp_encoder_ ? mlp_encoder_->forward(flat_obs) : transformer_encoder_->forward(flat_obs);
 
   torch::Tensor policy_logits;
   if (!policy_hidden_.is_empty()) {

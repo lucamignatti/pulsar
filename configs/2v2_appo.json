@@ -368,8 +368,9 @@
   "model": {
     "observation_dim": 172,
     "action_dim": 90,
+    "encoder_type": "mlp",
     "use_layer_norm": true,
-    "encoder_dim": 512,
+    "encoder_dim": 2624,
     "num_encoder_blocks": 4,
     "transformer_num_heads": 8,
     "transformer_window_size": 16,

@@ -102,6 +102,7 @@ int main(int argc, char** argv) {
 
     std::cout << "config=" << config_path.string() << '\n';
     std::cout << "device=" << config.ppo.device << '\n';
+    std::cout << "model_parameters=" << trainer.model_parameter_count() << '\n';
     std::cout << "updates=" << metrics.updates << '\n';
     std::cout << "agent_steps=" << metrics.agent_steps << '\n';
     std::cout << "total_seconds=" << metrics.total_seconds << '\n';

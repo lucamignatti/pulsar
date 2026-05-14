@@ -183,7 +183,7 @@ int cuda_autograd_forward_sample_cap(const ModelConfig& config) {
 
 int effective_transformer_max_batch_size(const ModelConfig& config, const torch::Device& device) {
   const int configured = std::max(1, config.transformer_max_batch_size);
-  if (!device.is_cuda()) {
+  if (!device.is_cuda() || config.encoder_type == "mlp") {
     return configured;
   }
   return std::max(1, std::min(configured, cuda_autograd_forward_sample_cap(config)));
@@ -428,6 +428,14 @@ APPOTrainer::APPOTrainer(
 
 APPOTrainer::~APPOTrainer() {
   synchronize_cuda_if_needed(device_, "trainer shutdown");
+}
+
+std::int64_t APPOTrainer::model_parameter_count() const {
+  std::int64_t total = 0;
+  for (const auto& param : actor_->parameters()) {
+    total += param.numel();
+  }
+  return total;
 }
 
 void APPOTrainer::apply_curriculum_to_collectors() {
@@ -708,6 +716,26 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   const int agents_per_forward = std::max(1, max_forward_samples / seq_len);
   const int total_agents = rollout.num_agents();
   const int rollout_steps = rollout.rollout_length();
+  int minibatches_per_epoch = 0;
+  int microbatches_per_epoch = 0;
+  for (int offset = 0; offset < total_agents; offset += logical_agents_per_batch) {
+    const int count = std::min(logical_agents_per_batch, total_agents - offset);
+    ++minibatches_per_epoch;
+    microbatches_per_epoch += (count + agents_per_forward - 1) / agents_per_forward;
+  }
+  if (benchmark_progress_) {
+    std::cout << "bench_update_phase_start"
+              << " rollout_steps=" << rollout_steps
+              << " total_agents=" << total_agents
+              << " update_epochs=" << config_.ppo.update_epochs
+              << " logical_agents_per_batch=" << logical_agents_per_batch
+              << " effective_forward_samples=" << max_forward_samples
+              << " agents_per_forward=" << agents_per_forward
+              << " minibatches_per_epoch=" << minibatches_per_epoch
+              << " microbatches_per_epoch=" << microbatches_per_epoch
+              << " pcgrad=" << (config_.ppo.pcgrad ? 1 : 0)
+              << '\n' << std::flush;
+  }
   std::int64_t metric_steps = 0;
   double accumulated_goal_critic_loss = 0.0;
   double accumulated_goal_score = 0.0;
@@ -729,6 +757,10 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   torch::Tensor normalized_advantages;
   {
     PULSAR_TRACE_SCOPE_CAT("trainer", "update_gae");
+    const auto gae_start = std::chrono::steady_clock::now();
+    if (benchmark_progress_) {
+      std::cout << "bench_update_gae_start\n" << std::flush;
+    }
     torch::Tensor terminal_values;
     if (rollout_bootstrap_truncated.any().item<bool>()) {
       torch::NoGradGuard no_grad;
@@ -761,14 +793,21 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       rollout_bootstrap_truncated,
       terminal_values);
     normalized_advantages = normalize_advantage(sparse_advantages, active_mask);
+    if (benchmark_progress_) {
+      const double gae_seconds =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - gae_start).count();
+      std::cout << "bench_update_gae_done seconds=" << gae_seconds << '\n' << std::flush;
+    }
   }
   torch::Tensor sparse_returns = sparse_advantages + extrinsic_values.detach();
 
+  int completed_minibatches = 0;
   for (int epoch = 0; epoch < config_.ppo.update_epochs; ++epoch) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "update_epoch");
     const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
     for (int agent_offset = 0; agent_offset < total_agents; agent_offset += logical_agents_per_batch) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "update_minibatch");
+      const auto minibatch_start = std::chrono::steady_clock::now();
       const int count = std::min(logical_agents_per_batch, total_agents - agent_offset);
       const torch::Tensor agent_indices = perm.narrow(0, agent_offset, count);
 
@@ -1048,6 +1087,20 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       metrics.optimizer_step_seconds +=
           std::chrono::duration<double>(std::chrono::steady_clock::now() - optim_start).count();
       metrics.grad_norm += grad_norm * total_active_samples_agent;
+      ++completed_minibatches;
+      if (benchmark_progress_) {
+        const double minibatch_seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - minibatch_start).count();
+        std::cout << "bench_update_minibatch_done"
+                  << " epoch=" << (epoch + 1) << "/" << config_.ppo.update_epochs
+                  << " minibatch=" << completed_minibatches << "/"
+                  << (minibatches_per_epoch * config_.ppo.update_epochs)
+                  << " agents=" << count
+                  << " active_samples=" << total_active_samples_agent
+                  << " seconds=" << minibatch_seconds
+                  << " grad_norm=" << grad_norm
+                  << '\n' << std::flush;
+      }
     }
   }
 
@@ -1907,6 +1960,8 @@ TrainerBenchmarkMetrics APPOTrainer::benchmark(int updates) {
   const int bounded_updates = std::max(1, updates);
   TrainerBenchmarkMetrics result{};
   result.updates = bounded_updates;
+  const bool previous_progress = benchmark_progress_;
+  benchmark_progress_ = true;
 
   if (curriculum_.enabled()) {
     apply_curriculum_to_collectors();
@@ -1963,6 +2018,7 @@ TrainerBenchmarkMetrics APPOTrainer::benchmark(int updates) {
   result.value_loss /= denom;
   result.entropy /= denom;
   result.grad_norm /= denom;
+  benchmark_progress_ = previous_progress;
   return result;
 }
 

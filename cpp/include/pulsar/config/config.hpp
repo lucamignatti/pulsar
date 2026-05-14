@@ -112,6 +112,7 @@ struct EnvConfig {
 struct ModelConfig {
   int observation_dim = 132;
   int action_dim = 90;
+  std::string encoder_type = "transformer";
   bool use_layer_norm = true;
   int encoder_dim = 640;
   int num_encoder_blocks = 5;

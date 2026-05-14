@@ -147,6 +147,18 @@ class SWATransformerEncoderImpl : public torch::nn::Module {
 
 TORCH_MODULE(SWATransformerEncoder);
 
+class MLPEncoderImpl : public torch::nn::Module {
+ public:
+  explicit MLPEncoderImpl(const ModelConfig& config);
+
+  torch::Tensor forward(const torch::Tensor& obs);
+
+ private:
+  torch::nn::Sequential network_{nullptr};
+};
+
+TORCH_MODULE(MLPEncoder);
+
 class PPOActorImpl : public torch::nn::Module {
  public:
   explicit PPOActorImpl(
@@ -187,7 +199,8 @@ class PPOActorImpl : public torch::nn::Module {
   GoalCriticConfig goal_critic_config_{};
   ESLoraConfig es_lora_config_{};
   int feature_dim_ = 0;
-  SWATransformerEncoder encoder_{nullptr};
+  SWATransformerEncoder transformer_encoder_{nullptr};
+  MLPEncoder mlp_encoder_{nullptr};
 
   torch::nn::Sequential policy_hidden_{nullptr};
   LoRALinear policy_lora_{nullptr};
