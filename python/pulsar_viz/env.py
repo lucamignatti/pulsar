@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -13,7 +13,10 @@ def _require_rlgym() -> Any:
         from rlgym.rocket_league.action_parsers import LookupTableAction, RepeatAction
         from rlgym.rocket_league.obs_builders import DefaultObs
         from rlgym.rocket_league.sim.rocketsim_engine import RocketSimEngine
-        from rlgym.rocket_league.state_mutators import FixedTeamSizeMutator, MutatorSequence
+        from rlgym.rocket_league.state_mutators import (
+            FixedTeamSizeMutator,
+            MutatorSequence,
+        )
     except ImportError as exc:
         raise RuntimeError(
             "rlgym is required for visualization. Install the project with `pip install .[viz]`."
@@ -32,8 +35,12 @@ def _require_rlgym() -> Any:
 
 def _require_rlgym_tools() -> Any:
     try:
-        from rlgym_tools.rocket_league.done_conditions.game_condition import GameCondition
-        from rlgym_tools.rocket_league.shared_info_providers.scoreboard_provider import ScoreboardProvider
+        from rlgym_tools.rocket_league.done_conditions.game_condition import (
+            GameCondition,
+        )
+        from rlgym_tools.rocket_league.shared_info_providers.scoreboard_provider import (
+            ScoreboardProvider,
+        )
         from rlgym_tools.rocket_league.state_mutators.game_mutator import GameMutator
     except ImportError as exc:
         raise RuntimeError(
@@ -51,8 +58,31 @@ class ZeroReward:
     def reset(self, *args: Any, **kwargs: Any) -> None:
         return None
 
-    def get_rewards(self, agents: list[Any], *args: Any, **kwargs: Any) -> dict[Any, float]:
+    def get_rewards(
+        self, agents: list[Any], *args: Any, **kwargs: Any
+    ) -> dict[Any, float]:
         return {agent: 0.0 for agent in agents}
+
+
+def _obs_zero_padding(config: dict[str, Any]) -> int:
+    observation_dim = int(config["model"]["observation_dim"])
+    base_dim = 52
+    per_car_dim = 20
+    remaining = observation_dim - base_dim
+    if remaining < 0 or remaining % (per_car_dim * 2) != 0:
+        raise ValueError(
+            "model.observation_dim does not match the expected Pulsar observation schema. "
+            f"Expected 52 + 40 * N, got {observation_dim}."
+        )
+
+    zero_padding = remaining // (per_car_dim * 2)
+    env_team_size = int(config["env"]["team_size"])
+    if env_team_size > zero_padding:
+        raise ValueError(
+            "env.team_size is larger than the observation padding implied by model.observation_dim. "
+            f"team_size={env_team_size}, zero_padding={zero_padding}, observation_dim={observation_dim}."
+        )
+    return zero_padding
 
 
 @dataclass(slots=True)
@@ -78,7 +108,9 @@ def _make_renderer(
 
     if renderer_backend == "rocketsimvis":
         try:
-            from rlgym_tools.rocket_league.renderers.rocketsimvis_renderer import RocketSimVisRenderer
+            from rlgym_tools.rocket_league.renderers.rocketsimvis_renderer import (
+                RocketSimVisRenderer,
+            )
         except ImportError as exc:
             raise RuntimeError(
                 "The RocketSimVis backend requires `rlgym-tools`. Install the project with "
@@ -98,13 +130,17 @@ def make_eval_env(
     mods = _require_rlgym()
     tool_mods = _require_rlgym_tools()
     env_cfg = config["env"]
-    os.environ.setdefault("RS_COLLISION_MESHES", env_cfg.get("collision_meshes_path", "collision_meshes"))
+    os.environ.setdefault(
+        "RS_COLLISION_MESHES", env_cfg.get("collision_meshes_path", "collision_meshes")
+    )
 
     renderer = _make_renderer(renderer_backend, env_cfg, udp_ip, udp_port)
     game_length_seconds = float(env_cfg.get("game_length_seconds", 300.0))
     kickoff_timer_seconds = float(env_cfg.get("kickoff_timer_seconds", 5.0))
     state_mutator = mods["MutatorSequence"](
-        mods["FixedTeamSizeMutator"](blue_size=env_cfg["team_size"], orange_size=env_cfg["team_size"]),
+        mods["FixedTeamSizeMutator"](
+            blue_size=env_cfg["team_size"], orange_size=env_cfg["team_size"]
+        ),
         tool_mods["GameMutator"](
             game_length_seconds=game_length_seconds,
             kickoff_timer_seconds=kickoff_timer_seconds,
@@ -113,8 +149,10 @@ def make_eval_env(
 
     env = mods["RLGym"](
         state_mutator=state_mutator,
-        obs_builder=mods["DefaultObs"](zero_padding=env_cfg["team_size"]),
-        action_parser=mods["RepeatAction"](mods["LookupTableAction"](), repeats=env_cfg["tick_skip"]),
+        obs_builder=mods["DefaultObs"](zero_padding=_obs_zero_padding(config)),
+        action_parser=mods["RepeatAction"](
+            mods["LookupTableAction"](), repeats=env_cfg["tick_skip"]
+        ),
         reward_fn=ZeroReward(),
         transition_engine=mods["RocketSimEngine"](),
         termination_cond=tool_mods["GameCondition"](),
