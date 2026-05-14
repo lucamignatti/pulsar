@@ -31,6 +31,38 @@ namespace {
 
 constexpr int kEsLoraMinStage = 3;  // enable ES LoRA automatically at stage 3+ (platinum-aerials)
 
+#ifdef PULSAR_HAS_CUDA
+class OptionalCudaAutocastGuard {
+ public:
+  explicit OptionalCudaAutocastGuard(bool enabled)
+      : enabled_(enabled),
+        previous_enabled_(enabled ? at::autocast::is_autocast_enabled(at::kCUDA) : false),
+        previous_dtype_(enabled ? at::autocast::get_autocast_dtype(at::kCUDA) : at::kFloat) {
+    if (enabled_) {
+      at::autocast::set_autocast_dtype(at::kCUDA, at::kHalf);
+      at::autocast::set_autocast_enabled(at::kCUDA, true);
+    }
+  }
+
+  ~OptionalCudaAutocastGuard() {
+    if (enabled_) {
+      at::autocast::set_autocast_enabled(at::kCUDA, previous_enabled_);
+      at::autocast::set_autocast_dtype(at::kCUDA, previous_dtype_);
+    }
+  }
+
+ private:
+  bool enabled_;
+  bool previous_enabled_;
+  at::ScalarType previous_dtype_;
+};
+#else
+class OptionalCudaAutocastGuard {
+ public:
+  explicit OptionalCudaAutocastGuard(bool) {}
+};
+#endif
+
 torch::Device resolve_runtime_device(const std::string& device_name) {
   torch::Device device(device_name);
   if (device.is_cuda() && !device.has_index()) {
@@ -111,6 +143,18 @@ void zero_existing_gradients(torch::nn::Module& module) {
     torch::Tensor grad = p.mutable_grad();
     if (grad.defined()) {
       grad.zero_();
+    }
+  }
+}
+
+void scale_existing_gradients(torch::nn::Module& module, double scale) {
+  if (scale == 1.0) {
+    return;
+  }
+  for (auto& p : module.parameters()) {
+    torch::Tensor grad = p.mutable_grad();
+    if (grad.defined()) {
+      grad.div_(scale);
     }
   }
 }
@@ -716,6 +760,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   const int agents_per_forward = std::max(1, max_forward_samples / seq_len);
   const int total_agents = rollout.num_agents();
   const int rollout_steps = rollout.rollout_length();
+  const bool use_cuda_amp = device_.is_cuda();
+  const double cuda_amp_loss_scale = use_cuda_amp ? 128.0 : 1.0;
   int minibatches_per_epoch = 0;
   int microbatches_per_epoch = 0;
   for (int offset = 0; offset < total_agents; offset += logical_agents_per_batch) {
@@ -733,6 +779,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
               << " agents_per_forward=" << agents_per_forward
               << " minibatches_per_epoch=" << minibatches_per_epoch
               << " microbatches_per_epoch=" << microbatches_per_epoch
+              << " cuda_amp=" << (use_cuda_amp ? 1 : 0)
+              << " loss_scale=" << cuda_amp_loss_scale
               << " pcgrad=" << (config_.ppo.pcgrad ? 1 : 0)
               << '\n' << std::flush;
   }
@@ -862,7 +910,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         const torch::Tensor obs =
             gpu_obs_mb.narrow(0, chunk_start, chunk_steps).narrow(1, micro_agent_offset, micro_count);
 
-        const auto forward_start = std::chrono::steady_clock::now();
+        const auto forward_backward_start = std::chrono::steady_clock::now();
+        OptionalCudaAutocastGuard autocast_guard(use_cuda_amp);
         ActorSequenceOutput output;
         {
           PULSAR_TRACE_SCOPE_CAT("trainer", "update_forward_sequence");
@@ -1018,14 +1067,14 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           }
 
           zero_existing_gradients(*actor_);
-          loss_a.backward({}, true);
+          (loss_a * cuda_amp_loss_scale).backward({}, true);
           auto grads_a = capture_gradients(*actor_);
 
           torch::Tensor loss_b = (config_.goal_critic.lambda_Zg * goal_loss
               + config_.goal_critic.lambda_goal_actor * actor_goal_loss) * sample_weight;
 
           zero_existing_gradients(*actor_);
-          loss_b.backward();
+          (loss_b * cuda_amp_loss_scale).backward();
           auto grads_b = capture_gradients(*actor_);
           zero_existing_gradients(*actor_);
 
@@ -1066,12 +1115,14 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
           torch::Tensor combined_loss = loss * sample_weight;
 
-          combined_loss.backward();
+          (combined_loss * cuda_amp_loss_scale).backward();
         }
 
         metrics.policy_loss += policy_loss.item<double>() * static_cast<double>(active_samples);
         metrics.value_loss += value_loss.item<double>() * static_cast<double>(active_samples);
         metrics.entropy += entropy.item<double>() * static_cast<double>(active_samples);
+        metrics.forward_backward_seconds +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - forward_backward_start).count();
         metric_steps += active_samples;
       }
       }
@@ -1080,6 +1131,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       double grad_norm = 0.0;
       {
         PULSAR_TRACE_SCOPE_CAT("trainer", "update_optimizer");
+        scale_existing_gradients(*actor_, cuda_amp_loss_scale);
         const auto grad_norm_value = torch::nn::utils::clip_grad_norm_(actor_->parameters(), config_.ppo.max_grad_norm);
         grad_norm = static_cast<double>(grad_norm_value);
         actor_optimizer_.step();
@@ -1981,6 +2033,12 @@ TrainerBenchmarkMetrics APPOTrainer::benchmark(int updates) {
     const double collection_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - collection_start).count();
     result.collection_seconds += collection_seconds;
+    result.obs_build_seconds += collection_metrics.obs_build_seconds;
+    result.mask_build_seconds += collection_metrics.mask_build_seconds;
+    result.policy_forward_seconds += collection_metrics.policy_forward_seconds;
+    result.action_decode_seconds += collection_metrics.action_decode_seconds;
+    result.env_step_seconds += collection_metrics.env_step_seconds;
+    result.done_reset_seconds += collection_metrics.done_reset_seconds;
     std::cout << "bench_collection_done update=" << (index + 1)
               << " agent_steps=" << collected_steps
               << " seconds=" << collection_seconds

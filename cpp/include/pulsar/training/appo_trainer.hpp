@@ -89,6 +89,12 @@ struct TrainerBenchmarkMetrics {
   double total_seconds = 0.0;
   double collection_seconds = 0.0;
   double update_seconds = 0.0;
+  double obs_build_seconds = 0.0;
+  double mask_build_seconds = 0.0;
+  double policy_forward_seconds = 0.0;
+  double action_decode_seconds = 0.0;
+  double env_step_seconds = 0.0;
+  double done_reset_seconds = 0.0;
   double forward_backward_seconds = 0.0;
   double optimizer_step_seconds = 0.0;
   double policy_loss = 0.0;

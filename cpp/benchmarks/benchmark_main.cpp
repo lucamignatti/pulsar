@@ -108,6 +108,12 @@ int main(int argc, char** argv) {
     std::cout << "total_seconds=" << metrics.total_seconds << '\n';
     std::cout << "collection_seconds=" << metrics.collection_seconds << '\n';
     std::cout << "update_seconds=" << metrics.update_seconds << '\n';
+    std::cout << "collection_obs_build_seconds=" << metrics.obs_build_seconds << '\n';
+    std::cout << "collection_mask_build_seconds=" << metrics.mask_build_seconds << '\n';
+    std::cout << "collection_policy_forward_seconds=" << metrics.policy_forward_seconds << '\n';
+    std::cout << "collection_action_decode_seconds=" << metrics.action_decode_seconds << '\n';
+    std::cout << "collection_env_step_seconds=" << metrics.env_step_seconds << '\n';
+    std::cout << "collection_done_reset_seconds=" << metrics.done_reset_seconds << '\n';
     std::cout << "forward_backward_seconds=" << metrics.forward_backward_seconds << '\n';
     std::cout << "optimizer_step_seconds=" << metrics.optimizer_step_seconds << '\n';
     std::cout << "collection_agent_steps_per_second="
