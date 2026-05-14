@@ -53,13 +53,15 @@ RolloutStorage make_rollout_storage(
     const ExperimentConfig& config,
     int num_agents,
     int action_dim,
-    const torch::Device& device) {
+    bool pin_memory) {
   return RolloutStorage(
       config.ppo.rollout_length,
       num_agents,
       config.model.observation_dim,
       action_dim,
-      device);
+      torch::Device(torch::kCPU),
+      {"extrinsic"},
+      pin_memory);
 }
 
 void require_finite(const torch::Tensor& tensor, const std::string& name) {
@@ -325,12 +327,12 @@ APPOTrainer::APPOTrainer(
           config_,
           static_cast<int>(total_agents_for_collectors(collectors_)),
           action_dim_for_collectors(collectors_),
-          device_)),
+          device_.is_cuda())),
       rollout_B_(make_rollout_storage(
           config_,
           static_cast<int>(total_agents_for_collectors(collectors_)),
           action_dim_for_collectors(collectors_),
-          device_)),
+          device_.is_cuda())),
       run_output_root_(std::move(run_output_root)),
       log_initialization_(log_initialization) {
   validate_experiment_config(config_);
@@ -501,8 +503,8 @@ void APPOTrainer::rebuild_collectors() {
 
   // rebuild rollout storage
   const int action_dim = action_dim_for_collectors(collectors_);
-  rollout_ = make_rollout_storage(config_, static_cast<int>(total_agents_), action_dim, device_);
-  rollout_B_ = make_rollout_storage(config_, static_cast<int>(total_agents_), action_dim, device_);
+  rollout_ = make_rollout_storage(config_, static_cast<int>(total_agents_), action_dim, device_.is_cuda());
+  rollout_B_ = make_rollout_storage(config_, static_cast<int>(total_agents_), action_dim, device_.is_cuda());
 
   // recompute shard agent offsets
   shard_agent_offsets_.clear();
@@ -685,12 +687,12 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
     metrics.effective_entropy_coef = static_cast<double>(effective_entropy_coef);
     return metrics;
   }
-  const torch::Tensor extrinsic_values = all_values.at("extrinsic").narrow(0, 0, rollout_steps);
-  const torch::Tensor extrinsic_rewards = all_rewards.at("extrinsic").narrow(0, 0, rollout_steps);
-  const torch::Tensor rollout_dones = rollout.dones.narrow(0, 0, rollout_steps);
-  const torch::Tensor rollout_bootstrap_truncated = rollout.bootstrap_truncated.narrow(0, 0, rollout_steps);
+  const torch::Tensor extrinsic_values = all_values.at("extrinsic").narrow(0, 0, rollout_steps).to(device_);
+  const torch::Tensor extrinsic_rewards = all_rewards.at("extrinsic").narrow(0, 0, rollout_steps).to(device_);
+  const torch::Tensor rollout_dones = rollout.dones.narrow(0, 0, rollout_steps).to(device_);
+  const torch::Tensor rollout_bootstrap_truncated = rollout.bootstrap_truncated.narrow(0, 0, rollout_steps).to(device_);
 
-  torch::Tensor active_mask = rollout.learner_active.narrow(0, 0, rollout_steps) > 0.5F;
+  torch::Tensor active_mask = rollout.learner_active.narrow(0, 0, rollout_steps).to(device_) > 0.5F;
   torch::Tensor sparse_advantages;
   torch::Tensor normalized_advantages;
   {
@@ -715,7 +717,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
     }
     auto final_values_map = rollout.final_values();
     torch::Tensor final_extrinsic_values = final_values_map.count("extrinsic") && final_values_map.at("extrinsic").defined()
-        ? final_values_map.at("extrinsic")
+        ? final_values_map.at("extrinsic").to(device_)
         : torch::Tensor{};
     sparse_advantages = compute_gae(
       extrinsic_values,
@@ -730,9 +732,18 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   }
   torch::Tensor sparse_returns = sparse_advantages + extrinsic_values.detach();
 
+  // Transfer rollout data to GPU once for all epochs to eliminate per-micro-batch H2D copies.
+  // The tensors are already pinned (RolloutStorage uses pinned_memory=true when CUDA is active),
+  // so the transfer is efficient. Total cache ~1.9 GB at 3072 envs / 3v3 / 128 steps.
+  torch::Tensor gpu_obs = rollout.obs.narrow(0, 0, rollout_steps).to(device_);
+  torch::Tensor gpu_action_masks = rollout.action_masks.narrow(0, 0, rollout_steps).to(device_);
+  torch::Tensor gpu_learner_active = rollout.learner_active.narrow(0, 0, rollout_steps).to(device_);
+  torch::Tensor gpu_actions = rollout.actions.narrow(0, 0, rollout_steps).to(device_);
+  torch::Tensor gpu_action_log_probs = rollout.action_log_probs.narrow(0, 0, rollout_steps).to(device_);
+
   for (int epoch = 0; epoch < config_.ppo.update_epochs; ++epoch) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "update_epoch");
-    const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(device_));
+    const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
     for (int agent_offset = 0; agent_offset < total_agents; agent_offset += logical_agents_per_batch) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "update_minibatch");
       const int count = std::min(logical_agents_per_batch, total_agents - agent_offset);
@@ -776,7 +787,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         const int loss_steps = chunk_steps;
 
         const torch::Tensor obs =
-            rollout.obs.narrow(0, chunk_start, chunk_steps).index_select(1, micro_agent_indices);
+            gpu_obs.narrow(0, chunk_start, chunk_steps).index_select(1, micro_agent_indices);
 
         const auto forward_start = std::chrono::steady_clock::now();
         ActorSequenceOutput output;
@@ -794,13 +805,13 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         torch::Tensor features = output.features;
 
         const torch::Tensor action_masks =
-            rollout.action_masks.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices).to(torch::kBool);
+            gpu_action_masks.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices).to(torch::kBool);
         const torch::Tensor learner_active =
-            rollout.learner_active.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
+            gpu_learner_active.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
         const torch::Tensor old_actions =
-            rollout.actions.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
+            gpu_actions.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
         const torch::Tensor old_log_probs =
-            rollout.action_log_probs.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
+            gpu_action_log_probs.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
         const torch::Tensor chunk_advantages =
             normalized_advantages.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
 
@@ -870,7 +881,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
               config_.goal_critic.max_future_horizon);
           const int goal_dim = config_.goal_critic.goal_dim;
 
-          torch::Tensor flat_future_goal_pos = future_goal_pos.reshape({samples, goal_dim});
+          torch::Tensor flat_future_goal_pos = future_goal_pos.to(device_).reshape({samples, goal_dim});
           torch::Tensor active_future_goal_pos = flat_future_goal_pos.index({flat_active});
 
           const auto active_count = active_features.size(0);
