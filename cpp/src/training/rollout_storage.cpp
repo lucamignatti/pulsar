@@ -15,30 +15,35 @@ RolloutStorage::RolloutStorage(
     int obs_dim,
     int action_dim,
     torch::Device device,
-    std::vector<std::string> head_names)
+    std::vector<std::string> head_names,
+    bool pin_memory)
     : rollout_length_(rollout_length),
       num_agents_(num_agents),
       device_(device) {
-  obs = torch::zeros({rollout_length, num_agents, obs_dim}, device);
-  episode_starts = torch::zeros({rollout_length, num_agents}, device);
+  auto opts = torch::TensorOptions().device(device);
+  if (pin_memory) {
+    opts = opts.pinned_memory(true);
+  }
+  obs = torch::zeros({rollout_length, num_agents, obs_dim}, opts);
+  episode_starts = torch::zeros({rollout_length, num_agents}, opts);
   action_masks = torch::zeros(
       {rollout_length, num_agents, action_dim},
-      torch::TensorOptions().dtype(torch::kUInt8).device(device));
-  learner_active = torch::zeros({rollout_length, num_agents}, device);
-  actions = torch::zeros({rollout_length, num_agents}, torch::TensorOptions().dtype(torch::kLong).device(device));
-  action_log_probs = torch::zeros({rollout_length, num_agents}, device);
-  dones = torch::zeros({rollout_length, num_agents}, device);
-  truncated = torch::zeros({rollout_length, num_agents}, device);
-  bootstrap_truncated = torch::zeros({rollout_length, num_agents}, device);
-  goal_positions = torch::zeros({rollout_length, num_agents, 3}, device);
+      opts.dtype(torch::kUInt8));
+  learner_active = torch::zeros({rollout_length, num_agents}, opts);
+  actions = torch::zeros({rollout_length, num_agents}, opts.dtype(torch::kLong));
+  action_log_probs = torch::zeros({rollout_length, num_agents}, opts);
+  dones = torch::zeros({rollout_length, num_agents}, opts);
+  truncated = torch::zeros({rollout_length, num_agents}, opts);
+  bootstrap_truncated = torch::zeros({rollout_length, num_agents}, opts);
+  goal_positions = torch::zeros({rollout_length, num_agents, 3}, opts);
   terminal_outcome_labels = torch::full(
       {rollout_length, num_agents}, 2,
-      torch::TensorOptions().dtype(torch::kInt64).device(device));
-  terminal_observations = torch::zeros({rollout_length, num_agents, obs_dim}, device);
+      opts.dtype(torch::kInt64));
+  terminal_observations = torch::zeros({rollout_length, num_agents, obs_dim}, opts);
 
   for (const auto& name : head_names) {
-    values_[name] = torch::zeros({rollout_length, num_agents}, device);
-    rewards_[name] = torch::zeros({rollout_length, num_agents}, device);
+    values_[name] = torch::zeros({rollout_length, num_agents}, opts);
+    rewards_[name] = torch::zeros({rollout_length, num_agents}, opts);
   }
 }
 

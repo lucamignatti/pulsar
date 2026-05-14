@@ -18,7 +18,8 @@ class RolloutStorage {
       int obs_dim,
       int action_dim,
       torch::Device device,
-      std::vector<std::string> head_names = {"extrinsic"});
+      std::vector<std::string> head_names = {"extrinsic"},
+      bool pin_memory = false);
 
   void append(
       int step,
