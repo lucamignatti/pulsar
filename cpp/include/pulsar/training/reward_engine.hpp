@@ -26,8 +26,11 @@ struct AgentRewardState {
   bool prev_ball_touched = false;
 
   int consecutive_air_touches = 0;
+  int consecutive_touches = 0;
   int last_wavedash_tick = -1000;
   int last_ball_touch_tick = -1000;
+  int last_own_touch_tick = -1000;
+  int prev_env_last_touch_agent = -1;
   int flip_start_tick = -1;
 
   bool was_on_ceiling = false;
@@ -108,6 +111,7 @@ class RewardEngine {
   float defensive_positioning(const CarState& car, const EnvState& env) const;
   float shot_accuracy(const CarState& car, const EnvState& env) const;
   float boost_pickup(const CarState& car, AgentRewardState& s) const;
+  float possession_chain(const CarState& car, const EnvState& env, int global_tick, AgentRewardState& s) const;
 
   // --- mechanic rewards ---
   float detect_speed_flip(const CarState& car, AgentRewardState& s) const;

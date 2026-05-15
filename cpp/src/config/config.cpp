@@ -139,6 +139,9 @@ void to_json(json& j, const DenseRewardConfig& value) {
       {"boost_pickup_big_threshold", value.boost_pickup_big_threshold},
       {"boost_pickup_cap_per_episode", value.boost_pickup_cap_per_episode},
       {"air_touch_cap_per_episode", value.air_touch_cap_per_episode},
+      {"possession_chain_weight", value.possession_chain_weight},
+      {"possession_chain_scale", value.possession_chain_scale},
+      {"possession_chain_timeout_ticks", value.possession_chain_timeout_ticks},
       {"dense_reward_cap_per_episode", value.dense_reward_cap_per_episode},
   };
 }
@@ -166,6 +169,9 @@ void from_json(const json& j, DenseRewardConfig& value) {
   value.boost_pickup_big_threshold = j.value("boost_pickup_big_threshold", 0.5F);
   value.boost_pickup_cap_per_episode = j.value("boost_pickup_cap_per_episode", 0.0F);
   value.air_touch_cap_per_episode = j.value("air_touch_cap_per_episode", 0.0F);
+  value.possession_chain_weight = j.value("possession_chain_weight", 0.0F);
+  value.possession_chain_scale = j.value("possession_chain_scale", 0.0F);
+  value.possession_chain_timeout_ticks = j.value("possession_chain_timeout_ticks", 360);
   value.dense_reward_cap_per_episode = j.value("dense_reward_cap_per_episode", 0.0F);
 }
 

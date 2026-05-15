@@ -61,6 +61,9 @@ struct DenseRewardConfig {
   float boost_pickup_big_threshold = 0.5F;
   float boost_pickup_cap_per_episode = 0.0F;
   float air_touch_cap_per_episode = 0.0F;
+  float possession_chain_weight = 0.0F;
+  float possession_chain_scale = 0.0F;
+  int possession_chain_timeout_ticks = 360;
   float dense_reward_cap_per_episode = 0.0F;
 };
 

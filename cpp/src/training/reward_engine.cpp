@@ -164,6 +164,10 @@ RewardBreakdown RewardEngine::compute(
   agent_state.episode_boost_pickup_reward += bp;
   bd.gameplay += bp;
 
+  float pc = possession_chain(car, env, global_tick, agent_state);
+  bd.terms["gameplay.possession_chain"] = pc;
+  bd.gameplay += pc;
+
   // --- mechanic rewards ---
   const int prev_wavedash_tick = agent_state.last_wavedash_tick;
 
@@ -270,6 +274,7 @@ RewardBreakdown RewardEngine::compute(
   agent_state.prev_ball_touched = car.ball_touched;
   agent_state.prev_ball_velocity = env.ball.velocity;
   agent_state.prev_boost = car.boost;
+  agent_state.prev_env_last_touch_agent = env.last_touch_agent;
 
   return bd;
 }
@@ -552,6 +557,36 @@ float RewardEngine::boost_pickup(
     return amount * dense_cfg_.boost_pickup_big_weight;
   }
   return amount * dense_cfg_.boost_pickup_small_weight;
+}
+
+float RewardEngine::possession_chain(
+    const CarState& car, const EnvState& env, int global_tick, AgentRewardState& s) const {
+  if (dense_cfg_.possession_chain_weight <= 0.0F) return 0.0F;
+
+  // Timeout reset: if too much time passed since this agent last touched, break the chain.
+  if (s.consecutive_touches > 0 &&
+      (global_tick - s.last_own_touch_tick) >= dense_cfg_.possession_chain_timeout_ticks) {
+    s.consecutive_touches = 0;
+  }
+
+  // Opponent reset: if the env's last-toucher changed to someone other than this agent,
+  // the chain is broken.
+  if (s.consecutive_touches > 0 && s.prev_env_last_touch_agent >= 0 &&
+      env.last_touch_agent != s.prev_env_last_touch_agent && env.last_touch_agent != car.id) {
+    s.consecutive_touches = 0;
+  }
+
+  // Edge-detect a new touch by this agent.
+  if (car.ball_touched && !s.prev_ball_touched) {
+    s.last_own_touch_tick = global_tick;
+    s.consecutive_touches++;
+
+    float reward = dense_cfg_.possession_chain_weight +
+                   dense_cfg_.possession_chain_scale * static_cast<float>(s.consecutive_touches - 1);
+    return reward;
+  }
+
+  return 0.0F;
 }
 
 // --- mechanic reward methods ---------------------------------------------------

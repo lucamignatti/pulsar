@@ -40,6 +40,9 @@ pulsar::ExperimentConfig make_reward_test_config() {
   cfg.dense_rewards.boost_pickup_big_weight = 3.0f;
   cfg.dense_rewards.boost_pickup_small_weight = 10.0f;
   cfg.dense_rewards.boost_pickup_big_threshold = 0.5f;
+  cfg.dense_rewards.possession_chain_weight = 1.0f;
+  cfg.dense_rewards.possession_chain_scale = 0.5f;
+  cfg.dense_rewards.possession_chain_timeout_ticks = 360;
   cfg.mechanic_rewards.speed_flip = 0.5f;
   cfg.mechanic_rewards.wavedash = 0.3f;
   cfg.mechanic_rewards.chain_dash_bonus = 0.4f;
@@ -1390,6 +1393,7 @@ int main() {
       require(bd.terms.find("gameplay.boost_used") != bd.terms.end(), "terms has boost_used");
       require(bd.terms.find("gameplay.defensive_positioning") != bd.terms.end(), "terms has defensive_positioning");
       require(bd.terms.find("gameplay.shot_accuracy") != bd.terms.end(), "terms has shot_accuracy");
+      require(bd.terms.find("gameplay.possession_chain") != bd.terms.end(), "terms has possession_chain");
       require(bd.terms.find("mechanic.speed_flip") != bd.terms.end(), "terms has speed_flip");
       require(bd.terms.find("mechanic.wavedash") != bd.terms.end(), "terms has wavedash");
       require(bd.terms.find("mechanic.chain_dash") != bd.terms.end(), "terms has chain_dash");
@@ -1430,6 +1434,111 @@ int main() {
       require_close(bd.mechanic, 0.5f, "combined mechanic");
       require_close(bd.terminal, 10.0f, "combined terminal");
       require_close(bd.total, 10.867879f, "combined total");
+    }
+
+    // =========================================================================
+    // 62. Possession chain - first touch gives base reward
+    // =========================================================================
+    {
+      auto cfg = make_reward_test_config();
+      pulsar::RewardEngine engine(cfg);
+      auto car = make_neutral_car(pulsar::Team::Blue);
+      car.ball_touched = true;
+      pulsar::EnvState env{};
+      env.last_touch_agent = car.id;
+      pulsar::AgentRewardState agent_state{};
+      agent_state.prev_ball_touched = false;
+      agent_state.prev_env_last_touch_agent = -1;
+      agent_state.consecutive_touches = 0;
+      agent_state.last_own_touch_tick = -1000;
+      pulsar::EnvRewardState env_state{};
+      auto bd = engine.compute(100, car, env, 2, agent_state, env_state, false, 0);
+      require_close(bd.terms.at("gameplay.possession_chain"), 1.0f, "pc first touch base");
+      require(agent_state.consecutive_touches == 1, "pc consecutive_touches = 1");
+      require(agent_state.last_own_touch_tick == 100, "pc last_own_touch_tick = 100");
+    }
+
+    // =========================================================================
+    // 63. Possession chain - second consecutive touch gets scale bonus
+    // =========================================================================
+    {
+      auto cfg = make_reward_test_config();
+      pulsar::RewardEngine engine(cfg);
+      auto car = make_neutral_car(pulsar::Team::Blue);
+      car.ball_touched = true;
+      pulsar::EnvState env{};
+      env.last_touch_agent = car.id;
+      pulsar::AgentRewardState agent_state{};
+      agent_state.prev_ball_touched = false;
+      agent_state.prev_env_last_touch_agent = car.id;  // same agent previously
+      agent_state.consecutive_touches = 1;
+      agent_state.last_own_touch_tick = 90;
+      pulsar::EnvRewardState env_state{};
+      auto bd = engine.compute(100, car, env, 2, agent_state, env_state, false, 0);
+      require_close(bd.terms.at("gameplay.possession_chain"), 1.5f, "pc second touch base+scale");
+      require(agent_state.consecutive_touches == 2, "pc consecutive_touches = 2");
+    }
+
+    // =========================================================================
+    // 64. Possession chain - opponent touch resets chain
+    // =========================================================================
+    {
+      auto cfg = make_reward_test_config();
+      pulsar::RewardEngine engine(cfg);
+      auto car = make_neutral_car(pulsar::Team::Blue);
+      car.ball_touched = true;
+      pulsar::EnvState env{};
+      env.last_touch_agent = car.id;  // current tick: this agent touched
+      pulsar::AgentRewardState agent_state{};
+      agent_state.prev_ball_touched = false;
+      agent_state.prev_env_last_touch_agent = 1;  // previous tick: opponent touched
+      agent_state.consecutive_touches = 2;
+      agent_state.last_own_touch_tick = 80;
+      pulsar::EnvRewardState env_state{};
+      auto bd = engine.compute(100, car, env, 2, agent_state, env_state, false, 0);
+      require(agent_state.consecutive_touches == 1, "pc opponent reset chain to 1");
+      require_close(bd.terms.at("gameplay.possession_chain"), 1.0f, "pc after opponent reset");
+    }
+
+    // =========================================================================
+    // 65. Possession chain - timeout resets chain
+    // =========================================================================
+    {
+      auto cfg = make_reward_test_config();
+      pulsar::RewardEngine engine(cfg);
+      auto car = make_neutral_car(pulsar::Team::Blue);
+      car.ball_touched = true;
+      pulsar::EnvState env{};
+      env.last_touch_agent = car.id;
+      pulsar::AgentRewardState agent_state{};
+      agent_state.prev_ball_touched = false;
+      agent_state.prev_env_last_touch_agent = car.id;
+      agent_state.consecutive_touches = 5;
+      agent_state.last_own_touch_tick = 0;  // 500 ticks ago, > 360 timeout
+      pulsar::EnvRewardState env_state{};
+      auto bd = engine.compute(500, car, env, 2, agent_state, env_state, false, 0);
+      require(agent_state.consecutive_touches == 1, "pc timeout reset chain to 1");
+      require_close(bd.terms.at("gameplay.possession_chain"), 1.0f, "pc after timeout reset");
+    }
+
+    // =========================================================================
+    // 66. Possession chain - no touch gives zero reward
+    // =========================================================================
+    {
+      auto cfg = make_reward_test_config();
+      pulsar::RewardEngine engine(cfg);
+      auto car = make_neutral_car(pulsar::Team::Blue);
+      car.ball_touched = false;
+      pulsar::EnvState env{};
+      pulsar::AgentRewardState agent_state{};
+      agent_state.prev_ball_touched = false;
+      agent_state.prev_env_last_touch_agent = -1;
+      agent_state.consecutive_touches = 0;
+      agent_state.last_own_touch_tick = -1000;
+      pulsar::EnvRewardState env_state{};
+      auto bd = engine.compute(100, car, env, 2, agent_state, env_state, false, 0);
+      require_close(bd.terms.at("gameplay.possession_chain"), 0.0f, "pc no touch zero");
+      require(agent_state.consecutive_touches == 0, "pc no change");
     }
 
     std::cout << "test_reward_engine passed\n";
