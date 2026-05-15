@@ -387,7 +387,7 @@
     "init_checkpoint": "",
     "rollout_length": 128,
     "minibatch_size": 131072,
-    "update_epochs": 2,
+    "update_epochs": 1,
     "clip_range": 0.2,
     "entropy_coef": 0.03,
     "entropy_floor": 0.08,
