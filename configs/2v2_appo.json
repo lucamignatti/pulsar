@@ -381,11 +381,11 @@
     "policy_hidden_dim": 0
   },
   "ppo": {
-    "num_envs": 384,
+    "num_envs": 512,
     "collection_workers": 16,
     "collection_shards": 4,
     "init_checkpoint": "",
-    "rollout_length": 64,
+    "rollout_length": 48,
     "minibatch_size": 8192,
     "update_epochs": 2,
     "clip_range": 0.2,
