@@ -171,11 +171,11 @@ class Mamba2BlockImpl : public torch::nn::Module {
   bool use_layer_norm_ = true;
   torch::nn::LayerNorm input_norm_{nullptr};
   torch::nn::LayerNorm output_norm_{nullptr};
+  torch::nn::Conv1d causal_conv_{nullptr};
   torch::nn::Linear input_projection_{nullptr};
   torch::nn::Linear output_projection_{nullptr};
-  torch::Tensor decay_logits_;
+  torch::Tensor decay_bias_;
   torch::Tensor skip_;
-  torch::Tensor position_ids_;
 };
 
 TORCH_MODULE(Mamba2Block);
@@ -188,15 +188,13 @@ class Mamba2EncoderImpl : public torch::nn::Module {
 
  private:
   int observation_dim_ = 0;
-  int token_group_size_ = 1;
-  int padded_observation_dim_ = 0;
   int embed_dim_ = 0;
   int sequence_length_ = 0;
-  torch::nn::Linear input_projection_{nullptr};
+  torch::Tensor feature_scale_;
+  torch::Tensor feature_bias_;
   std::vector<Mamba2Block> blocks_{};
   torch::nn::LayerNorm output_norm_{nullptr};
   torch::Tensor cls_token_;
-  torch::Tensor position_embedding_;
 };
 
 TORCH_MODULE(Mamba2Encoder);

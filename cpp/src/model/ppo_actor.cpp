@@ -346,13 +346,15 @@ Mamba2BlockImpl::Mamba2BlockImpl(int embed_dim, int sequence_length, bool use_la
     input_norm_ = register_module("input_norm", torch::nn::LayerNorm(torch::nn::LayerNormOptions({embed_dim_})));
     output_norm_ = register_module("output_norm", torch::nn::LayerNorm(torch::nn::LayerNormOptions({embed_dim_})));
   }
-  input_projection_ = register_module("input_projection", torch::nn::Linear(embed_dim_, 4 * embed_dim_));
+  causal_conv_ = register_module(
+      "causal_conv",
+      torch::nn::Conv1d(torch::nn::Conv1dOptions(embed_dim_, embed_dim_, 3)
+                            .groups(embed_dim_)
+                            .padding(2)));
+  input_projection_ = register_module("input_projection", torch::nn::Linear(embed_dim_, 5 * embed_dim_));
   output_projection_ = register_module("output_projection", torch::nn::Linear(embed_dim_, embed_dim_));
-  decay_logits_ = register_parameter("decay_logits", torch::full({embed_dim_}, 2.0F));
+  decay_bias_ = register_parameter("decay_bias", torch::full({embed_dim_}, 2.0F));
   skip_ = register_parameter("skip", torch::ones({embed_dim_}));
-  position_ids_ = register_buffer(
-      "position_ids",
-      torch::arange(sequence_length_, torch::TensorOptions().dtype(torch::kFloat32)).view({sequence_length_, 1}));
 }
 
 torch::Tensor Mamba2BlockImpl::forward(const torch::Tensor& tokens) {
@@ -360,20 +362,33 @@ torch::Tensor Mamba2BlockImpl::forward(const torch::Tensor& tokens) {
   const auto batch = tokens.size(0);
   const auto sequence = tokens.size(1);
   torch::Tensor block_input = use_layer_norm_ ? input_norm_->forward(tokens) : tokens;
-  const auto projected = input_projection_->forward(block_input).chunk(4, -1);
+
+  // Local causal mixing before the selective scan. Conv1d expects [B, C, S].
+  torch::Tensor conv_input = block_input.transpose(1, 2);
+  torch::Tensor conv_out = causal_conv_->forward(conv_input).narrow(2, 0, sequence).transpose(1, 2);
+  conv_out = torch::silu(conv_out);
+
+  const auto projected = input_projection_->forward(conv_out).chunk(5, -1);
   const torch::Tensor x = torch::silu(projected[0]);
   const torch::Tensor b = torch::sigmoid(projected[1]);
   const torch::Tensor c = torch::sigmoid(projected[2]);
   const torch::Tensor z = torch::silu(projected[3]);
-  const torch::Tensor decay = torch::sigmoid(decay_logits_).clamp(1.0e-4, 0.9999).to(tokens.device());
-  const torch::Tensor skip = skip_.to(tokens.device()).view({1, embed_dim_});
 
-  const torch::Tensor positions = position_ids_.to(tokens.device()).to(tokens.dtype()).narrow(0, 0, sequence);
-  const torch::Tensor decay_powers = torch::exp(positions * torch::log(decay).view({1, embed_dim_}));
+  // Input-dependent retention. This is a stable recurrence form and avoids the
+  // underflow-prone cumsum(input / decay_powers) * decay_powers formulation.
+  const torch::Tensor retention = torch::sigmoid(projected[4] + decay_bias_.view({1, 1, embed_dim_}))
+                                      .clamp(0.01, 0.9999);
   const torch::Tensor recurrent_input = b * x;
-  const torch::Tensor state = torch::cumsum(recurrent_input / decay_powers.unsqueeze(0), 1)
-      * decay_powers.unsqueeze(0);
-  torch::Tensor mixed = (c * state + skip.unsqueeze(1) * x) * z;
+  torch::Tensor state = torch::zeros({batch, embed_dim_}, tokens.options());
+  std::vector<torch::Tensor> states;
+  states.reserve(static_cast<std::size_t>(sequence));
+  for (int64_t t = 0; t < sequence; ++t) {
+    state = retention.select(1, t) * state + recurrent_input.select(1, t);
+    states.push_back(state);
+  }
+  const torch::Tensor scanned = torch::stack(states, 1);
+
+  torch::Tensor mixed = (c * scanned + skip_.view({1, 1, embed_dim_}) * x) * z;
   if (use_layer_norm_) {
     mixed = output_norm_->forward(mixed);
   }
@@ -382,17 +397,15 @@ torch::Tensor Mamba2BlockImpl::forward(const torch::Tensor& tokens) {
 
 Mamba2EncoderImpl::Mamba2EncoderImpl(const ModelConfig& config)
     : observation_dim_(config.observation_dim),
-      token_group_size_(config.transformer_token_group_size),
-      padded_observation_dim_(((config.observation_dim + config.transformer_token_group_size - 1) /
-                               config.transformer_token_group_size) *
-                              config.transformer_token_group_size),
       embed_dim_(config.encoder_dim),
-      sequence_length_(padded_observation_dim_ / token_group_size_ + 1) {
-  input_projection_ = register_module("input_projection", torch::nn::Linear(token_group_size_, embed_dim_));
+      sequence_length_(config.observation_dim + 1) {
+  feature_scale_ = register_parameter(
+      "feature_scale",
+      torch::randn({1, observation_dim_, embed_dim_}) * 0.02F);
+  feature_bias_ = register_parameter(
+      "feature_bias",
+      torch::randn({1, observation_dim_, embed_dim_}) * 0.01F);
   cls_token_ = register_parameter("cls_token", torch::zeros({1, 1, embed_dim_}));
-  position_embedding_ = register_parameter(
-      "position_embedding",
-      torch::randn({1, sequence_length_, embed_dim_}) * 0.01F);
 
   blocks_.reserve(static_cast<std::size_t>(config.num_encoder_blocks));
   for (int i = 0; i < config.num_encoder_blocks; ++i) {
@@ -405,16 +418,9 @@ Mamba2EncoderImpl::Mamba2EncoderImpl(const ModelConfig& config)
 torch::Tensor Mamba2EncoderImpl::forward(const torch::Tensor& obs) {
   PULSAR_TRACE_SCOPE_CAT("actor", "mamba2_encoder");
   const auto batch = obs.size(0);
-  torch::Tensor grouped_obs = obs;
-  if (padded_observation_dim_ != observation_dim_) {
-    grouped_obs = torch::cat(
-        {obs, torch::zeros({batch, padded_observation_dim_ - observation_dim_}, obs.options())},
-        1);
-  }
-  torch::Tensor tokens = input_projection_->forward(
-      grouped_obs.view({batch, padded_observation_dim_ / token_group_size_, token_group_size_}));
+  torch::Tensor tokens = obs.view({batch, observation_dim_, 1}) * feature_scale_ + feature_bias_;
   const torch::Tensor cls = cls_token_.expand({batch, -1, -1});
-  tokens = torch::cat({tokens, cls}, 1) + position_embedding_.to(obs.device());
+  tokens = torch::cat({tokens, cls}, 1);
   for (Mamba2Block& block : blocks_) {
     tokens = block->forward(tokens);
   }
