@@ -163,7 +163,15 @@ class Mamba2BlockImpl : public torch::nn::Module {
  public:
   Mamba2BlockImpl(int embed_dim, int sequence_length, bool use_layer_norm);
 
-  torch::Tensor forward(const torch::Tensor& tokens);
+  torch::Tensor forward(const torch::Tensor& tokens, const torch::Tensor& reset_mask = {});
+  torch::Tensor forward_step(
+      const torch::Tensor& token,
+      const torch::Tensor& previous_conv_2,
+      const torch::Tensor& previous_conv_1,
+      const torch::Tensor& previous_scan,
+      torch::Tensor* next_conv_2,
+      torch::Tensor* next_conv_1,
+      torch::Tensor* next_scan);
 
  private:
   int embed_dim_ = 0;
@@ -185,16 +193,21 @@ class Mamba2EncoderImpl : public torch::nn::Module {
   explicit Mamba2EncoderImpl(const ModelConfig& config);
 
   torch::Tensor forward(const torch::Tensor& obs);
+  torch::Tensor forward_sequence(const torch::Tensor& obs_seq, const torch::Tensor& episode_starts = {});
+  torch::Tensor forward_step(
+      const torch::Tensor& obs,
+      const torch::Tensor& state,
+      const torch::Tensor& episode_starts,
+      torch::Tensor* next_state);
+  [[nodiscard]] torch::Tensor initial_state(int64_t batch, const torch::Device& device) const;
 
  private:
   int observation_dim_ = 0;
   int embed_dim_ = 0;
-  int sequence_length_ = 0;
-  torch::Tensor feature_scale_;
-  torch::Tensor feature_bias_;
+  int sequence_length_ = 1;
+  torch::nn::Linear input_projection_{nullptr};
   std::vector<Mamba2Block> blocks_{};
   torch::nn::LayerNorm output_norm_{nullptr};
-  torch::Tensor cls_token_;
 };
 
 TORCH_MODULE(Mamba2Encoder);
@@ -209,9 +222,17 @@ class PPOActorImpl : public torch::nn::Module {
   ActorStepOutput forward_step(
       torch::Tensor obs,
       torch::Tensor goal_values = {});
+  ActorStepOutput forward_step_stateful(
+      torch::Tensor obs,
+      torch::Tensor state,
+      torch::Tensor episode_starts,
+      torch::Tensor* next_state,
+      torch::Tensor goal_values = {});
   ActorSequenceOutput forward_sequence(
       torch::Tensor obs_seq,
-      torch::Tensor goal_values = {});
+      torch::Tensor goal_values = {},
+      torch::Tensor episode_starts = {});
+  [[nodiscard]] torch::Tensor initial_recurrent_state(int64_t batch, const torch::Device& device) const;
   [[nodiscard]] int feature_dim() const;
   [[nodiscard]] const ModelConfig& config() const;
   [[nodiscard]] const GoalCriticConfig& goal_critic_config() const;

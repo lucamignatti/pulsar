@@ -97,6 +97,27 @@ int main() {
       if (mamba_seq.policy_logits.sizes() != torch::IntArrayRef({2, 3, mamba_config.action_dim})) {
         throw std::runtime_error("mamba2 sequence logits shape mismatch");
       }
+      {
+        torch::NoGradGuard no_grad;
+        const torch::Tensor obs_seq = torch::randn({4, 3, mamba_config.observation_dim});
+        const auto sequence_out = mamba_actor->forward_sequence(obs_seq);
+        torch::Tensor state = mamba_actor->initial_recurrent_state(3, torch::kCPU);
+        std::vector<torch::Tensor> step_logits;
+        for (int t = 0; t < obs_seq.size(0); ++t) {
+          torch::Tensor next_state;
+          const auto step_out = mamba_actor->forward_step_stateful(
+              obs_seq[t],
+              state,
+              torch::zeros({3}, torch::kFloat32),
+              &next_state);
+          state = next_state;
+          step_logits.push_back(step_out.policy_logits);
+        }
+        const torch::Tensor stepped_logits = torch::stack(step_logits, 0);
+        if (!torch::allclose(sequence_out.policy_logits, stepped_logits, 1.0e-4, 1.0e-4)) {
+          throw std::runtime_error("mamba2 stateful step logits should match sequence logits");
+        }
+      }
       if (!torch::all(torch::isfinite(mamba_step.features)).item<bool>()) {
         throw std::runtime_error("mamba2 produced non-finite features");
       }
@@ -104,13 +125,13 @@ int main() {
           + mamba_step.value_win_logits.square().mean()
           + mamba_step.features.square().mean();
       mamba_loss.backward();
-      bool saw_feature_scale_grad = false;
+      bool saw_input_projection_grad = false;
       bool saw_decay_grad = false;
       bool saw_conv_grad = false;
       for (const auto& item : mamba_actor->named_parameters(true)) {
         const std::string name = item.key();
-        if (name.find("encoder.feature_scale") == 0 && item.value().grad().defined()) {
-          saw_feature_scale_grad = true;
+        if (name.find("encoder.input_projection") == 0 && item.value().grad().defined()) {
+          saw_input_projection_grad = true;
         }
         if (name.find("encoder.block_0.decay_bias") == 0 && item.value().grad().defined()) {
           saw_decay_grad = true;
@@ -119,7 +140,7 @@ int main() {
           saw_conv_grad = true;
         }
       }
-      if (!saw_feature_scale_grad || !saw_decay_grad || !saw_conv_grad) {
+      if (!saw_input_projection_grad || !saw_decay_grad || !saw_conv_grad) {
         throw std::runtime_error("mamba2 backward missed expected encoder gradients");
       }
     }

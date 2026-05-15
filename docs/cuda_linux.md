@@ -43,7 +43,7 @@ cmake --build build/release --parallel
 
 - Use `ppo.device = "cuda"` or `"cuda:0"` in APPO configs.
 - CUDA pinned host buffers are enabled for collector-to-GPU transfers when the runtime device is CUDA.
-- The CUDA smoke test enables TF32 matmul and cuDNN paths through PyTorch when supported before running the BC pretrain/APPO train slice.
+- The CUDA smoke test enables TF32 matmul and cuDNN paths through PyTorch when supported before running the APPO train slice.
 
 ## Expected External Inputs
 
@@ -60,12 +60,11 @@ After dependencies are installed, the minimum validation pass should include:
 ```bash
 ctest --test-dir build/release --output-on-failure
 ctest --test-dir build/release -L cuda --output-on-failure
-./build/release/pulsar_bench
+./build/release/pulsar_bench 20 configs/2v2_appo.json cuda:0
 ```
 
 If the Torch targets are enabled, also validate:
 
-- `pulsar_bc_pretrain` writes the Continuum actor checkpoint.
-- `pulsar_appo_train` loads that checkpoint via `ppo.init_checkpoint` and runs on `cuda:0`.
-- The CUDA smoke test is skipped only when no CUDA device is available or PyTorch is not CUDA-enabled.
+- `pulsar_appo_train` runs end-to-end with a CUDA device (the `cuda_smoke` test exercises this with a downsized config and verifies finite metrics + checkpoint output).
+- The CUDA smoke test is skipped (exit code 77) when no CUDA device is available or PyTorch is not CUDA-enabled.
 - Python bindings are optional. If `Python3 Development.Module` is unavailable, CMake skips `pulsar_native` without blocking the C++ trainer build.

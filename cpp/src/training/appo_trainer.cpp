@@ -278,9 +278,8 @@ int cuda_autograd_forward_sample_cap(const ModelConfig& config) {
 
 int cuda_mamba2_autograd_forward_sample_cap(const ModelConfig& config) {
   constexpr std::int64_t kProjectedActivationBudgetBytes = 2LL * 1024LL * 1024LL * 1024LL;
-  const auto sequence = static_cast<std::int64_t>(std::max(1, config.observation_dim + 1));
   const auto projected_dim = static_cast<std::int64_t>(std::max(1, config.encoder_dim)) * 5;
-  const std::int64_t bytes_per_sample = sequence * projected_dim * static_cast<std::int64_t>(sizeof(float));
+  const std::int64_t bytes_per_sample = projected_dim * static_cast<std::int64_t>(sizeof(float));
   if (bytes_per_sample <= 0) {
     return std::max(1, config.transformer_max_batch_size);
   }
@@ -1032,6 +1031,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           const torch::Tensor micro_agent_indices = mode_agent_indices.narrow(0, micro_agent_offset, micro_count);
 
           torch::Tensor mode_gpu_obs_mb = rollout.obs.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(device_);
+          torch::Tensor mode_gpu_episode_starts_mb = rollout.episode_starts.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(device_);
           torch::Tensor mode_gpu_action_masks_mb = rollout.action_masks.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(device_);
           torch::Tensor mode_gpu_learner_active_mb = rollout.learner_active.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(device_);
           torch::Tensor mode_gpu_actions_mb = rollout.actions.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(device_);
@@ -1055,7 +1055,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             {
               PULSAR_TRACE_SCOPE_CAT("trainer", "update_forward_sequence");
               const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_critic.goal_dim);
-              output = actor_->forward_sequence(obs, goal_values);
+              const torch::Tensor episode_starts =
+                  mode_gpu_episode_starts_mb.narrow(0, chunk_start, chunk_steps);
+              output = actor_->forward_sequence(obs, goal_values, episode_starts);
             }
 
             if (loss_steps <= 0) continue;
@@ -1606,6 +1608,12 @@ void APPOTrainer::collect_rollout(
   std::map<std::string, int> mode_completed;
   std::map<std::string, int> mode_touched;
   std::map<std::string, int> mode_scored;
+  std::vector<torch::Tensor> rollout_recurrent_states;
+  rollout_recurrent_states.reserve(collectors_.size());
+  for (const auto& collector_ptr : collectors_) {
+    rollout_recurrent_states.push_back(
+        rollout_actor->initial_recurrent_state(static_cast<int64_t>(collector_ptr->total_agents()), device_));
+  }
 
   if (collectors_.size() > 1) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "collect_loop_sharded");
@@ -1654,7 +1662,16 @@ void APPOTrainer::collect_rollout(
           normalizer.update(raw_obs);
           normalized_obs = normalizer.normalize(raw_obs);
           const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
-          output = rollout_actor->forward_step(normalized_obs, goal_values);
+          torch::Tensor next_state;
+          output = rollout_actor->forward_step_stateful(
+              normalized_obs,
+              rollout_recurrent_states[shard],
+              episode_starts,
+              &next_state,
+              goal_values);
+          if (next_state.defined()) {
+            rollout_recurrent_states[shard] = next_state;
+          }
           actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
         }
         if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
@@ -1846,7 +1863,13 @@ void APPOTrainer::collect_rollout(
         torch::Tensor final_normalized = normalizer.normalize(final_raw_obs);
         torch::Tensor final_starts = collector.host_episode_starts().to(device_, use_pinned_host_buffers_);
         const torch::Tensor final_goal_values = policy_goal_values_like(final_normalized, config_.goal_critic.goal_dim);
-        ActorStepOutput final_output = rollout_actor->forward_step(final_normalized, final_goal_values);
+        torch::Tensor unused_next_state;
+        ActorStepOutput final_output = rollout_actor->forward_step_stateful(
+            final_normalized,
+            rollout_recurrent_states[shard],
+            final_starts,
+            &unused_next_state,
+            final_goal_values);
         final_values.push_back(final_output.value_win_logits.squeeze(-1));
       }
       std::unordered_map<std::string, torch::Tensor> bootstrap_values;
@@ -1879,7 +1902,16 @@ void APPOTrainer::collect_rollout(
       normalizer.update(raw_obs);
       normalized_obs = normalizer.normalize(raw_obs);
       const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
-      output = rollout_actor->forward_step(normalized_obs, goal_values);
+      torch::Tensor next_state;
+      output = rollout_actor->forward_step_stateful(
+          normalized_obs,
+          rollout_recurrent_states[0],
+          episode_starts,
+          &next_state,
+          goal_values);
+      if (next_state.defined()) {
+        rollout_recurrent_states[0] = next_state;
+      }
       actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
     }
     if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
@@ -2032,7 +2064,13 @@ void APPOTrainer::collect_rollout(
     torch::Tensor final_normalized = normalizer.normalize(final_raw_obs);
     torch::Tensor final_starts = collector_->host_episode_starts().to(device_, use_pinned_host_buffers_);
     const torch::Tensor final_goal_values = policy_goal_values_like(final_normalized, config_.goal_critic.goal_dim);
-    ActorStepOutput final_output = rollout_actor->forward_step(final_normalized, final_goal_values);
+    torch::Tensor unused_next_state;
+    ActorStepOutput final_output = rollout_actor->forward_step_stateful(
+        final_normalized,
+        rollout_recurrent_states[0],
+        final_starts,
+        &unused_next_state,
+        final_goal_values);
 
     std::unordered_map<std::string, torch::Tensor> bootstrap_values;
     bootstrap_values["extrinsic"] = final_output.value_win_logits.squeeze(-1);

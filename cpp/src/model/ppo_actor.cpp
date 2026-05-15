@@ -357,7 +357,7 @@ Mamba2BlockImpl::Mamba2BlockImpl(int embed_dim, int sequence_length, bool use_la
   skip_ = register_parameter("skip", torch::ones({embed_dim_}));
 }
 
-torch::Tensor Mamba2BlockImpl::forward(const torch::Tensor& tokens) {
+torch::Tensor Mamba2BlockImpl::forward(const torch::Tensor& tokens, const torch::Tensor& reset_mask) {
   PULSAR_TRACE_SCOPE_CAT("actor", "mamba2_block");
   const auto batch = tokens.size(0);
   const auto sequence = tokens.size(1);
@@ -383,6 +383,11 @@ torch::Tensor Mamba2BlockImpl::forward(const torch::Tensor& tokens) {
   std::vector<torch::Tensor> states;
   states.reserve(static_cast<std::size_t>(sequence));
   for (int64_t t = 0; t < sequence; ++t) {
+    if (reset_mask.defined()) {
+      const torch::Tensor keep = (1.0F - reset_mask.select(1, t).to(tokens.device()).to(tokens.scalar_type()))
+          .view({batch, 1});
+      state = state * keep;
+    }
     state = retention.select(1, t) * state + recurrent_input.select(1, t);
     states.push_back(state);
   }
@@ -395,17 +400,56 @@ torch::Tensor Mamba2BlockImpl::forward(const torch::Tensor& tokens) {
   return tokens + output_projection_->forward(mixed);
 }
 
+torch::Tensor Mamba2BlockImpl::forward_step(
+    const torch::Tensor& token,
+    const torch::Tensor& previous_conv_2,
+    const torch::Tensor& previous_conv_1,
+    const torch::Tensor& previous_scan,
+    torch::Tensor* next_conv_2,
+    torch::Tensor* next_conv_1,
+    torch::Tensor* next_scan) {
+  PULSAR_TRACE_SCOPE_CAT("actor", "mamba2_block_step");
+  torch::Tensor block_input = use_layer_norm_ ? input_norm_->forward(token) : token;
+  const torch::Tensor weight = causal_conv_->weight.squeeze(1);
+  torch::Tensor conv_out =
+      previous_conv_2 * weight.select(1, 0).view({1, embed_dim_})
+      + previous_conv_1 * weight.select(1, 1).view({1, embed_dim_})
+      + block_input * weight.select(1, 2).view({1, embed_dim_});
+  if (causal_conv_->bias.defined()) {
+    conv_out = conv_out + causal_conv_->bias.view({1, embed_dim_});
+  }
+  conv_out = torch::silu(conv_out);
+
+  const auto projected = input_projection_->forward(conv_out).chunk(5, -1);
+  const torch::Tensor x = torch::silu(projected[0]);
+  const torch::Tensor b = torch::sigmoid(projected[1]);
+  const torch::Tensor c = torch::sigmoid(projected[2]);
+  const torch::Tensor z = torch::silu(projected[3]);
+  const torch::Tensor retention = torch::sigmoid(projected[4] + decay_bias_.view({1, embed_dim_}))
+                                      .clamp(0.01, 0.9999);
+  const torch::Tensor scan = retention * previous_scan + b * x;
+  torch::Tensor mixed = (c * scan + skip_.view({1, embed_dim_}) * x) * z;
+  if (use_layer_norm_) {
+    mixed = output_norm_->forward(mixed);
+  }
+
+  if (next_conv_2 != nullptr) {
+    *next_conv_2 = previous_conv_1;
+  }
+  if (next_conv_1 != nullptr) {
+    *next_conv_1 = block_input;
+  }
+  if (next_scan != nullptr) {
+    *next_scan = scan;
+  }
+  return token + output_projection_->forward(mixed);
+}
+
 Mamba2EncoderImpl::Mamba2EncoderImpl(const ModelConfig& config)
     : observation_dim_(config.observation_dim),
       embed_dim_(config.encoder_dim),
-      sequence_length_(config.observation_dim + 1) {
-  feature_scale_ = register_parameter(
-      "feature_scale",
-      torch::randn({1, observation_dim_, embed_dim_}) * 0.02F);
-  feature_bias_ = register_parameter(
-      "feature_bias",
-      torch::randn({1, observation_dim_, embed_dim_}) * 0.01F);
-  cls_token_ = register_parameter("cls_token", torch::zeros({1, 1, embed_dim_}));
+      sequence_length_(config.transformer_window_size > 0 ? config.transformer_window_size : config.observation_dim + 1) {
+  input_projection_ = register_module("input_projection", torch::nn::Linear(observation_dim_, embed_dim_));
 
   blocks_.reserve(static_cast<std::size_t>(config.num_encoder_blocks));
   for (int i = 0; i < config.num_encoder_blocks; ++i) {
@@ -417,15 +461,73 @@ Mamba2EncoderImpl::Mamba2EncoderImpl(const ModelConfig& config)
 
 torch::Tensor Mamba2EncoderImpl::forward(const torch::Tensor& obs) {
   PULSAR_TRACE_SCOPE_CAT("actor", "mamba2_encoder");
-  const auto batch = obs.size(0);
-  torch::Tensor tokens = obs.view({batch, observation_dim_, 1}) * feature_scale_ + feature_bias_;
-  const torch::Tensor cls = cls_token_.expand({batch, -1, -1});
-  tokens = torch::cat({tokens, cls}, 1);
+  torch::Tensor tokens = input_projection_->forward(obs).unsqueeze(1);
   for (Mamba2Block& block : blocks_) {
     tokens = block->forward(tokens);
   }
   tokens = output_norm_->forward(tokens);
-  return tokens.select(1, sequence_length_ - 1);
+  return tokens.squeeze(1);
+}
+
+torch::Tensor Mamba2EncoderImpl::forward_sequence(const torch::Tensor& obs_seq, const torch::Tensor& episode_starts) {
+  PULSAR_TRACE_SCOPE_CAT("actor", "mamba2_encoder_sequence");
+  const auto time = obs_seq.size(0);
+  const auto batch = obs_seq.size(1);
+  torch::Tensor tokens = input_projection_->forward(
+      obs_seq.transpose(0, 1).reshape({batch * time, observation_dim_}))
+      .reshape({batch, time, embed_dim_});
+  torch::Tensor reset_mask = episode_starts.defined()
+      ? episode_starts.transpose(0, 1).to(tokens.device()).to(tokens.scalar_type())
+      : torch::Tensor{};
+  for (Mamba2Block& block : blocks_) {
+    tokens = block->forward(tokens, reset_mask);
+  }
+  tokens = output_norm_->forward(tokens);
+  return tokens.transpose(0, 1);
+}
+
+torch::Tensor Mamba2EncoderImpl::initial_state(int64_t batch, const torch::Device& device) const {
+  return torch::zeros(
+      {static_cast<int64_t>(blocks_.size()), 3, batch, embed_dim_},
+      torch::TensorOptions().dtype(torch::kFloat32).device(device));
+}
+
+torch::Tensor Mamba2EncoderImpl::forward_step(
+    const torch::Tensor& obs,
+    const torch::Tensor& state,
+    const torch::Tensor& episode_starts,
+    torch::Tensor* next_state) {
+  PULSAR_TRACE_SCOPE_CAT("actor", "mamba2_encoder_step");
+  const auto batch = obs.size(0);
+  torch::Tensor current_state = state.defined()
+      ? state.to(obs.device()).to(torch::kFloat32)
+      : initial_state(batch, obs.device());
+  if (episode_starts.defined()) {
+    const torch::Tensor keep = (1.0F - episode_starts.to(obs.device()).to(torch::kFloat32)).view({1, 1, batch, 1});
+    current_state = current_state * keep;
+  }
+
+  torch::Tensor token = input_projection_->forward(obs);
+  std::vector<torch::Tensor> next_blocks;
+  next_blocks.reserve(blocks_.size());
+  for (std::size_t i = 0; i < blocks_.size(); ++i) {
+    torch::Tensor next_conv_2;
+    torch::Tensor next_conv_1;
+    torch::Tensor next_scan;
+    token = blocks_[i]->forward_step(
+        token,
+        current_state[static_cast<int64_t>(i)][0],
+        current_state[static_cast<int64_t>(i)][1],
+        current_state[static_cast<int64_t>(i)][2],
+        &next_conv_2,
+        &next_conv_1,
+        &next_scan);
+    next_blocks.push_back(torch::stack({next_conv_2, next_conv_1, next_scan}, 0));
+  }
+  if (next_state != nullptr) {
+    *next_state = torch::stack(next_blocks, 0).detach();
+  }
+  return output_norm_->forward(token);
 }
 
 GoalCriticImpl::GoalCriticImpl(int feature_dim, int action_dim, int embedding_dim, int hidden_dim, int goal_dim)
@@ -542,20 +644,55 @@ ActorStepOutput PPOActorImpl::forward_step(
   };
 }
 
+ActorStepOutput PPOActorImpl::forward_step_stateful(
+    torch::Tensor obs,
+    torch::Tensor state,
+    torch::Tensor episode_starts,
+    torch::Tensor* next_state,
+    torch::Tensor goal_values) {
+  PULSAR_TRACE_SCOPE_CAT("actor", "forward_step_stateful");
+  torch::Tensor encoded;
+  if (mamba2_encoder_) {
+    encoded = mamba2_encoder_->forward_step(obs, state, episode_starts, next_state);
+  } else {
+    encoded = forward_step(obs, goal_values).encoded;
+    if (next_state != nullptr) {
+      *next_state = state;
+    }
+  }
+
+  torch::Tensor policy_logits;
+  if (!policy_hidden_.is_empty()) {
+    policy_logits = policy_lora_->forward(policy_hidden_->forward(encoded));
+  } else {
+    policy_logits = policy_lora_->forward(encoded);
+  }
+
+  return {
+      policy_logits,
+      encoded,
+      value_head_win_->forward(encoded),
+      encoded,
+  };
+}
+
 ActorSequenceOutput PPOActorImpl::forward_sequence(
     torch::Tensor obs_seq,
-    torch::Tensor goal_values) {
+    torch::Tensor goal_values,
+    torch::Tensor episode_starts) {
   PULSAR_TRACE_SCOPE_CAT("actor", "forward_sequence");
   const auto time = obs_seq.size(0);
   const auto batch = obs_seq.size(1);
-  const auto flat_batch = time * batch;
-  const torch::Tensor flat_obs = obs_seq.reshape({flat_batch, config_.observation_dim});
   torch::Tensor encoded;
   if (mlp_encoder_) {
+    const auto flat_batch = time * batch;
+    const torch::Tensor flat_obs = obs_seq.reshape({flat_batch, config_.observation_dim});
     encoded = mlp_encoder_->forward(flat_obs);
   } else if (mamba2_encoder_) {
-    encoded = mamba2_encoder_->forward(flat_obs);
+    encoded = mamba2_encoder_->forward_sequence(obs_seq, episode_starts).reshape({time * batch, config_.encoder_dim});
   } else {
+    const auto flat_batch = time * batch;
+    const torch::Tensor flat_obs = obs_seq.reshape({flat_batch, config_.observation_dim});
     encoded = transformer_encoder_->forward(flat_obs);
   }
 
@@ -572,6 +709,13 @@ ActorSequenceOutput PPOActorImpl::forward_sequence(
       value_head_win_->forward(encoded).reshape({time, batch, 1}),
       encoded.reshape({time, batch, config_.encoder_dim}),
   };
+}
+
+torch::Tensor PPOActorImpl::initial_recurrent_state(int64_t batch, const torch::Device& device) const {
+  if (mamba2_encoder_) {
+    return mamba2_encoder_->initial_state(batch, device);
+  }
+  return torch::Tensor{};
 }
 
 int PPOActorImpl::feature_dim() const {
