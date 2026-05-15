@@ -148,6 +148,8 @@ void to_json(json& j, const DenseRewardConfig& value) {
       {"possession_window_ticks", value.possession_window_ticks},
       {"possession_distance_decay", value.possession_distance_decay},
       {"dense_reward_cap_per_episode", value.dense_reward_cap_per_episode},
+      {"flat_touch_weight", value.flat_touch_weight},
+      {"team_spirit", value.team_spirit},
   };
 }
 
@@ -183,6 +185,8 @@ void from_json(const json& j, DenseRewardConfig& value) {
   value.possession_window_ticks = j.value("possession_window_ticks", 180);
   value.possession_distance_decay = j.value("possession_distance_decay", 1000.0F);
   value.dense_reward_cap_per_episode = j.value("dense_reward_cap_per_episode", 0.0F);
+  value.flat_touch_weight = j.value("flat_touch_weight", 0.0F);
+  value.team_spirit = j.value("team_spirit", 0.0F);
 }
 
 void to_json(json& j, const CurriculumStageConfig& value) {

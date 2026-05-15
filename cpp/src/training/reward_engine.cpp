@@ -91,6 +91,10 @@ RewardBreakdown RewardEngine::compute(
   bd.terms["gameplay.ball_touch_vel"] = bt_vel;
   bd.gameplay += bt_vel;
 
+  float ft = flat_touch(car, agent_state);
+  bd.terms["gameplay.flat_touch"] = ft;
+  bd.gameplay += ft;
+
   float td = touch_direction(car, env, agent_state);
   bd.terms["gameplay.touch_direction"] = td;
   bd.gameplay += td;
@@ -294,6 +298,14 @@ float RewardEngine::ball_touch_vel(
   const float delta_mag = vec3_magnitude(delta);
   return clamp(delta_mag / std::max(dense_cfg_.max_ball_speed, 1.0F), 0.0F, 1.0F)
       * dense_cfg_.ball_touch_vel_weight;
+}
+
+float RewardEngine::flat_touch(
+    const CarState& car, AgentRewardState& s) const {
+  if (dense_cfg_.flat_touch_weight <= 0.0F) return 0.0F;
+  if (!car.ball_touched) return 0.0F;
+  if (s.prev_ball_touched) return 0.0F;
+  return dense_cfg_.flat_touch_weight;
 }
 
 float RewardEngine::touch_direction(

@@ -466,6 +466,38 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         goal_pos_ptr[pos_offset + 2] = goal_pos[2];
       }
 
+      // Team spirit blending: blend individual gameplay rewards with team average
+      {
+        const float team_spirit = config_.dense_rewards.team_spirit;
+        if (team_spirit > 0.0F && count > 1) {
+          float team0_sum = 0.0F, team1_sum = 0.0F;
+          int team0_cnt = 0, team1_cnt = 0;
+          for (std::size_t idx2 = 0; idx2 < count; ++idx2) {
+            const std::size_t gidx = agent_begin + idx2;
+            const float gp = host_gameplay_rewards_.data_ptr<float>()[gidx];
+            if (current_state.cars[idx2].team == Team::Blue) {
+              team0_sum += gp;
+              team0_cnt++;
+            } else {
+              team1_sum += gp;
+              team1_cnt++;
+            }
+          }
+          const float team0_avg = team0_cnt > 0 ? team0_sum / static_cast<float>(team0_cnt) : 0.0F;
+          const float team1_avg = team1_cnt > 0 ? team1_sum / static_cast<float>(team1_cnt) : 0.0F;
+          for (std::size_t idx2 = 0; idx2 < count; ++idx2) {
+            const std::size_t gidx = agent_begin + idx2;
+            const float team_avg = (current_state.cars[idx2].team == Team::Blue) ? team0_avg : team1_avg;
+            float* gp_ptr = host_gameplay_rewards_.data_ptr<float>() + gidx;
+            const float old_gp = *gp_ptr;
+            const float new_gp = (1.0F - team_spirit) * old_gp + team_spirit * team_avg;
+            const float delta = new_gp - old_gp;
+            *gp_ptr = new_gp;
+            host_rewards_.data_ptr<float>()[gidx] += delta;
+          }
+        }
+      }
+
       if (reset_needed) {
         obs_builder_->build_obs_batch(
             current_state,

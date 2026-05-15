@@ -132,7 +132,7 @@ int main() {
       pulsar::validate_experiment_config(prod);
       pulsar::test::require(prod.schema_version == 6, "production config schema");
       pulsar::test::require(prod.curriculum.enabled, "curriculum enabled in production");
-      pulsar::test::require(prod.curriculum.stages.size() == 1, "single stable reward stage in production");
+      pulsar::test::require(prod.curriculum.stages.size() == 3, "three curriculum stages in production");
       pulsar::test::require(prod.curriculum.stages[0].mode_allocation.size() == 3,
                             "production config starts with all ranked team sizes");
       pulsar::test::require(prod.self_play_league.enabled, "self_play_league enabled in production");

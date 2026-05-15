@@ -70,6 +70,8 @@ struct DenseRewardConfig {
   int possession_window_ticks = 180;
   float possession_distance_decay = 1000.0F;
   float dense_reward_cap_per_episode = 0.0F;
+  float flat_touch_weight = 0.0F;
+  float team_spirit = 0.0F;
 };
 
 struct CurriculumStageConfig {

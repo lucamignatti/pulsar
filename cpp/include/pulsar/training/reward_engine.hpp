@@ -99,6 +99,7 @@ class RewardEngine {
 
   // --- dense/gameplay rewards ---
   float ball_touch_vel(const CarState& car, const EnvState& env, AgentRewardState& s) const;
+  float flat_touch(const CarState& car, AgentRewardState& s) const;
   float touch_direction(const CarState& car, const EnvState& env, AgentRewardState& s) const;
   float speed_toward_ball(const CarState& car, const EnvState& env) const;
   float face_ball(const CarState& car, const EnvState& env) const;
