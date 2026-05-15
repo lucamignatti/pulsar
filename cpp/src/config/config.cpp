@@ -420,6 +420,7 @@ void to_json(json& j, const PPOConfig& value) {
       {"rollout_length", value.rollout_length},
       {"minibatch_size", value.minibatch_size},
       {"update_epochs", value.update_epochs},
+      {"optimizer_accumulation_steps", value.optimizer_accumulation_steps},
       {"clip_range", value.clip_range},
       {"entropy_coef", value.entropy_coef},
       {"entropy_floor", value.entropy_floor},
@@ -453,6 +454,7 @@ void from_json(const json& j, PPOConfig& value) {
   value.rollout_length = j.value("rollout_length", 256);
   value.minibatch_size = j.value("minibatch_size", 32768);
   value.update_epochs = j.value("update_epochs", 3);
+  value.optimizer_accumulation_steps = j.value("optimizer_accumulation_steps", 1);
   value.clip_range = j.value("clip_range", 0.2F);
   value.entropy_coef = j.value("entropy_coef", 0.01F);
   value.entropy_floor = j.value("entropy_floor", 0.0F);
@@ -733,6 +735,9 @@ void validate_experiment_config(const ExperimentConfig& config) {
   }
   if (config.ppo.minibatch_size <= 0) {
     throw std::invalid_argument("ppo.minibatch_size must be positive.");
+  }
+  if (config.ppo.optimizer_accumulation_steps <= 0) {
+    throw std::invalid_argument("ppo.optimizer_accumulation_steps must be positive.");
   }
   if (config.ppo.update_epochs <= 0) {
     throw std::invalid_argument("ppo.update_epochs must be positive.");

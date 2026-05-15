@@ -167,6 +167,7 @@ struct PPOConfig {
   int rollout_length = 256;
   int minibatch_size = 32768;
   int update_epochs = 3;
+  int optimizer_accumulation_steps = 1;
   float clip_range = 0.2F;
   float entropy_coef = 0.01F;
   float entropy_floor = 0.0F;

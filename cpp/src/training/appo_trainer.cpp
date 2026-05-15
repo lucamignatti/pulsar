@@ -840,6 +840,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   const int rollout_steps = rollout.rollout_length();
   const bool use_cuda_amp = device_.is_cuda();
   const double cuda_amp_loss_scale = use_cuda_amp ? 128.0 : 1.0;
+  const int optimizer_accumulation_steps = std::max(1, config_.ppo.optimizer_accumulation_steps);
   int minibatches_per_epoch = 0;
   int microbatches_per_epoch = 0;
   for (int offset = 0; offset < total_agents; offset += logical_agents_per_batch) {
@@ -857,6 +858,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
               << " agents_per_forward=" << agents_per_forward
               << " minibatches_per_epoch=" << minibatches_per_epoch
               << " microbatches_per_epoch=" << microbatches_per_epoch
+              << " optimizer_accumulation_steps=" << optimizer_accumulation_steps
               << " cuda_amp=" << (use_cuda_amp ? 1 : 0)
               << " loss_scale=" << cuda_amp_loss_scale
               << " pcgrad=" << (config_.ppo.pcgrad ? 1 : 0)
@@ -870,6 +872,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   torch::Tensor goal_critic_loss_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
   torch::Tensor goal_score_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
   torch::Tensor sampled_goal_distance_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+  int accumulated_minibatches = 0;
+  double accumulated_total_active = 0.0;
 
   const auto& all_values = rollout.all_values();
   const auto& all_rewards = rollout.all_rewards();
@@ -1000,7 +1004,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         torch::Tensor mode_gpu_advantages_mb = normalized_advantages.narrow(0, 0, rollout_steps).index_select(1, mode_agent_indices_gpu);
         torch::Tensor mode_gpu_returns_mb = sparse_returns.narrow(0, 0, rollout_steps).index_select(1, mode_agent_indices_gpu);
 
-        actor_optimizer_.zero_grad();
+        if (use_mode_pcgrad || accumulated_minibatches == 0) {
+          actor_optimizer_.zero_grad();
+        }
 
         for (int seq_start = 0; seq_start < rollout.rollout_length(); seq_start += seq_len) {
           const int chunk_start = seq_start;
@@ -1156,7 +1162,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
               + entropy_floor_loss
               - effective_entropy_coef * entropy;
 
-          torch::Tensor combined_loss = loss * sample_weight;
+          const int effective_accumulation_steps = use_mode_pcgrad ? 1 : optimizer_accumulation_steps;
+          torch::Tensor combined_loss = loss * sample_weight / static_cast<double>(effective_accumulation_steps);
           (combined_loss * cuda_amp_loss_scale).backward();
 
           policy_loss_sum = policy_loss_sum + policy_loss.detach().to(torch::kFloat32) * active_samples;
@@ -1171,6 +1178,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           mode_grad_groups.push_back(capture_gradients(*actor_));
         }
       }
+
+      accumulated_minibatches++;
+      accumulated_total_active += combined_total_active;
 
       // If multiple modes were present, apply PCGrad across mode gradient groups.
       if (use_mode_pcgrad && !mode_grad_groups.empty()) {
@@ -1191,6 +1201,15 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         }
       }
 
+      const bool at_epoch_end = agent_offset + logical_agents_per_batch >= total_agents;
+      const bool should_step_optimizer =
+          use_mode_pcgrad ||
+          accumulated_minibatches >= optimizer_accumulation_steps ||
+          at_epoch_end;
+      if (!should_step_optimizer) {
+        continue;
+      }
+
       const auto optim_start = std::chrono::steady_clock::now();
       double grad_norm = 0.0;
       {
@@ -1198,12 +1217,14 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         scale_existing_gradients(*actor_, cuda_amp_loss_scale);
         const auto grad_norm_value = torch::nn::utils::clip_grad_norm_(actor_->parameters(), config_.ppo.max_grad_norm);
         grad_norm = static_cast<double>(grad_norm_value);
-        grad_norm_sum = grad_norm_sum + grad_norm * combined_total_active;
+        grad_norm_sum = grad_norm_sum + grad_norm * accumulated_total_active;
         actor_optimizer_.step();
       }
       metrics.optimizer_step_seconds +=
           std::chrono::duration<double>(std::chrono::steady_clock::now() - optim_start).count();
-      metrics.grad_norm += grad_norm * combined_total_active;
+      metrics.grad_norm += grad_norm * accumulated_total_active;
+      accumulated_minibatches = 0;
+      accumulated_total_active = 0.0;
       ++completed_minibatches;
       if (benchmark_progress_) {
         const double minibatch_seconds =

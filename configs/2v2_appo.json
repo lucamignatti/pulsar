@@ -388,6 +388,7 @@
     "rollout_length": 64,
     "minibatch_size": 8192,
     "update_epochs": 2,
+    "optimizer_accumulation_steps": 2,
     "clip_range": 0.2,
     "entropy_coef": 0.03,
     "entropy_floor": 0.08,
