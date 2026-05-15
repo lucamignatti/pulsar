@@ -225,8 +225,12 @@ int cuda_autograd_forward_sample_cap(const ModelConfig& config) {
 }
 
 int effective_transformer_max_batch_size(const ModelConfig& config, const torch::Device& device) {
+  constexpr int kUnlimitedCap = 524288;
   if (config.transformer_max_batch_size == 0) {
-    return std::numeric_limits<int>::max();
+    if (!device.is_cuda() || config.encoder_type == "mlp") {
+      return kUnlimitedCap;
+    }
+    return std::max(1, std::min(kUnlimitedCap, cuda_autograd_forward_sample_cap(config)));
   }
   const int configured = std::max(1, config.transformer_max_batch_size);
   if (!device.is_cuda() || config.encoder_type == "mlp") {
