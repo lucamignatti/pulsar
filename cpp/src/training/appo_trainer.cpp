@@ -2306,6 +2306,10 @@ void APPOTrainer::prune_old_checkpoints(const std::filesystem::path& checkpoint_
       continue;
     }
     const std::string name = entry.path().filename().string();
+    // Never prune stage progression checkpoints.
+    if (name.rfind("stage_", 0) == 0) {
+      continue;
+    }
     if (name.rfind("update_", 0) != 0) {
       continue;
     }
@@ -2408,6 +2412,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
 
     // 5. Curriculum checks + rebuild (may touch collectors, safe after collection)
     if (curriculum_.enabled()) {
+      bool stage_changed = false;
       if (curriculum_.check_promotion(
           coll_metrics.mode_touch_rates, coll_metrics.mode_scored_rates, coll_steps)) {
         if (curriculum_.mode_allocation_changed()) {
@@ -2415,6 +2420,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
         }
         apply_curriculum_to_collectors();
         apply_curriculum_lr();
+        stage_changed = true;
       } else {
         bool demoted = curriculum_.check_demotion(coll_metrics.mode_scored_rates);
         if (demoted) {
@@ -2423,7 +2429,13 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           }
           apply_curriculum_to_collectors();
           apply_curriculum_lr();
+          stage_changed = true;
         }
+      }
+      if (stage_changed) {
+        save_checkpoint(
+            std::filesystem::path(checkpoint_dir) / ("stage_" + std::to_string(curriculum_.state().stage_index) + "_update_" + std::to_string(update_index)),
+            global_step, update_index, wandb.run_id());
       }
     }
 
