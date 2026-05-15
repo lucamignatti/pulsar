@@ -82,6 +82,23 @@ int main() {
       }
     }
 
+    {
+      pulsar::ModelConfig mamba_config = small_model_config();
+      mamba_config.encoder_type = "mamba2";
+      mamba_config.encoder_dim = 16;
+      mamba_config.num_encoder_blocks = 2;
+      mamba_config.transformer_token_group_size = 4;
+      pulsar::PPOActor mamba_actor(mamba_config, gc_cfg);
+      const auto mamba_step = mamba_actor->forward_step(torch::randn({3, mamba_config.observation_dim}));
+      if (mamba_step.policy_logits.sizes() != torch::IntArrayRef({3, mamba_config.action_dim})) {
+        throw std::runtime_error("mamba2 policy logits shape mismatch");
+      }
+      const auto mamba_seq = mamba_actor->forward_sequence(torch::randn({2, 3, mamba_config.observation_dim}));
+      if (mamba_seq.policy_logits.sizes() != torch::IntArrayRef({2, 3, mamba_config.action_dim})) {
+        throw std::runtime_error("mamba2 sequence logits shape mismatch");
+      }
+    }
+
     const auto actor_clone = pulsar::clone_ppo_actor(actor, torch::kCPU);
     const auto source_params = actor->named_parameters(true);
     const auto clone_params = actor_clone->named_parameters(true);

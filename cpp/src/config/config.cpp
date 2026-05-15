@@ -639,8 +639,10 @@ void validate_experiment_config(const ExperimentConfig& config) {
     throw std::invalid_argument("ppo.collection_shards must be <= ppo.num_envs.");
   }
 
-  if (config.model.encoder_type != "transformer" && config.model.encoder_type != "mlp") {
-    throw std::invalid_argument("model.encoder_type must be either \"transformer\" or \"mlp\".");
+  if (config.model.encoder_type != "transformer" &&
+      config.model.encoder_type != "mlp" &&
+      config.model.encoder_type != "mamba2") {
+    throw std::invalid_argument("model.encoder_type must be one of \"transformer\", \"mlp\", or \"mamba2\".");
   }
   if (config.model.encoder_dim <= 0) {
     throw std::invalid_argument("model.encoder_dim must be positive.");

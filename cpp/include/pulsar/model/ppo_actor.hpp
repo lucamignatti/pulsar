@@ -159,6 +159,46 @@ class MLPEncoderImpl : public torch::nn::Module {
 
 TORCH_MODULE(MLPEncoder);
 
+class Mamba2BlockImpl : public torch::nn::Module {
+ public:
+  Mamba2BlockImpl(int embed_dim, bool use_layer_norm);
+
+  torch::Tensor forward(const torch::Tensor& tokens);
+
+ private:
+  int embed_dim_ = 0;
+  bool use_layer_norm_ = true;
+  torch::nn::LayerNorm input_norm_{nullptr};
+  torch::nn::LayerNorm output_norm_{nullptr};
+  torch::nn::Linear input_projection_{nullptr};
+  torch::nn::Linear output_projection_{nullptr};
+  torch::Tensor decay_logits_;
+  torch::Tensor skip_;
+};
+
+TORCH_MODULE(Mamba2Block);
+
+class Mamba2EncoderImpl : public torch::nn::Module {
+ public:
+  explicit Mamba2EncoderImpl(const ModelConfig& config);
+
+  torch::Tensor forward(const torch::Tensor& obs);
+
+ private:
+  int observation_dim_ = 0;
+  int token_group_size_ = 1;
+  int padded_observation_dim_ = 0;
+  int embed_dim_ = 0;
+  int sequence_length_ = 0;
+  torch::nn::Linear input_projection_{nullptr};
+  std::vector<Mamba2Block> blocks_{};
+  torch::nn::LayerNorm output_norm_{nullptr};
+  torch::Tensor cls_token_;
+  torch::Tensor position_embedding_;
+};
+
+TORCH_MODULE(Mamba2Encoder);
+
 class PPOActorImpl : public torch::nn::Module {
  public:
   explicit PPOActorImpl(
@@ -201,6 +241,7 @@ class PPOActorImpl : public torch::nn::Module {
   int feature_dim_ = 0;
   SWATransformerEncoder transformer_encoder_{nullptr};
   MLPEncoder mlp_encoder_{nullptr};
+  Mamba2Encoder mamba2_encoder_{nullptr};
 
   torch::nn::Sequential policy_hidden_{nullptr};
   LoRALinear policy_lora_{nullptr};
