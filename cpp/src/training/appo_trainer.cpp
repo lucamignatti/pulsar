@@ -29,7 +29,7 @@
 namespace pulsar {
 namespace {
 
-constexpr int kEsLoraMinStage = 3;  // enable ES LoRA automatically at stage 3+ (platinum-aerials)
+constexpr int kEsLoraMinStage = 0;  // enable ES LoRA from the first update
 
 #ifdef PULSAR_HAS_CUDA
 class OptionalCudaAutocastGuard {
@@ -1351,103 +1351,137 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
   const auto& es_cfg = config_.es_lora;
   const int pop = es_cfg.population_size;
   const int eval_envs = es_cfg.eval_num_envs;
-  const int total_envs = pop * eval_envs;
-  const int team_size = config_.env.team_size;
-  const int agents_per_env = team_size * 2;
-  const int member_agents = eval_envs * agents_per_env;
 
   ESPopulationFitness result;
   result.fitness.assign(static_cast<std::size_t>(pop), 0.0F);
   result.winrate.assign(static_cast<std::size_t>(pop), 0.0F);
   result.kl.assign(static_cast<std::size_t>(pop), 0.0F);
 
-  std::vector<int> episode_counts(static_cast<std::size_t>(pop), 0);
-  std::vector<int> win_counts(static_cast<std::size_t>(pop), 0);
-
-  torch::Tensor kl_sum = torch::zeros({pop}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-  torch::Tensor kl_count = torch::zeros({pop}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-
-  std::vector<std::uint8_t> controlled_host(static_cast<std::size_t>(total_envs * agents_per_env), 0);
-  for (int env_idx = 0; env_idx < total_envs; ++env_idx) {
-    const int local_env = env_idx % eval_envs;
-    const bool perturb_blue = (local_env % 2) == 0;
-    for (int local_agent = 0; local_agent < agents_per_env; ++local_agent) {
-      const bool is_blue = local_agent < team_size;
-      controlled_host[static_cast<std::size_t>(env_idx * agents_per_env + local_agent)] =
-          (is_blue == perturb_blue) ? 1 : 0;
+  std::vector<std::pair<std::string, float>> eval_modes;
+  if (curriculum_.enabled() && !config_.curriculum.stages.empty()) {
+    for (const auto& [mode, frac] : curriculum_.mode_allocation()) {
+      if (frac > 0.0F) {
+        eval_modes.emplace_back(mode, frac);
+      }
     }
   }
-  const torch::Tensor controlled_mask = torch::from_blob(
-      controlled_host.data(),
-      {static_cast<long>(controlled_host.size())},
-      torch::TensorOptions().dtype(torch::kUInt8))
-      .clone()
-      .to(device_)
-      .to(torch::kBool);
-  const torch::Tensor controlled_float = controlled_mask.to(torch::kFloat32).view({pop, member_agents});
+  if (eval_modes.empty()) {
+    const std::string mode = std::to_string(config_.env.team_size) + "v" +
+        std::to_string(config_.env.team_size);
+    eval_modes.emplace_back(mode, 1.0F);
+  }
 
-  auto eval_collector = make_es_eval_collector(
-      config_, total_envs, eval_envs, update_index, 0, use_pinned_host_buffers_);
+  float weight_sum = 0.0F;
+  for (const auto& [mode, weight] : eval_modes) {
+    (void)mode;
+    weight_sum += weight;
+  }
+  if (weight_sum <= 0.0F) {
+    weight_sum = 1.0F;
+  }
 
-  for (int ep = 0; ep < es_cfg.eval_episodes_per_member; ++ep) {
-    eval_collector->reset_es_episode(update_index, ep, eval_envs);
+  for (const auto& [mode, raw_weight] : eval_modes) {
+    const float mode_weight = raw_weight / weight_sum;
+    ExperimentConfig mode_config = config_;
+    mode_config.env.team_size = team_size_from_mode(mode);
+    mode_config.env.spawn_opponents = true;
 
-    for (int step = 0; step < es_cfg.eval_rollout_length; ++step) {
-      torch::Tensor raw_obs = eval_collector->host_observations().to(device_, use_pinned_host_buffers_);
-      torch::Tensor episode_starts = eval_collector->host_episode_starts().to(device_, use_pinned_host_buffers_);
-      torch::Tensor action_masks = eval_collector->host_action_masks().to(device_, use_pinned_host_buffers_).to(torch::kBool);
-      torch::Tensor normalized_obs = actor_normalizer_.normalize(raw_obs);
+    const int total_envs = pop * eval_envs;
+    const int team_size = mode_config.env.team_size;
+    const int agents_per_env = team_size * 2;
+    const int member_agents = eval_envs * agents_per_env;
 
-      const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
-      ActorStepOutput output = actor_->forward_step(normalized_obs, goal_values);
-      torch::Tensor perturbed_logits = actor_->policy_eggroll_logits(
-          output.features, A_stack, B_stack, es_cfg.sigma_ES, goal_values);
+    std::vector<int> episode_counts(static_cast<std::size_t>(pop), 0);
+    std::vector<int> win_counts(static_cast<std::size_t>(pop), 0);
 
-      torch::Tensor base_actions = sample_masked_actions(output.policy_logits, action_masks, true, nullptr);
-      torch::Tensor perturbed_actions = sample_masked_actions(perturbed_logits, action_masks, true, nullptr);
-      torch::Tensor actions = torch::where(controlled_mask, perturbed_actions, base_actions);
+    torch::Tensor kl_sum = torch::zeros({pop}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+    torch::Tensor kl_count = torch::zeros({pop}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
 
-      const torch::Tensor base_masked = apply_action_mask_to_logits(output.policy_logits, action_masks);
-      const torch::Tensor perturbed_masked = apply_action_mask_to_logits(perturbed_logits, action_masks);
-      const torch::Tensor base_probs = torch::softmax(base_masked, -1);
-      const torch::Tensor perturbed_probs = torch::softmax(perturbed_masked, -1);
-      const torch::Tensor kl_values = (
-          perturbed_probs * (torch::log(perturbed_probs + 1.0e-8) - torch::log(base_probs + 1.0e-8)))
-          .sum(-1)
-          .view({pop, member_agents});
-      kl_sum += (kl_values * controlled_float).sum(1);
-      kl_count += controlled_float.sum(1);
+    std::vector<std::uint8_t> controlled_host(static_cast<std::size_t>(total_envs * agents_per_env), 0);
+    for (int env_idx = 0; env_idx < total_envs; ++env_idx) {
+      const int local_env = env_idx % eval_envs;
+      const bool perturb_blue = (local_env % 2) == 0;
+      for (int local_agent = 0; local_agent < agents_per_env; ++local_agent) {
+        const bool is_blue = local_agent < team_size;
+        controlled_host[static_cast<std::size_t>(env_idx * agents_per_env + local_agent)] =
+            (is_blue == perturb_blue) ? 1 : 0;
+      }
+    }
+    const torch::Tensor controlled_mask = torch::from_blob(
+        controlled_host.data(),
+        {static_cast<long>(controlled_host.size())},
+        torch::TensorOptions().dtype(torch::kUInt8))
+        .clone()
+        .to(device_)
+        .to(torch::kBool);
+    const torch::Tensor controlled_float = controlled_mask.to(torch::kFloat32).view({pop, member_agents});
 
-      const torch::Tensor action_indices_cpu = actions.contiguous().to(torch::kCPU);
-      eval_collector->step(std::span<const std::int64_t>(
-          action_indices_cpu.data_ptr<std::int64_t>(),
-          static_cast<std::size_t>(action_indices_cpu.numel())));
+    auto eval_collector = make_es_eval_collector(
+        mode_config, total_envs, eval_envs, update_index, 0, use_pinned_host_buffers_);
 
-      torch::Tensor dones_cpu = eval_collector->host_dones();
-      torch::Tensor labels_cpu = eval_collector->host_terminal_outcome_labels();
-      const auto* dones_ptr = dones_cpu.data_ptr<float>();
-      const auto* labels_ptr = labels_cpu.data_ptr<std::int64_t>();
-      for (std::size_t i = 0; i < controlled_host.size(); ++i) {
-        if (controlled_host[i] == 0 || dones_ptr[i] <= 0.5F) {
-          continue;
+    for (int ep = 0; ep < es_cfg.eval_episodes_per_member; ++ep) {
+      eval_collector->reset_es_episode(update_index, ep, eval_envs);
+
+      for (int step = 0; step < es_cfg.eval_rollout_length; ++step) {
+        torch::Tensor raw_obs = eval_collector->host_observations().to(device_, use_pinned_host_buffers_);
+        torch::Tensor action_masks = eval_collector->host_action_masks().to(device_, use_pinned_host_buffers_).to(torch::kBool);
+        torch::Tensor normalized_obs = actor_normalizer_.normalize(raw_obs);
+
+        const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
+        ActorStepOutput output = actor_->forward_step(normalized_obs, goal_values);
+        torch::Tensor perturbed_logits = actor_->policy_eggroll_logits(
+            output.features, A_stack, B_stack, es_cfg.sigma_ES, goal_values);
+
+        torch::Tensor base_actions = sample_masked_actions(output.policy_logits, action_masks, true, nullptr);
+        torch::Tensor perturbed_actions = sample_masked_actions(perturbed_logits, action_masks, true, nullptr);
+        torch::Tensor actions = torch::where(controlled_mask, perturbed_actions, base_actions);
+
+        const torch::Tensor base_masked = apply_action_mask_to_logits(output.policy_logits, action_masks);
+        const torch::Tensor perturbed_masked = apply_action_mask_to_logits(perturbed_logits, action_masks);
+        const torch::Tensor base_probs = torch::softmax(base_masked, -1);
+        const torch::Tensor perturbed_probs = torch::softmax(perturbed_masked, -1);
+        const torch::Tensor kl_values = (
+            perturbed_probs * (torch::log(perturbed_probs + 1.0e-8) - torch::log(base_probs + 1.0e-8)))
+            .sum(-1)
+            .view({pop, member_agents});
+        kl_sum += (kl_values * controlled_float).sum(1);
+        kl_count += controlled_float.sum(1);
+
+        const torch::Tensor action_indices_cpu = actions.contiguous().to(torch::kCPU);
+        eval_collector->step(std::span<const std::int64_t>(
+            action_indices_cpu.data_ptr<std::int64_t>(),
+            static_cast<std::size_t>(action_indices_cpu.numel())));
+
+        torch::Tensor dones_cpu = eval_collector->host_dones();
+        torch::Tensor labels_cpu = eval_collector->host_terminal_outcome_labels();
+        const auto* dones_ptr = dones_cpu.data_ptr<float>();
+        const auto* labels_ptr = labels_cpu.data_ptr<std::int64_t>();
+        for (std::size_t i = 0; i < controlled_host.size(); ++i) {
+          if (controlled_host[i] == 0 || dones_ptr[i] <= 0.5F) {
+            continue;
+          }
+          const int env_idx = static_cast<int>(i / static_cast<std::size_t>(agents_per_env));
+          const int member = env_idx / eval_envs;
+          episode_counts[static_cast<std::size_t>(member)] += 1;
+          if (labels_ptr[i] == 0) {
+            win_counts[static_cast<std::size_t>(member)] += 1;
+          }
         }
-        const int env_idx = static_cast<int>(i / static_cast<std::size_t>(agents_per_env));
-        const int member = env_idx / eval_envs;
-        episode_counts[static_cast<std::size_t>(member)] += 1;
-        if (labels_ptr[i] == 0) {
-          win_counts[static_cast<std::size_t>(member)] += 1;
-        }
+      }
+    }
+
+    torch::Tensor kl_mean = (kl_sum / kl_count.clamp_min(1.0F)).to(torch::kCPU);
+    const auto* kl_ptr = kl_mean.data_ptr<float>();
+    for (int i = 0; i < pop; ++i) {
+      const int denom = std::max(episode_counts[static_cast<std::size_t>(i)], 1);
+      const float mode_winrate =
+          static_cast<float>(win_counts[static_cast<std::size_t>(i)]) / static_cast<float>(denom);
+      result.winrate[static_cast<std::size_t>(i)] += mode_weight * mode_winrate;
+      result.kl[static_cast<std::size_t>(i)] += mode_weight * kl_ptr[i];
     }
   }
-}
 
-  torch::Tensor kl_mean = (kl_sum / kl_count.clamp_min(1.0F)).to(torch::kCPU);
-  const auto* kl_ptr = kl_mean.data_ptr<float>();
   for (int i = 0; i < pop; ++i) {
-    const int denom = std::max(episode_counts[static_cast<std::size_t>(i)], 1);
-    result.winrate[static_cast<std::size_t>(i)] =
-        static_cast<float>(win_counts[static_cast<std::size_t>(i)]) / static_cast<float>(denom);
-    result.kl[static_cast<std::size_t>(i)] = kl_ptr[i];
     result.fitness[static_cast<std::size_t>(i)] =
         result.winrate[static_cast<std::size_t>(i)]
         - es_cfg.beta_KL * result.kl[static_cast<std::size_t>(i)];
@@ -2384,6 +2418,10 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
   std::int64_t global_step = resumed_global_step_;
 
   if (curriculum_.enabled()) {
+    curriculum_.initialize_stage();
+    if (curriculum_.mode_allocation().size() > 1) {
+      rebuild_collectors();
+    }
     apply_curriculum_to_collectors();
     apply_curriculum_lr();
   }

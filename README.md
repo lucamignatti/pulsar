@@ -1,6 +1,6 @@
 # Pulsar
 
-Sparse-reward Rocket League bot training with **APPO**, **contrastive goal-conditioned auxiliary learning**, **curriculum learning**, **self-play**, and **slow ES-LoRA**.
+Sparse-reward Rocket League bot training with **APPO**, **contrastive goal-conditioned auxiliary learning**, **all-mode self-play**, **PCGrad**, and **slow ES-LoRA**.
 
 The training loop combines three complementary signals:
 
@@ -8,7 +8,7 @@ The training loop combines three complementary signals:
 2. **Contrastive goal-conditioned auxiliary** — self-supervised future-goal encoders (state-action and goal) trained with symmetric InfoNCE. Provides a representation-learning signal that never shapes the environment reward.
 3. **Slow Rank-4 ES-LoRA** — periodic global parameter-space search over a LoRA adapter on the final policy layer, driven by true sparse winrate with KL penalty.
 
-A **curriculum** progresses the agent through stages: basic ball touching → directional control → scoring → aerials → teamplay → aggression — with per-mode (1v1 / 2v2 / 3v3) allocation, promotion gates, mechanic unlocks, and escalating reward complexity.
+The production setup trains 1v1, 2v2, and 3v3 from the start using one stable reward function. The curriculum layer is still available, but the default config uses it only as a mode-allocation wrapper rather than a staged reward schedule.
 
 ## Architecture
 
@@ -17,7 +17,7 @@ A **curriculum** progresses the agent through stages: basic ball touching → di
 - **Rank-4 LoRA adapter** on the final policy layer — mutated by ES, also trainable by APPO
 - **ES-LoRA** periodic global optimizer: population sampling, antithetic evaluation, sparse-outcome fitness
 - **Self-play league** with ELO ratings, snapshot management, and periodic evaluation against past policies
-- **Multi-stage curriculum** with per-mode thresholds, mechanic unlocks, and demotion
+- **All-mode training** with PCGrad over per-mode minibatch groups
 - **Comprehensive reward engine**: terminal outcome rewards, 18 mechanic detectors (speed flip, wavedash, flip reset, ceiling shot, air dribble, redirect, pinch, etc.), and dense gameplay rewards
 - Optional **PCGrad** gradient projection for multi-task gradients
 - **Perfetto-compatible tracing** for performance analysis
@@ -210,18 +210,11 @@ Set `model.encoder_type` to one of:
 | `"mamba2"` | State space model (Mamba-2) with selective scan. Supports recurrent inference with `initial_recurrent_state` / `forward_step` for efficient autoregressive deployment. |
 | `"mlp"` | Simple multi-layer perceptron with ReLU activations. |
 
-## Curriculum Learning
+## Mode Allocation
 
-The curriculum defines a sequence of stages, each specifying:
-- **Mode** (1v1, 2v2, 3v3) or **mode allocation** (e.g., 50% 1v1 + 50% 2v2)
-- **Minimum agent steps** before promotion is considered
-- **Rolling window** of touch/scored rates with **consecutive success threshold** for promotion
-- **Demotion** if scored rate falls below a fraction of the threshold
-- **Mechanic unlocks** that gate which mechanic rewards the agent receives
-- **Per-stage overrides** for outcome, dense reward, and mechanic reward configs
-- **Learning rate** schedules per stage
+The production config uses a single stable reward stage with a 1v1 / 2v2 / 3v3 allocation from the first rollout. The trainer dynamically rebuilds collectors before collection so each mode gets its own environment group and PCGrad can project per-mode gradients.
 
-When the mode allocation changes between stages, the environment collectors are dynamically rebuilt to serve the new mix of modes.
+The curriculum system still supports staged reward schedules, promotion gates, demotion, mechanic unlocks, and per-stage overrides for experiments that need them.
 
 ## Self-Play League
 
