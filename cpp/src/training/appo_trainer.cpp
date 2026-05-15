@@ -657,6 +657,18 @@ void APPOTrainer::rebuild_collectors() {
     agent_offset += static_cast<std::int64_t>(collector->total_agents());
   }
 
+  // Pre-allocate pinned action index buffers per shard.
+  shard_action_buffers_cpu_.clear();
+  shard_action_buffers_cpu_.reserve(collectors_.size());
+  for (const auto& collector : collectors_) {
+    auto opts = torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU);
+    if (use_pinned_host_buffers_) {
+      opts = opts.pinned_memory(true);
+    }
+    shard_action_buffers_cpu_.push_back(
+        torch::zeros({static_cast<long>(collector->total_agents())}, opts));
+  }
+
   // rebuild self-play assignments
   if (self_play_manager_ && self_play_was_enabled) {
     self_play_manager_->restore_rng_state(self_play_rng);
@@ -1590,7 +1602,8 @@ void APPOTrainer::collect_rollout(
         const auto decode_start = std::chrono::steady_clock::now();
         {
           PULSAR_TRACE_SCOPE_CAT("trainer", "action_decode_shard");
-          shard_step.action_indices_cpu = actions.contiguous().to(torch::kCPU);
+          shard_step.action_indices_cpu = shard_action_buffers_cpu_[shard];
+          shard_step.action_indices_cpu.copy_(actions.contiguous());
           BatchedRocketSimCollector* collector_ptr = &collector;
           torch::Tensor action_indices_cpu = shard_step.action_indices_cpu;
           CollectorTimings* shard_timings = &shard_step.timings;
@@ -1807,7 +1820,8 @@ void APPOTrainer::collect_rollout(
     torch::Tensor action_indices_cpu;
     {
       PULSAR_TRACE_SCOPE_CAT("trainer", "action_decode");
-      action_indices_cpu = actions.contiguous().to(torch::kCPU);
+      action_indices_cpu = shard_action_buffers_cpu_[0];
+      action_indices_cpu.copy_(actions.contiguous());
       collector_->step(
           std::span<const std::int64_t>(
               action_indices_cpu.data_ptr<std::int64_t>(),

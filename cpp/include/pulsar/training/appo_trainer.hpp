@@ -174,6 +174,7 @@ class APPOTrainer {
   std::int64_t resumed_update_index_ = 0;
   std::size_t total_agents_ = 0;
   std::vector<std::int64_t> shard_agent_offsets_{};
+  std::vector<torch::Tensor> shard_action_buffers_cpu_{};
   bool use_pinned_host_buffers_ = false;
   bool benchmark_progress_ = false;
   std::atomic<bool> es_deltas_ready_{false};
