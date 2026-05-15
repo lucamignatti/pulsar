@@ -381,13 +381,13 @@
     "policy_hidden_dim": 0
   },
   "ppo": {
-    "num_envs": 10240,
-    "collection_workers": 24,
+    "num_envs": 256,
+    "collection_workers": 16,
     "collection_shards": 4,
     "init_checkpoint": "",
     "rollout_length": 128,
-    "minibatch_size": 131072,
-    "update_epochs": 1,
+    "minibatch_size": 8192,
+    "update_epochs": 3,
     "clip_range": 0.2,
     "entropy_coef": 0.03,
     "entropy_floor": 0.08,
