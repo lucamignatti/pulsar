@@ -40,6 +40,7 @@ RolloutStorage::RolloutStorage(
       {rollout_length, num_agents}, 2,
       opts.dtype(torch::kInt64));
   terminal_observations = torch::zeros({rollout_length, num_agents, obs_dim}, opts);
+  mode_ids = torch::zeros({rollout_length, num_agents}, opts.dtype(torch::kInt8));
 
   for (const auto& name : head_names) {
     values_[name] = torch::zeros({rollout_length, num_agents}, opts);
@@ -145,6 +146,17 @@ void RolloutStorage::append_slice(
     }
   }
   filled_length_ = std::max(filled_length_, step + 1);
+}
+
+void RolloutStorage::set_mode_ids_slice(int step, int agent_offset, std::int8_t mode_id) {
+  if (step < 0 || step >= rollout_length_) {
+    throw std::out_of_range("RolloutStorage::set_mode_ids_slice step is outside rollout capacity.");
+  }
+  const int remaining = num_agents_ - agent_offset;
+  if (agent_offset < 0 || remaining <= 0 || agent_offset >= num_agents_) {
+    throw std::out_of_range("RolloutStorage::set_mode_ids_slice agent range is outside rollout capacity.");
+  }
+  mode_ids[step].narrow(0, agent_offset, remaining).fill_(static_cast<int64_t>(mode_id));
 }
 
 void RolloutStorage::set_final_values(

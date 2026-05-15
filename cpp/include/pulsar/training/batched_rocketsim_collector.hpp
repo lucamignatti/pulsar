@@ -57,6 +57,7 @@ class BatchedRocketSimCollector {
   void update_unlocked_mechanics(const std::vector<std::string>& mechanics);
   void set_mode(const std::string& mode);
   [[nodiscard]] const std::string& mode() const;
+  [[nodiscard]] std::int8_t mode_id() const;
   void reset_all(CollectorTimings* timings = nullptr);
   void reset_es_episode(int update_index, int episode_index, int eval_envs_per_member, CollectorTimings* timings = nullptr);
 

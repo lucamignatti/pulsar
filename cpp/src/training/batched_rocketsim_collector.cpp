@@ -176,6 +176,13 @@ const std::string& BatchedRocketSimCollector::mode() const {
   return mode_;
 }
 
+std::int8_t BatchedRocketSimCollector::mode_id() const {
+  if (mode_ == "1v1") return 1;
+  if (mode_ == "2v2") return 2;
+  if (mode_ == "3v3") return 3;
+  return 0;
+}
+
 void BatchedRocketSimCollector::reset_all(CollectorTimings* timings) {
   PULSAR_TRACE_SCOPE_CAT("collector", "reset_all");
   const auto reset_start = std::chrono::steady_clock::now();
