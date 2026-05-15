@@ -276,14 +276,32 @@ int cuda_autograd_forward_sample_cap(const ModelConfig& config) {
       static_cast<std::int64_t>(std::numeric_limits<int>::max())));
 }
 
+int cuda_mamba2_autograd_forward_sample_cap(const ModelConfig& config) {
+  constexpr std::int64_t kProjectedActivationBudgetBytes = 512LL * 1024LL * 1024LL;
+  const auto sequence = static_cast<std::int64_t>(std::max(1, config.observation_dim + 1));
+  const auto projected_dim = static_cast<std::int64_t>(std::max(1, config.encoder_dim)) * 5;
+  const std::int64_t bytes_per_sample = sequence * projected_dim * static_cast<std::int64_t>(sizeof(float));
+  if (bytes_per_sample <= 0) {
+    return std::max(1, config.transformer_max_batch_size);
+  }
+  const std::int64_t sample_cap = std::max<std::int64_t>(1, kProjectedActivationBudgetBytes / bytes_per_sample);
+  return static_cast<int>(std::min<std::int64_t>(
+      sample_cap,
+      static_cast<std::int64_t>(std::numeric_limits<int>::max())));
+}
+
 int effective_transformer_max_batch_size(const ModelConfig& config, const torch::Device& device) {
   constexpr int kUnlimitedCap = 524288;
   if (config.encoder_type == "mamba2") {
-    constexpr int kDefaultMamba2Cap = 8192;
-    if (config.transformer_max_batch_size == 0) {
-      return device.is_cuda() ? kDefaultMamba2Cap : kUnlimitedCap;
+    if (!device.is_cuda()) {
+      return config.transformer_max_batch_size == 0
+          ? kUnlimitedCap
+          : std::max(1, config.transformer_max_batch_size);
     }
-    return std::max(1, config.transformer_max_batch_size);
+    const int cap = cuda_mamba2_autograd_forward_sample_cap(config);
+    return config.transformer_max_batch_size == 0
+        ? cap
+        : std::max(1, std::min(std::max(1, config.transformer_max_batch_size), cap));
   }
   if (config.transformer_max_batch_size == 0) {
     if (!device.is_cuda() || config.encoder_type == "mlp") {
