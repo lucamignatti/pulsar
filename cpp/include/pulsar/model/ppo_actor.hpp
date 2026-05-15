@@ -161,12 +161,13 @@ TORCH_MODULE(MLPEncoder);
 
 class Mamba2BlockImpl : public torch::nn::Module {
  public:
-  Mamba2BlockImpl(int embed_dim, bool use_layer_norm);
+  Mamba2BlockImpl(int embed_dim, int sequence_length, bool use_layer_norm);
 
   torch::Tensor forward(const torch::Tensor& tokens);
 
  private:
   int embed_dim_ = 0;
+  int sequence_length_ = 0;
   bool use_layer_norm_ = true;
   torch::nn::LayerNorm input_norm_{nullptr};
   torch::nn::LayerNorm output_norm_{nullptr};
@@ -174,6 +175,7 @@ class Mamba2BlockImpl : public torch::nn::Module {
   torch::nn::Linear output_projection_{nullptr};
   torch::Tensor decay_logits_;
   torch::Tensor skip_;
+  torch::Tensor position_ids_;
 };
 
 TORCH_MODULE(Mamba2Block);

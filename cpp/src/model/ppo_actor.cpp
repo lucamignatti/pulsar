@@ -334,10 +334,13 @@ torch::Tensor MLPEncoderImpl::forward(const torch::Tensor& obs) {
   return network_->forward(obs);
 }
 
-Mamba2BlockImpl::Mamba2BlockImpl(int embed_dim, bool use_layer_norm)
-    : embed_dim_(embed_dim), use_layer_norm_(use_layer_norm) {
+Mamba2BlockImpl::Mamba2BlockImpl(int embed_dim, int sequence_length, bool use_layer_norm)
+    : embed_dim_(embed_dim), sequence_length_(sequence_length), use_layer_norm_(use_layer_norm) {
   if (embed_dim_ <= 0) {
     throw std::invalid_argument("Mamba2Block requires positive embed_dim.");
+  }
+  if (sequence_length_ <= 0) {
+    throw std::invalid_argument("Mamba2Block requires positive sequence_length.");
   }
   if (use_layer_norm_) {
     input_norm_ = register_module("input_norm", torch::nn::LayerNorm(torch::nn::LayerNormOptions({embed_dim_})));
@@ -347,6 +350,9 @@ Mamba2BlockImpl::Mamba2BlockImpl(int embed_dim, bool use_layer_norm)
   output_projection_ = register_module("output_projection", torch::nn::Linear(embed_dim_, embed_dim_));
   decay_logits_ = register_parameter("decay_logits", torch::full({embed_dim_}, 2.0F));
   skip_ = register_parameter("skip", torch::ones({embed_dim_}));
+  position_ids_ = register_buffer(
+      "position_ids",
+      torch::arange(sequence_length_, torch::TensorOptions().dtype(torch::kFloat32)).view({sequence_length_, 1}));
 }
 
 torch::Tensor Mamba2BlockImpl::forward(const torch::Tensor& tokens) {
@@ -359,19 +365,15 @@ torch::Tensor Mamba2BlockImpl::forward(const torch::Tensor& tokens) {
   const torch::Tensor b = torch::sigmoid(projected[1]);
   const torch::Tensor c = torch::sigmoid(projected[2]);
   const torch::Tensor z = torch::silu(projected[3]);
-  const torch::Tensor decay = torch::sigmoid(decay_logits_).to(tokens.device()).view({1, embed_dim_});
+  const torch::Tensor decay = torch::sigmoid(decay_logits_).clamp(1.0e-4, 0.9999).to(tokens.device());
   const torch::Tensor skip = skip_.to(tokens.device()).view({1, embed_dim_});
 
-  torch::Tensor state = torch::zeros({batch, embed_dim_}, tokens.options());
-  std::vector<torch::Tensor> outputs;
-  outputs.reserve(static_cast<std::size_t>(sequence));
-  for (int64_t t = 0; t < sequence; ++t) {
-    const torch::Tensor x_t = x.select(1, t);
-    state = decay * state + b.select(1, t) * x_t;
-    outputs.push_back((c.select(1, t) * state + skip * x_t) * z.select(1, t));
-  }
-
-  torch::Tensor mixed = torch::stack(outputs, 1);
+  const torch::Tensor positions = position_ids_.to(tokens.device()).to(tokens.dtype()).narrow(0, 0, sequence);
+  const torch::Tensor decay_powers = torch::exp(positions * torch::log(decay).view({1, embed_dim_}));
+  const torch::Tensor recurrent_input = b * x;
+  const torch::Tensor state = torch::cumsum(recurrent_input / decay_powers.unsqueeze(0), 1)
+      * decay_powers.unsqueeze(0);
+  torch::Tensor mixed = (c * state + skip.unsqueeze(1) * x) * z;
   if (use_layer_norm_) {
     mixed = output_norm_->forward(mixed);
   }
@@ -394,7 +396,7 @@ Mamba2EncoderImpl::Mamba2EncoderImpl(const ModelConfig& config)
 
   blocks_.reserve(static_cast<std::size_t>(config.num_encoder_blocks));
   for (int i = 0; i < config.num_encoder_blocks; ++i) {
-    Mamba2Block block(embed_dim_, config.use_layer_norm);
+    Mamba2Block block(embed_dim_, sequence_length_, config.use_layer_norm);
     blocks_.push_back(register_module("block_" + std::to_string(i), block));
   }
   output_norm_ = register_module("output_norm", torch::nn::LayerNorm(torch::nn::LayerNormOptions({embed_dim_})));
