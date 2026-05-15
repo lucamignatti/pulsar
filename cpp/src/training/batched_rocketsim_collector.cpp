@@ -360,31 +360,30 @@ void BatchedRocketSimCollector::rebuild_next_buffers(CollectorTimings* timings) 
 void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
   PULSAR_TRACE_SCOPE_CAT("collector", "finalize_step");
   const auto done_reset_start = std::chrono::steady_clock::now();
-  const std::size_t obs_stride = static_cast<std::size_t>(obs_dim_);
-  const std::size_t action_stride = static_cast<std::size_t>(action_dim_);
-
-  // Pointers for done / reward / goal output tensors.
   float* dones_ptr = host_dones_.data_ptr<float>();
   float* terminated_ptr = host_terminated_.data_ptr<float>();
   float* truncated_ptr = host_truncated_.data_ptr<float>();
-  float* btrunc_ptr = host_bootstrap_truncated_.data_ptr<float>();
   std::int64_t* labels_ptr = host_terminal_outcome_labels_.data_ptr<std::int64_t>();
   float* terminal_obs_ptr = host_terminal_observations_.data_ptr<float>();
   float* goal_pos_ptr = host_goal_positions_.data_ptr<float>();
   float* ball_touch_ptr = host_ball_proximity_.data_ptr<float>();
   float* episode_touch_ptr = host_episode_ball_touch_.data_ptr<float>();
-  float* rewards_ptr = host_rewards_.data_ptr<float>();
-  float* gameplay_r_ptr = host_gameplay_rewards_.data_ptr<float>();
-  float* mechanic_r_ptr = host_mechanic_rewards_.data_ptr<float>();
-  float* host_env_touch_ptr = host_env_touched_.data_ptr<float>();
-  const float* learner_ptr = current_buffers_.learner_active.data_ptr<float>();
+  const std::size_t obs_stride = static_cast<std::size_t>(obs_dim_);
+  host_dones_.zero_();
+  host_terminated_.zero_();
+  host_truncated_.zero_();
+  host_terminal_outcome_labels_.fill_(2);
+  host_terminal_observations_.zero_();
+  host_goal_positions_.zero_();
+  host_ball_proximity_.zero_();
+  host_rewards_.zero_();
+  host_gameplay_rewards_.zero_();
+  host_mechanic_rewards_.zero_();
+  host_env_touched_.zero_();
+  host_bootstrap_truncated_.zero_();
 
-  // Pointers for next-buffer rebuild (fused into this pass).
-  float* next_obs_ptr = next_buffers_.obs.data_ptr<float>();
-  std::uint8_t* next_mask_ptr = next_buffers_.action_masks.data_ptr<std::uint8_t>();
-  float* next_learner_ptr = next_buffers_.learner_active.data_ptr<float>();
-  std::int64_t* next_snap_ptr = next_buffers_.snapshot_ids.data_ptr<std::int64_t>();
-  float* next_epstarts_ptr = next_buffers_.episode_starts.data_ptr<float>();
+  float* host_env_touched_ptr = host_env_touched_.data_ptr<float>();
+  const float* learner_ptr = current_buffers_.learner_active.data_ptr<float>();
 
   executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
     for (std::size_t env_idx = begin; env_idx < end; ++env_idx) {
@@ -402,18 +401,17 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
       bool reset_needed = false;
       const bool goal_scored = current_state.goal_scored;
       const Team scoring_team = current_state.last_scoring_team;
-
       for (std::size_t idx = 0; idx < count; ++idx) {
         const CarState& car = current_state.cars[idx];
         const BallState& ball = current_state.ball;
-        const std::size_t global_idx = agent_begin + idx;
 
-        // Ball proximity / touch.
         const float dx = car.position.x - ball.position.x;
         const float dy = car.position.y - ball.position.y;
         const float dz = car.position.z - ball.position.z;
         const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
         const float step_touch = (dist < 300.0F) ? 1.0F : 0.0F;
+
+        const std::size_t global_idx = agent_begin + idx;
         float& accumulated = episode_touch_ptr[global_idx];
         accumulated = std::max(accumulated, step_touch);
         ball_touch_ptr[global_idx] = step_touch;
@@ -424,17 +422,16 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         dones_ptr[global_idx] = done ? 1.0F : 0.0F;
         terminated_ptr[global_idx] = is_terminated ? 1.0F : 0.0F;
         truncated_ptr[global_idx] = is_truncated ? 1.0F : 0.0F;
-        btrunc_ptr[global_idx] = (is_truncated && !is_terminated) ? 1.0F : 0.0F;
-
-        // Next-buffer episode_starts mirrors dones.
-        next_epstarts_ptr[global_idx] = dones_ptr[global_idx];
+        host_bootstrap_truncated_.data_ptr<float>()[global_idx] = (is_truncated && !is_terminated) ? 1.0F : 0.0F;
 
         const int label = done
             ? (goal_scored
                 ? (car.team == scoring_team ? 0 : 1)
                 : (accumulated > 0.5F ? 2 : 3))
             : -1;
-        labels_ptr[global_idx] = label;
+        if (done) {
+          labels_ptr[global_idx] = label;
+        }
 
         RewardBreakdown breakdown = reward_engine_.compute(
             current_state.tick, car, current_state,
@@ -442,9 +439,9 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
             agent_reward_states_[global_idx],
             env_reward_states_[env_idx],
             done, label);
-        rewards_ptr[global_idx] = breakdown.total;
-        gameplay_r_ptr[global_idx] = breakdown.gameplay;
-        mechanic_r_ptr[global_idx] = breakdown.mechanic;
+        host_rewards_.data_ptr<float>()[global_idx] = breakdown.total;
+        host_gameplay_rewards_.data_ptr<float>()[global_idx] = breakdown.gameplay;
+        host_mechanic_rewards_.data_ptr<float>()[global_idx] = breakdown.mechanic;
 
         reset_needed = reset_needed || done;
 
@@ -474,35 +471,13 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
             break;
           }
         }
-        host_env_touch_ptr[env_idx] = learner_touched ? 1.0F : 0.0F;
+        if (learner_touched) {
+          host_env_touched_ptr[env_idx] = 1.0F;
+        }
         for (std::size_t idx = 0; idx < count; ++idx) {
           episode_touch_ptr[agent_begin + idx] = 0.0F;
           agent_reward_states_[agent_begin + idx] = AgentRewardState{};
         }
-      } else {
-        host_env_touch_ptr[env_idx] = 0.0F;
-      }
-
-      // Build next-buffer obs + masks + learner/snapshot in the same pass.
-      const EnvState& post_reset_state = envs_[env_idx].engine->state();
-      obs_builder_->build_obs_batch(
-          post_reset_state,
-          std::span<float>(
-              next_obs_ptr + static_cast<std::ptrdiff_t>(agent_begin * obs_stride),
-              count * obs_stride));
-      action_parser_->build_action_mask_batch(
-          post_reset_state,
-          std::span<std::uint8_t>(
-              next_mask_ptr + static_cast<std::ptrdiff_t>(agent_begin * action_stride),
-              post_reset_state.cars.size() * action_stride));
-      for (std::size_t local_idx = 0; local_idx < post_reset_state.cars.size(); ++local_idx) {
-        const std::size_t global_idx = agent_begin + local_idx;
-        const Team team = post_reset_state.cars[local_idx].team;
-        const bool learner =
-            !envs_[env_idx].assignment.enabled || team == envs_[env_idx].assignment.learner_team;
-        next_learner_ptr[global_idx] = learner ? 1.0F : 0.0F;
-        next_snap_ptr[global_idx] =
-            learner ? -1 : static_cast<std::int64_t>(envs_[env_idx].assignment.snapshot_index);
       }
     }
   });
@@ -511,6 +486,7 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         std::chrono::duration<double>(std::chrono::steady_clock::now() - done_reset_start).count();
   }
 
+  rebuild_next_buffers(timings);
   std::swap(current_buffers_, next_buffers_);
 }
 

@@ -1602,8 +1602,7 @@ void APPOTrainer::collect_rollout(
         const auto decode_start = std::chrono::steady_clock::now();
         {
           PULSAR_TRACE_SCOPE_CAT("trainer", "action_decode_shard");
-          shard_step.action_indices_cpu = shard_action_buffers_cpu_[shard];
-          shard_step.action_indices_cpu.copy_(actions.contiguous());
+          shard_step.action_indices_cpu = actions.contiguous().to(torch::kCPU);
           BatchedRocketSimCollector* collector_ptr = &collector;
           torch::Tensor action_indices_cpu = shard_step.action_indices_cpu;
           CollectorTimings* shard_timings = &shard_step.timings;
@@ -1820,8 +1819,7 @@ void APPOTrainer::collect_rollout(
     torch::Tensor action_indices_cpu;
     {
       PULSAR_TRACE_SCOPE_CAT("trainer", "action_decode");
-      action_indices_cpu = shard_action_buffers_cpu_[0];
-      action_indices_cpu.copy_(actions.contiguous());
+      action_indices_cpu = actions.contiguous().to(torch::kCPU);
       collector_->step(
           std::span<const std::int64_t>(
               action_indices_cpu.data_ptr<std::int64_t>(),
