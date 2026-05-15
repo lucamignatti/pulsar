@@ -262,7 +262,7 @@ int transformer_sequence_length(const ModelConfig& config) {
 }
 
 int cuda_autograd_forward_sample_cap(const ModelConfig& config) {
-  constexpr std::int64_t kFfnActivationBudgetBytes = 384LL * 1024LL * 1024LL;
+  constexpr std::int64_t kAutogradActivationBudgetBytes = 96LL * 1024LL * 1024LL;
   const auto sequence = static_cast<std::int64_t>(transformer_sequence_length(config));
   const auto ffn_dim = static_cast<std::int64_t>(std::max(1, config.encoder_dim))
       * static_cast<std::int64_t>(std::max(1, config.transformer_ffn_multiplier));
@@ -270,7 +270,7 @@ int cuda_autograd_forward_sample_cap(const ModelConfig& config) {
   if (bytes_per_sample <= 0) {
     return std::max(1, config.transformer_max_batch_size);
   }
-  const std::int64_t sample_cap = std::max<std::int64_t>(1, kFfnActivationBudgetBytes / bytes_per_sample);
+  const std::int64_t sample_cap = std::max<std::int64_t>(1, kAutogradActivationBudgetBytes / bytes_per_sample);
   return static_cast<int>(std::min<std::int64_t>(
       sample_cap,
       static_cast<std::int64_t>(std::numeric_limits<int>::max())));
