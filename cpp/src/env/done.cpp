@@ -4,6 +4,23 @@
 #include <stdexcept>
 
 namespace pulsar {
+namespace {
+
+bool no_touch_timeout_expired(const EnvConfig& config, const EnvState& state) {
+  if (config.no_touch_timeout_seconds <= 0.0F) return false;
+
+  const int no_touch_timeout_ticks =
+      static_cast<int>(config.no_touch_timeout_seconds * static_cast<float>(config.tick_rate));
+  if (no_touch_timeout_ticks <= 0) return false;
+
+  if (config.no_touch_timeout_only_before_first_touch && state.last_touch_agent >= 0) {
+    return false;
+  }
+
+  return (state.tick - state.last_touch_tick) >= no_touch_timeout_ticks;
+}
+
+}  // namespace
 
 SimpleDoneCondition::SimpleDoneCondition(EnvConfig config) : config_(std::move(config)) {}
 
@@ -16,9 +33,7 @@ std::pair<std::vector<std::uint8_t>, std::vector<std::uint8_t>> SimpleDoneCondit
 
   const bool goal_scored = state.goal_scored;
   const bool timeout = episode_ticks >= config_.max_episode_ticks;
-  const int no_touch_timeout_ticks =
-      static_cast<int>(config_.no_touch_timeout_seconds * static_cast<float>(config_.tick_rate));
-  const bool no_touch_timeout = (state.tick - state.last_touch_tick) >= no_touch_timeout_ticks;
+  const bool no_touch_timeout = no_touch_timeout_expired(config_, state);
 
   if (goal_scored) {
     std::fill(terminated.begin(), terminated.end(), 1);
@@ -44,9 +59,7 @@ void SimpleDoneCondition::is_done_into(
 
   const bool goal_scored = state.goal_scored;
   const bool timeout = episode_ticks >= config_.max_episode_ticks;
-  const int no_touch_timeout_ticks =
-      static_cast<int>(config_.no_touch_timeout_seconds * static_cast<float>(config_.tick_rate));
-  const bool no_touch_timeout = (state.tick - state.last_touch_tick) >= no_touch_timeout_ticks;
+  const bool no_touch_timeout = no_touch_timeout_expired(config_, state);
 
   if (goal_scored) {
     std::fill(terminated.begin(), terminated.end(), 1);

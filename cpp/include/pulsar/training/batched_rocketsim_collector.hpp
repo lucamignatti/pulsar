@@ -82,10 +82,12 @@ class BatchedRocketSimCollector {
   [[nodiscard]] const torch::Tensor& host_goal_positions() const;
   [[nodiscard]] const torch::Tensor& host_ball_proximity() const;
   [[nodiscard]] const torch::Tensor& host_episode_ball_touch() const;
+  [[nodiscard]] const torch::Tensor& host_episode_ball_touch_count() const;
   [[nodiscard]] const torch::Tensor& host_rewards() const;
   [[nodiscard]] const torch::Tensor& host_gameplay_rewards() const;
   [[nodiscard]] const torch::Tensor& host_mechanic_rewards() const;
   [[nodiscard]] const torch::Tensor& host_env_touched() const;
+  [[nodiscard]] const torch::Tensor& host_env_multi_touched() const;
   [[nodiscard]] const torch::Tensor& host_bootstrap_truncated() const;
 
  private:
@@ -131,10 +133,12 @@ class BatchedRocketSimCollector {
   torch::Tensor host_goal_positions_;
   torch::Tensor host_ball_proximity_;
   torch::Tensor host_episode_ball_touch_;
+  torch::Tensor host_episode_ball_touch_count_;
   torch::Tensor host_rewards_;
   torch::Tensor host_gameplay_rewards_;
   torch::Tensor host_mechanic_rewards_;
   torch::Tensor host_env_touched_;
+  torch::Tensor host_env_multi_touched_;
   torch::Tensor host_bootstrap_truncated_;
   std::vector<AgentRewardState> agent_reward_states_;
   std::vector<EnvRewardState> env_reward_states_;

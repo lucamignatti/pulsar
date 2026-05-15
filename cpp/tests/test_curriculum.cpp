@@ -15,6 +15,7 @@ std::map<std::string, double> mode_map(double v) {
 }
 
 std::map<std::string, double> mode_touch(double v) { return mode_map(v); }
+std::map<std::string, double> mode_multi_touch(double v) { return mode_map(v); }
 std::map<std::string, double> mode_scored(double v) { return mode_map(v); }
 
 void require_eq(int actual, int expected, const std::string& msg) {
@@ -339,6 +340,26 @@ void test_initialize_stage_clamps_index() {
              "initialize_stage resets promotion counter");
 }
 
+void test_multi_touch_threshold_gates_promotion() {
+  auto cfg = make_two_stage_config();
+  cfg.stages[0].min_agent_steps = 0;
+  cfg.stages[0].rolling_window_size = 2;
+  cfg.stages[0].consecutive_success_threshold = 1;
+  cfg.stages[0].required_touch_episode_rate = 0.0f;
+  cfg.stages[0].required_multi_touch_episode_rate = 0.5f;
+
+  pulsar::Curriculum curriculum(cfg);
+
+  curriculum.check_promotion(mode_touch(1.0), mode_multi_touch(0.25), mode_scored(0.0), 0);
+  bool promoted = curriculum.check_promotion(mode_touch(1.0), mode_multi_touch(0.25), mode_scored(0.0), 0);
+  pulsar::test::require(!promoted, "multi-touch threshold should block promotion");
+  require_eq(curriculum.stage_index(), 0, "still stage 0 after low multi-touch");
+
+  promoted = curriculum.check_promotion(mode_touch(1.0), mode_multi_touch(0.75), mode_scored(0.0), 0);
+  pulsar::test::require(promoted, "high multi-touch should allow promotion");
+  require_eq(curriculum.stage_index(), 1, "promoted after multi-touch threshold passes");
+}
+
 void test_mechanic_rewards_and_dense_rewards() {
   auto cfg = make_two_stage_config();
 
@@ -387,6 +408,7 @@ int main() {
     test_single_stage_never_promotes();
     test_empty_stages_never_promotes();
     test_initialize_stage_clamps_index();
+    test_multi_touch_threshold_gates_promotion();
     test_mechanic_rewards_and_dense_rewards();
     std::cout << "test_curriculum passed\n";
     return EXIT_SUCCESS;

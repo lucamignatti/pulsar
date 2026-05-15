@@ -142,6 +142,11 @@ void to_json(json& j, const DenseRewardConfig& value) {
       {"possession_chain_weight", value.possession_chain_weight},
       {"possession_chain_scale", value.possession_chain_scale},
       {"possession_chain_timeout_ticks", value.possession_chain_timeout_ticks},
+      {"possession_proximity_weight", value.possession_proximity_weight},
+      {"possession_speed_toward_ball_weight", value.possession_speed_toward_ball_weight},
+      {"possession_face_ball_weight", value.possession_face_ball_weight},
+      {"possession_window_ticks", value.possession_window_ticks},
+      {"possession_distance_decay", value.possession_distance_decay},
       {"dense_reward_cap_per_episode", value.dense_reward_cap_per_episode},
   };
 }
@@ -172,6 +177,11 @@ void from_json(const json& j, DenseRewardConfig& value) {
   value.possession_chain_weight = j.value("possession_chain_weight", 0.0F);
   value.possession_chain_scale = j.value("possession_chain_scale", 0.0F);
   value.possession_chain_timeout_ticks = j.value("possession_chain_timeout_ticks", 360);
+  value.possession_proximity_weight = j.value("possession_proximity_weight", 0.0F);
+  value.possession_speed_toward_ball_weight = j.value("possession_speed_toward_ball_weight", 0.0F);
+  value.possession_face_ball_weight = j.value("possession_face_ball_weight", 0.0F);
+  value.possession_window_ticks = j.value("possession_window_ticks", 180);
+  value.possession_distance_decay = j.value("possession_distance_decay", 1000.0F);
   value.dense_reward_cap_per_episode = j.value("dense_reward_cap_per_episode", 0.0F);
 }
 
@@ -189,6 +199,7 @@ void to_json(json& j, const CurriculumStageConfig& value) {
       {"rolling_window_size", value.rolling_window_size},
       {"consecutive_success_threshold", value.consecutive_success_threshold},
       {"required_touch_episode_rate", value.required_touch_episode_rate},
+      {"required_multi_touch_episode_rate", value.required_multi_touch_episode_rate},
       {"required_scored_episode_rate", value.required_scored_episode_rate},
       {"demotion_threshold_rate", value.demotion_threshold_rate},
       {"demotion_window_updates", value.demotion_window_updates},
@@ -198,6 +209,9 @@ void to_json(json& j, const CurriculumStageConfig& value) {
   }
   if (!value.mode_touch_thresholds.empty()) {
     j["mode_touch_thresholds"] = value.mode_touch_thresholds;
+  }
+  if (!value.mode_multi_touch_thresholds.empty()) {
+    j["mode_multi_touch_thresholds"] = value.mode_multi_touch_thresholds;
   }
 }
 
@@ -214,6 +228,7 @@ void from_json(const json& j, CurriculumStageConfig& value) {
   value.rolling_window_size = j.value("rolling_window_size", window_size);
   value.consecutive_success_threshold = j.value("consecutive_success_threshold", window_size);
   value.required_touch_episode_rate = j.value("required_touch_episode_rate", 0.0F);
+  value.required_multi_touch_episode_rate = j.value("required_multi_touch_episode_rate", 0.0F);
   value.required_scored_episode_rate = j.value("required_scored_episode_rate", 0.0F);
   value.demotion_threshold_rate = j.value("demotion_threshold_rate", 0.0F);
   value.demotion_window_updates = j.value("demotion_window_updates", 10);
@@ -222,6 +237,9 @@ void from_json(const json& j, CurriculumStageConfig& value) {
   }
   if (j.contains("mode_touch_thresholds")) {
     value.mode_touch_thresholds = j["mode_touch_thresholds"].get<std::map<std::string, float>>();
+  }
+  if (j.contains("mode_multi_touch_thresholds")) {
+    value.mode_multi_touch_thresholds = j["mode_multi_touch_thresholds"].get<std::map<std::string, float>>();
   }
 
   // mode_allocation: if present in JSON, use it; otherwise derive from single "mode" field
@@ -287,6 +305,7 @@ void to_json(json& j, const EnvConfig& value) {
       {"tick_rate", value.tick_rate},
       {"max_episode_ticks", value.max_episode_ticks},
       {"no_touch_timeout_seconds", value.no_touch_timeout_seconds},
+      {"no_touch_timeout_only_before_first_touch", value.no_touch_timeout_only_before_first_touch},
       {"spawn_opponents", value.spawn_opponents},
       {"randomize_kickoffs", value.randomize_kickoffs},
       {"seed", value.seed},
@@ -301,6 +320,7 @@ void from_json(const json& j, EnvConfig& value) {
   value.tick_rate = j.value("tick_rate", 120);
   value.max_episode_ticks = j.value("max_episode_ticks", 2250);
   value.no_touch_timeout_seconds = j.value("no_touch_timeout_seconds", 10.0F);
+  value.no_touch_timeout_only_before_first_touch = j.value("no_touch_timeout_only_before_first_touch", false);
   value.spawn_opponents = j.value("spawn_opponents", true);
   value.randomize_kickoffs = j.value("randomize_kickoffs", true);
   value.seed = j.value("seed", static_cast<std::uint64_t>(0));

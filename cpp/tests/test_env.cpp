@@ -61,6 +61,14 @@ void test_obs_content_and_done() {
   pulsar::test::require(terminated[0] == 0, "no-touch timeout should not terminate");
   pulsar::test::require(truncated[0] == 1, "no-touch timeout should truncate");
 
+  auto post_touch_config = config.env;
+  post_touch_config.no_touch_timeout_only_before_first_touch = true;
+  pulsar::SimpleDoneCondition post_touch_done(post_touch_config);
+  timeout_state.last_touch_agent = 0;
+  const auto [post_touch_terminated, post_touch_truncated] = post_touch_done.is_done(timeout_state, config.env.tick_skip);
+  pulsar::test::require(post_touch_terminated[0] == 0, "post-touch no-touch guard should not terminate");
+  pulsar::test::require(post_touch_truncated[0] == 0, "post-touch no-touch guard should not truncate");
+
   timeout_state.goal_scored = true;
   timeout_state.tick = 0;
   timeout_state.last_touch_tick = 0;

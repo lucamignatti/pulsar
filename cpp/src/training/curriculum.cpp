@@ -95,6 +95,7 @@ void Curriculum::initialize_stage() {
   state_.promotion_counter = 0;
   state_.demotion_counter = 0;
   state_.mode_touch_rates.clear();
+  state_.mode_multi_touch_rates.clear();
   state_.mode_scored_rates.clear();
 
   const auto& stage = stages[static_cast<std::size_t>(idx)];
@@ -111,6 +112,15 @@ void Curriculum::initialize_stage() {
 
 bool Curriculum::check_promotion(
     const std::map<std::string, double>& mode_touch_rates,
+    const std::map<std::string, double>& mode_scored_rates,
+    std::int64_t agent_steps) {
+  static const std::map<std::string, double> kNoMultiTouchRates{};
+  return check_promotion(mode_touch_rates, kNoMultiTouchRates, mode_scored_rates, agent_steps);
+}
+
+bool Curriculum::check_promotion(
+    const std::map<std::string, double>& mode_touch_rates,
+    const std::map<std::string, double>& mode_multi_touch_rates,
     const std::map<std::string, double>& mode_scored_rates,
     std::int64_t agent_steps) {
   if (!config_.enabled) return false;
@@ -139,6 +149,13 @@ bool Curriculum::check_promotion(
       state_.mode_touch_rates[mode].push_back(0.0);
     }
 
+    auto multi_touch_it = mode_multi_touch_rates.find(mode);
+    if (multi_touch_it != mode_multi_touch_rates.end()) {
+      state_.mode_multi_touch_rates[mode].push_back(multi_touch_it->second);
+    } else {
+      state_.mode_multi_touch_rates[mode].push_back(0.0);
+    }
+
     auto scored_it = mode_scored_rates.find(mode);
     if (scored_it != mode_scored_rates.end()) {
       state_.mode_scored_rates[mode].push_back(scored_it->second);
@@ -148,6 +165,9 @@ bool Curriculum::check_promotion(
 
     while (static_cast<int>(state_.mode_touch_rates[mode].size()) > window_size) {
       state_.mode_touch_rates[mode].pop_front();
+    }
+    while (static_cast<int>(state_.mode_multi_touch_rates[mode].size()) > window_size) {
+      state_.mode_multi_touch_rates[mode].pop_front();
     }
     while (static_cast<int>(state_.mode_scored_rates[mode].size()) > window_size) {
       state_.mode_scored_rates[mode].pop_front();
@@ -166,6 +186,10 @@ bool Curriculum::check_promotion(
     for (double v : state_.mode_touch_rates[mode]) avg_touch += v;
     avg_touch /= static_cast<double>(state_.mode_touch_rates[mode].size());
 
+    double avg_multi_touch = 0.0;
+    for (double v : state_.mode_multi_touch_rates[mode]) avg_multi_touch += v;
+    avg_multi_touch /= static_cast<double>(state_.mode_multi_touch_rates[mode].size());
+
     double avg_scored = 0.0;
     for (double v : state_.mode_scored_rates[mode]) avg_scored += v;
     avg_scored /= static_cast<double>(state_.mode_scored_rates[mode].size());
@@ -176,6 +200,11 @@ bool Curriculum::check_promotion(
       auto it = stage.mode_touch_thresholds.find(mode);
       if (it != stage.mode_touch_thresholds.end()) touch_threshold = it->second;
     }
+    float multi_touch_threshold = stage.required_multi_touch_episode_rate;
+    {
+      auto it = stage.mode_multi_touch_thresholds.find(mode);
+      if (it != stage.mode_multi_touch_thresholds.end()) multi_touch_threshold = it->second;
+    }
     float score_threshold = stage.required_scored_episode_rate;
     {
       auto it = stage.mode_scored_thresholds.find(mode);
@@ -183,10 +212,12 @@ bool Curriculum::check_promotion(
     }
     bool touch_ok = touch_threshold <= 0.0F ||
                     avg_touch >= static_cast<double>(touch_threshold);
+    bool multi_touch_ok = multi_touch_threshold <= 0.0F ||
+                          avg_multi_touch >= static_cast<double>(multi_touch_threshold);
     bool score_ok = score_threshold <= 0.0F ||
                     avg_scored >= static_cast<double>(score_threshold);
 
-    if (!touch_ok || !score_ok) {
+    if (!touch_ok || !multi_touch_ok || !score_ok) {
       all_pass = false;
       break;
     }
@@ -204,6 +235,7 @@ bool Curriculum::check_promotion(
     state_.stage_index++;
     state_.promotion_counter = 0;
     state_.mode_touch_rates.clear();
+    state_.mode_multi_touch_rates.clear();
     state_.mode_scored_rates.clear();
     initialize_stage();
     std::cout << "curriculum_promoted stage=" << state_.stage_index
@@ -256,6 +288,7 @@ bool Curriculum::check_demotion(const std::map<std::string, double>& mode_scored
     state_.promotion_counter = 0;
     state_.demotion_counter = 0;
     state_.mode_touch_rates.clear();
+    state_.mode_multi_touch_rates.clear();
     state_.mode_scored_rates.clear();
     initialize_stage();
     std::cout << "curriculum_demoted stage=" << state_.stage_index

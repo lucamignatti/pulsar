@@ -561,7 +561,12 @@ float RewardEngine::boost_pickup(
 
 float RewardEngine::possession_chain(
     const CarState& car, const EnvState& env, int global_tick, AgentRewardState& s) const {
-  if (dense_cfg_.possession_chain_weight <= 0.0F) return 0.0F;
+  const bool enabled = dense_cfg_.possession_chain_weight > 0.0F ||
+      dense_cfg_.possession_chain_scale > 0.0F ||
+      dense_cfg_.possession_proximity_weight > 0.0F ||
+      dense_cfg_.possession_speed_toward_ball_weight > 0.0F ||
+      dense_cfg_.possession_face_ball_weight > 0.0F;
+  if (!enabled) return 0.0F;
 
   // Timeout reset: if too much time passed since this agent last touched, break the chain.
   if (s.consecutive_touches > 0 &&
@@ -569,24 +574,59 @@ float RewardEngine::possession_chain(
     s.consecutive_touches = 0;
   }
 
-  // Opponent reset: if the env's last-toucher changed to someone other than this agent,
-  // the chain is broken.
-  if (s.consecutive_touches > 0 && s.prev_env_last_touch_agent >= 0 &&
-      env.last_touch_agent != s.prev_env_last_touch_agent && env.last_touch_agent != car.id) {
+  // Opponent reset: if another agent was or is the env's last toucher, the
+  // possession chain is broken before this agent can start a new chain.
+  if (s.consecutive_touches > 0 &&
+      ((s.prev_env_last_touch_agent >= 0 && s.prev_env_last_touch_agent != car.id) ||
+       (env.last_touch_agent >= 0 && env.last_touch_agent != car.id))) {
     s.consecutive_touches = 0;
   }
+
+  float reward = 0.0F;
 
   // Edge-detect a new touch by this agent.
   if (car.ball_touched && !s.prev_ball_touched) {
     s.last_own_touch_tick = global_tick;
     s.consecutive_touches++;
 
-    float reward = dense_cfg_.possession_chain_weight +
-                   dense_cfg_.possession_chain_scale * static_cast<float>(s.consecutive_touches - 1);
+    reward += dense_cfg_.possession_chain_weight +
+              dense_cfg_.possession_chain_scale * static_cast<float>(s.consecutive_touches - 1);
+  }
+
+  const bool possession_active = s.consecutive_touches > 0 &&
+      env.last_touch_agent == car.id &&
+      (global_tick - s.last_own_touch_tick) <= dense_cfg_.possession_window_ticks;
+  if (!possession_active) return reward;
+
+  const Vec3 to_ball{
+      env.ball.position.x - car.position.x,
+      env.ball.position.y - car.position.y,
+      env.ball.position.z - car.position.z,
+  };
+  const float dist = vec3_magnitude(to_ball);
+  if (dist < 1.0F) {
+    reward += dense_cfg_.possession_proximity_weight;
     return reward;
   }
 
-  return 0.0F;
+  const float decay = std::exp(-dist / std::max(dense_cfg_.possession_distance_decay, 1.0F));
+  const Vec3 to_ball_norm{
+      to_ball.x / dist,
+      to_ball.y / dist,
+      to_ball.z / dist,
+  };
+
+  reward += decay * dense_cfg_.possession_proximity_weight;
+
+  const float car_speed = vec3_magnitude(car.velocity);
+  const float speed_toward = vec3_dot(car.velocity, to_ball_norm);
+  const float speed_frac = clamp(speed_toward / std::max(car_speed, 1.0F), 0.0F, 1.0F);
+  reward += speed_frac * decay * dense_cfg_.possession_speed_toward_ball_weight;
+
+  const float facing = std::max(0.0F, vec3_dot(car.forward, to_ball_norm));
+  reward += facing * decay * dense_cfg_.possession_face_ball_weight;
+
+  return reward;
 }
 
 // --- mechanic reward methods ---------------------------------------------------

@@ -365,8 +365,19 @@ void append_metrics_line(
       {"es_lora_b_norm", metrics.es_lora_b_norm},
       {"es_seconds", metrics.es_seconds},
       {"scored_episode_rate", metrics.scored_episode_rate},
+      {"touch_episode_rate", metrics.touch_episode_rate},
+      {"multi_touch_episode_rate", metrics.multi_touch_episode_rate},
       {"effective_entropy_coef", metrics.effective_entropy_coef},
   };
+  for (const auto& [mode, rate] : metrics.mode_touch_rates) {
+    line["mode_" + mode + "_touch_episode_rate"] = rate;
+  }
+  for (const auto& [mode, rate] : metrics.mode_multi_touch_rates) {
+    line["mode_" + mode + "_multi_touch_episode_rate"] = rate;
+  }
+  for (const auto& [mode, rate] : metrics.mode_scored_rates) {
+    line["mode_" + mode + "_scored_episode_rate"] = rate;
+  }
   for (const auto& [mode, rating] : metrics.elo_ratings) {
     line["elo_" + mode] = rating;
   }
@@ -789,6 +800,13 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
         std::deque<double> deq;
         for (const auto& v : arr) deq.push_back(v.get<double>());
         restored.mode_touch_rates[mode] = deq;
+      }
+    }
+    if (metadata.extra.contains("curriculum_mode_multi_touch_rates")) {
+      for (const auto& [mode, arr] : metadata.extra["curriculum_mode_multi_touch_rates"].items()) {
+        std::deque<double> deq;
+        for (const auto& v : arr) deq.push_back(v.get<double>());
+        restored.mode_multi_touch_rates[mode] = deq;
       }
     }
     if (metadata.extra.contains("curriculum_mode_scored_rates")) {
@@ -1605,8 +1623,10 @@ void APPOTrainer::collect_rollout(
   int completed_episodes = 0;
   int scored_episodes = 0;
   int touched_episodes = 0;
+  int multi_touched_episodes = 0;
   std::map<std::string, int> mode_completed;
   std::map<std::string, int> mode_touched;
+  std::map<std::string, int> mode_multi_touched;
   std::map<std::string, int> mode_scored;
   std::vector<torch::Tensor> rollout_recurrent_states;
   rollout_recurrent_states.reserve(collectors_.size());
@@ -1748,7 +1768,9 @@ void APPOTrainer::collect_rollout(
         const auto* tl_ptr = terminal_labels.data_ptr<std::int64_t>();
         const auto* la_ptr = shard_step.learner_active_host.data_ptr<float>();
         torch::Tensor env_touch_host = collector.host_env_touched();
+        torch::Tensor env_multi_touch_host = collector.host_env_multi_touched();
         const auto* env_touch_ptr = env_touch_host.data_ptr<float>();
+        const auto* env_multi_touch_ptr = env_multi_touch_host.data_ptr<float>();
         const int64_t coll_agents = static_cast<int64_t>(collector.total_agents());
         const int64_t coll_num_envs = static_cast<int64_t>(collector.num_envs());
         const int64_t coll_ape = (coll_num_envs > 0) ? (coll_agents / coll_num_envs) : 2;
@@ -1786,10 +1808,14 @@ void APPOTrainer::collect_rollout(
               if (env_touch_ptr[env_idx] > 0.5F) {
                 touched_episodes++;
               }
+              if (env_multi_touch_ptr[env_idx] > 0.5F) {
+                multi_touched_episodes++;
+              }
               // per-mode tracking
               const std::string& cmode = collector.mode();
               mode_completed[cmode]++;
               if (env_touch_ptr[env_idx] > 0.5F) mode_touched[cmode]++;
+              if (env_multi_touch_ptr[env_idx] > 0.5F) mode_multi_touched[cmode]++;
               if (env_scored) mode_scored[cmode]++;
             }
          }
@@ -1968,7 +1994,9 @@ void APPOTrainer::collect_rollout(
     const auto* tl_ptr = terminal_labels.data_ptr<std::int64_t>();
     const auto* la_ptr = learner_active_host.data_ptr<float>();
     torch::Tensor env_touch_host = collector_->host_env_touched();
+    torch::Tensor env_multi_touch_host = collector_->host_env_multi_touched();
     const auto* env_touch_ptr = env_touch_host.data_ptr<float>();
+    const auto* env_multi_touch_ptr = env_multi_touch_host.data_ptr<float>();
     const int64_t coll_agents = static_cast<int64_t>(collector_->total_agents());
     const int64_t coll_num_envs = static_cast<int64_t>(collector_->num_envs());
     const int64_t coll_ape = (coll_num_envs > 0) ? (coll_agents / coll_num_envs) : 2;
@@ -2002,9 +2030,13 @@ void APPOTrainer::collect_rollout(
         if (env_touch_ptr[env_idx] > 0.5F) {
           touched_episodes++;
         }
+        if (env_multi_touch_ptr[env_idx] > 0.5F) {
+          multi_touched_episodes++;
+        }
         const std::string& cmode = collector_->mode();
         mode_completed[cmode]++;
         if (env_touch_ptr[env_idx] > 0.5F) mode_touched[cmode]++;
+        if (env_multi_touch_ptr[env_idx] > 0.5F) mode_multi_touched[cmode]++;
         if (env_scored) mode_scored[cmode]++;
       }
     }
@@ -2097,9 +2129,16 @@ void APPOTrainer::collect_rollout(
       completed_episodes > 0
           ? static_cast<double>(touched_episodes) / static_cast<double>(completed_episodes)
           : 0.0;
+  metrics.multi_touch_episode_rate =
+      completed_episodes > 0
+          ? static_cast<double>(multi_touched_episodes) / static_cast<double>(completed_episodes)
+          : 0.0;
   for (const auto& [mode, comp] : mode_completed) {
     metrics.mode_touch_rates[mode] = comp > 0
         ? static_cast<double>(mode_touched[mode]) / static_cast<double>(comp)
+        : 0.0;
+    metrics.mode_multi_touch_rates[mode] = comp > 0
+        ? static_cast<double>(mode_multi_touched[mode]) / static_cast<double>(comp)
         : 0.0;
     metrics.mode_scored_rates[mode] = comp > 0
         ? static_cast<double>(mode_scored[mode]) / static_cast<double>(comp)
@@ -2151,6 +2190,13 @@ CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
     mode_touch_json[mode] = arr;
   }
   extra["curriculum_mode_touch_rates"] = mode_touch_json;
+  nlohmann::json mode_multi_touch_json = nlohmann::json::object();
+  for (const auto& [mode, deq] : curriculum_.state().mode_multi_touch_rates) {
+    nlohmann::json arr = nlohmann::json::array();
+    for (double v : deq) arr.push_back(v);
+    mode_multi_touch_json[mode] = arr;
+  }
+  extra["curriculum_mode_multi_touch_rates"] = mode_multi_touch_json;
   nlohmann::json mode_scored_json = nlohmann::json::object();
   for (const auto& [mode, deq] : curriculum_.state().mode_scored_rates) {
     nlohmann::json arr = nlohmann::json::array();
@@ -2414,7 +2460,10 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     if (curriculum_.enabled()) {
       bool stage_changed = false;
       if (curriculum_.check_promotion(
-          coll_metrics.mode_touch_rates, coll_metrics.mode_scored_rates, coll_steps)) {
+          coll_metrics.mode_touch_rates,
+          coll_metrics.mode_multi_touch_rates,
+          coll_metrics.mode_scored_rates,
+          coll_steps)) {
         if (curriculum_.mode_allocation_changed()) {
           rebuild_collectors();
         }
@@ -2485,6 +2534,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " completed_eps=" << coll_metrics.completed_episodes
               << " scored_eps=" << coll_metrics.scored_episodes
               << " touch_rate=" << coll_metrics.touch_episode_rate
+              << " multi_touch_rate=" << coll_metrics.multi_touch_episode_rate
               << " sampled_goal_dist=" << coll_metrics.mean_sampled_goal_distance
               << " mean_goal_dist=" << coll_metrics.mean_goal_distance
               << " ball_prox=" << coll_metrics.ball_proximity_rate
@@ -2502,28 +2552,35 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"policy_loss", coll_metrics.policy_loss},
           {"value_loss", coll_metrics.value_loss},
           {"entropy", coll_metrics.entropy},
-      {"total_reward_mean", coll_metrics.total_reward_mean},
-      {"gameplay_reward_mean", coll_metrics.gameplay_reward_mean},
-      {"mechanic_reward_mean", coll_metrics.mechanic_reward_mean},
+          {"total_reward_mean", coll_metrics.total_reward_mean},
+          {"gameplay_reward_mean", coll_metrics.gameplay_reward_mean},
+          {"mechanic_reward_mean", coll_metrics.mechanic_reward_mean},
           {"sampled_value_win_mean", coll_metrics.sampled_value_win_mean},
           {"rollout_steps", coll_metrics.rollout_steps},
           {"completed_episodes", coll_metrics.completed_episodes},
-      {"scored_episodes", coll_metrics.scored_episodes},
-      {"touch_episode_rate", coll_metrics.touch_episode_rate},
+          {"touch_episode_rate", coll_metrics.touch_episode_rate},
+          {"multi_touch_episode_rate", coll_metrics.multi_touch_episode_rate},
+          {"scored_episode_rate", coll_metrics.scored_episode_rate},
           {"goal_critic_loss", coll_metrics.goal_critic_loss},
           {"mean_goal_score", coll_metrics.mean_goal_score},
           {"mean_sampled_goal_distance", coll_metrics.mean_sampled_goal_distance},
           {"mean_goal_distance", coll_metrics.mean_goal_distance},
           {"min_goal_distance", coll_metrics.min_goal_distance},
           {"ball_proximity_rate", coll_metrics.ball_proximity_rate},
-          {"goals_scored", coll_metrics.goals_scored},
-          {"goals_conceded", coll_metrics.goals_conceded},
-      {"scored_episode_rate", coll_metrics.scored_episode_rate},
           {"effective_entropy_coef", coll_metrics.effective_entropy_coef},
           {"curriculum_stage", curriculum_.state().stage_index},
           {"curriculum_agent_steps", curriculum_.state().agent_steps_in_stage},
           {"curriculum_promotion_counter", curriculum_.state().promotion_counter},
       };
+      for (const auto& [mode, rate] : coll_metrics.mode_touch_rates) {
+        payload["mode_" + mode + "_touch_episode_rate"] = rate;
+      }
+      for (const auto& [mode, rate] : coll_metrics.mode_multi_touch_rates) {
+        payload["mode_" + mode + "_multi_touch_episode_rate"] = rate;
+      }
+      for (const auto& [mode, rate] : coll_metrics.mode_scored_rates) {
+        payload["mode_" + mode + "_scored_episode_rate"] = rate;
+      }
       if (curriculum_.stage_index() >= kEsLoraMinStage && update_index % config_.es_lora.es_interval == 0) {
         payload["es_fitness_mean"] = coll_metrics.es_fitness_mean;
         payload["es_fitness_std"] = coll_metrics.es_fitness_std;

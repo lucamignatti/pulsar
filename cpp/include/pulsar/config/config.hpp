@@ -64,6 +64,11 @@ struct DenseRewardConfig {
   float possession_chain_weight = 0.0F;
   float possession_chain_scale = 0.0F;
   int possession_chain_timeout_ticks = 360;
+  float possession_proximity_weight = 0.0F;
+  float possession_speed_toward_ball_weight = 0.0F;
+  float possession_face_ball_weight = 0.0F;
+  int possession_window_ticks = 180;
+  float possession_distance_decay = 1000.0F;
   float dense_reward_cap_per_episode = 0.0F;
 };
 
@@ -80,11 +85,13 @@ struct CurriculumStageConfig {
   int rolling_window_size = 10;
   int consecutive_success_threshold = 5;
   float required_touch_episode_rate = 0.0F;
+  float required_multi_touch_episode_rate = 0.0F;
   float required_scored_episode_rate = 0.0F;
   // Per-mode overrides for promotion thresholds.  When non-empty, the value
   // for a given mode takes precedence over the scalar fields above.
   std::map<std::string, float> mode_scored_thresholds{};
   std::map<std::string, float> mode_touch_thresholds{};
+  std::map<std::string, float> mode_multi_touch_thresholds{};
   float demotion_threshold_rate = 0.0F;
   int demotion_window_updates = 10;
 };
@@ -107,6 +114,7 @@ struct EnvConfig {
   int tick_rate = 120;
   int max_episode_ticks = 2250;
   float no_touch_timeout_seconds = 10.0F;
+  bool no_touch_timeout_only_before_first_touch = false;
   bool spawn_opponents = true;
   bool randomize_kickoffs = true;
   std::uint64_t seed = 0;

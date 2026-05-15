@@ -76,10 +76,12 @@ struct TrainerMetrics {
   double es_seconds = 0.0;
   double scored_episode_rate = 0.0;
   double touch_episode_rate = 0.0;
+  double multi_touch_episode_rate = 0.0;
   double effective_entropy_coef = 0.0;
 
   std::map<std::string, double> elo_ratings{};
   std::map<std::string, double> mode_touch_rates{};
+  std::map<std::string, double> mode_multi_touch_rates{};
   std::map<std::string, double> mode_scored_rates{};
 };
 

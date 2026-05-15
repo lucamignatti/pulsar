@@ -40,9 +40,6 @@ pulsar::ExperimentConfig make_reward_test_config() {
   cfg.dense_rewards.boost_pickup_big_weight = 3.0f;
   cfg.dense_rewards.boost_pickup_small_weight = 10.0f;
   cfg.dense_rewards.boost_pickup_big_threshold = 0.5f;
-  cfg.dense_rewards.possession_chain_weight = 1.0f;
-  cfg.dense_rewards.possession_chain_scale = 0.5f;
-  cfg.dense_rewards.possession_chain_timeout_ticks = 360;
   cfg.mechanic_rewards.speed_flip = 0.5f;
   cfg.mechanic_rewards.wavedash = 0.3f;
   cfg.mechanic_rewards.chain_dash_bonus = 0.4f;
@@ -61,6 +58,12 @@ pulsar::ExperimentConfig make_reward_test_config() {
   cfg.mechanic_rewards.kickoff_first_touch = 0.95f;
   cfg.mechanic_rewards.mechanic_reward_cap_per_episode = 0.0f;
   return cfg;
+}
+
+void enable_possession_test_rewards(pulsar::ExperimentConfig& cfg) {
+  cfg.dense_rewards.possession_chain_weight = 1.0f;
+  cfg.dense_rewards.possession_chain_scale = 0.5f;
+  cfg.dense_rewards.possession_chain_timeout_ticks = 360;
 }
 
 // Returns a neutral car state that produces zero gameplay rewards when the ball
@@ -1418,6 +1421,7 @@ int main() {
       auto cfg = make_reward_test_config();
       cfg.dense_rewards.dense_reward_cap_per_episode = 0.0f;
       cfg.mechanic_rewards.mechanic_reward_cap_per_episode = 0.0f;
+      cfg.mechanic_rewards.wavedash = 0.0f;
       pulsar::RewardEngine engine(cfg);
       auto car = make_neutral_car(pulsar::Team::Blue);
       car.forward = {0.0f, 1.0f, 0.0f};
@@ -1441,6 +1445,7 @@ int main() {
     // =========================================================================
     {
       auto cfg = make_reward_test_config();
+      enable_possession_test_rewards(cfg);
       pulsar::RewardEngine engine(cfg);
       auto car = make_neutral_car(pulsar::Team::Blue);
       car.ball_touched = true;
@@ -1463,6 +1468,7 @@ int main() {
     // =========================================================================
     {
       auto cfg = make_reward_test_config();
+      enable_possession_test_rewards(cfg);
       pulsar::RewardEngine engine(cfg);
       auto car = make_neutral_car(pulsar::Team::Blue);
       car.ball_touched = true;
@@ -1484,6 +1490,7 @@ int main() {
     // =========================================================================
     {
       auto cfg = make_reward_test_config();
+      enable_possession_test_rewards(cfg);
       pulsar::RewardEngine engine(cfg);
       auto car = make_neutral_car(pulsar::Team::Blue);
       car.ball_touched = true;
@@ -1505,6 +1512,7 @@ int main() {
     // =========================================================================
     {
       auto cfg = make_reward_test_config();
+      enable_possession_test_rewards(cfg);
       pulsar::RewardEngine engine(cfg);
       auto car = make_neutral_car(pulsar::Team::Blue);
       car.ball_touched = true;
@@ -1526,6 +1534,7 @@ int main() {
     // =========================================================================
     {
       auto cfg = make_reward_test_config();
+      enable_possession_test_rewards(cfg);
       pulsar::RewardEngine engine(cfg);
       auto car = make_neutral_car(pulsar::Team::Blue);
       car.ball_touched = false;

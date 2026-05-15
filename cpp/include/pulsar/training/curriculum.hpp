@@ -18,6 +18,7 @@ struct CurriculumState {
   int demotion_counter = 0;
   std::string current_mode = "1v1";
   std::map<std::string, std::deque<double>> mode_touch_rates{};
+  std::map<std::string, std::deque<double>> mode_multi_touch_rates{};
   std::map<std::string, std::deque<double>> mode_scored_rates{};
 };
 
@@ -42,6 +43,11 @@ class Curriculum {
 
   bool check_promotion(
       const std::map<std::string, double>& mode_touch_rates,
+      const std::map<std::string, double>& mode_scored_rates,
+      std::int64_t agent_steps);
+  bool check_promotion(
+      const std::map<std::string, double>& mode_touch_rates,
+      const std::map<std::string, double>& mode_multi_touch_rates,
       const std::map<std::string, double>& mode_scored_rates,
       std::int64_t agent_steps);
   bool check_demotion(const std::map<std::string, double>& mode_scored_rates);
