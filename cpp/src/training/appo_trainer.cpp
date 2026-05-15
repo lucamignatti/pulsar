@@ -873,6 +873,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   torch::Tensor goal_score_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
   torch::Tensor sampled_goal_distance_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
   int accumulated_minibatches = 0;
+  bool accumulated_has_backward = false;
   double accumulated_total_active = 0.0;
 
   const auto& all_values = rollout.all_values();
@@ -1161,10 +1162,21 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
               + config_.goal_critic.lambda_goal_actor * actor_goal_loss
               + entropy_floor_loss
               - effective_entropy_coef * entropy;
+          if (!torch::isfinite(loss).item<bool>()) {
+            std::cerr << "skipping non-finite APPO loss"
+                      << " policy_loss=" << policy_loss.item<float>()
+                      << " value_loss=" << value_loss.item<float>()
+                      << " entropy=" << entropy.item<float>()
+                      << " goal_loss=" << goal_loss.item<float>()
+                      << " actor_goal_loss=" << actor_goal_loss.item<float>()
+                      << '\n';
+            continue;
+          }
 
           const int effective_accumulation_steps = use_mode_pcgrad ? 1 : optimizer_accumulation_steps;
           torch::Tensor combined_loss = loss * sample_weight / static_cast<double>(effective_accumulation_steps);
           (combined_loss * cuda_amp_loss_scale).backward();
+          accumulated_has_backward = true;
 
           policy_loss_sum = policy_loss_sum + policy_loss.detach().to(torch::kFloat32) * active_samples;
           value_loss_sum = value_loss_sum + value_loss.detach().to(torch::kFloat32) * active_samples;
@@ -1209,21 +1221,37 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       if (!should_step_optimizer) {
         continue;
       }
+      if (!accumulated_has_backward) {
+        actor_optimizer_.zero_grad();
+        accumulated_minibatches = 0;
+        accumulated_total_active = 0.0;
+        continue;
+      }
 
       const auto optim_start = std::chrono::steady_clock::now();
       double grad_norm = 0.0;
+      bool stepped_optimizer = false;
       {
         PULSAR_TRACE_SCOPE_CAT("trainer", "update_optimizer");
         scale_existing_gradients(*actor_, cuda_amp_loss_scale);
         const auto grad_norm_value = torch::nn::utils::clip_grad_norm_(actor_->parameters(), config_.ppo.max_grad_norm);
         grad_norm = static_cast<double>(grad_norm_value);
-        grad_norm_sum = grad_norm_sum + grad_norm * accumulated_total_active;
-        actor_optimizer_.step();
+        if (std::isfinite(grad_norm)) {
+          grad_norm_sum = grad_norm_sum + grad_norm * accumulated_total_active;
+          actor_optimizer_.step();
+          stepped_optimizer = true;
+        } else {
+          std::cerr << "skipping APPO optimizer step with non-finite grad_norm=" << grad_norm << '\n';
+        }
       }
+      actor_optimizer_.zero_grad();
       metrics.optimizer_step_seconds +=
           std::chrono::duration<double>(std::chrono::steady_clock::now() - optim_start).count();
-      metrics.grad_norm += grad_norm * accumulated_total_active;
+      if (stepped_optimizer) {
+        metrics.grad_norm += grad_norm * accumulated_total_active;
+      }
       accumulated_minibatches = 0;
+      accumulated_has_backward = false;
       accumulated_total_active = 0.0;
       ++completed_minibatches;
       if (benchmark_progress_) {

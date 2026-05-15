@@ -227,17 +227,23 @@ torch::Tensor compute_pairwise_negative_l2_logits(
     const torch::Tensor& lhs_embeddings,
     const torch::Tensor& rhs_embeddings) {
   PULSAR_TRACE_SCOPE_CAT("ppo_math", "infonce_logits");
-  const torch::Tensor diff = lhs_embeddings.unsqueeze(1) - rhs_embeddings.unsqueeze(0);
-  return -(diff.square().sum(-1).clamp_min(1.0e-8F));
+  constexpr float kMaxSquaredDiff = 1.0e6F;
+  const torch::Tensor lhs = lhs_embeddings.to(torch::kFloat32);
+  const torch::Tensor rhs = rhs_embeddings.to(torch::kFloat32);
+  const torch::Tensor diff = lhs.unsqueeze(1) - rhs.unsqueeze(0);
+  const torch::Tensor squared = diff.square().clamp_max(kMaxSquaredDiff);
+  return -(squared.sum(-1).clamp_min(1.0e-8F));
 }
 
 torch::Tensor compute_symmetric_infonce_loss(
     const torch::Tensor& logits,
     float logsumexp_penalty_coeff) {
   PULSAR_TRACE_SCOPE_CAT("ppo_math", "infonce_loss");
-  const torch::Tensor diag = logits.diagonal();
-  const torch::Tensor row_lse = torch::logsumexp(logits, 1);
-  const torch::Tensor col_lse = torch::logsumexp(logits, 0);
+  constexpr float kFiniteLogitClamp = 1.0e6F;
+  const torch::Tensor logits_f32 = logits.to(torch::kFloat32).clamp(-kFiniteLogitClamp, kFiniteLogitClamp);
+  const torch::Tensor diag = logits_f32.diagonal();
+  const torch::Tensor row_lse = torch::logsumexp(logits_f32, 1);
+  const torch::Tensor col_lse = torch::logsumexp(logits_f32, 0);
   const torch::Tensor row_loss = -(diag - row_lse).mean();
   const torch::Tensor col_loss = -(diag - col_lse).mean();
   const torch::Tensor penalty = logsumexp_penalty_coeff * (row_lse.mean() + col_lse.mean());

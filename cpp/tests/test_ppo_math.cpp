@@ -177,6 +177,17 @@ int main() {
       require_finite(loss, "contrastive loss finite");
     }
 
+    // 9b. Contrastive loss stays finite for distances that would overflow fp16.
+    {
+      auto lhs = torch::full({2, 4}, 10000.0F, torch::kFloat32);
+      auto rhs = torch::full({2, 4}, -10000.0F, torch::kFloat32);
+      auto logits = pulsar::compute_pairwise_negative_l2_logits(lhs, rhs);
+      require_finite(logits, "large-distance contrastive logits finite");
+
+      auto loss = pulsar::compute_symmetric_infonce_loss(logits, 0.01F);
+      require_finite(loss, "large-distance contrastive loss finite");
+    }
+
     // 10. KL divergence computation
     {
       auto base_logits = torch::full({2, 4}, 0.01F, torch::kFloat32);
