@@ -227,12 +227,14 @@ torch::Tensor compute_pairwise_negative_l2_logits(
     const torch::Tensor& lhs_embeddings,
     const torch::Tensor& rhs_embeddings) {
   PULSAR_TRACE_SCOPE_CAT("ppo_math", "infonce_logits");
-  constexpr float kMaxSquaredDiff = 1.0e6F;
+  constexpr float kMaxSquaredDistance = 1.0e6F;
   const torch::Tensor lhs = lhs_embeddings.to(torch::kFloat32);
   const torch::Tensor rhs = rhs_embeddings.to(torch::kFloat32);
-  const torch::Tensor diff = lhs.unsqueeze(1) - rhs.unsqueeze(0);
-  const torch::Tensor squared = diff.square().clamp_max(kMaxSquaredDiff);
-  return -(squared.sum(-1).clamp_min(1.0e-8F));
+  const torch::Tensor lhs_norm = lhs.square().sum(-1, true);
+  const torch::Tensor rhs_norm = rhs.square().sum(-1, true).transpose(0, 1);
+  const torch::Tensor distances = (lhs_norm + rhs_norm - 2.0F * torch::matmul(lhs, rhs.transpose(0, 1)))
+      .clamp(1.0e-8F, kMaxSquaredDistance);
+  return -distances;
 }
 
 torch::Tensor compute_symmetric_infonce_loss(

@@ -177,7 +177,18 @@ int main() {
       require_finite(loss, "contrastive loss finite");
     }
 
-    // 9b. Contrastive loss stays finite for distances that would overflow fp16.
+    // 9b. Pairwise negative L2 logits match known squared distances.
+    {
+      auto lhs = torch::tensor({{0.0F, 0.0F}, {1.0F, 0.0F}}, torch::kFloat32);
+      auto rhs = torch::tensor({{0.0F, 0.0F}, {0.0F, 2.0F}}, torch::kFloat32);
+      auto logits = pulsar::compute_pairwise_negative_l2_logits(lhs, rhs);
+      require_close(logits[0][0].item<float>(), 0.0F, "pairwise L2 zero distance");
+      require_close(logits[0][1].item<float>(), -4.0F, "pairwise L2 row 0 col 1");
+      require_close(logits[1][0].item<float>(), -1.0F, "pairwise L2 row 1 col 0");
+      require_close(logits[1][1].item<float>(), -5.0F, "pairwise L2 row 1 col 1");
+    }
+
+    // 9c. Contrastive loss stays finite for distances that would overflow fp16.
     {
       auto lhs = torch::full({2, 4}, 10000.0F, torch::kFloat32);
       auto rhs = torch::full({2, 4}, -10000.0F, torch::kFloat32);
