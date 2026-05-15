@@ -832,9 +832,10 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   }
 
   const int seq_len = std::max(1, config_.ppo.rollout_length);
-  const int logical_agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
   const int max_forward_samples = effective_transformer_max_batch_size(config_.model, device_);
   const int agents_per_forward = std::max(1, max_forward_samples / seq_len);
+  const int requested_logical_agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
+  const int logical_agents_per_batch = std::min(requested_logical_agents_per_batch, agents_per_forward);
   const int total_agents = rollout.num_agents();
   const int rollout_steps = rollout.rollout_length();
   const bool use_cuda_amp = device_.is_cuda();
