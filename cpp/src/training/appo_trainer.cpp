@@ -277,7 +277,7 @@ int cuda_autograd_forward_sample_cap(const ModelConfig& config) {
 }
 
 int cuda_mamba2_autograd_forward_sample_cap(const ModelConfig& config) {
-  constexpr std::int64_t kProjectedActivationBudgetBytes = 512LL * 1024LL * 1024LL;
+  constexpr std::int64_t kProjectedActivationBudgetBytes = 2LL * 1024LL * 1024LL * 1024LL;
   const auto sequence = static_cast<std::int64_t>(std::max(1, config.observation_dim + 1));
   const auto projected_dim = static_cast<std::int64_t>(std::max(1, config.encoder_dim)) * 5;
   const std::int64_t bytes_per_sample = sequence * projected_dim * static_cast<std::int64_t>(sizeof(float));
