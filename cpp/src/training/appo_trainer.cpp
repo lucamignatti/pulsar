@@ -853,8 +853,17 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   const int max_forward_samples = effective_transformer_max_batch_size(config_.model, device_);
   const int agents_per_forward = std::max(1, max_forward_samples / seq_len);
   const int requested_logical_agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
-  const int logical_agents_per_batch = std::min(requested_logical_agents_per_batch, agents_per_forward);
   const int total_agents = rollout.num_agents();
+  constexpr int kMaxLogicalMinibatchesPerUpdate = 25;
+  const int update_epochs = std::max(1, config_.ppo.update_epochs);
+  const int min_agents_for_minibatch_cap = std::max(
+      1,
+      static_cast<int>(
+          (static_cast<std::int64_t>(total_agents) * update_epochs + kMaxLogicalMinibatchesPerUpdate - 1) /
+          kMaxLogicalMinibatchesPerUpdate));
+  const int logical_agents_per_batch = std::min(
+      total_agents,
+      std::max(requested_logical_agents_per_batch, min_agents_for_minibatch_cap));
   const int rollout_steps = rollout.rollout_length();
   const bool use_cuda_amp = device_.is_cuda();
   const double cuda_amp_loss_scale = use_cuda_amp ? 128.0 : 1.0;
@@ -1014,194 +1023,199 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         }
         combined_total_active += mode_total_active;
 
-        torch::Tensor mode_gpu_obs_mb = rollout.obs.narrow(0, 0, rollout_steps).index_select(1, mode_agent_indices).to(device_);
-        torch::Tensor mode_gpu_action_masks_mb = rollout.action_masks.narrow(0, 0, rollout_steps).index_select(1, mode_agent_indices).to(device_);
-        torch::Tensor mode_gpu_learner_active_mb = rollout.learner_active.narrow(0, 0, rollout_steps).index_select(1, mode_agent_indices).to(device_);
-        torch::Tensor mode_gpu_actions_mb = rollout.actions.narrow(0, 0, rollout_steps).index_select(1, mode_agent_indices).to(device_);
-        torch::Tensor mode_gpu_action_log_probs_mb = rollout.action_log_probs.narrow(0, 0, rollout_steps).index_select(1, mode_agent_indices).to(device_);
-        torch::Tensor mode_agent_indices_gpu = mode_agent_indices.to(device_);
-        torch::Tensor mode_gpu_advantages_mb = normalized_advantages.narrow(0, 0, rollout_steps).index_select(1, mode_agent_indices_gpu);
-        torch::Tensor mode_gpu_returns_mb = sparse_returns.narrow(0, 0, rollout_steps).index_select(1, mode_agent_indices_gpu);
-
         if (use_mode_pcgrad || accumulated_minibatches == 0) {
           actor_optimizer_.zero_grad();
         }
 
-        for (int seq_start = 0; seq_start < rollout.rollout_length(); seq_start += seq_len) {
-          const int chunk_start = seq_start;
-          const int chunk_end = std::min(rollout.rollout_length(), chunk_start + seq_len);
-          const int chunk_steps = chunk_end - chunk_start;
-          const int loss_start = chunk_start;
-          const int loss_steps = chunk_steps;
+        for (int micro_agent_offset = 0; micro_agent_offset < mode_count; micro_agent_offset += agents_per_forward) {
+          const int micro_count = std::min(agents_per_forward, mode_count - micro_agent_offset);
+          const torch::Tensor micro_agent_indices = mode_agent_indices.narrow(0, micro_agent_offset, micro_count);
 
-          const torch::Tensor obs = mode_gpu_obs_mb.narrow(0, chunk_start, chunk_steps);
+          torch::Tensor mode_gpu_obs_mb = rollout.obs.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(device_);
+          torch::Tensor mode_gpu_action_masks_mb = rollout.action_masks.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(device_);
+          torch::Tensor mode_gpu_learner_active_mb = rollout.learner_active.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(device_);
+          torch::Tensor mode_gpu_actions_mb = rollout.actions.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(device_);
+          torch::Tensor mode_gpu_action_log_probs_mb = rollout.action_log_probs.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(device_);
+          torch::Tensor micro_agent_indices_gpu = micro_agent_indices.to(device_);
+          torch::Tensor mode_gpu_advantages_mb = normalized_advantages.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices_gpu);
+          torch::Tensor mode_gpu_returns_mb = sparse_returns.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices_gpu);
 
-          const auto forward_backward_start = std::chrono::steady_clock::now();
-          OptionalCudaAutocastGuard autocast_guard(use_cuda_amp);
-          ActorSequenceOutput output;
-          {
-            PULSAR_TRACE_SCOPE_CAT("trainer", "update_forward_sequence");
-            const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_critic.goal_dim);
-            output = actor_->forward_sequence(obs, goal_values);
-          }
+          for (int seq_start = 0; seq_start < rollout.rollout_length(); seq_start += seq_len) {
+            const int chunk_start = seq_start;
+            const int chunk_end = std::min(rollout.rollout_length(), chunk_start + seq_len);
+            const int chunk_steps = chunk_end - chunk_start;
+            const int loss_start = chunk_start;
+            const int loss_steps = chunk_steps;
 
-          if (loss_steps <= 0) continue;
+            const torch::Tensor obs = mode_gpu_obs_mb.narrow(0, chunk_start, chunk_steps);
 
-          torch::Tensor policy_logits = output.policy_logits;
-          torch::Tensor features = output.features;
-
-          const torch::Tensor action_masks = mode_gpu_action_masks_mb.narrow(0, loss_start, loss_steps).to(torch::kBool);
-          const torch::Tensor learner_active = mode_gpu_learner_active_mb.narrow(0, loss_start, loss_steps);
-          const torch::Tensor old_actions = mode_gpu_actions_mb.narrow(0, loss_start, loss_steps);
-          const torch::Tensor old_log_probs = mode_gpu_action_log_probs_mb.narrow(0, loss_start, loss_steps);
-          const torch::Tensor chunk_advantages = mode_gpu_advantages_mb.narrow(0, loss_start, loss_steps);
-
-          const auto samples = loss_steps * mode_count;
-          const torch::Tensor flat_active = learner_active.reshape({samples}) > 0.5F;
-
-          torch::Tensor flat_logits = policy_logits.reshape({samples, config_.model.action_dim});
-          torch::Tensor flat_features = features.reshape({samples, static_cast<int64_t>(actor_->feature_dim())});
-          torch::Tensor flat_masks = action_masks.reshape({samples, config_.model.action_dim});
-          torch::Tensor flat_actions = old_actions.reshape({samples});
-          torch::Tensor flat_old_log_probs = old_log_probs.reshape({samples});
-          torch::Tensor flat_advantages = chunk_advantages.reshape({samples});
-
-          const torch::Tensor active_logits = flat_logits.index({flat_active});
-          const torch::Tensor active_features = flat_features.index({flat_active});
-          const torch::Tensor active_masks = flat_masks.index({flat_active});
-          const torch::Tensor active_actions = flat_actions.index({flat_active});
-          const torch::Tensor active_old_log_probs = flat_old_log_probs.index({flat_active});
-          const torch::Tensor active_advantages = flat_advantages.index({flat_active});
-          const auto active_sample_count = active_logits.size(0);
-          if (active_sample_count == 0) continue;
-          const auto active_samples = static_cast<double>(active_sample_count);
-
-          const torch::Tensor log_probs =
-              torch::log_softmax(apply_action_mask_to_logits(active_logits, active_masks), -1);
-          const torch::Tensor current_log_probs = log_probs.gather(1, active_actions.unsqueeze(1)).squeeze(1);
-
-          torch::Tensor epsilon = torch::full({active_advantages.size(0)}, config_.ppo.clip_range, active_advantages.options());
-
-          torch::Tensor policy_loss =
-              clipped_ppo_policy_loss(current_log_probs, active_old_log_probs, active_advantages, epsilon);
-          policy_loss = policy_loss.mean();
-
-          const torch::Tensor entropy = masked_action_entropy(active_logits, active_masks).mean();
-          torch::Tensor entropy_floor_loss = torch::zeros({}, active_advantages.options());
-          if (config_.ppo.entropy_floor > 0.0F && effective_entropy_floor_coef > 0.0F) {
-            const torch::Tensor entropy_floor = torch::full_like(entropy, config_.ppo.entropy_floor);
-            entropy_floor_loss = effective_entropy_floor_coef * torch::relu(entropy_floor - entropy).square();
-          }
-
-          torch::Tensor chunk_returns = mode_gpu_returns_mb.narrow(0, loss_start, loss_steps).reshape({samples});
-          torch::Tensor active_returns = chunk_returns.index({flat_active});
-
-          torch::Tensor value_win_chunk = output.value_win_logits;
-          torch::Tensor flat_value_win_logits = value_win_chunk.reshape({samples, 1});
-          torch::Tensor active_value_win_logits = flat_value_win_logits.index({flat_active});
-
-          torch::Tensor value_loss = torch::mse_loss(
-              active_value_win_logits.squeeze(-1), active_returns, torch::Reduction::Mean);
-
-          torch::Tensor goal_loss = torch::zeros({}, active_advantages.options());
-          torch::Tensor actor_goal_loss = torch::zeros({}, active_advantages.options());
-          torch::Tensor chunk_goal_score = torch::zeros({}, active_advantages.options());
-          torch::Tensor chunk_sampled_goal_norm = torch::zeros({}, active_advantages.options());
-
-          {
-            torch::Tensor chunk_goal_pos =
-                rollout.goal_positions.narrow(0, loss_start, loss_steps).index_select(1, mode_agent_indices);
-            torch::Tensor chunk_dones =
-                rollout.dones.narrow(0, loss_start, loss_steps).index_select(1, mode_agent_indices);
-            torch::Tensor chunk_ep_starts =
-                rollout.episode_starts.narrow(0, loss_start, loss_steps).index_select(1, mode_agent_indices);
-            torch::Tensor future_goal_pos = sample_future_goal_positions(
-                chunk_goal_pos,
-                chunk_dones,
-                chunk_ep_starts,
-                config_.goal_critic.max_future_horizon);
-            const int goal_dim = config_.goal_critic.goal_dim;
-
-            torch::Tensor flat_future_goal_pos = future_goal_pos.to(device_).reshape({samples, goal_dim});
-            torch::Tensor active_future_goal_pos = flat_future_goal_pos.index({flat_active});
-
-            const auto active_count = active_features.size(0);
-            const int cb_size = config_.goal_critic.contrastive_batch_size;
-            torch::Tensor sa_emb, g_emb;
-            if (active_count > static_cast<c10::IntArrayRef::value_type>(cb_size)) {
-              const torch::Tensor idx = torch::randperm(active_count, active_actions.options())
-                  .narrow(0, 0, cb_size);
-              const torch::Tensor feat_sub = active_features.index({idx});
-              const torch::Tensor act_sub = active_actions.index({idx});
-              const torch::Tensor goal_sub = active_future_goal_pos.index({idx});
-              const torch::Tensor logit_sub = active_logits.index({idx});
-              const torch::Tensor mask_sub = active_masks.index({idx});
-
-              sa_emb = actor_->goal_critic()->sa_embedding(feat_sub, act_sub);
-              g_emb = actor_->goal_critic()->goal_embedding(goal_sub);
-
-              torch::Tensor sampled = sample_masked_actions(
-                  logit_sub.detach(), mask_sub.detach(), false, nullptr);
-              actor_goal_loss = -actor_->goal_critic()->forward(
-                  feat_sub, sampled.detach(), goal_sub).mean();
-            } else {
-              sa_emb = actor_->goal_critic()->sa_embedding(active_features, active_actions);
-              g_emb = actor_->goal_critic()->goal_embedding(active_future_goal_pos);
-
-              torch::Tensor sampled = sample_masked_actions(
-                  active_logits.detach(), active_masks.detach(), false, nullptr);
-              actor_goal_loss = -actor_->goal_critic()->forward(
-                  active_features, sampled.detach(), active_future_goal_pos).mean();
+            const auto forward_backward_start = std::chrono::steady_clock::now();
+            OptionalCudaAutocastGuard autocast_guard(use_cuda_amp);
+            ActorSequenceOutput output;
+            {
+              PULSAR_TRACE_SCOPE_CAT("trainer", "update_forward_sequence");
+              const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_critic.goal_dim);
+              output = actor_->forward_sequence(obs, goal_values);
             }
-            const torch::Tensor sa_logits = compute_pairwise_negative_l2_logits(sa_emb, g_emb);
-            goal_loss = compute_symmetric_infonce_loss(sa_logits, config_.goal_critic.logsumexp_penalty_coeff);
+
+            if (loss_steps <= 0) continue;
+
+            torch::Tensor policy_logits = output.policy_logits;
+            torch::Tensor features = output.features;
+
+            const torch::Tensor action_masks = mode_gpu_action_masks_mb.narrow(0, loss_start, loss_steps).to(torch::kBool);
+            const torch::Tensor learner_active = mode_gpu_learner_active_mb.narrow(0, loss_start, loss_steps);
+            const torch::Tensor old_actions = mode_gpu_actions_mb.narrow(0, loss_start, loss_steps);
+            const torch::Tensor old_log_probs = mode_gpu_action_log_probs_mb.narrow(0, loss_start, loss_steps);
+            const torch::Tensor chunk_advantages = mode_gpu_advantages_mb.narrow(0, loss_start, loss_steps);
+
+            const auto samples = loss_steps * micro_count;
+            const torch::Tensor flat_active = learner_active.reshape({samples}) > 0.5F;
+
+            torch::Tensor flat_logits = policy_logits.reshape({samples, config_.model.action_dim});
+            torch::Tensor flat_features = features.reshape({samples, static_cast<int64_t>(actor_->feature_dim())});
+            torch::Tensor flat_masks = action_masks.reshape({samples, config_.model.action_dim});
+            torch::Tensor flat_actions = old_actions.reshape({samples});
+            torch::Tensor flat_old_log_probs = old_log_probs.reshape({samples});
+            torch::Tensor flat_advantages = chunk_advantages.reshape({samples});
+
+            const torch::Tensor active_logits = flat_logits.index({flat_active});
+            const torch::Tensor active_features = flat_features.index({flat_active});
+            const torch::Tensor active_masks = flat_masks.index({flat_active});
+            const torch::Tensor active_actions = flat_actions.index({flat_active});
+            const torch::Tensor active_old_log_probs = flat_old_log_probs.index({flat_active});
+            const torch::Tensor active_advantages = flat_advantages.index({flat_active});
+            const auto active_sample_count = active_logits.size(0);
+            if (active_sample_count == 0) continue;
+            const auto active_samples = static_cast<double>(active_sample_count);
+
+            const torch::Tensor log_probs =
+                torch::log_softmax(apply_action_mask_to_logits(active_logits, active_masks), -1);
+            const torch::Tensor current_log_probs = log_probs.gather(1, active_actions.unsqueeze(1)).squeeze(1);
+
+            torch::Tensor epsilon = torch::full({active_advantages.size(0)}, config_.ppo.clip_range, active_advantages.options());
+
+            torch::Tensor policy_loss =
+                clipped_ppo_policy_loss(current_log_probs, active_old_log_probs, active_advantages, epsilon);
+            policy_loss = policy_loss.mean();
+
+            const torch::Tensor entropy = masked_action_entropy(active_logits, active_masks).mean();
+            torch::Tensor entropy_floor_loss = torch::zeros({}, active_advantages.options());
+            if (config_.ppo.entropy_floor > 0.0F && effective_entropy_floor_coef > 0.0F) {
+              const torch::Tensor entropy_floor = torch::full_like(entropy, config_.ppo.entropy_floor);
+              entropy_floor_loss = effective_entropy_floor_coef * torch::relu(entropy_floor - entropy).square();
+            }
+
+            torch::Tensor chunk_returns = mode_gpu_returns_mb.narrow(0, loss_start, loss_steps).reshape({samples});
+            torch::Tensor active_returns = chunk_returns.index({flat_active});
+
+            torch::Tensor value_win_chunk = output.value_win_logits;
+            torch::Tensor flat_value_win_logits = value_win_chunk.reshape({samples, 1});
+            torch::Tensor active_value_win_logits = flat_value_win_logits.index({flat_active});
+
+            torch::Tensor value_loss = torch::mse_loss(
+                active_value_win_logits.squeeze(-1), active_returns, torch::Reduction::Mean);
+
+            torch::Tensor goal_loss = torch::zeros({}, active_advantages.options());
+            torch::Tensor actor_goal_loss = torch::zeros({}, active_advantages.options());
+            torch::Tensor chunk_goal_score = torch::zeros({}, active_advantages.options());
+            torch::Tensor chunk_sampled_goal_norm = torch::zeros({}, active_advantages.options());
 
             {
-              torch::NoGradGuard no_grad;
-              const torch::Tensor goal_scores = actor_->goal_critic()->forward(
-                  active_features.detach(),
-                  active_actions,
-                  active_future_goal_pos);
-              chunk_goal_score = goal_scores.mean();
+              torch::Tensor chunk_goal_pos =
+                  rollout.goal_positions.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
+              torch::Tensor chunk_dones =
+                  rollout.dones.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
+              torch::Tensor chunk_ep_starts =
+                  rollout.episode_starts.narrow(0, loss_start, loss_steps).index_select(1, micro_agent_indices);
+              torch::Tensor future_goal_pos = sample_future_goal_positions(
+                  chunk_goal_pos,
+                  chunk_dones,
+                  chunk_ep_starts,
+                  config_.goal_critic.max_future_horizon);
+              const int goal_dim = config_.goal_critic.goal_dim;
+
+              torch::Tensor flat_future_goal_pos = future_goal_pos.to(device_).reshape({samples, goal_dim});
+              torch::Tensor active_future_goal_pos = flat_future_goal_pos.index({flat_active});
+
+              const auto active_count = active_features.size(0);
+              const int cb_size = config_.goal_critic.contrastive_batch_size;
+              torch::Tensor sa_emb, g_emb;
+              if (active_count > static_cast<c10::IntArrayRef::value_type>(cb_size)) {
+                const torch::Tensor idx = torch::randperm(active_count, active_actions.options())
+                    .narrow(0, 0, cb_size);
+                const torch::Tensor feat_sub = active_features.index({idx});
+                const torch::Tensor act_sub = active_actions.index({idx});
+                const torch::Tensor goal_sub = active_future_goal_pos.index({idx});
+                const torch::Tensor logit_sub = active_logits.index({idx});
+                const torch::Tensor mask_sub = active_masks.index({idx});
+
+                sa_emb = actor_->goal_critic()->sa_embedding(feat_sub, act_sub);
+                g_emb = actor_->goal_critic()->goal_embedding(goal_sub);
+
+                torch::Tensor sampled = sample_masked_actions(
+                    logit_sub.detach(), mask_sub.detach(), false, nullptr);
+                actor_goal_loss = -actor_->goal_critic()->forward(
+                    feat_sub, sampled.detach(), goal_sub).mean();
+              } else {
+                sa_emb = actor_->goal_critic()->sa_embedding(active_features, active_actions);
+                g_emb = actor_->goal_critic()->goal_embedding(active_future_goal_pos);
+
+                torch::Tensor sampled = sample_masked_actions(
+                    active_logits.detach(), active_masks.detach(), false, nullptr);
+                actor_goal_loss = -actor_->goal_critic()->forward(
+                    active_features, sampled.detach(), active_future_goal_pos).mean();
+              }
+              const torch::Tensor sa_logits = compute_pairwise_negative_l2_logits(sa_emb, g_emb);
+              goal_loss = compute_symmetric_infonce_loss(sa_logits, config_.goal_critic.logsumexp_penalty_coeff);
+
+              {
+                torch::NoGradGuard no_grad;
+                const torch::Tensor goal_scores = actor_->goal_critic()->forward(
+                    active_features.detach(),
+                    active_actions,
+                    active_future_goal_pos);
+                chunk_goal_score = goal_scores.mean();
+              }
+
+              chunk_sampled_goal_norm = active_future_goal_pos.norm(2, -1).mean();
+              sampled_goal_distance_sum = sampled_goal_distance_sum + chunk_sampled_goal_norm.detach().to(torch::kFloat32) * active_samples;
+              goal_critic_loss_sum = goal_critic_loss_sum + goal_loss.detach().to(torch::kFloat32) * active_samples;
+              goal_score_sum = goal_score_sum + chunk_goal_score.detach().to(torch::kFloat32) * active_samples;
             }
 
-            chunk_sampled_goal_norm = active_future_goal_pos.norm(2, -1).mean();
-            sampled_goal_distance_sum = sampled_goal_distance_sum + chunk_sampled_goal_norm.detach().to(torch::kFloat32) * active_samples;
-            goal_critic_loss_sum = goal_critic_loss_sum + goal_loss.detach().to(torch::kFloat32) * active_samples;
-            goal_score_sum = goal_score_sum + chunk_goal_score.detach().to(torch::kFloat32) * active_samples;
+            const auto sample_weight = active_samples / mode_total_active;
+
+            const torch::Tensor loss =
+                policy_loss
+                + config_.ppo.value_coef * value_loss
+                + config_.goal_critic.lambda_Zg * goal_loss
+                + config_.goal_critic.lambda_goal_actor * actor_goal_loss
+                + entropy_floor_loss
+                - effective_entropy_coef * entropy;
+            if (!torch::isfinite(loss).item<bool>()) {
+              std::cerr << "skipping non-finite APPO loss"
+                        << " policy_loss=" << policy_loss.item<float>()
+                        << " value_loss=" << value_loss.item<float>()
+                        << " entropy=" << entropy.item<float>()
+                        << " goal_loss=" << goal_loss.item<float>()
+                        << " actor_goal_loss=" << actor_goal_loss.item<float>()
+                        << '\n';
+              continue;
+            }
+
+            const int effective_accumulation_steps = use_mode_pcgrad ? 1 : optimizer_accumulation_steps;
+            torch::Tensor combined_loss = loss * sample_weight / static_cast<double>(effective_accumulation_steps);
+            (combined_loss * cuda_amp_loss_scale).backward();
+            accumulated_has_backward = true;
+
+            policy_loss_sum = policy_loss_sum + policy_loss.detach().to(torch::kFloat32) * active_samples;
+            value_loss_sum = value_loss_sum + value_loss.detach().to(torch::kFloat32) * active_samples;
+            entropy_sum = entropy_sum + entropy.detach().to(torch::kFloat32) * active_samples;
+            metrics.forward_backward_seconds +=
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - forward_backward_start).count();
+            metric_steps += active_sample_count;
           }
-
-          const auto sample_weight = active_samples / mode_total_active;
-
-          const torch::Tensor loss =
-              policy_loss
-              + config_.ppo.value_coef * value_loss
-              + config_.goal_critic.lambda_Zg * goal_loss
-              + config_.goal_critic.lambda_goal_actor * actor_goal_loss
-              + entropy_floor_loss
-              - effective_entropy_coef * entropy;
-          if (!torch::isfinite(loss).item<bool>()) {
-            std::cerr << "skipping non-finite APPO loss"
-                      << " policy_loss=" << policy_loss.item<float>()
-                      << " value_loss=" << value_loss.item<float>()
-                      << " entropy=" << entropy.item<float>()
-                      << " goal_loss=" << goal_loss.item<float>()
-                      << " actor_goal_loss=" << actor_goal_loss.item<float>()
-                      << '\n';
-            continue;
-          }
-
-          const int effective_accumulation_steps = use_mode_pcgrad ? 1 : optimizer_accumulation_steps;
-          torch::Tensor combined_loss = loss * sample_weight / static_cast<double>(effective_accumulation_steps);
-          (combined_loss * cuda_amp_loss_scale).backward();
-          accumulated_has_backward = true;
-
-          policy_loss_sum = policy_loss_sum + policy_loss.detach().to(torch::kFloat32) * active_samples;
-          value_loss_sum = value_loss_sum + value_loss.detach().to(torch::kFloat32) * active_samples;
-          entropy_sum = entropy_sum + entropy.detach().to(torch::kFloat32) * active_samples;
-          metrics.forward_backward_seconds +=
-              std::chrono::duration<double>(std::chrono::steady_clock::now() - forward_backward_start).count();
-          metric_steps += active_sample_count;
         }
 
         if (use_mode_pcgrad) {
