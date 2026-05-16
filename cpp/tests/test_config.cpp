@@ -107,7 +107,15 @@ int main() {
     catch (const std::invalid_argument&) { caught = true; }
     pulsar::test::require(caught, "zero max_grad_norm should throw");
 
-    // Test 12: reject invalid es_lora.population_size when antithetic
+    // Test 12: reject negative value_loss_delta
+    bad = config;
+    bad.ppo.value_loss_delta = -1.0f;
+    caught = false;
+    try { pulsar::validate_experiment_config(bad); }
+    catch (const std::invalid_argument&) { caught = true; }
+    pulsar::test::require(caught, "negative value_loss_delta should throw");
+
+    // Test 13: reject invalid es_lora.population_size when antithetic
     bad = config;
     bad.es_lora.population_size = 7;
     bad.es_lora.antithetic_sampling = true;
@@ -116,7 +124,7 @@ int main() {
     catch (const std::invalid_argument&) { caught = true; }
     pulsar::test::require(caught, "odd population_size with antithetic should throw");
 
-    // Test 13: reject collection_shards > num_envs
+    // Test 14: reject collection_shards > num_envs
     bad = config;
     bad.ppo.num_envs = 4;
     bad.ppo.collection_shards = 8;

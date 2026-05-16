@@ -456,6 +456,7 @@ void to_json(json& j, const PPOConfig& value) {
       {"entropy_floor", value.entropy_floor},
       {"entropy_floor_coef", value.entropy_floor_coef},
       {"value_coef", value.value_coef},
+      {"value_loss_delta", value.value_loss_delta},
       {"gamma", value.gamma},
       {"gae_lambda", value.gae_lambda},
       {"learning_rate", value.learning_rate},
@@ -473,6 +474,7 @@ void to_json(json& j, const PPOConfig& value) {
       {"plasticity_shrink", value.plasticity_shrink},
       {"plasticity_noise", value.plasticity_noise},
       {"pcgrad", value.pcgrad},
+      {"overlap_collection_update", value.overlap_collection_update},
   };
 }
 
@@ -490,6 +492,7 @@ void from_json(const json& j, PPOConfig& value) {
   value.entropy_floor = j.value("entropy_floor", 0.0F);
   value.entropy_floor_coef = j.value("entropy_floor_coef", 0.0F);
   value.value_coef = j.value("value_coef", 1.0F);
+  value.value_loss_delta = j.value("value_loss_delta", 10.0F);
   value.gamma = j.value("gamma", 0.99F);
   value.gae_lambda = j.value("gae_lambda", 0.95F);
   value.learning_rate = j.value("learning_rate", 3.0e-4F);
@@ -507,6 +510,7 @@ void from_json(const json& j, PPOConfig& value) {
   value.plasticity_shrink = j.value("plasticity_shrink", 0.999F);
   value.plasticity_noise = j.value("plasticity_noise", 1.0e-4F);
   value.pcgrad = j.value("pcgrad", false);
+  value.overlap_collection_update = j.value("overlap_collection_update", false);
 }
 
 void to_json(json& j, const SelfPlayLeagueConfig& value) {
@@ -786,6 +790,9 @@ void validate_experiment_config(const ExperimentConfig& config) {
   }
   if (config.ppo.entropy_floor_coef < 0.0F) {
     throw std::invalid_argument("ppo.entropy_floor_coef must be non-negative.");
+  }
+  if (config.ppo.value_loss_delta < 0.0F) {
+    throw std::invalid_argument("ppo.value_loss_delta must be non-negative.");
   }
   if (config.env.team_size <= 0 || config.env.team_size > 4) {
     throw std::invalid_argument("env.team_size must be between 1 and 4.");

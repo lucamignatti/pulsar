@@ -186,6 +186,7 @@ struct PPOConfig {
   float entropy_floor = 0.0F;
   float entropy_floor_coef = 0.0F;
   float value_coef = 1.0F;
+  float value_loss_delta = 10.0F;
   float gamma = 0.99F;
   float gae_lambda = 0.95F;
   float learning_rate = 3.0e-4F;
@@ -202,6 +203,7 @@ struct PPOConfig {
   float plasticity_shrink = 0.999F;
   float plasticity_noise = 1.0e-4F;
   bool pcgrad = false;
+  bool overlap_collection_update = false;
 };
 
 struct SelfPlayLeagueConfig {

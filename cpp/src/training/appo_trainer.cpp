@@ -159,6 +159,21 @@ void scale_existing_gradients(torch::nn::Module& module, double scale) {
   }
 }
 
+torch::Tensor smooth_l1_value_loss(
+    const torch::Tensor& prediction,
+    const torch::Tensor& target,
+    float delta) {
+  if (delta <= 0.0F) {
+    return torch::mse_loss(prediction, target, torch::Reduction::Mean);
+  }
+  const torch::Tensor error = prediction - target;
+  const torch::Tensor abs_error = error.abs();
+  const torch::Tensor delta_tensor = torch::full_like(abs_error, delta);
+  const torch::Tensor quadratic = 0.5F * error.square() / delta;
+  const torch::Tensor linear = abs_error - 0.5F * delta;
+  return torch::where(abs_error < delta_tensor, quadratic, linear).mean();
+}
+
 void apply_pcgrad(std::vector<CapturedGrad>& group_a, std::vector<CapturedGrad>& group_b) {
   std::vector<torch::Tensor> flat_a_parts, flat_b_parts;
   for (size_t i = 0; i < group_a.size(); ++i) {
@@ -883,7 +898,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       std::max(requested_logical_agents_per_batch, min_agents_for_minibatch_cap));
   const int rollout_steps = rollout.rollout_length();
   const bool use_cuda_amp = device_.is_cuda();
-  const double cuda_amp_loss_scale = use_cuda_amp ? 128.0 : 1.0;
+  const double cuda_amp_loss_scale = 1.0;
   const int optimizer_accumulation_steps = std::max(1, config_.ppo.optimizer_accumulation_steps);
   int minibatches_per_epoch = 0;
   int microbatches_per_epoch = 0;
@@ -1068,10 +1083,10 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             const torch::Tensor obs = mode_gpu_obs_mb.narrow(0, chunk_start, chunk_steps);
 
             const auto forward_backward_start = std::chrono::steady_clock::now();
-            OptionalCudaAutocastGuard autocast_guard(use_cuda_amp);
             ActorSequenceOutput output;
             {
               PULSAR_TRACE_SCOPE_CAT("trainer", "update_forward_sequence");
+              OptionalCudaAutocastGuard autocast_guard(use_cuda_amp);
               const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_critic.goal_dim);
               const torch::Tensor episode_starts =
                   mode_gpu_episode_starts_mb.narrow(0, chunk_start, chunk_steps);
@@ -1099,12 +1114,12 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             torch::Tensor flat_old_log_probs = old_log_probs.reshape({samples});
             torch::Tensor flat_advantages = chunk_advantages.reshape({samples});
 
-            const torch::Tensor active_logits = flat_logits.index({flat_active});
-            const torch::Tensor active_features = flat_features.index({flat_active});
+            const torch::Tensor active_logits = flat_logits.index({flat_active}).to(torch::kFloat32);
+            const torch::Tensor active_features = flat_features.index({flat_active}).to(torch::kFloat32);
             const torch::Tensor active_masks = flat_masks.index({flat_active});
             const torch::Tensor active_actions = flat_actions.index({flat_active});
-            const torch::Tensor active_old_log_probs = flat_old_log_probs.index({flat_active});
-            const torch::Tensor active_advantages = flat_advantages.index({flat_active});
+            const torch::Tensor active_old_log_probs = flat_old_log_probs.index({flat_active}).to(torch::kFloat32);
+            const torch::Tensor active_advantages = flat_advantages.index({flat_active}).to(torch::kFloat32);
             const auto active_sample_count = active_logits.size(0);
             if (active_sample_count == 0) continue;
             const auto active_samples = static_cast<double>(active_sample_count);
@@ -1127,14 +1142,16 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             }
 
             torch::Tensor chunk_returns = mode_gpu_returns_mb.narrow(0, loss_start, loss_steps).reshape({samples});
-            torch::Tensor active_returns = chunk_returns.index({flat_active});
+            torch::Tensor active_returns = chunk_returns.index({flat_active}).to(torch::kFloat32);
 
             torch::Tensor value_win_chunk = output.value_win_logits;
             torch::Tensor flat_value_win_logits = value_win_chunk.reshape({samples, 1});
-            torch::Tensor active_value_win_logits = flat_value_win_logits.index({flat_active});
+            torch::Tensor active_value_win_logits = flat_value_win_logits.index({flat_active}).to(torch::kFloat32);
 
-            torch::Tensor value_loss = torch::mse_loss(
-                active_value_win_logits.squeeze(-1), active_returns, torch::Reduction::Mean);
+            torch::Tensor value_loss = smooth_l1_value_loss(
+                active_value_win_logits.squeeze(-1),
+                active_returns,
+                config_.ppo.value_loss_delta);
 
             torch::Tensor goal_loss = torch::zeros({}, active_advantages.options());
             torch::Tensor actor_goal_loss = torch::zeros({}, active_advantages.options());
@@ -2439,17 +2456,19 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     TrainerMetrics next_coll_metrics{};
     std::int64_t next_coll_steps = 0;
     const bool has_next = train_forever || index + 1 < updates;
+    const bool overlap_collection_update = has_next && config_.ppo.overlap_collection_update;
 
-    // Clone normalizer for collection thread to avoid race with self-play eval
-    ObservationNormalizer collection_normalizer = actor_normalizer_.clone();
+    ObservationNormalizer collection_normalizer =
+        overlap_collection_update ? actor_normalizer_.clone() : ObservationNormalizer(0);
 
-    // 1. Launch training (GPU on training_stream_) and collection (GPU on shard streams + CPU stepping) concurrently
+    // 1. Launch training and, when explicitly enabled, overlap it with collection
+    // from the previous policy snapshot.
     std::future<TrainerMetrics> train_future = std::async(std::launch::async, [&]() {
       return update_actor(rollout_);
     });
 
     std::future<std::int64_t> collect_future;
-    if (has_next) {
+    if (overlap_collection_update) {
       collect_future = std::async(std::launch::async, [&]() {
         std::int64_t steps = 0;
         collect_rollout(rollout_B_, next_coll_metrics, &steps, actor_snapshot_, collection_normalizer);
@@ -2457,7 +2476,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       });
     }
 
-    // 2. Main thread CPU work that overlaps with GPU training+collection
+    // 2. Main thread CPU work that overlaps with the update.
     {
       double scored = static_cast<double>(coll_metrics.scored_episodes);
       double completed = static_cast<double>(std::max(coll_metrics.completed_episodes, static_cast<int64_t>(1)));
@@ -2469,8 +2488,11 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       }
     }
 
-    // 3. Wait for training to finish before touching actor_
+    // 3. Wait for training to finish before touching actor_.
     TrainerMetrics train_metrics = train_future.get();
+    if (overlap_collection_update) {
+      next_coll_steps = collect_future.get();
+    }
 
     // 4. Self-play / ES-LoRA / plasticity (touch actor_, safe now)
     if (self_play_manager_) {
@@ -2526,14 +2548,19 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       }
     }
 
-    // 6. Clone snapshot for next iteration's collection
-    synchronize_cuda_if_needed(device_, "snapshot clone");
-    PPOActor new_snapshot = clone_ppo_actor(actor_, device_);
-    new_snapshot->eval();
-
-    // 7. Wait for collection to finish
+    // 6. Clone snapshot for next iteration's collection after all work using
+    // the previous snapshot has completed.
+    PPOActor new_snapshot{nullptr};
     if (has_next) {
-      next_coll_steps = collect_future.get();
+      synchronize_cuda_if_needed(device_, "snapshot clone");
+      new_snapshot = clone_ppo_actor(actor_, device_);
+      new_snapshot->eval();
+    }
+
+    // 7. In the default memory-safe mode, collect after the update with the
+    // fresh policy snapshot.
+    if (has_next && !overlap_collection_update) {
+      collect_rollout(rollout_B_, next_coll_metrics, &next_coll_steps, new_snapshot, actor_normalizer_);
     }
 
     global_step += next_coll_steps;

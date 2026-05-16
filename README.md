@@ -147,10 +147,12 @@ To run a bounded number of updates:
     "optimizer_accumulation_steps": 2,
     "entropy_coef": 0.03,
     "entropy_floor": 0.08,
+    "value_loss_delta": 10.0,
     "learning_rate": 0.0003,
     "max_grad_norm": 1.0,
     "device": "cuda",
     "pcgrad": true,
+    "overlap_collection_update": false,
     "checkpoint_interval": 50,
     "max_rolling_checkpoints": 3
   },

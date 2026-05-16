@@ -347,6 +347,7 @@
     "entropy_floor": 0.85,
     "entropy_floor_coef": 0.05,
     "value_coef": 1.0,
+    "value_loss_delta": 10.0,
     "gamma": 0.99,
     "gae_lambda": 0.95,
     "learning_rate": 0.0003,
@@ -362,7 +363,8 @@
     "plasticity_interval": 40,
     "plasticity_shrink": 0.999,
     "plasticity_noise": 0.0001,
-    "pcgrad": true
+    "pcgrad": true,
+    "overlap_collection_update": false
   },
   "goal_mapping": {
     "arena_max_distance": 8192.0
