@@ -125,15 +125,11 @@ struct EnvConfig {
 struct ModelConfig {
   int observation_dim = 132;
   int action_dim = 90;
-  std::string encoder_type = "transformer";
   bool use_layer_norm = true;
   int encoder_dim = 640;
   int num_encoder_blocks = 5;
-  int transformer_num_heads = 8;
-  int transformer_window_size = 16;
-  int transformer_max_batch_size = 1024;
-  int transformer_token_group_size = 4;
-  int transformer_ffn_multiplier = 2;
+  int sequence_length = 16;
+  int max_forward_samples = 0;
   int value_hidden_dim = 256;
   int policy_hidden_dim = 0;
 };
@@ -259,7 +255,7 @@ struct CheckpointMetadata {
   int obs_schema_version = 2;
   std::string config_hash{};
   std::string action_table_hash{};
-  std::string architecture_name = "swa_transformer_goal_appo";
+  std::string architecture_name = "mamba2_goal_appo";
   std::string device = "cpu";
   std::int64_t global_step = 0;
   std::int64_t update_index = 0;

@@ -18,8 +18,8 @@ def main() -> int:
     base_config["model"].update({
         "encoder_dim": 64,
         "num_encoder_blocks": 1,
-        "transformer_num_heads": 4,
-        "transformer_max_batch_size": 256,
+        "sequence_length": 4,
+        "max_forward_samples": 256,
         "value_hidden_dim": 64,
     })
     base_config["ppo"]["rollout_length"] = 8

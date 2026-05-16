@@ -12,15 +12,9 @@ pulsar::ModelConfig small_model_config() {
   config.observation_dim = 16;
   config.action_dim = 7;
   config.use_layer_norm = false;
-  config.encoder_dim = 8;
-  // config.workspace_dim = 8;
-  // config.stm_slots = 4;
-  // config.stm_key_dim = 4;
-  // config.stm_value_dim = 4;
-  // config.ltm_slots = 4;
-  // config.ltm_dim = 4;
-  // config.controller_dim = 8;
-  // config.consolidation_stride = 2;
+  config.encoder_dim = 16;
+  config.num_encoder_blocks = 2;
+  config.sequence_length = 8;
   config.value_hidden_dim = 32;
   return config;
 }
@@ -57,15 +51,23 @@ int main() {
           + output.value_win_logits.square().mean()
           + output.features.square().mean();
       loss.backward();
-      bool saw_encoder_grad = false;
+      bool saw_input_projection_grad = false;
+      bool saw_decay_grad = false;
+      bool saw_conv_grad = false;
       for (const auto& item : actor->named_parameters(true)) {
-        if (item.key().find("encoder.") == 0 && item.value().grad().defined()) {
-          saw_encoder_grad = true;
-          break;
+        const std::string name = item.key();
+        if (name.find("encoder.input_projection") == 0 && item.value().grad().defined()) {
+          saw_input_projection_grad = true;
+        }
+        if (name.find("encoder.block_0.decay_bias") == 0 && item.value().grad().defined()) {
+          saw_decay_grad = true;
+        }
+        if (name.find("encoder.block_0.causal_conv") == 0 && item.value().grad().defined()) {
+          saw_conv_grad = true;
         }
       }
-      if (!saw_encoder_grad) {
-        throw std::runtime_error("actor backward did not populate encoder gradients");
+      if (!saw_input_projection_grad || !saw_decay_grad || !saw_conv_grad) {
+        throw std::runtime_error("mamba2 backward missed expected encoder gradients");
       }
       actor->zero_grad();
     }
@@ -83,66 +85,36 @@ int main() {
     }
 
     {
-      pulsar::ModelConfig mamba_config = small_model_config();
-      mamba_config.encoder_type = "mamba2";
-      mamba_config.encoder_dim = 16;
-      mamba_config.num_encoder_blocks = 2;
-      mamba_config.transformer_token_group_size = 4;
-      pulsar::PPOActor mamba_actor(mamba_config, gc_cfg);
-      const auto mamba_step = mamba_actor->forward_step(torch::randn({3, mamba_config.observation_dim}));
-      if (mamba_step.policy_logits.sizes() != torch::IntArrayRef({3, mamba_config.action_dim})) {
-        throw std::runtime_error("mamba2 policy logits shape mismatch");
+      const auto seq_out = actor->forward_sequence(torch::randn({2, 3, model_config.observation_dim}));
+      if (seq_out.policy_logits.sizes() != torch::IntArrayRef({2, 3, model_config.action_dim})) {
+        throw std::runtime_error("sequence logits shape mismatch");
       }
-      const auto mamba_seq = mamba_actor->forward_sequence(torch::randn({2, 3, mamba_config.observation_dim}));
-      if (mamba_seq.policy_logits.sizes() != torch::IntArrayRef({2, 3, mamba_config.action_dim})) {
-        throw std::runtime_error("mamba2 sequence logits shape mismatch");
+    }
+
+    {
+      torch::NoGradGuard no_grad;
+      const torch::Tensor obs_seq = torch::randn({4, 3, model_config.observation_dim});
+      const auto sequence_out = actor->forward_sequence(obs_seq);
+      torch::Tensor state = actor->initial_recurrent_state(3, torch::kCPU);
+      std::vector<torch::Tensor> step_logits;
+      for (int t = 0; t < obs_seq.size(0); ++t) {
+        torch::Tensor next_state;
+        const auto step_out = actor->forward_step_stateful(
+            obs_seq[t],
+            state,
+            torch::zeros({3}, torch::kFloat32),
+            &next_state);
+        state = next_state;
+        step_logits.push_back(step_out.policy_logits);
       }
-      {
-        torch::NoGradGuard no_grad;
-        const torch::Tensor obs_seq = torch::randn({4, 3, mamba_config.observation_dim});
-        const auto sequence_out = mamba_actor->forward_sequence(obs_seq);
-        torch::Tensor state = mamba_actor->initial_recurrent_state(3, torch::kCPU);
-        std::vector<torch::Tensor> step_logits;
-        for (int t = 0; t < obs_seq.size(0); ++t) {
-          torch::Tensor next_state;
-          const auto step_out = mamba_actor->forward_step_stateful(
-              obs_seq[t],
-              state,
-              torch::zeros({3}, torch::kFloat32),
-              &next_state);
-          state = next_state;
-          step_logits.push_back(step_out.policy_logits);
-        }
-        const torch::Tensor stepped_logits = torch::stack(step_logits, 0);
-        if (!torch::allclose(sequence_out.policy_logits, stepped_logits, 1.0e-4, 1.0e-4)) {
-          throw std::runtime_error("mamba2 stateful step logits should match sequence logits");
-        }
+      const torch::Tensor stepped_logits = torch::stack(step_logits, 0);
+      if (!torch::allclose(sequence_out.policy_logits, stepped_logits, 1.0e-4, 1.0e-4)) {
+        throw std::runtime_error("stateful step logits should match sequence logits");
       }
-      if (!torch::all(torch::isfinite(mamba_step.features)).item<bool>()) {
-        throw std::runtime_error("mamba2 produced non-finite features");
-      }
-      const torch::Tensor mamba_loss = mamba_step.policy_logits.square().mean()
-          + mamba_step.value_win_logits.square().mean()
-          + mamba_step.features.square().mean();
-      mamba_loss.backward();
-      bool saw_input_projection_grad = false;
-      bool saw_decay_grad = false;
-      bool saw_conv_grad = false;
-      for (const auto& item : mamba_actor->named_parameters(true)) {
-        const std::string name = item.key();
-        if (name.find("encoder.input_projection") == 0 && item.value().grad().defined()) {
-          saw_input_projection_grad = true;
-        }
-        if (name.find("encoder.block_0.decay_bias") == 0 && item.value().grad().defined()) {
-          saw_decay_grad = true;
-        }
-        if (name.find("encoder.block_0.causal_conv") == 0 && item.value().grad().defined()) {
-          saw_conv_grad = true;
-        }
-      }
-      if (!saw_input_projection_grad || !saw_decay_grad || !saw_conv_grad) {
-        throw std::runtime_error("mamba2 backward missed expected encoder gradients");
-      }
+    }
+
+    if (!torch::all(torch::isfinite(output.features)).item<bool>()) {
+      throw std::runtime_error("produced non-finite features");
     }
 
     const auto actor_clone = pulsar::clone_ppo_actor(actor, torch::kCPU);

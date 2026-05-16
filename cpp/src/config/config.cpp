@@ -334,15 +334,11 @@ void to_json(json& j, const ModelConfig& value) {
   j = json{
       {"observation_dim", value.observation_dim},
       {"action_dim", value.action_dim},
-      {"encoder_type", value.encoder_type},
       {"use_layer_norm", value.use_layer_norm},
       {"encoder_dim", value.encoder_dim},
       {"num_encoder_blocks", value.num_encoder_blocks},
-      {"transformer_num_heads", value.transformer_num_heads},
-      {"transformer_window_size", value.transformer_window_size},
-      {"transformer_max_batch_size", value.transformer_max_batch_size},
-      {"transformer_token_group_size", value.transformer_token_group_size},
-      {"transformer_ffn_multiplier", value.transformer_ffn_multiplier},
+      {"sequence_length", value.sequence_length},
+      {"max_forward_samples", value.max_forward_samples},
       {"value_hidden_dim", value.value_hidden_dim},
       {"policy_hidden_dim", value.policy_hidden_dim},
   };
@@ -351,15 +347,11 @@ void to_json(json& j, const ModelConfig& value) {
 void from_json(const json& j, ModelConfig& value) {
   value.observation_dim = j.value("observation_dim", 132);
   value.action_dim = j.value("action_dim", 90);
-  value.encoder_type = j.value("encoder_type", std::string{"transformer"});
   value.use_layer_norm = j.value("use_layer_norm", true);
   value.encoder_dim = j.value("encoder_dim", 640);
   value.num_encoder_blocks = j.value("num_encoder_blocks", 5);
-  value.transformer_num_heads = j.value("transformer_num_heads", 8);
-  value.transformer_window_size = j.value("transformer_window_size", 16);
-  value.transformer_max_batch_size = j.value("transformer_max_batch_size", 1024);
-  value.transformer_token_group_size = j.value("transformer_token_group_size", 4);
-  value.transformer_ffn_multiplier = j.value("transformer_ffn_multiplier", 2);
+  value.sequence_length = j.value("sequence_length", j.value("transformer_window_size", 16));
+  value.max_forward_samples = j.value("max_forward_samples", j.value("transformer_max_batch_size", 0));
   value.value_hidden_dim = j.value("value_hidden_dim", 256);
   value.policy_hidden_dim = j.value("policy_hidden_dim", 0);
 }
@@ -675,34 +667,17 @@ void validate_experiment_config(const ExperimentConfig& config) {
     throw std::invalid_argument("ppo.collection_shards must be <= ppo.num_envs.");
   }
 
-  if (config.model.encoder_type != "transformer" &&
-      config.model.encoder_type != "mlp" &&
-      config.model.encoder_type != "mamba2") {
-    throw std::invalid_argument("model.encoder_type must be one of \"transformer\", \"mlp\", or \"mamba2\".");
-  }
   if (config.model.encoder_dim <= 0) {
     throw std::invalid_argument("model.encoder_dim must be positive.");
   }
   if (config.model.num_encoder_blocks <= 0) {
     throw std::invalid_argument("model.num_encoder_blocks must be positive.");
   }
-  if (config.model.transformer_num_heads <= 0) {
-    throw std::invalid_argument("model.transformer_num_heads must be positive.");
+  if (config.model.sequence_length <= 0) {
+    throw std::invalid_argument("model.sequence_length must be positive.");
   }
-  if (config.model.encoder_type == "transformer" && config.model.encoder_dim % config.model.transformer_num_heads != 0) {
-    throw std::invalid_argument("model.encoder_dim must be divisible by model.transformer_num_heads.");
-  }
-  if (config.model.transformer_window_size <= 0) {
-    throw std::invalid_argument("model.transformer_window_size must be positive.");
-  }
-  if (config.model.transformer_max_batch_size < 0) {
-    throw std::invalid_argument("model.transformer_max_batch_size must be non-negative (0 = unlimited).");
-  }
-  if (config.model.transformer_token_group_size <= 0) {
-    throw std::invalid_argument("model.transformer_token_group_size must be positive.");
-  }
-  if (config.model.transformer_ffn_multiplier <= 0) {
-    throw std::invalid_argument("model.transformer_ffn_multiplier must be positive.");
+  if (config.model.max_forward_samples < 0) {
+    throw std::invalid_argument("model.max_forward_samples must be non-negative (0 = unlimited).");
   }
   if (config.goal_mapping.arena_max_distance <= 0.0F) {
     throw std::invalid_argument("goal_mapping.arena_max_distance must be positive.");

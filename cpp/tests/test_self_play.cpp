@@ -292,7 +292,7 @@ void test_checkpoint_metadata_validation() {
     meta.obs_schema_version = config.obs_schema_version;
     meta.config_hash = pulsar::config_hash(config);
     meta.action_table_hash = pulsar::action_table_hash(config.action_table);
-    meta.architecture_name = "swa_transformer_goal_appo";
+    meta.architecture_name = "mamba2_goal_appo";
     meta.device = "cpu";
     meta.global_step = 0;
     meta.update_index = 0;

@@ -70,7 +70,7 @@ void apply_benchmark_override(pulsar::ExperimentConfig& config, const std::strin
   } else if (key == "update_epochs") {
     config.ppo.update_epochs = std::stoi(value);
   } else if (key == "max_forward_samples") {
-    config.model.transformer_max_batch_size = std::stoi(value);
+    config.model.max_forward_samples = std::stoi(value);
   } else if (key == "pcgrad") {
     config.ppo.pcgrad = parse_bool_override(value);
   } else {
@@ -153,7 +153,7 @@ int main(int argc, char** argv) {
     std::cout << "rollout_length=" << config.ppo.rollout_length << '\n';
     std::cout << "minibatch_size=" << config.ppo.minibatch_size << '\n';
     std::cout << "update_epochs=" << config.ppo.update_epochs << '\n';
-    std::cout << "max_forward_samples=" << config.model.transformer_max_batch_size << '\n';
+    std::cout << "max_forward_samples=" << config.model.max_forward_samples << '\n';
     std::cout << "pcgrad=" << (config.ppo.pcgrad ? 1 : 0) << '\n';
     std::cout << "updates=" << metrics.updates << '\n';
     std::cout << "agent_steps=" << metrics.agent_steps << '\n';

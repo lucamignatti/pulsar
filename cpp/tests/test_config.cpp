@@ -15,11 +15,8 @@ int main() {
     config.ppo.minibatch_size = 256;
     config.model.encoder_dim = 512;
     config.model.num_encoder_blocks = 2;
-    config.model.transformer_num_heads = 8;
-    config.model.transformer_window_size = 4;
-    config.model.transformer_max_batch_size = 1024;
-    config.model.transformer_token_group_size = 4;
-    config.model.transformer_ffn_multiplier = 2;
+    config.model.sequence_length = 4;
+    config.model.max_forward_samples = 1024;
     pulsar::validate_experiment_config(config);
 
     // Test 2: JSON round-trip
@@ -45,16 +42,7 @@ int main() {
     catch (const std::invalid_argument&) { caught = true; }
     pulsar::test::require(caught, "rollout_length <= 1 should throw");
 
-    // Test 5: reject invalid encoder_dim divisor
-    bad = config;
-    bad.model.encoder_dim = 513;
-    bad.model.transformer_num_heads = 8;
-    caught = false;
-    try { pulsar::validate_experiment_config(bad); }
-    catch (const std::invalid_argument&) { caught = true; }
-    pulsar::test::require(caught, "encoder_dim not divisible by num_heads should throw");
-
-    // Test 6: reject negative learning_rate
+    // Test 5: reject negative learning_rate
     bad = config;
     bad.ppo.learning_rate = -0.001f;
     caught = false;
@@ -163,7 +151,7 @@ int main() {
       meta.obs_schema_version = 2;
       meta.config_hash = "abc123";
       meta.action_table_hash = "def456";
-      meta.architecture_name = "swa_transformer_goal_appo";
+      meta.architecture_name = "mamba2_goal_appo";
       meta.device = "cpu";
       meta.global_step = 1000;
       meta.update_index = 50;

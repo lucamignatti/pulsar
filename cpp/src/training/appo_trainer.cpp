@@ -302,35 +302,12 @@ torch::Tensor policy_goal_values_like(const torch::Tensor& obs, int goal_dim) {
   return torch::zeros({obs.size(0), goal_dim}, options);
 }
 
-int transformer_sequence_length(const ModelConfig& config) {
-  const auto token_group_size = static_cast<std::int64_t>(std::max(1, config.transformer_token_group_size));
-  const auto observation_dim = static_cast<std::int64_t>(std::max(1, config.observation_dim));
-  const auto padded_observation_dim =
-      ((observation_dim + token_group_size - 1) / token_group_size) * token_group_size;
-  return static_cast<int>(padded_observation_dim / token_group_size + 1);
-}
-
-int cuda_autograd_forward_sample_cap(const ModelConfig& config) {
-  constexpr std::int64_t kAutogradActivationBudgetBytes = 96LL * 1024LL * 1024LL;
-  const auto sequence = static_cast<std::int64_t>(transformer_sequence_length(config));
-  const auto ffn_dim = static_cast<std::int64_t>(std::max(1, config.encoder_dim))
-      * static_cast<std::int64_t>(std::max(1, config.transformer_ffn_multiplier));
-  const std::int64_t bytes_per_sample = sequence * ffn_dim * static_cast<std::int64_t>(sizeof(float));
-  if (bytes_per_sample <= 0) {
-    return std::max(1, config.transformer_max_batch_size);
-  }
-  const std::int64_t sample_cap = std::max<std::int64_t>(1, kAutogradActivationBudgetBytes / bytes_per_sample);
-  return static_cast<int>(std::min<std::int64_t>(
-      sample_cap,
-      static_cast<std::int64_t>(std::numeric_limits<int>::max())));
-}
-
 int cuda_mamba2_autograd_forward_sample_cap(const ModelConfig& config) {
   constexpr std::int64_t kProjectedActivationBudgetBytes = 2LL * 1024LL * 1024LL * 1024LL;
   const auto projected_dim = static_cast<std::int64_t>(std::max(1, config.encoder_dim)) * 5;
   const std::int64_t bytes_per_sample = projected_dim * static_cast<std::int64_t>(sizeof(float));
   if (bytes_per_sample <= 0) {
-    return std::max(1, config.transformer_max_batch_size);
+    return std::max(1, config.max_forward_samples);
   }
   const std::int64_t sample_cap = std::max<std::int64_t>(1, kProjectedActivationBudgetBytes / bytes_per_sample);
   return static_cast<int>(std::min<std::int64_t>(
@@ -338,30 +315,17 @@ int cuda_mamba2_autograd_forward_sample_cap(const ModelConfig& config) {
       static_cast<std::int64_t>(std::numeric_limits<int>::max())));
 }
 
-int effective_transformer_max_batch_size(const ModelConfig& config, const torch::Device& device) {
+int effective_max_forward_samples(const ModelConfig& config, const torch::Device& device) {
   constexpr int kUnlimitedCap = 524288;
-  if (config.encoder_type == "mamba2") {
-    if (!device.is_cuda()) {
-      return config.transformer_max_batch_size == 0
-          ? kUnlimitedCap
-          : std::max(1, config.transformer_max_batch_size);
-    }
-    const int cap = cuda_mamba2_autograd_forward_sample_cap(config);
-    return config.transformer_max_batch_size == 0
-        ? cap
-        : std::max(1, std::min(std::max(1, config.transformer_max_batch_size), cap));
+  if (!device.is_cuda()) {
+    return config.max_forward_samples == 0
+        ? kUnlimitedCap
+        : std::max(1, config.max_forward_samples);
   }
-  if (config.transformer_max_batch_size == 0) {
-    if (!device.is_cuda() || config.encoder_type == "mlp") {
-      return kUnlimitedCap;
-    }
-    return std::max(1, std::min(kUnlimitedCap, cuda_autograd_forward_sample_cap(config)));
-  }
-  const int configured = std::max(1, config.transformer_max_batch_size);
-  if (!device.is_cuda() || config.encoder_type == "mlp") {
-    return configured;
-  }
-  return std::max(1, std::min(configured, cuda_autograd_forward_sample_cap(config)));
+  const int cap = cuda_mamba2_autograd_forward_sample_cap(config);
+  return config.max_forward_samples == 0
+      ? cap
+      : std::max(1, std::min(std::max(1, config.max_forward_samples), cap));
 }
 
 void append_metrics_line(
@@ -979,7 +943,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   }
 
   const int seq_len = std::max(1, config_.ppo.rollout_length);
-  const int max_forward_samples = effective_transformer_max_batch_size(config_.model, device_);
+  const int max_forward_samples = effective_max_forward_samples(config_.model, device_);
   const int agents_per_forward = std::max(1, max_forward_samples / seq_len);
   const int requested_logical_agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
   const int total_agents = rollout.num_agents();
@@ -1058,7 +1022,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       torch::Tensor term_obs = rollout.terminal_observations.narrow(0, 0, rollout_steps);
       auto term_flat = term_obs.reshape({rollout_steps * total_agents, config_.model.observation_dim});
       const int total_term_samples = rollout_steps * total_agents;
-      const int max_term_batch = effective_transformer_max_batch_size(config_.model, device_);
+      const int max_term_batch = effective_max_forward_samples(config_.model, device_);
       std::vector<torch::Tensor> term_value_chunks;
       for (int offset = 0; offset < total_term_samples; offset += max_term_batch) {
         int batch = std::min(max_term_batch, total_term_samples - offset);
@@ -2364,7 +2328,7 @@ CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
       .obs_schema_version = config_.obs_schema_version,
       .config_hash = config_hash(config_),
       .action_table_hash = action_table_hash(config_.action_table),
-      .architecture_name = "swa_transformer_goal_appo",
+      .architecture_name = "mamba2_goal_appo",
       .device = config_.ppo.device,
       .global_step = global_step,
       .update_index = update_index,

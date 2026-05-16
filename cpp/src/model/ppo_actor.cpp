@@ -51,20 +51,11 @@ void validate_model_config(const ModelConfig& config) {
   require_positive(config.action_dim, "action_dim");
   require_positive(config.encoder_dim, "encoder_dim");
   require_positive(config.num_encoder_blocks, "num_encoder_blocks");
-  require_positive(config.transformer_num_heads, "transformer_num_heads");
-  require_positive(config.transformer_window_size, "transformer_window_size");
-  if (config.transformer_max_batch_size < 0) {
-    throw std::invalid_argument("ModelConfig.transformer_max_batch_size must be non-negative (0 = unlimited).");
+  require_positive(config.sequence_length, "sequence_length");
+  if (config.max_forward_samples < 0) {
+    throw std::invalid_argument("ModelConfig.max_forward_samples must be non-negative (0 = unlimited).");
   }
-  require_positive(config.transformer_token_group_size, "transformer_token_group_size");
-  require_positive(config.transformer_ffn_multiplier, "transformer_ffn_multiplier");
   require_positive(config.value_hidden_dim, "value_hidden_dim");
-  if (config.encoder_type != "transformer" && config.encoder_type != "mlp" && config.encoder_type != "mamba2") {
-    throw std::invalid_argument("ModelConfig.encoder_type must be one of \"transformer\", \"mlp\", or \"mamba2\".");
-  }
-  if (config.encoder_type == "transformer" && config.encoder_dim % config.transformer_num_heads != 0) {
-    throw std::invalid_argument("ModelConfig.encoder_dim must be divisible by transformer_num_heads.");
-  }
 }
 
 void validate_es_lora_config(const ESLoraConfig& config) {
@@ -165,173 +156,6 @@ int LoRALinearImpl::rank() const {
 
 float LoRALinearImpl::scale() const {
   return scale_;
-}
-
-SlidingWindowSelfAttentionImpl::SlidingWindowSelfAttentionImpl(
-    int embed_dim,
-    int num_heads,
-    int window_size,
-    int sequence_length)
-    : embed_dim_(embed_dim),
-      num_heads_(num_heads),
-      head_dim_(embed_dim / num_heads),
-      window_size_(window_size),
-      sequence_length_(sequence_length) {
-  if (embed_dim_ <= 0 || num_heads_ <= 0 || head_dim_ * num_heads_ != embed_dim_) {
-    throw std::invalid_argument("SlidingWindowSelfAttention requires embed_dim divisible by num_heads.");
-  }
-  if (window_size_ <= 0 || sequence_length_ <= 0) {
-    throw std::invalid_argument("SlidingWindowSelfAttention requires positive window and sequence length.");
-  }
-
-  qkv_ = register_module("qkv", torch::nn::Linear(embed_dim_, 3 * embed_dim_));
-  out_proj_ = register_module("out_proj", torch::nn::Linear(embed_dim_, embed_dim_));
-
-  torch::Tensor mask = torch::zeros(
-      {sequence_length_, sequence_length_},
-      torch::TensorOptions().dtype(torch::kBool));
-  auto mask_accessor = mask.accessor<bool, 2>();
-  for (int query = 0; query < sequence_length_; ++query) {
-    for (int key = 0; key < sequence_length_; ++key) {
-      const bool global_cls = query == 0 || key == 0;
-      const bool local_window = std::abs(query - key) <= window_size_;
-      if (global_cls || local_window) {
-        mask_accessor[query][key] = true;
-      }
-    }
-  }
-  attention_mask_ = register_buffer("attention_mask", mask.view({1, 1, sequence_length_, sequence_length_}));
-}
-
-torch::Tensor SlidingWindowSelfAttentionImpl::forward(const torch::Tensor& tokens) {
-  PULSAR_TRACE_SCOPE_CAT("actor", "swa_attention");
-  const auto batch = tokens.size(0);
-  const auto sequence = tokens.size(1);
-
-  torch::Tensor qkv = qkv_->forward(tokens)
-      .view({batch, sequence, 3, num_heads_, head_dim_});
-  const auto parts = qkv.unbind(2);
-  const torch::Tensor q = parts[0];
-  const torch::Tensor k = parts[1];
-  const torch::Tensor v = parts[2];
-
-  const torch::Tensor mask = attention_mask_.to(q.device()).narrow(2, 0, sequence).narrow(3, 0, sequence).squeeze(1);
-  const float scale = 1.0F / std::sqrt(static_cast<float>(head_dim_));
-  torch::Tensor attended_heads = torch::empty(
-      {batch, sequence, num_heads_, head_dim_},
-      tokens.options());
-  // Keep the final layout contiguous without allocating a second full attended tensor.
-  for (int head = 0; head < num_heads_; ++head) {
-    const torch::Tensor q_head = q.select(2, head);
-    const torch::Tensor k_head = k.select(2, head);
-    const torch::Tensor v_head = v.select(2, head);
-    torch::Tensor attention_scores = torch::bmm(q_head, k_head.transpose(1, 2)) * scale;
-    attention_scores = attention_scores.masked_fill(mask.logical_not(), -std::numeric_limits<float>::infinity());
-    const torch::Tensor attended_head = torch::bmm(torch::softmax(attention_scores, -1), v_head);
-    attended_heads.select(2, head).copy_(attended_head);
-  }
-  return out_proj_->forward(attended_heads.view({batch, sequence, embed_dim_}));
-}
-
-SWATransformerBlockImpl::SWATransformerBlockImpl(
-    int embed_dim,
-    int num_heads,
-    int window_size,
-    int sequence_length,
-    int ffn_multiplier,
-    bool use_layer_norm)
-    : use_layer_norm_(use_layer_norm) {
-  attention_ = register_module(
-      "attention",
-      SlidingWindowSelfAttention(embed_dim, num_heads, window_size, sequence_length));
-  if (use_layer_norm_) {
-    attn_norm_ = register_module("attn_norm", torch::nn::LayerNorm(torch::nn::LayerNormOptions({embed_dim})));
-    ffn_norm_ = register_module("ffn_norm", torch::nn::LayerNorm(torch::nn::LayerNormOptions({embed_dim})));
-  }
-  ffn_ = torch::nn::Sequential();
-  const int ffn_dim = ffn_multiplier * embed_dim;
-  ffn_->push_back(torch::nn::Linear(embed_dim, ffn_dim));
-  ffn_->push_back(torch::nn::Functional(torch::relu));
-  ffn_->push_back(torch::nn::Linear(ffn_dim, embed_dim));
-  register_module("ffn", ffn_);
-}
-
-torch::Tensor SWATransformerBlockImpl::forward(const torch::Tensor& tokens) {
-  PULSAR_TRACE_SCOPE_CAT("actor", "swa_block");
-  torch::Tensor attn_input = use_layer_norm_ ? attn_norm_->forward(tokens) : tokens;
-  torch::Tensor hidden = tokens + attention_->forward(attn_input);
-  torch::Tensor ffn_input = use_layer_norm_ ? ffn_norm_->forward(hidden) : hidden;
-  return hidden + ffn_->forward(ffn_input);
-}
-
-SWATransformerEncoderImpl::SWATransformerEncoderImpl(const ModelConfig& config)
-    : observation_dim_(config.observation_dim),
-      token_group_size_(config.transformer_token_group_size),
-      padded_observation_dim_(((config.observation_dim + config.transformer_token_group_size - 1) /
-                               config.transformer_token_group_size) *
-                              config.transformer_token_group_size),
-      embed_dim_(config.encoder_dim),
-      sequence_length_(padded_observation_dim_ / token_group_size_ + 1) {
-  input_projection_ = register_module("input_projection", torch::nn::Linear(token_group_size_, embed_dim_));
-  cls_token_ = register_parameter("cls_token", torch::zeros({1, 1, embed_dim_}));
-  position_embedding_ = register_parameter(
-      "position_embedding",
-      torch::randn({1, sequence_length_, embed_dim_}) * 0.01F);
-
-  blocks_.reserve(static_cast<std::size_t>(config.num_encoder_blocks));
-  for (int i = 0; i < config.num_encoder_blocks; ++i) {
-    SWATransformerBlock block(
-        embed_dim_,
-        config.transformer_num_heads,
-        config.transformer_window_size,
-        sequence_length_,
-        config.transformer_ffn_multiplier,
-        config.use_layer_norm);
-    blocks_.push_back(register_module("block_" + std::to_string(i), block));
-  }
-  output_norm_ = register_module("output_norm", torch::nn::LayerNorm(torch::nn::LayerNormOptions({embed_dim_})));
-}
-
-torch::Tensor SWATransformerEncoderImpl::forward(const torch::Tensor& obs) {
-  PULSAR_TRACE_SCOPE_CAT("actor", "swa_encoder");
-  const auto batch = obs.size(0);
-  torch::Tensor grouped_obs = obs;
-  if (padded_observation_dim_ != observation_dim_) {
-    grouped_obs = torch::cat(
-        {obs, torch::zeros({batch, padded_observation_dim_ - observation_dim_}, obs.options())},
-        1);
-  }
-  torch::Tensor tokens = input_projection_->forward(
-      grouped_obs.view({batch, padded_observation_dim_ / token_group_size_, token_group_size_}));
-  const torch::Tensor cls = cls_token_.expand({batch, -1, -1});
-  tokens = torch::cat({cls, tokens}, 1) + position_embedding_.to(obs.device());
-  for (SWATransformerBlock& block : blocks_) {
-    tokens = block->forward(tokens);
-  }
-  tokens = output_norm_->forward(tokens);
-  return tokens.select(1, 0);
-}
-
-MLPEncoderImpl::MLPEncoderImpl(const ModelConfig& config) {
-  network_ = torch::nn::Sequential();
-  network_->push_back(torch::nn::Linear(config.observation_dim, config.encoder_dim));
-  if (config.use_layer_norm) {
-    network_->push_back(torch::nn::LayerNorm(torch::nn::LayerNormOptions({config.encoder_dim})));
-  }
-  network_->push_back(torch::nn::Functional(torch::relu));
-  for (int i = 0; i < config.num_encoder_blocks; ++i) {
-    network_->push_back(torch::nn::Linear(config.encoder_dim, config.encoder_dim));
-    if (config.use_layer_norm) {
-      network_->push_back(torch::nn::LayerNorm(torch::nn::LayerNormOptions({config.encoder_dim})));
-    }
-    network_->push_back(torch::nn::Functional(torch::relu));
-  }
-  register_module("network", network_);
-}
-
-torch::Tensor MLPEncoderImpl::forward(const torch::Tensor& obs) {
-  PULSAR_TRACE_SCOPE_CAT("actor", "mlp_encoder");
-  return network_->forward(obs);
 }
 
 Mamba2BlockImpl::Mamba2BlockImpl(int embed_dim, int sequence_length, bool use_layer_norm)
@@ -448,7 +272,7 @@ torch::Tensor Mamba2BlockImpl::forward_step(
 Mamba2EncoderImpl::Mamba2EncoderImpl(const ModelConfig& config)
     : observation_dim_(config.observation_dim),
       embed_dim_(config.encoder_dim),
-      sequence_length_(config.transformer_window_size > 0 ? config.transformer_window_size : config.observation_dim + 1) {
+      sequence_length_(config.sequence_length > 0 ? config.sequence_length : config.observation_dim + 1) {
   input_projection_ = register_module("input_projection", torch::nn::Linear(observation_dim_, embed_dim_));
 
   blocks_.reserve(static_cast<std::size_t>(config.num_encoder_blocks));
@@ -584,16 +408,8 @@ PPOActorImpl::PPOActorImpl(
   validate_model_config(config_);
   validate_es_lora_config(es_lora_config_);
 
-  if (config_.encoder_type == "mlp") {
-    mlp_encoder_ = MLPEncoder(config_);
-    register_module("encoder", mlp_encoder_);
-  } else if (config_.encoder_type == "mamba2") {
-    mamba2_encoder_ = Mamba2Encoder(config_);
-    register_module("encoder", mamba2_encoder_);
-  } else {
-    transformer_encoder_ = SWATransformerEncoder(config_);
-    register_module("encoder", transformer_encoder_);
-  }
+  mamba2_encoder_ = Mamba2Encoder(config_);
+  register_module("encoder", mamba2_encoder_);
 
   feature_dim_ = config_.encoder_dim;
 
@@ -620,14 +436,7 @@ ActorStepOutput PPOActorImpl::forward_step(
     torch::Tensor obs,
     torch::Tensor goal_values) {
   PULSAR_TRACE_SCOPE_CAT("actor", "forward_step");
-  torch::Tensor encoded;
-  if (mlp_encoder_) {
-    encoded = mlp_encoder_->forward(obs);
-  } else if (mamba2_encoder_) {
-    encoded = mamba2_encoder_->forward(obs);
-  } else {
-    encoded = transformer_encoder_->forward(obs);
-  }
+  torch::Tensor encoded = mamba2_encoder_->forward(obs);
 
   torch::Tensor policy_logits;
   if (!policy_hidden_.is_empty()) {
@@ -651,15 +460,7 @@ ActorStepOutput PPOActorImpl::forward_step_stateful(
     torch::Tensor* next_state,
     torch::Tensor goal_values) {
   PULSAR_TRACE_SCOPE_CAT("actor", "forward_step_stateful");
-  torch::Tensor encoded;
-  if (mamba2_encoder_) {
-    encoded = mamba2_encoder_->forward_step(obs, state, episode_starts, next_state);
-  } else {
-    encoded = forward_step(obs, goal_values).encoded;
-    if (next_state != nullptr) {
-      *next_state = state;
-    }
-  }
+  torch::Tensor encoded = mamba2_encoder_->forward_step(obs, state, episode_starts, next_state);
 
   torch::Tensor policy_logits;
   if (!policy_hidden_.is_empty()) {
@@ -683,18 +484,7 @@ ActorSequenceOutput PPOActorImpl::forward_sequence(
   PULSAR_TRACE_SCOPE_CAT("actor", "forward_sequence");
   const auto time = obs_seq.size(0);
   const auto batch = obs_seq.size(1);
-  torch::Tensor encoded;
-  if (mlp_encoder_) {
-    const auto flat_batch = time * batch;
-    const torch::Tensor flat_obs = obs_seq.reshape({flat_batch, config_.observation_dim});
-    encoded = mlp_encoder_->forward(flat_obs);
-  } else if (mamba2_encoder_) {
-    encoded = mamba2_encoder_->forward_sequence(obs_seq, episode_starts).reshape({time * batch, config_.encoder_dim});
-  } else {
-    const auto flat_batch = time * batch;
-    const torch::Tensor flat_obs = obs_seq.reshape({flat_batch, config_.observation_dim});
-    encoded = transformer_encoder_->forward(flat_obs);
-  }
+  torch::Tensor encoded = mamba2_encoder_->forward_sequence(obs_seq, episode_starts).reshape({time * batch, config_.encoder_dim});
 
   torch::Tensor policy_logits;
   if (!policy_hidden_.is_empty()) {
@@ -712,10 +502,7 @@ ActorSequenceOutput PPOActorImpl::forward_sequence(
 }
 
 torch::Tensor PPOActorImpl::initial_recurrent_state(int64_t batch, const torch::Device& device) const {
-  if (mamba2_encoder_) {
-    return mamba2_encoder_->initial_state(batch, device);
-  }
-  return torch::Tensor{};
+  return mamba2_encoder_->initial_state(batch, device);
 }
 
 int PPOActorImpl::feature_dim() const {
