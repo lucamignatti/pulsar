@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <optional>
 #include <string>
 
 #include "pulsar/config/config.hpp"
@@ -16,5 +17,6 @@ void commit_checkpoint_directory(
     const std::filesystem::path& staging_directory,
     const std::filesystem::path& target_directory);
 void remove_checkpoint_directory(const std::filesystem::path& directory) noexcept;
+std::optional<std::filesystem::path> find_latest_checkpoint(const std::filesystem::path& checkpoint_dir);
 
 }  // namespace pulsar

@@ -10,6 +10,7 @@
 #include <future>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -653,7 +654,6 @@ std::int64_t APPOTrainer::model_parameter_count() const {
 
 void APPOTrainer::apply_curriculum_to_collectors() {
   if (!curriculum_.enabled()) return;
-  curriculum_.initialize_stage();
   auto cfg = config_;
   cfg.outcome = curriculum_.outcome();
   cfg.mechanic_rewards = curriculum_.mechanic_rewards();
@@ -813,10 +813,14 @@ void APPOTrainer::apply_curriculum_lr() {
 }
 
 void APPOTrainer::maybe_initialize_from_checkpoint() {
-  if (config_.ppo.init_checkpoint.empty()) {
-    return;
+  std::filesystem::path base;
+  if (!config_.ppo.init_checkpoint.empty()) {
+    base = std::filesystem::path(config_.ppo.init_checkpoint);
+  } else {
+    auto latest = find_latest_checkpoint(run_output_root_);
+    if (!latest.has_value()) return;
+    base = std::move(*latest);
   }
-  const std::filesystem::path base(config_.ppo.init_checkpoint);
   const ExperimentConfig checkpoint_config = load_experiment_config((base / "config.json").string());
   const CheckpointMetadata metadata = load_checkpoint_metadata((base / "metadata.json").string());
   validate_inference_checkpoint_metadata(metadata, checkpoint_config);

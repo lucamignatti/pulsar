@@ -117,6 +117,36 @@ void remove_checkpoint_directory(const std::filesystem::path& directory) noexcep
   std::filesystem::remove(directory, ec);
 }
 
+std::optional<std::filesystem::path> find_latest_checkpoint(const std::filesystem::path& checkpoint_dir) {
+  std::error_code ec;
+  if (!std::filesystem::exists(checkpoint_dir, ec)) {
+    return std::nullopt;
+  }
+
+  std::vector<std::pair<int, std::filesystem::path>> updates;
+  for (const auto& entry : std::filesystem::directory_iterator(checkpoint_dir, ec)) {
+    if (ec) break;
+    if (!entry.is_directory(ec)) continue;
+    const std::string name = entry.path().filename().string();
+    if (name.rfind("update_", 0) != 0) continue;
+    const std::string suffix = name.substr(7);
+    if (suffix.empty() || !std::all_of(suffix.begin(), suffix.end(), [](char ch) { return ch >= '0' && ch <= '9'; })) {
+      continue;
+    }
+    try {
+      updates.emplace_back(std::stoi(suffix), entry.path());
+    } catch (...) {
+    }
+  }
+
+  if (updates.empty()) {
+    return std::nullopt;
+  }
+
+  std::sort(updates.begin(), updates.end(), [](const auto& lhs, const auto& rhs) { return lhs.first > rhs.first; });
+  return updates.front().second;
+}
+
 void commit_checkpoint_directory(
     const std::filesystem::path& staging_directory,
     const std::filesystem::path& target_directory) {
