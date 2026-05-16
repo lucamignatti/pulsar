@@ -205,8 +205,6 @@ void to_json(json& j, const CurriculumStageConfig& value) {
       {"required_touch_episode_rate", value.required_touch_episode_rate},
       {"required_multi_touch_episode_rate", value.required_multi_touch_episode_rate},
       {"required_scored_episode_rate", value.required_scored_episode_rate},
-      {"demotion_threshold_rate", value.demotion_threshold_rate},
-      {"demotion_window_updates", value.demotion_window_updates},
   };
   if (!value.mode_scored_thresholds.empty()) {
     j["mode_scored_thresholds"] = value.mode_scored_thresholds;
@@ -230,12 +228,10 @@ void from_json(const json& j, CurriculumStageConfig& value) {
   value.min_agent_steps = j.value("min_agent_steps", 20'000'000LL);
   const int window_size = j.value("promotion_window_updates", j.value("rolling_window_size", 10));
   value.rolling_window_size = j.value("rolling_window_size", window_size);
-  value.consecutive_success_threshold = j.value("consecutive_success_threshold", window_size);
+  value.consecutive_success_threshold = j.value("consecutive_success_threshold", 5);
   value.required_touch_episode_rate = j.value("required_touch_episode_rate", 0.0F);
   value.required_multi_touch_episode_rate = j.value("required_multi_touch_episode_rate", 0.0F);
   value.required_scored_episode_rate = j.value("required_scored_episode_rate", 0.0F);
-  value.demotion_threshold_rate = j.value("demotion_threshold_rate", 0.0F);
-  value.demotion_window_updates = j.value("demotion_window_updates", 10);
   if (j.contains("mode_scored_thresholds")) {
     value.mode_scored_thresholds = j["mode_scored_thresholds"].get<std::map<std::string, float>>();
   }

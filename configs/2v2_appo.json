@@ -85,8 +85,6 @@
         "required_touch_episode_rate": 0.9,
         "required_multi_touch_episode_rate": 0.9,
         "required_scored_episode_rate": 0.0,
-        "demotion_threshold_rate": 0.0,
-        "demotion_window_updates": 0,
         "unlocked_mechanics": [],
         "outcome_override": {
           "score": 10.0,
@@ -159,8 +157,6 @@
         "required_touch_episode_rate": 0.0,
         "required_multi_touch_episode_rate": 0.0,
         "required_scored_episode_rate": 0.9,
-        "demotion_threshold_rate": 0.0,
-        "demotion_window_updates": 0,
         "unlocked_mechanics": [],
         "outcome_override": {
           "score": 50.0,
@@ -233,8 +229,6 @@
         "required_touch_episode_rate": 0.0,
         "required_multi_touch_episode_rate": 0.0,
         "required_scored_episode_rate": 0.0,
-        "demotion_threshold_rate": 0.0,
-        "demotion_window_updates": 0,
         "unlocked_mechanics": [
           "speed_flip",
           "wavedash",

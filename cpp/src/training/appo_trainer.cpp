@@ -873,7 +873,6 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
     restored.previous_stage_index = metadata.extra.value("curriculum_previous_stage", -1);
     restored.agent_steps_in_stage = metadata.extra.value("curriculum_agent_steps", 0LL);
     restored.promotion_counter = metadata.extra.value("curriculum_promotion_counter", 0);
-    restored.demotion_counter = metadata.extra.value("curriculum_demotion_counter", 0);
     restored.current_mode = metadata.extra.value("curriculum_current_mode", std::string{"1v1"});
     if (metadata.extra.contains("curriculum_mode_touch_rates")) {
       for (const auto& [mode, arr] : metadata.extra["curriculum_mode_touch_rates"].items()) {
@@ -2299,7 +2298,6 @@ CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
   extra["curriculum_previous_stage"] = curriculum_.state().previous_stage_index;
   extra["curriculum_agent_steps"] = curriculum_.state().agent_steps_in_stage;
   extra["curriculum_promotion_counter"] = curriculum_.state().promotion_counter;
-  extra["curriculum_demotion_counter"] = curriculum_.state().demotion_counter;
   extra["curriculum_current_mode"] = curriculum_.state().current_mode;
   nlohmann::json mode_touch_json = nlohmann::json::object();
   for (const auto& [mode, deq] : curriculum_.state().mode_touch_rates) {
@@ -2498,7 +2496,9 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
   std::int64_t global_step = resumed_global_step_;
 
   if (curriculum_.enabled()) {
-    curriculum_.initialize_stage();
+    if (resumed_update_index_ == 0) {
+      curriculum_.initialize_stage();
+    }
     if (curriculum_.mode_allocation().size() > 1) {
       rebuild_collectors();
     }
@@ -2594,16 +2594,6 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
         apply_curriculum_to_collectors();
         apply_curriculum_lr();
         stage_changed = true;
-      } else {
-        bool demoted = curriculum_.check_demotion(coll_metrics.mode_scored_rates);
-        if (demoted) {
-          if (curriculum_.mode_allocation_changed()) {
-            rebuild_collectors();
-          }
-          apply_curriculum_to_collectors();
-          apply_curriculum_lr();
-          stage_changed = true;
-        }
       }
       if (stage_changed) {
         save_checkpoint(

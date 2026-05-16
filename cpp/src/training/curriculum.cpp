@@ -93,7 +93,6 @@ void Curriculum::initialize_stage() {
   state_.stage_index = idx;
   state_.agent_steps_in_stage = 0;
   state_.promotion_counter = 0;
-  state_.demotion_counter = 0;
   state_.mode_touch_rates.clear();
   state_.mode_multi_touch_rates.clear();
   state_.mode_scored_rates.clear();
@@ -241,58 +240,6 @@ bool Curriculum::check_promotion(
     std::cout << "curriculum_promoted stage=" << state_.stage_index
               << " primary_mode=" << state_.current_mode
               << " alloc_modes=" << stage.mode_allocation.size() << '\n';
-    return true;
-  }
-
-  return false;
-}
-
-bool Curriculum::check_demotion(const std::map<std::string, double>& mode_scored_rates) {
-  if (!config_.enabled) return false;
-
-  const auto& stages = config_.stages;
-  if (stages.empty()) return false;
-
-  if (state_.stage_index <= 0) return false;
-
-  const int idx = std::min(state_.stage_index, static_cast<int>(stages.size()) - 1);
-  const auto& stage = stages[static_cast<std::size_t>(idx)];
-
-  if (stage.demotion_threshold_rate <= 0.0F) return false;
-  if (stage.demotion_window_updates <= 0) return false;
-  if (stage.required_scored_episode_rate <= 0.0F) return false;
-
-  const float threshold = stage.required_scored_episode_rate * stage.demotion_threshold_rate;
-
-  // all active modes must be below threshold
-  bool all_below = true;
-  for (const auto& [mode, frac] : stage.mode_allocation) {
-    auto it = mode_scored_rates.find(mode);
-    double rate = (it != mode_scored_rates.end()) ? it->second : 0.0;
-    if (rate >= static_cast<double>(threshold)) {
-      all_below = false;
-      break;
-    }
-  }
-
-  if (!all_below) {
-    state_.demotion_counter = 0;
-    return false;
-  }
-
-  state_.demotion_counter++;
-
-  if (state_.demotion_counter >= stage.demotion_window_updates) {
-    state_.previous_stage_index = state_.stage_index;
-    state_.stage_index--;
-    state_.promotion_counter = 0;
-    state_.demotion_counter = 0;
-    state_.mode_touch_rates.clear();
-    state_.mode_multi_touch_rates.clear();
-    state_.mode_scored_rates.clear();
-    initialize_stage();
-    std::cout << "curriculum_demoted stage=" << state_.stage_index
-              << " primary_mode=" << state_.current_mode << '\n';
     return true;
   }
 

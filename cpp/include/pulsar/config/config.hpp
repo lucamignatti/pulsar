@@ -94,8 +94,6 @@ struct CurriculumStageConfig {
   std::map<std::string, float> mode_scored_thresholds{};
   std::map<std::string, float> mode_touch_thresholds{};
   std::map<std::string, float> mode_multi_touch_thresholds{};
-  float demotion_threshold_rate = 0.0F;
-  int demotion_window_updates = 10;
 };
 
 struct CurriculumConfig {
