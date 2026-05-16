@@ -39,6 +39,8 @@ struct TrainerMetrics {
   double value_loss = 0.0;
   double entropy = 0.0;
   double grad_norm = 0.0;
+  int64_t nonfinite_loss_skips = 0;
+  int64_t nonfinite_grad_norm_skips = 0;
   double obs_build_seconds = 0.0;
   double mask_build_seconds = 0.0;
   double policy_forward_seconds = 0.0;

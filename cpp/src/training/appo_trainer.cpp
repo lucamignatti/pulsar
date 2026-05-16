@@ -380,6 +380,8 @@ void append_metrics_line(
       {"value_loss", metrics.value_loss},
       {"entropy", metrics.entropy},
       {"grad_norm", metrics.grad_norm},
+      {"nonfinite_loss_skips", metrics.nonfinite_loss_skips},
+      {"nonfinite_grad_norm_skips", metrics.nonfinite_grad_norm_skips},
       {"total_reward_mean", metrics.total_reward_mean},
       {"gameplay_reward_mean", metrics.gameplay_reward_mean},
       {"mechanic_reward_mean", metrics.mechanic_reward_mean},
@@ -1267,6 +1269,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 + entropy_floor_loss
                 - effective_entropy_coef * entropy;
             if (!torch::isfinite(loss).item<bool>()) {
+              ++metrics.nonfinite_loss_skips;
               std::cerr << "skipping non-finite APPO loss"
                         << " policy_loss=" << policy_loss.item<float>()
                         << " value_loss=" << value_loss.item<float>()
@@ -1346,6 +1349,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           actor_optimizer_.step();
           stepped_optimizer = true;
         } else {
+          ++metrics.nonfinite_grad_norm_skips;
           std::cerr << "skipping APPO optimizer step with non-finite grad_norm=" << grad_norm << '\n';
         }
       }
@@ -2603,6 +2607,8 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     coll_metrics.entropy = train_metrics.entropy;
     coll_metrics.effective_entropy_coef = train_metrics.effective_entropy_coef;
     coll_metrics.grad_norm = train_metrics.grad_norm;
+    coll_metrics.nonfinite_loss_skips = train_metrics.nonfinite_loss_skips;
+    coll_metrics.nonfinite_grad_norm_skips = train_metrics.nonfinite_grad_norm_skips;
     coll_metrics.update_seconds = train_metrics.update_seconds;
     coll_metrics.forward_backward_seconds = train_metrics.forward_backward_seconds;
     coll_metrics.optimizer_step_seconds = train_metrics.optimizer_step_seconds;
@@ -2627,6 +2633,8 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " value_loss=" << coll_metrics.value_loss
               << " entropy=" << coll_metrics.entropy
               << " grad_norm=" << coll_metrics.grad_norm
+              << " nonfinite_loss_skips=" << coll_metrics.nonfinite_loss_skips
+              << " nonfinite_grad_skips=" << coll_metrics.nonfinite_grad_norm_skips
               << " total_reward=" << coll_metrics.total_reward_mean
               << " gameplay_reward=" << coll_metrics.gameplay_reward_mean
               << " mechanic_reward=" << coll_metrics.mechanic_reward_mean
@@ -2654,6 +2662,9 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"policy_loss", coll_metrics.policy_loss},
           {"value_loss", coll_metrics.value_loss},
           {"entropy", coll_metrics.entropy},
+          {"grad_norm", coll_metrics.grad_norm},
+          {"nonfinite_loss_skips", coll_metrics.nonfinite_loss_skips},
+          {"nonfinite_grad_norm_skips", coll_metrics.nonfinite_grad_norm_skips},
           {"total_reward_mean", coll_metrics.total_reward_mean},
           {"gameplay_reward_mean", coll_metrics.gameplay_reward_mean},
           {"mechanic_reward_mean", coll_metrics.mechanic_reward_mean},
