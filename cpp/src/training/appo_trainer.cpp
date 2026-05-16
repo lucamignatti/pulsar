@@ -846,9 +846,6 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
     resumed_update_index_ = metadata.update_index;
   }
 
-  if (metadata.extra.contains("wandb_run_id")) {
-    config_.wandb.run_id = metadata.extra["wandb_run_id"].get<std::string>();
-  }
   if (metadata.extra.contains("recent_scored_rates")) {
     recent_scored_rates_.clear();
     for (const auto& v : metadata.extra["recent_scored_rates"]) {
