@@ -15,6 +15,13 @@
 #include <system_error>
 #include <unordered_set>
 
+#if defined(__linux__)
+#include <malloc.h>
+#include <unistd.h>
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#endif
+
 #include <nlohmann/json.hpp>
 
 #include "pulsar/env/done.hpp"
@@ -30,6 +37,33 @@ namespace pulsar {
 namespace {
 
 constexpr int kEsLoraMinStage = 0;  // enable ES LoRA from the first update
+
+double current_process_rss_mb() {
+#if defined(__linux__)
+  std::ifstream statm("/proc/self/statm");
+  long pages = 0;
+  long resident = 0;
+  if (statm >> pages >> resident) {
+    const long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size > 0) {
+      return static_cast<double>(resident) * static_cast<double>(page_size) / (1024.0 * 1024.0);
+    }
+  }
+#elif defined(__APPLE__)
+  mach_task_basic_info info{};
+  mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+  if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS) {
+    return static_cast<double>(info.resident_size) / (1024.0 * 1024.0);
+  }
+#endif
+  return 0.0;
+}
+
+void trim_released_host_memory() noexcept {
+#if defined(__linux__)
+  malloc_trim(0);
+#endif
+}
 
 #ifdef PULSAR_HAS_CUDA
 class OptionalCudaAutocastGuard {
@@ -370,6 +404,7 @@ void append_metrics_line(
       {"forward_backward_seconds", metrics.forward_backward_seconds},
       {"optimizer_step_seconds", metrics.optimizer_step_seconds},
       {"self_play_eval_seconds", metrics.self_play_eval_seconds},
+      {"process_rss_mb", metrics.process_rss_mb},
       {"es_fitness_mean", metrics.es_fitness_mean},
       {"es_fitness_std", metrics.es_fitness_std},
       {"es_fitness_best", metrics.es_fitness_best},
@@ -383,6 +418,7 @@ void append_metrics_line(
       {"touch_episode_rate", metrics.touch_episode_rate},
       {"multi_touch_episode_rate", metrics.multi_touch_episode_rate},
       {"effective_entropy_coef", metrics.effective_entropy_coef},
+      {"self_play_snapshot_count", metrics.self_play_snapshot_count},
   };
   for (const auto& [mode, rate] : metrics.mode_touch_rates) {
     line["mode_" + mode + "_touch_episode_rate"] = rate;
@@ -2496,6 +2532,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           self_play_manager_->on_update(actor_, actor_normalizer_, global_step, update_index);
       coll_metrics.self_play_eval_seconds = self_play_metrics.eval_seconds;
       coll_metrics.elo_ratings = self_play_metrics.ratings;
+      coll_metrics.self_play_snapshot_count = self_play_metrics.snapshot_count;
     }
 
     if (curriculum_.stage_index() >= kEsLoraMinStage && update_index % config_.es_lora.es_interval == 0) {
@@ -2580,6 +2617,8 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
             ? static_cast<double>(next_coll_steps) /
                   std::max(std::chrono::duration<double>(std::chrono::steady_clock::now() - iter_start).count(), 1.0e-9)
             : 0.0;
+    trim_released_host_memory();
+    coll_metrics.process_rss_mb = current_process_rss_mb();
 
     append_metrics_line(checkpoint_dir, update_index, global_step, coll_metrics);
     std::cout << "update=" << update_index
@@ -2601,6 +2640,8 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " ball_prox=" << coll_metrics.ball_proximity_rate
               << " goals=" << coll_metrics.goals_scored << "/" << coll_metrics.goals_conceded
               << " es_fitness=" << coll_metrics.es_fitness_mean
+              << " rss_mb=" << coll_metrics.process_rss_mb
+              << " league_snapshots=" << coll_metrics.self_play_snapshot_count
               << " curriculum=" << curriculum_.state().stage_index
               << " cur_steps=" << curriculum_.state().agent_steps_in_stage
               << " cur_promo=" << curriculum_.state().promotion_counter
@@ -2629,6 +2670,8 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           {"min_goal_distance", coll_metrics.min_goal_distance},
           {"ball_proximity_rate", coll_metrics.ball_proximity_rate},
           {"effective_entropy_coef", coll_metrics.effective_entropy_coef},
+          {"process_rss_mb", coll_metrics.process_rss_mb},
+          {"self_play_snapshot_count", coll_metrics.self_play_snapshot_count},
           {"curriculum_stage", curriculum_.state().stage_index},
           {"curriculum_agent_steps", curriculum_.state().agent_steps_in_stage},
           {"curriculum_promotion_counter", curriculum_.state().promotion_counter},

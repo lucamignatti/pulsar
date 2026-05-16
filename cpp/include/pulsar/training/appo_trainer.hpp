@@ -48,6 +48,7 @@ struct TrainerMetrics {
   double forward_backward_seconds = 0.0;
   double optimizer_step_seconds = 0.0;
   double self_play_eval_seconds = 0.0;
+  double process_rss_mb = 0.0;
   double total_reward_mean = 0.0;
   double gameplay_reward_mean = 0.0;
   double mechanic_reward_mean = 0.0;
@@ -78,6 +79,7 @@ struct TrainerMetrics {
   double touch_episode_rate = 0.0;
   double multi_touch_episode_rate = 0.0;
   double effective_entropy_coef = 0.0;
+  int self_play_snapshot_count = 0;
 
   std::map<std::string, double> elo_ratings{};
   std::map<std::string, double> mode_touch_rates{};

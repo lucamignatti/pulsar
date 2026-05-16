@@ -401,7 +401,7 @@
     "enabled": true,
     "opponent_probability": 0.5,
     "snapshot_interval_updates": 50,
-    "max_snapshots": 12,
+    "max_snapshots": 4,
     "training_opponent_policy": "stochastic",
     "eval_interval_updates": 10,
     "eval_num_envs": 8,
