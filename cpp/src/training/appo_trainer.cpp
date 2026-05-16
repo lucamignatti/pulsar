@@ -439,6 +439,65 @@ void append_metrics_line(
   output << line.dump() << '\n';
 }
 
+nlohmann::json wandb_section_order() {
+  return nlohmann::json::array({
+      "Tables",
+      "1v1",
+      "2v2",
+      "3v3",
+      "Rewards",
+      "GCRL",
+      "ES-LoRA",
+      "Optimization",
+      "Charts",
+      "System",
+      "Hidden Panels",
+  });
+}
+
+void register_wandb_metric_section(
+    nlohmann::json& sections,
+    const std::string& section,
+    const std::string& key) {
+  if (!section.empty() && !key.empty()) {
+    sections[key] = section;
+  }
+}
+
+void add_wandb_metric(
+    nlohmann::json& payload,
+    nlohmann::json& sections,
+    const std::string& section,
+    const std::string& key,
+    nlohmann::json value) {
+  register_wandb_metric_section(sections, section, key);
+  payload[key] = std::move(value);
+}
+
+std::vector<std::string> configured_wandb_modes(const ExperimentConfig& config) {
+  std::vector<std::string> modes;
+  const auto add_mode = [&modes](const std::string& mode) {
+    if (!mode.empty() && std::find(modes.begin(), modes.end(), mode) == modes.end()) {
+      modes.push_back(mode);
+    }
+  };
+  add_mode(std::to_string(config.env.team_size) + "v" + std::to_string(config.env.team_size));
+  for (const auto& stage : config.curriculum.stages) {
+    add_mode(stage.mode);
+    for (const auto& [mode, _] : stage.mode_allocation) {
+      add_mode(mode);
+    }
+  }
+  return modes;
+}
+
+void register_mode_wandb_sections(nlohmann::json& sections, const std::string& mode) {
+  register_wandb_metric_section(sections, mode, "elo_" + mode);
+  register_wandb_metric_section(sections, mode, "mode_" + mode + "_touch_episode_rate");
+  register_wandb_metric_section(sections, mode, "mode_" + mode + "_multi_touch_episode_rate");
+  register_wandb_metric_section(sections, mode, "mode_" + mode + "_scored_episode_rate");
+}
+
 std::shared_ptr<MutatorSequence> make_es_eval_reset_mutator(const EnvConfig& config) {
   return std::make_shared<MutatorSequence>(
       std::vector<StateMutatorPtr>{
@@ -2655,60 +2714,84 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " cur_promo=" << curriculum_.state().promotion_counter
               << '\n';
     if (wandb.enabled()) {
-      nlohmann::json payload{
-          {"_step", global_step},
-          {"update", update_index},
-          {"global_step", global_step},
-          {"policy_loss", coll_metrics.policy_loss},
-          {"value_loss", coll_metrics.value_loss},
-          {"entropy", coll_metrics.entropy},
-          {"grad_norm", coll_metrics.grad_norm},
-          {"nonfinite_loss_skips", coll_metrics.nonfinite_loss_skips},
-          {"nonfinite_grad_norm_skips", coll_metrics.nonfinite_grad_norm_skips},
-          {"total_reward_mean", coll_metrics.total_reward_mean},
-          {"gameplay_reward_mean", coll_metrics.gameplay_reward_mean},
-          {"mechanic_reward_mean", coll_metrics.mechanic_reward_mean},
-          {"sampled_value_win_mean", coll_metrics.sampled_value_win_mean},
-          {"rollout_steps", coll_metrics.rollout_steps},
-          {"completed_episodes", coll_metrics.completed_episodes},
-          {"touch_episode_rate", coll_metrics.touch_episode_rate},
-          {"multi_touch_episode_rate", coll_metrics.multi_touch_episode_rate},
-          {"scored_episode_rate", coll_metrics.scored_episode_rate},
-          {"goal_critic_loss", coll_metrics.goal_critic_loss},
-          {"mean_goal_score", coll_metrics.mean_goal_score},
-          {"mean_sampled_goal_distance", coll_metrics.mean_sampled_goal_distance},
-          {"mean_goal_distance", coll_metrics.mean_goal_distance},
-          {"min_goal_distance", coll_metrics.min_goal_distance},
-          {"ball_proximity_rate", coll_metrics.ball_proximity_rate},
-          {"effective_entropy_coef", coll_metrics.effective_entropy_coef},
-          {"process_rss_mb", coll_metrics.process_rss_mb},
-          {"self_play_snapshot_count", coll_metrics.self_play_snapshot_count},
-          {"curriculum_stage", curriculum_.state().stage_index},
-          {"curriculum_agent_steps", curriculum_.state().agent_steps_in_stage},
-          {"curriculum_promotion_counter", curriculum_.state().promotion_counter},
+      nlohmann::json payload{{"_step", global_step}};
+      nlohmann::json sections = nlohmann::json::object();
+      const auto add_metric =
+          [&payload, &sections](const std::string& section, const std::string& key, nlohmann::json value) {
+            add_wandb_metric(payload, sections, section, key, std::move(value));
+          };
+      const auto register_metric = [&sections](const std::string& section, const std::string& key) {
+        register_wandb_metric_section(sections, section, key);
       };
+
+      for (const auto& mode : configured_wandb_modes(config_)) {
+        register_mode_wandb_sections(sections, mode);
+      }
+      register_metric("ES-LoRA", "es_fitness_mean");
+      register_metric("ES-LoRA", "es_fitness_std");
+      register_metric("ES-LoRA", "es_fitness_best");
+      register_metric("ES-LoRA", "es_winrate_mean");
+      register_metric("ES-LoRA", "es_kl_mean");
+      register_metric("ES-LoRA", "es_update_norm");
+      register_metric("ES-LoRA", "es_lora_a_norm");
+      register_metric("ES-LoRA", "es_lora_b_norm");
+
+      add_metric("Optimization", "update", update_index);
+      add_metric("Optimization", "global_step", global_step);
+      add_metric("Optimization", "policy_loss", coll_metrics.policy_loss);
+      add_metric("Optimization", "value_loss", coll_metrics.value_loss);
+      add_metric("Optimization", "entropy", coll_metrics.entropy);
+      add_metric("Optimization", "grad_norm", coll_metrics.grad_norm);
+      add_metric("Optimization", "nonfinite_loss_skips", coll_metrics.nonfinite_loss_skips);
+      add_metric("Optimization", "nonfinite_grad_norm_skips", coll_metrics.nonfinite_grad_norm_skips);
+      add_metric("Optimization", "rollout_steps", coll_metrics.rollout_steps);
+      add_metric("Optimization", "effective_entropy_coef", coll_metrics.effective_entropy_coef);
+      add_metric("Optimization", "process_rss_mb", coll_metrics.process_rss_mb);
+      add_metric("Optimization", "self_play_snapshot_count", coll_metrics.self_play_snapshot_count);
+      add_metric("Optimization", "curriculum_stage", curriculum_.state().stage_index);
+      add_metric("Optimization", "curriculum_agent_steps", curriculum_.state().agent_steps_in_stage);
+      add_metric("Optimization", "curriculum_promotion_counter", curriculum_.state().promotion_counter);
+
+      add_metric("Rewards", "total_reward_mean", coll_metrics.total_reward_mean);
+      add_metric("Rewards", "gameplay_reward_mean", coll_metrics.gameplay_reward_mean);
+      add_metric("Rewards", "mechanic_reward_mean", coll_metrics.mechanic_reward_mean);
+      add_metric("Rewards", "completed_episodes", coll_metrics.completed_episodes);
+      add_metric("Rewards", "touch_episode_rate", coll_metrics.touch_episode_rate);
+      add_metric("Rewards", "multi_touch_episode_rate", coll_metrics.multi_touch_episode_rate);
+      add_metric("Rewards", "scored_episode_rate", coll_metrics.scored_episode_rate);
+      add_metric("Rewards", "ball_proximity_rate", coll_metrics.ball_proximity_rate);
+
+      add_metric("GCRL", "sampled_value_win_mean", coll_metrics.sampled_value_win_mean);
+      add_metric("GCRL", "goal_critic_loss", coll_metrics.goal_critic_loss);
+      add_metric("GCRL", "mean_goal_score", coll_metrics.mean_goal_score);
+      add_metric("GCRL", "mean_sampled_goal_distance", coll_metrics.mean_sampled_goal_distance);
+      add_metric("GCRL", "mean_goal_distance", coll_metrics.mean_goal_distance);
+      add_metric("GCRL", "min_goal_distance", coll_metrics.min_goal_distance);
+
       for (const auto& [mode, rate] : coll_metrics.mode_touch_rates) {
-        payload["mode_" + mode + "_touch_episode_rate"] = rate;
+        add_metric(mode, "mode_" + mode + "_touch_episode_rate", rate);
       }
       for (const auto& [mode, rate] : coll_metrics.mode_multi_touch_rates) {
-        payload["mode_" + mode + "_multi_touch_episode_rate"] = rate;
+        add_metric(mode, "mode_" + mode + "_multi_touch_episode_rate", rate);
       }
       for (const auto& [mode, rate] : coll_metrics.mode_scored_rates) {
-        payload["mode_" + mode + "_scored_episode_rate"] = rate;
+        add_metric(mode, "mode_" + mode + "_scored_episode_rate", rate);
       }
       if (curriculum_.stage_index() >= kEsLoraMinStage && update_index % config_.es_lora.es_interval == 0) {
-        payload["es_fitness_mean"] = coll_metrics.es_fitness_mean;
-        payload["es_fitness_std"] = coll_metrics.es_fitness_std;
-        payload["es_fitness_best"] = coll_metrics.es_fitness_best;
-        payload["es_winrate_mean"] = coll_metrics.es_winrate_mean;
-        payload["es_kl_mean"] = coll_metrics.es_kl_mean;
-        payload["es_update_norm"] = coll_metrics.es_update_norm;
-        payload["es_lora_a_norm"] = coll_metrics.es_lora_a_norm;
-        payload["es_lora_b_norm"] = coll_metrics.es_lora_b_norm;
+        add_metric("ES-LoRA", "es_fitness_mean", coll_metrics.es_fitness_mean);
+        add_metric("ES-LoRA", "es_fitness_std", coll_metrics.es_fitness_std);
+        add_metric("ES-LoRA", "es_fitness_best", coll_metrics.es_fitness_best);
+        add_metric("ES-LoRA", "es_winrate_mean", coll_metrics.es_winrate_mean);
+        add_metric("ES-LoRA", "es_kl_mean", coll_metrics.es_kl_mean);
+        add_metric("ES-LoRA", "es_update_norm", coll_metrics.es_update_norm);
+        add_metric("ES-LoRA", "es_lora_a_norm", coll_metrics.es_lora_a_norm);
+        add_metric("ES-LoRA", "es_lora_b_norm", coll_metrics.es_lora_b_norm);
       }
       for (const auto& [mode, rating] : coll_metrics.elo_ratings) {
-        payload["elo_" + mode] = rating;
+        add_metric(mode, "elo_" + mode, rating);
       }
+      payload["_wandb_sections"] = std::move(sections);
+      payload["_wandb_section_order"] = wandb_section_order();
       wandb.log(payload);
     }
     if (config_.ppo.checkpoint_interval > 0 && update_index % config_.ppo.checkpoint_interval == 0) {

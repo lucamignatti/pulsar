@@ -97,6 +97,7 @@ SelfPlayManager::SelfPlayManager(
       device_(std::move(device)),
       rng_(static_cast<std::mt19937::result_type>(config_.env.seed)) {
   current_mode_ = std::to_string(config_.env.team_size) + "v" + std::to_string(config_.env.team_size);
+  ensure_configured_rating_modes();
   if (!snapshot_root_.empty()) {
     std::filesystem::create_directories(snapshot_root_);
     load_existing_snapshots();
@@ -159,6 +160,7 @@ int SelfPlayManager::curriculum_stage() const {
 
 void SelfPlayManager::set_current_mode(const std::string& mode) {
   current_mode_ = mode;
+  ensure_configured_rating_modes();
 }
 
 const std::string& SelfPlayManager::current_mode() const {
@@ -369,6 +371,23 @@ void SelfPlayManager::trim_snapshots() {
   }
 }
 
+void SelfPlayManager::ensure_configured_rating_modes() {
+  const auto add_mode = [this](const std::string& mode) {
+    if (!mode.empty()) {
+      current_ratings_.emplace(mode, config_.self_play_league.elo_initial);
+    }
+  };
+
+  add_mode(std::to_string(config_.env.team_size) + "v" + std::to_string(config_.env.team_size));
+  add_mode(current_mode_);
+  for (const auto& stage : config_.curriculum.stages) {
+    add_mode(stage.mode);
+    for (const auto& [mode, _] : stage.mode_allocation) {
+      add_mode(mode);
+    }
+  }
+}
+
 void SelfPlayManager::add_snapshot(
     PPOActor& current_model,
     const ObservationNormalizer& current_normalizer,
@@ -545,6 +564,7 @@ const std::map<std::string, double>& SelfPlayManager::current_ratings() const {
 
 void SelfPlayManager::restore_ratings(const std::map<std::string, double>& ratings) {
   current_ratings_ = ratings;
+  ensure_configured_rating_modes();
 }
 
 std::string SelfPlayManager::rng_state() const {

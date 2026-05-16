@@ -77,6 +77,7 @@ class SelfPlayManager {
   void load_existing_snapshots();
   void save_snapshot(const Snapshot& snapshot) const;
   void trim_snapshots();
+  void ensure_configured_rating_modes();
   void add_snapshot(
       PPOActor& current_model,
       const ObservationNormalizer& current_normalizer,
