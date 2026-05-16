@@ -364,7 +364,7 @@
     "plasticity_shrink": 0.999,
     "plasticity_noise": 0.0001,
     "pcgrad": true,
-    "overlap_collection_update": false
+    "overlap_collection_update": true
   },
   "goal_mapping": {
     "arena_max_distance": 8192.0

@@ -152,7 +152,7 @@ To run a bounded number of updates:
     "max_grad_norm": 1.0,
     "device": "cuda",
     "pcgrad": true,
-    "overlap_collection_update": false,
+    "overlap_collection_update": true,
     "checkpoint_interval": 50,
     "max_rolling_checkpoints": 3
   },

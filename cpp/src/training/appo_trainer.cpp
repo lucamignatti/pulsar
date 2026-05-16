@@ -511,12 +511,12 @@ APPOTrainer::APPOTrainer(
           config_,
           static_cast<int>(total_agents_for_collectors(collectors_)),
           action_dim_for_collectors(collectors_),
-          device_.is_cuda())),
+          false)),
       rollout_B_(make_rollout_storage(
           config_,
           static_cast<int>(total_agents_for_collectors(collectors_)),
           action_dim_for_collectors(collectors_),
-          device_.is_cuda())),
+          false)),
       run_output_root_(std::move(run_output_root)),
       log_initialization_(log_initialization) {
   validate_experiment_config(config_);
@@ -695,8 +695,8 @@ void APPOTrainer::rebuild_collectors() {
 
   // rebuild rollout storage
   const int action_dim = action_dim_for_collectors(collectors_);
-  rollout_ = make_rollout_storage(config_, static_cast<int>(total_agents_), action_dim, device_.is_cuda());
-  rollout_B_ = make_rollout_storage(config_, static_cast<int>(total_agents_), action_dim, device_.is_cuda());
+  rollout_ = make_rollout_storage(config_, static_cast<int>(total_agents_), action_dim, false);
+  rollout_B_ = make_rollout_storage(config_, static_cast<int>(total_agents_), action_dim, false);
 
   // recompute shard agent offsets
   shard_agent_offsets_.clear();
@@ -2366,13 +2366,9 @@ TrainerBenchmarkMetrics APPOTrainer::benchmark(int updates) {
 
 void APPOTrainer::save_training_state(const std::filesystem::path& path) const {
   torch::NoGradGuard no_grad;
-  PPOActor actor_cpu = clone_ppo_actor(actor_, torch::Device(torch::kCPU));
-  ObservationNormalizer normalizer_cpu = actor_normalizer_.clone();
-  normalizer_cpu.to(torch::Device(torch::kCPU));
-
   torch::serialize::OutputArchive archive;
-  actor_cpu->save(archive);
-  normalizer_cpu.save(archive);
+  actor_->save(archive);
+  actor_normalizer_.save(archive);
   actor_optimizer_.save(archive);
   archive.save_to(path.string());
 }

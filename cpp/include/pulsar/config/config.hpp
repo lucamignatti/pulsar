@@ -203,7 +203,7 @@ struct PPOConfig {
   float plasticity_shrink = 0.999F;
   float plasticity_noise = 1.0e-4F;
   bool pcgrad = false;
-  bool overlap_collection_update = false;
+  bool overlap_collection_update = true;
 };
 
 struct SelfPlayLeagueConfig {
