@@ -440,6 +440,7 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
       bool reset_needed = false;
       const bool goal_scored = current_state.goal_scored;
       const Team scoring_team = current_state.last_scoring_team;
+      float team_touch_count[2] = {0.0F, 0.0F};
       for (std::size_t idx = 0; idx < count; ++idx) {
         const CarState& car = current_state.cars[idx];
         const BallState& ball = current_state.ball;
@@ -459,6 +460,9 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         }
         ball_touch_ptr[global_idx] = step_proximity;
 
+        const int team_index = (car.team == Team::Blue) ? 0 : 1;
+        team_touch_count[team_index] += episode_touch_count_ptr[global_idx];
+
         const bool is_terminated = envs_[env_idx].terminated_scratch[idx] != 0;
         const bool is_truncated = envs_[env_idx].truncated_scratch[idx] != 0;
         const bool done = is_terminated || is_truncated;
@@ -466,11 +470,21 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         terminated_ptr[global_idx] = is_terminated ? 1.0F : 0.0F;
         truncated_ptr[global_idx] = is_truncated ? 1.0F : 0.0F;
         host_bootstrap_truncated_.data_ptr<float>()[global_idx] = (is_truncated && !is_terminated) ? 1.0F : 0.0F;
+        reset_needed = reset_needed || done;
+      }
+
+      for (std::size_t idx = 0; idx < count; ++idx) {
+        const CarState& car = current_state.cars[idx];
+        const std::size_t global_idx = agent_begin + idx;
+        const bool is_terminated = envs_[env_idx].terminated_scratch[idx] != 0;
+        const bool is_truncated = envs_[env_idx].truncated_scratch[idx] != 0;
+        const bool done = is_terminated || is_truncated;
+        const int team_index = (car.team == Team::Blue) ? 0 : 1;
 
         const int label = done
             ? (goal_scored
                 ? (car.team == scoring_team ? 0 : 1)
-                : (episode_touch_count_ptr[global_idx] > 0.5F ? 2 : 3))
+                : (team_touch_count[team_index] > 0.5F ? 2 : 3))
             : -1;
         if (done) {
           labels_ptr[global_idx] = label;
@@ -485,8 +499,6 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         host_rewards_.data_ptr<float>()[global_idx] = breakdown.total;
         host_gameplay_rewards_.data_ptr<float>()[global_idx] = breakdown.gameplay;
         host_mechanic_rewards_.data_ptr<float>()[global_idx] = breakdown.mechanic;
-
-        reset_needed = reset_needed || done;
 
         float goal_pos[3];
         compute_goal_position(current_state, config_.goal_mapping, goal_pos);

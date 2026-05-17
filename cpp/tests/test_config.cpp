@@ -104,6 +104,14 @@ int main() {
     catch (const std::invalid_argument&) { caught = true; }
     pulsar::test::require(caught, "negative value_loss_delta should throw");
 
+    // Test 12b: reject negative max_policy_log_ratio
+    bad = config;
+    bad.ppo.max_policy_log_ratio = -1.0f;
+    caught = false;
+    try { pulsar::validate_experiment_config(bad); }
+    catch (const std::invalid_argument&) { caught = true; }
+    pulsar::test::require(caught, "negative max_policy_log_ratio should throw");
+
     // Test 13: reject invalid es_lora.population_size when antithetic
     bad = config;
     bad.es_lora.population_size = 7;
@@ -135,8 +143,16 @@ int main() {
                             "production config starts touch curriculum in 3v3");
       pulsar::test::require(prod.self_play_league.enabled, "self_play_league enabled in production");
       pulsar::test::require(prod.self_play_league.max_snapshots == 4, "max_snapshots in production");
+      pulsar::test::require(prod.ppo.max_policy_log_ratio == 5.0f,
+                            "production config should bound stale policy log ratios");
+      pulsar::test::require(prod.es_lora.require_fitness_signal,
+                            "production ES should require a reward-fitness signal");
       pulsar::test::require(prod.ppo.overlap_collection_update,
                             "production config should overlap collection/update by default");
+      pulsar::test::require(prod.outcome.neutral_no_touch < 0.0f,
+                            "production config should penalize no-touch collapse");
+      pulsar::test::require(prod.curriculum.stages[2].outcome_override.neutral_no_touch < 0.0f,
+                            "sparse production stage should retain no-touch penalty");
     }
 
     // Test 15: stable_json is deterministic

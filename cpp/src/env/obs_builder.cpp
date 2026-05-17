@@ -87,6 +87,7 @@ void write_agent_obs(const EnvState& state, const EnvConfig& config, AgentId age
   *dst++ = self.has_flip ? 1.0F : 0.0F;
   *dst++ = self.air_time_since_jump;
 
+  // The acting agent is always the fixed self slot; car_order only randomizes other cars.
   write_car_obs(dst, self, inverted);
 
   std::size_t ally_count = 0;

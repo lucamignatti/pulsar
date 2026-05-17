@@ -402,14 +402,14 @@ void to_json(json& j, const ESLoraConfig& value) {
       {"update_norm_clip", value.update_norm_clip},
       {"max_update_norm", value.max_update_norm},
       {"max_kl_mean", value.max_kl_mean},
-      {"require_winrate_signal", value.require_winrate_signal},
-      {"min_winrate_std", value.min_winrate_std},
+      {"require_fitness_signal", value.require_fitness_signal},
+      {"min_fitness_std", value.min_fitness_std},
   };
 }
 
 void from_json(const json& j, ESLoraConfig& value) {
   if (j.contains("alpha_g")) {
-    throw std::invalid_argument("es_lora.alpha_g was removed; ES fitness is sparse winrate minus KL only.");
+    throw std::invalid_argument("es_lora.alpha_g was removed; ES fitness is reward minus KL.");
   }
   value.rank = j.value("rank", 4);
   value.lora_alpha = j.value("lora_alpha", 4.0F);
@@ -425,8 +425,12 @@ void from_json(const json& j, ESLoraConfig& value) {
   value.update_norm_clip = j.value("update_norm_clip", true);
   value.max_update_norm = j.value("max_update_norm", 0.002F);
   value.max_kl_mean = j.value("max_kl_mean", 0.01F);
-  value.require_winrate_signal = j.value("require_winrate_signal", true);
-  value.min_winrate_std = j.value("min_winrate_std", 1.0e-6F);
+  value.require_fitness_signal = j.value(
+      "require_fitness_signal",
+      j.value("require_winrate_signal", true));
+  value.min_fitness_std = j.value(
+      "min_fitness_std",
+      j.value("min_winrate_std", 1.0e-6F));
 }
 
 void to_json(json& j, const PPOConfig& value) {
@@ -457,6 +461,7 @@ void to_json(json& j, const PPOConfig& value) {
       {"adaptive_entropy", value.adaptive_entropy},
       {"entropy_decay_score", value.entropy_decay_score},
       {"entropy_low_coef", value.entropy_low_coef},
+      {"max_policy_log_ratio", value.max_policy_log_ratio},
       {"plasticity", value.plasticity},
       {"plasticity_interval", value.plasticity_interval},
       {"plasticity_shrink", value.plasticity_shrink},
@@ -493,6 +498,7 @@ void from_json(const json& j, PPOConfig& value) {
   value.adaptive_entropy = j.value("adaptive_entropy", false);
   value.entropy_decay_score = j.value("entropy_decay_score", 0.60F);
   value.entropy_low_coef = j.value("entropy_low_coef", 0.005F);
+  value.max_policy_log_ratio = j.value("max_policy_log_ratio", 5.0F);
   value.plasticity = j.value("plasticity", false);
   value.plasticity_interval = j.value("plasticity_interval", 40);
   value.plasticity_shrink = j.value("plasticity_shrink", 0.999F);
@@ -723,8 +729,8 @@ void validate_experiment_config(const ExperimentConfig& config) {
   if (config.es_lora.max_kl_mean < 0.0F) {
     throw std::invalid_argument("es_lora.max_kl_mean must be non-negative.");
   }
-  if (config.es_lora.min_winrate_std < 0.0F) {
-    throw std::invalid_argument("es_lora.min_winrate_std must be non-negative.");
+  if (config.es_lora.min_fitness_std < 0.0F) {
+    throw std::invalid_argument("es_lora.min_fitness_std must be non-negative.");
   }
   if (config.es_lora.eval_episodes_per_member <= 0) {
     throw std::invalid_argument("es_lora.eval_episodes_per_member must be positive.");
@@ -761,6 +767,9 @@ void validate_experiment_config(const ExperimentConfig& config) {
   }
   if (config.ppo.entropy_floor_coef < 0.0F) {
     throw std::invalid_argument("ppo.entropy_floor_coef must be non-negative.");
+  }
+  if (config.ppo.max_policy_log_ratio < 0.0F) {
+    throw std::invalid_argument("ppo.max_policy_log_ratio must be non-negative.");
   }
   if (config.ppo.value_loss_delta < 0.0F) {
     throw std::invalid_argument("ppo.value_loss_delta must be non-negative.");

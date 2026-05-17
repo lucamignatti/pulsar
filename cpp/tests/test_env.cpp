@@ -101,11 +101,38 @@ void test_obs_shuffled_car_order() {
   const std::vector<pulsar::AgentId> car_order{2, 1, 0, 5, 4, 3};
   obs_builder.build_obs_batch(state, obs, car_order);
 
-  pulsar::test::require(nearly_equal(obs[72], state.cars[2].position.x / 2300.0F), "first ally slot should follow shuffled order");
-  pulsar::test::require(nearly_equal(obs[92], state.cars[1].position.x / 2300.0F), "second ally slot should follow shuffled order");
-  pulsar::test::require(nearly_equal(obs[112], state.cars[5].position.x / 2300.0F), "first enemy slot should follow shuffled order");
-  pulsar::test::require(nearly_equal(obs[132], state.cars[4].position.x / 2300.0F), "second enemy slot should follow shuffled order");
-  pulsar::test::require(nearly_equal(obs[152], state.cars[3].position.x / 2300.0F), "third enemy slot should follow shuffled order");
+  constexpr std::size_t kSelfCarOffset = 52;
+  constexpr std::size_t kAlly0Offset = 72;
+  constexpr std::size_t kAlly1Offset = 92;
+  constexpr std::size_t kEnemy0Offset = 112;
+  constexpr std::size_t kEnemy1Offset = 132;
+  constexpr std::size_t kEnemy2Offset = 152;
+  const std::size_t obs_dim = obs_builder.obs_dim();
+  auto slot_x = [&](pulsar::AgentId agent_id, std::size_t offset) {
+    return obs[static_cast<std::size_t>(agent_id) * obs_dim + offset];
+  };
+  auto expected_x = [&](pulsar::AgentId agent_id, bool inverted = false) {
+    const float x = state.cars[agent_id].position.x;
+    return (inverted ? -x : x) / 2300.0F;
+  };
+
+  for (pulsar::AgentId agent_id = 0; agent_id < state.cars.size(); ++agent_id) {
+    const bool inverted = state.cars[agent_id].team == pulsar::Team::Orange;
+    pulsar::test::require(
+        nearly_equal(slot_x(agent_id, kSelfCarOffset), expected_x(agent_id, inverted)),
+        "self slot should stay bound to the acting agent under shuffled car order");
+  }
+
+  pulsar::test::require(nearly_equal(slot_x(0, kAlly0Offset), expected_x(2)), "first ally slot should follow shuffled order");
+  pulsar::test::require(nearly_equal(slot_x(0, kAlly1Offset), expected_x(1)), "second ally slot should follow shuffled order");
+  pulsar::test::require(nearly_equal(slot_x(0, kEnemy0Offset), expected_x(5)), "first enemy slot should follow shuffled order");
+  pulsar::test::require(nearly_equal(slot_x(0, kEnemy1Offset), expected_x(4)), "second enemy slot should follow shuffled order");
+  pulsar::test::require(nearly_equal(slot_x(0, kEnemy2Offset), expected_x(3)), "third enemy slot should follow shuffled order");
+  pulsar::test::require(nearly_equal(slot_x(1, kAlly0Offset), expected_x(2)), "acting agent should be skipped from shuffled ally slots");
+  pulsar::test::require(nearly_equal(slot_x(1, kAlly1Offset), expected_x(0)), "remaining ally slots should keep shuffled order");
+  pulsar::test::require(nearly_equal(slot_x(5, kAlly0Offset), expected_x(4, true)), "orange ally slot should follow shuffled order");
+  pulsar::test::require(nearly_equal(slot_x(5, kAlly1Offset), expected_x(3, true)), "orange ally slot should skip self");
+  pulsar::test::require(nearly_equal(slot_x(5, kEnemy0Offset), expected_x(2, true)), "orange enemy slot should follow shuffled order");
 }
 
 void test_mutators() {

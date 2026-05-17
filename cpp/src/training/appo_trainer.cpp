@@ -369,6 +369,78 @@ torch::Tensor policy_goal_values_like(const torch::Tensor& obs, int goal_dim) {
   return torch::zeros({obs.size(0), goal_dim}, options);
 }
 
+class ModuleRequiresGradGuard {
+ public:
+  explicit ModuleRequiresGradGuard(torch::nn::Module& module, bool requires_grad) {
+    for (auto& param : module.parameters()) {
+      previous_.push_back({param, param.requires_grad()});
+      param.set_requires_grad(requires_grad);
+    }
+  }
+
+  ~ModuleRequiresGradGuard() {
+    for (auto& [param, requires_grad] : previous_) {
+      param.set_requires_grad(requires_grad);
+    }
+  }
+
+ private:
+  std::vector<std::pair<torch::Tensor, bool>> previous_;
+};
+
+torch::Tensor sample_masked_gumbel_softmax(
+    const torch::Tensor& logits,
+    const torch::Tensor& masks,
+    float temperature) {
+  const torch::Tensor valid_counts = masks.to(torch::kFloat32).sum(-1);
+  if ((valid_counts <= 0.5F).any().item<bool>()) {
+    throw std::invalid_argument("sample_masked_gumbel_softmax requires at least one valid action per sample.");
+  }
+  const torch::Tensor masked_logits = apply_action_mask_to_logits(logits, masks);
+  const torch::Tensor uniform = torch::rand_like(masked_logits).clamp(1.0e-6F, 1.0F - 1.0e-6F);
+  const torch::Tensor gumbel = -torch::log(-torch::log(uniform));
+  return torch::softmax((masked_logits + gumbel) / std::max(temperature, 1.0e-3F), -1);
+}
+
+torch::Tensor goal_actor_critic_loss(
+    GoalCritic& goal_critic,
+    const torch::Tensor& features,
+    const torch::Tensor& logits,
+    const torch::Tensor& masks,
+    const torch::Tensor& future_goals,
+    int contrastive_batch_size) {
+  const auto active_count = features.size(0);
+  if (active_count <= 0) {
+    return torch::zeros({}, logits.options().dtype(torch::kFloat32));
+  }
+
+  torch::Tensor selected_features = features;
+  torch::Tensor selected_logits = logits;
+  torch::Tensor selected_masks = masks;
+  torch::Tensor selected_goals = future_goals;
+  const int bounded_batch = std::max(1, contrastive_batch_size);
+  if (active_count > static_cast<c10::IntArrayRef::value_type>(bounded_batch)) {
+    const torch::Tensor idx = torch::randperm(
+        active_count,
+        torch::TensorOptions().dtype(torch::kLong).device(logits.device()))
+        .narrow(0, 0, bounded_batch);
+    selected_features = selected_features.index({idx});
+    selected_logits = selected_logits.index({idx});
+    selected_masks = selected_masks.index({idx});
+    selected_goals = selected_goals.index({idx});
+  }
+
+  const torch::Tensor action_probs = sample_masked_gumbel_softmax(
+      selected_logits,
+      selected_masks,
+      1.0F);
+  ModuleRequiresGradGuard freeze_goal_critic(*goal_critic, false);
+  return -goal_critic->forward(
+      selected_features.detach(),
+      action_probs,
+      selected_goals.detach()).to(torch::kFloat32).mean();
+}
+
 int cuda_mamba2_autograd_forward_sample_cap(const ModelConfig& config) {
   constexpr std::int64_t kProjectedActivationBudgetBytes = 2LL * 1024LL * 1024LL * 1024LL;
   const auto projected_dim = static_cast<std::int64_t>(std::max(1, config.encoder_dim)) * 5;
@@ -411,6 +483,9 @@ void append_metrics_line(
       {"value_loss", metrics.value_loss},
       {"entropy", metrics.entropy},
       {"grad_norm", metrics.grad_norm},
+      {"policy_approx_kl", metrics.policy_approx_kl},
+      {"policy_clip_fraction", metrics.policy_clip_fraction},
+      {"policy_log_ratio_abs_max", metrics.policy_log_ratio_abs_max},
       {"nonfinite_loss_skips", metrics.nonfinite_loss_skips},
       {"nonfinite_grad_norm_skips", metrics.nonfinite_grad_norm_skips},
       {"total_reward_mean", metrics.total_reward_mean},
@@ -450,6 +525,7 @@ void append_metrics_line(
       {"es_fitness_mean", metrics.es_fitness_mean},
       {"es_fitness_std", metrics.es_fitness_std},
       {"es_fitness_best", metrics.es_fitness_best},
+      {"es_reward_mean", metrics.es_reward_mean},
       {"es_winrate_mean", metrics.es_winrate_mean},
       {"es_kl_mean", metrics.es_kl_mean},
       {"es_update_norm", metrics.es_update_norm},
@@ -1065,9 +1141,12 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   torch::Tensor value_loss_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
   torch::Tensor entropy_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
   torch::Tensor grad_norm_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+  torch::Tensor policy_approx_kl_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+  torch::Tensor policy_clip_fraction_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
   torch::Tensor goal_critic_loss_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
   torch::Tensor goal_score_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
   torch::Tensor sampled_goal_distance_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+  double policy_log_ratio_abs_max = 0.0;
   int accumulated_minibatches = 0;
   bool accumulated_has_backward = false;
   double accumulated_total_active = 0.0;
@@ -1102,7 +1181,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       std::vector<torch::Tensor> term_value_chunks;
       for (int offset = 0; offset < total_term_samples; offset += max_term_batch) {
         int batch = std::min(max_term_batch, total_term_samples - offset);
-        auto chunk = term_flat.slice(0, offset, offset + batch).to(device_);
+        auto chunk = actor_normalizer_.normalize(term_flat.slice(0, offset, offset + batch).to(device_));
         auto chunk_goal = policy_goal_values_like(chunk, config_.goal_critic.goal_dim);
         auto chunk_out = actor_->forward_step(chunk, chunk_goal).value_win_logits.squeeze(-1);
         term_value_chunks.push_back(chunk_out);
@@ -1268,18 +1347,49 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             const torch::Tensor log_probs =
                 torch::log_softmax(apply_action_mask_to_logits(active_logits, active_masks), -1);
             const torch::Tensor current_log_probs = log_probs.gather(1, active_actions.unsqueeze(1)).squeeze(1);
+            torch::Tensor bounded_current_log_probs = current_log_probs;
+            const torch::Tensor raw_log_ratio = current_log_probs - active_old_log_probs;
+            if (config_.ppo.max_policy_log_ratio > 0.0F) {
+              bounded_current_log_probs =
+                  active_old_log_probs + raw_log_ratio.clamp(
+                      -config_.ppo.max_policy_log_ratio,
+                      config_.ppo.max_policy_log_ratio);
+            }
+            {
+              const torch::Tensor metric_log_ratio = raw_log_ratio.detach().to(torch::kFloat32).clamp(-20.0F, 20.0F);
+              const torch::Tensor approx_kl =
+                  ((torch::exp(metric_log_ratio) - 1.0F) - metric_log_ratio).mean();
+              const torch::Tensor clip_fraction =
+                  (raw_log_ratio.detach().abs() > std::log1p(static_cast<double>(config_.ppo.clip_range)))
+                      .to(torch::kFloat32)
+                      .mean();
+              policy_approx_kl_sum = policy_approx_kl_sum + approx_kl * active_samples;
+              policy_clip_fraction_sum = policy_clip_fraction_sum + clip_fraction * active_samples;
+              const double chunk_max_log_ratio =
+                  raw_log_ratio.detach().abs().max().item<double>();
+              policy_log_ratio_abs_max = std::max(policy_log_ratio_abs_max, chunk_max_log_ratio);
+            }
 
             torch::Tensor epsilon = torch::full({active_advantages.size(0)}, config_.ppo.clip_range, active_advantages.options());
 
             torch::Tensor policy_loss =
-                clipped_ppo_policy_loss(current_log_probs, active_old_log_probs, active_advantages, epsilon);
+                clipped_ppo_policy_loss(bounded_current_log_probs, active_old_log_probs, active_advantages, epsilon);
             policy_loss = policy_loss.mean();
 
-            const torch::Tensor entropy = masked_action_entropy(active_logits, active_masks).mean();
+            const torch::Tensor entropy_values = masked_action_entropy(active_logits, active_masks);
+            const torch::Tensor entropy = entropy_values.mean();
             torch::Tensor entropy_floor_loss = torch::zeros({}, active_advantages.options());
             if (config_.ppo.entropy_floor > 0.0F && effective_entropy_floor_coef > 0.0F) {
-              const torch::Tensor entropy_floor = torch::full_like(entropy, config_.ppo.entropy_floor);
-              entropy_floor_loss = effective_entropy_floor_coef * torch::relu(entropy_floor - entropy).square();
+              const torch::Tensor entropy_floor_mask =
+                  active_masks.to(torch::kFloat32).sum(-1) > 1.0F;
+              if (entropy_floor_mask.any().item<bool>()) {
+                const torch::Tensor entropy_floor = torch::full_like(entropy_values, config_.ppo.entropy_floor);
+                entropy_floor_loss = effective_entropy_floor_coef
+                    * torch::relu(entropy_floor - entropy_values)
+                          .index({entropy_floor_mask})
+                          .square()
+                          .mean();
+              }
             }
 
             torch::Tensor chunk_returns = mode_gpu_returns_mb.narrow(0, loss_start, loss_steps).reshape({samples});
@@ -1325,27 +1435,22 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 const torch::Tensor feat_sub = active_features.index({idx});
                 const torch::Tensor act_sub = active_actions.index({idx});
                 const torch::Tensor goal_sub = active_future_goal_pos.index({idx});
-                const torch::Tensor logit_sub = active_logits.index({idx});
-                const torch::Tensor mask_sub = active_masks.index({idx});
 
                 sa_emb = actor_->goal_critic()->sa_embedding(feat_sub, act_sub);
                 g_emb = actor_->goal_critic()->goal_embedding(goal_sub);
-
-                torch::Tensor sampled = sample_masked_actions(
-                    logit_sub.detach(), mask_sub.detach(), false, nullptr);
-                actor_goal_loss = -actor_->goal_critic()->forward(
-                    feat_sub, sampled.detach(), goal_sub).mean();
               } else {
                 sa_emb = actor_->goal_critic()->sa_embedding(active_features, active_actions);
                 g_emb = actor_->goal_critic()->goal_embedding(active_future_goal_pos);
-
-                torch::Tensor sampled = sample_masked_actions(
-                    active_logits.detach(), active_masks.detach(), false, nullptr);
-                actor_goal_loss = -actor_->goal_critic()->forward(
-                    active_features, sampled.detach(), active_future_goal_pos).mean();
               }
               const torch::Tensor sa_logits = compute_pairwise_negative_l2_logits(sa_emb, g_emb);
               goal_loss = compute_symmetric_infonce_loss(sa_logits, config_.goal_critic.logsumexp_penalty_coeff);
+              actor_goal_loss = goal_actor_critic_loss(
+                  actor_->goal_critic(),
+                  active_features,
+                  active_logits,
+                  active_masks,
+                  active_future_goal_pos,
+                  config_.goal_critic.contrastive_batch_size);
 
               {
                 torch::NoGradGuard no_grad;
@@ -1528,6 +1633,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
     metrics.value_loss = (value_loss_sum / denom).item<double>();
     metrics.entropy = (entropy_sum / denom).item<double>();
     metrics.grad_norm = (grad_norm_sum / denom).item<double>();
+    metrics.policy_approx_kl = (policy_approx_kl_sum / denom).item<double>();
+    metrics.policy_clip_fraction = (policy_clip_fraction_sum / denom).item<double>();
+    metrics.policy_log_ratio_abs_max = policy_log_ratio_abs_max;
     metrics.goal_critic_loss = (goal_critic_loss_sum / denom).item<double>();
     metrics.mean_goal_score = (goal_score_sum / denom).item<double>();
     metrics.mean_sampled_goal_distance = (sampled_goal_distance_sum / denom).item<double>();
@@ -1554,6 +1662,7 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
 
   ESPopulationFitness result;
   result.fitness.assign(static_cast<std::size_t>(pop), 0.0F);
+  result.reward.assign(static_cast<std::size_t>(pop), 0.0F);
   result.winrate.assign(static_cast<std::size_t>(pop), 0.0F);
   result.kl.assign(static_cast<std::size_t>(pop), 0.0F);
 
@@ -1585,6 +1694,11 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
     ExperimentConfig mode_config = config_;
     mode_config.env.team_size = team_size_from_mode(mode);
     mode_config.env.spawn_opponents = true;
+    if (curriculum_.enabled()) {
+      mode_config.outcome = curriculum_.outcome();
+      mode_config.mechanic_rewards = curriculum_.mechanic_rewards();
+      mode_config.dense_rewards = curriculum_.dense_rewards();
+    }
 
     const int total_envs = pop * eval_envs;
     const int team_size = mode_config.env.team_size;
@@ -1594,6 +1708,8 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
     std::vector<int> episode_counts(static_cast<std::size_t>(pop), 0);
     std::vector<int> win_counts(static_cast<std::size_t>(pop), 0);
 
+    torch::Tensor reward_sum = torch::zeros({pop}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+    torch::Tensor reward_count = torch::zeros({pop}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
     torch::Tensor kl_sum = torch::zeros({pop}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
     torch::Tensor kl_count = torch::zeros({pop}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
 
@@ -1618,17 +1734,33 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
 
     auto eval_collector = make_es_eval_collector(
         mode_config, total_envs, eval_envs, update_index, 0, use_pinned_host_buffers_);
+    if (curriculum_.enabled()) {
+      eval_collector->update_unlocked_mechanics(curriculum_.unlocked_mechanics());
+    }
 
     for (int ep = 0; ep < es_cfg.eval_episodes_per_member; ++ep) {
       eval_collector->reset_es_episode(update_index, ep, eval_envs);
+      torch::Tensor recurrent_state = actor_->initial_recurrent_state(
+          static_cast<int64_t>(total_envs * agents_per_env),
+          device_);
 
       for (int step = 0; step < es_cfg.eval_rollout_length; ++step) {
         torch::Tensor raw_obs = eval_collector->host_observations().to(device_, use_pinned_host_buffers_);
+        torch::Tensor episode_starts = eval_collector->host_episode_starts().to(device_, use_pinned_host_buffers_);
         torch::Tensor action_masks = eval_collector->host_action_masks().to(device_, use_pinned_host_buffers_).to(torch::kBool);
         torch::Tensor normalized_obs = actor_normalizer_.normalize(raw_obs);
 
         const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
-        ActorStepOutput output = actor_->forward_step(normalized_obs, goal_values);
+        torch::Tensor next_state;
+        ActorStepOutput output = actor_->forward_step_stateful(
+            normalized_obs,
+            recurrent_state,
+            episode_starts,
+            &next_state,
+            goal_values);
+        if (next_state.defined()) {
+          recurrent_state = next_state;
+        }
         torch::Tensor perturbed_logits = actor_->policy_eggroll_logits(
             output.features, A_stack, B_stack, es_cfg.sigma_ES, goal_values);
 
@@ -1652,6 +1784,12 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
             action_indices_cpu.data_ptr<std::int64_t>(),
             static_cast<std::size_t>(action_indices_cpu.numel())));
 
+        const torch::Tensor rewards = eval_collector->host_rewards()
+            .to(device_, use_pinned_host_buffers_)
+            .view({pop, member_agents});
+        reward_sum += (rewards * controlled_float).sum(1);
+        reward_count += controlled_float.sum(1);
+
         torch::Tensor dones_cpu = eval_collector->host_dones();
         torch::Tensor labels_cpu = eval_collector->host_terminal_outcome_labels();
         const auto* dones_ptr = dones_cpu.data_ptr<float>();
@@ -1670,12 +1808,15 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
       }
     }
 
+    torch::Tensor reward_mean = (reward_sum / reward_count.clamp_min(1.0F)).to(torch::kCPU);
     torch::Tensor kl_mean = (kl_sum / kl_count.clamp_min(1.0F)).to(torch::kCPU);
+    const auto* reward_ptr = reward_mean.data_ptr<float>();
     const auto* kl_ptr = kl_mean.data_ptr<float>();
     for (int i = 0; i < pop; ++i) {
       const int denom = std::max(episode_counts[static_cast<std::size_t>(i)], 1);
       const float mode_winrate =
           static_cast<float>(win_counts[static_cast<std::size_t>(i)]) / static_cast<float>(denom);
+      result.reward[static_cast<std::size_t>(i)] += mode_weight * reward_ptr[i];
       result.winrate[static_cast<std::size_t>(i)] += mode_weight * mode_winrate;
       result.kl[static_cast<std::size_t>(i)] += mode_weight * kl_ptr[i];
     }
@@ -1683,7 +1824,7 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
 
   for (int i = 0; i < pop; ++i) {
     result.fitness[static_cast<std::size_t>(i)] =
-        result.winrate[static_cast<std::size_t>(i)]
+        result.reward[static_cast<std::size_t>(i)]
         - es_cfg.beta_KL * result.kl[static_cast<std::size_t>(i)];
   }
   return result;
@@ -1733,26 +1874,24 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
   }
 
   double winrate_mean = 0.0;
+  double reward_mean = 0.0;
   double kl_mean = 0.0;
   for (uint64_t i = 0; i < total_members; ++i) {
+    reward_mean += population.reward[i];
     winrate_mean += population.winrate[i];
     kl_mean += population.kl[i];
   }
+  reward_mean /= static_cast<double>(total_members);
   winrate_mean /= static_cast<double>(total_members);
   kl_mean /= static_cast<double>(total_members);
 
-  double winrate_variance = 0.0;
-  for (uint64_t i = 0; i < total_members; ++i) {
-    const double centered = static_cast<double>(population.winrate[i]) - winrate_mean;
-    winrate_variance += centered * centered;
-  }
-  const double winrate_std = std::sqrt(winrate_variance / static_cast<double>(total_members));
   const float best_fitness = *std::max_element(fitnesses.begin(), fitnesses.end());
-  if (es_cfg.require_winrate_signal && winrate_std < static_cast<double>(es_cfg.min_winrate_std)) {
+  if (es_cfg.require_fitness_signal && sigma < es_cfg.min_fitness_std) {
     metrics.es_fitness_mean = mu;
     metrics.es_fitness_std = sigma;
     metrics.es_fitness_best = static_cast<double>(best_fitness);
     metrics.es_update_norm = 0.0;
+    metrics.es_reward_mean = reward_mean;
     metrics.es_winrate_mean = winrate_mean;
     metrics.es_kl_mean = kl_mean;
 
@@ -1801,12 +1940,16 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
     auto lora_params = actor_->es_lora_parameters();
     lora_params[0].add_(delta_A);
     lora_params[1].add_(delta_B);
+    for (auto& param : lora_params) {
+      actor_optimizer_.state().erase(param.unsafeGetTensorImpl());
+    }
   }
 
   metrics.es_fitness_mean = mu;
   metrics.es_fitness_std = sigma;
   metrics.es_fitness_best = static_cast<double>(best_fitness);
   metrics.es_update_norm = update_norm;
+  metrics.es_reward_mean = reward_mean;
   metrics.es_winrate_mean = winrate_mean;
   metrics.es_kl_mean = kl_mean;
 
@@ -2071,9 +2214,9 @@ void APPOTrainer::collect_rollout(
         torch::Tensor terminal_obs_host = collector.host_terminal_observations();
 
         const auto learner_step_count = static_cast<std::int64_t>(shard_step.learner_active_host.sum().item<float>());
-        total_reward += extrinsic_rewards_host.sum().item<double>();
-        total_gameplay_reward += gameplay_r_host.sum().item<double>();
-        total_mechanic_reward += mechanic_r_host.sum().item<double>();
+        total_reward += (extrinsic_rewards_host * shard_step.learner_active_host).sum().item<double>();
+        total_gameplay_reward += (gameplay_r_host * shard_step.learner_active_host).sum().item<double>();
+        total_mechanic_reward += (mechanic_r_host * shard_step.learner_active_host).sum().item<double>();
         total_steps += extrinsic_rewards_host.numel();
         total_learner_steps += learner_step_count;
 
@@ -2290,9 +2433,9 @@ void APPOTrainer::collect_rollout(
     torch::Tensor terminal_obs_host = collector_->host_terminal_observations();
 
     const auto learner_step_count = static_cast<std::int64_t>(learner_active_host.sum().item<float>());
-    total_reward += extrinsic_rewards_host.sum().item<double>();
-    total_gameplay_reward += gameplay_r_host.sum().item<double>();
-    total_mechanic_reward += mechanic_r_host.sum().item<double>();
+    total_reward += (extrinsic_rewards_host * learner_active_host).sum().item<double>();
+    total_gameplay_reward += (gameplay_r_host * learner_active_host).sum().item<double>();
+    total_mechanic_reward += (mechanic_r_host * learner_active_host).sum().item<double>();
     total_steps += extrinsic_rewards_host.numel();
     total_learner_steps += learner_step_count;
 
@@ -2662,6 +2805,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     // backgrounds collection for the next rollout.
     TrainerMetrics train_metrics{};
     std::future<std::int64_t> collect_future;
+    bool discard_overlapped_rollout = false;
     if (overlap_collection_update) {
       collection_normalizer.emplace(actor_normalizer_.clone());
       collect_future = std::async(std::launch::async, [&]() {
@@ -2687,6 +2831,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
 
     if (curriculum_.stage_index() >= kEsLoraMinStage && update_index % config_.es_lora.es_interval == 0) {
       run_es_lora_update(update_index, coll_metrics);
+      discard_overlapped_rollout = discard_overlapped_rollout || overlap_collection_update;
     }
 
     if (config_.ppo.plasticity && update_index % config_.ppo.plasticity_interval == 0) {
@@ -2697,6 +2842,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
         if (!p.requires_grad() || p.dim() < 2) continue;
         actor_optimizer_.state().erase(p.unsafeGetTensorImpl());
       }
+      discard_overlapped_rollout = discard_overlapped_rollout || overlap_collection_update;
     }
 
     // 4. Curriculum checks + rebuild (may touch collectors, safe after collection)
@@ -2715,6 +2861,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
         stage_changed = true;
       }
       if (stage_changed) {
+        discard_overlapped_rollout = discard_overlapped_rollout || overlap_collection_update;
         save_checkpoint(
             std::filesystem::path(checkpoint_dir) / ("stage_" + std::to_string(curriculum_.state().stage_index) + "_update_" + std::to_string(update_index)),
             global_step, update_index, wandb.run_id());
@@ -2732,7 +2879,9 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
 
     // 6. In the default memory-safe mode, collect after the update with the
     // fresh policy snapshot.
-    if (has_next && !overlap_collection_update) {
+    if (has_next && (!overlap_collection_update || discard_overlapped_rollout)) {
+      next_coll_metrics = TrainerMetrics{};
+      next_coll_steps = 0;
       collect_rollout(rollout_B_, next_coll_metrics, &next_coll_steps, new_snapshot, actor_normalizer_);
     }
 
@@ -2743,6 +2892,9 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     coll_metrics.entropy = train_metrics.entropy;
     coll_metrics.effective_entropy_coef = train_metrics.effective_entropy_coef;
     coll_metrics.grad_norm = train_metrics.grad_norm;
+    coll_metrics.policy_approx_kl = train_metrics.policy_approx_kl;
+    coll_metrics.policy_clip_fraction = train_metrics.policy_clip_fraction;
+    coll_metrics.policy_log_ratio_abs_max = train_metrics.policy_log_ratio_abs_max;
     coll_metrics.nonfinite_loss_skips = train_metrics.nonfinite_loss_skips;
     coll_metrics.nonfinite_grad_norm_skips = train_metrics.nonfinite_grad_norm_skips;
     coll_metrics.update_seconds = train_metrics.update_seconds;
@@ -2774,6 +2926,9 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " value_loss=" << coll_metrics.value_loss
               << " entropy=" << coll_metrics.entropy
               << " grad_norm=" << coll_metrics.grad_norm
+              << " policy_approx_kl=" << coll_metrics.policy_approx_kl
+              << " clip_frac=" << coll_metrics.policy_clip_fraction
+              << " max_log_ratio=" << coll_metrics.policy_log_ratio_abs_max
               << " nonfinite_loss_skips=" << coll_metrics.nonfinite_loss_skips
               << " nonfinite_grad_skips=" << coll_metrics.nonfinite_grad_norm_skips
               << " total_reward=" << coll_metrics.total_reward_mean
@@ -2789,6 +2944,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " ball_prox=" << coll_metrics.ball_proximity_rate
               << " goals=" << coll_metrics.goals_scored << "/" << coll_metrics.goals_conceded
               << " es_fitness=" << coll_metrics.es_fitness_mean
+              << " es_reward=" << coll_metrics.es_reward_mean
               << " rss_mb=" << coll_metrics.process_rss_mb
               << " peak_rss_mb=" << coll_metrics.process_peak_rss_mb
               << " cgroup_mem_mb=" << coll_metrics.cgroup_memory_current_mb << "/" << coll_metrics.cgroup_memory_limit_mb
@@ -2817,6 +2973,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       register_metric("ES-LoRA", "es_fitness_mean");
       register_metric("ES-LoRA", "es_fitness_std");
       register_metric("ES-LoRA", "es_fitness_best");
+      register_metric("ES-LoRA", "es_reward_mean");
       register_metric("ES-LoRA", "es_winrate_mean");
       register_metric("ES-LoRA", "es_kl_mean");
       register_metric("ES-LoRA", "es_update_norm");
@@ -2829,6 +2986,9 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       add_metric("Optimization", "value_loss", coll_metrics.value_loss);
       add_metric("Optimization", "entropy", coll_metrics.entropy);
       add_metric("Optimization", "grad_norm", coll_metrics.grad_norm);
+      add_metric("Optimization", "policy_approx_kl", coll_metrics.policy_approx_kl);
+      add_metric("Optimization", "policy_clip_fraction", coll_metrics.policy_clip_fraction);
+      add_metric("Optimization", "policy_log_ratio_abs_max", coll_metrics.policy_log_ratio_abs_max);
       add_metric("Optimization", "nonfinite_loss_skips", coll_metrics.nonfinite_loss_skips);
       add_metric("Optimization", "nonfinite_grad_norm_skips", coll_metrics.nonfinite_grad_norm_skips);
       add_metric("Optimization", "rollout_steps", coll_metrics.rollout_steps);
@@ -2878,6 +3038,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
         add_metric("ES-LoRA", "es_fitness_mean", coll_metrics.es_fitness_mean);
         add_metric("ES-LoRA", "es_fitness_std", coll_metrics.es_fitness_std);
         add_metric("ES-LoRA", "es_fitness_best", coll_metrics.es_fitness_best);
+        add_metric("ES-LoRA", "es_reward_mean", coll_metrics.es_reward_mean);
         add_metric("ES-LoRA", "es_winrate_mean", coll_metrics.es_winrate_mean);
         add_metric("ES-LoRA", "es_kl_mean", coll_metrics.es_kl_mean);
         add_metric("ES-LoRA", "es_update_norm", coll_metrics.es_update_norm);

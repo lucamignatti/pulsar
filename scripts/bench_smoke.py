@@ -8,12 +8,19 @@ import tempfile
 from pathlib import Path
 
 
+def find_repo_root(start: Path) -> Path:
+    for candidate in (start, *start.parents):
+        if (candidate / "configs" / "2v2_appo.json").exists():
+            return candidate
+    raise FileNotFoundError("could not locate repo root containing configs/2v2_appo.json")
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit("usage: bench_smoke.py <pulsar_bench>")
 
     bench_binary = Path(sys.argv[1]).resolve()
-    repo_root = bench_binary.parents[2]
+    repo_root = find_repo_root(bench_binary.parent)
     base_config = json.loads((repo_root / "configs" / "2v2_appo.json").read_text(encoding="utf-8"))
     base_config["model"].update({
         "encoder_dim": 64,

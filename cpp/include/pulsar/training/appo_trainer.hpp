@@ -39,6 +39,9 @@ struct TrainerMetrics {
   double value_loss = 0.0;
   double entropy = 0.0;
   double grad_norm = 0.0;
+  double policy_approx_kl = 0.0;
+  double policy_clip_fraction = 0.0;
+  double policy_log_ratio_abs_max = 0.0;
   int64_t nonfinite_loss_skips = 0;
   int64_t nonfinite_grad_norm_skips = 0;
   double obs_build_seconds = 0.0;
@@ -80,6 +83,7 @@ struct TrainerMetrics {
   double es_fitness_mean = 0.0;
   double es_fitness_std = 0.0;
   double es_fitness_best = 0.0;
+  double es_reward_mean = 0.0;
   double es_winrate_mean = 0.0;
   double es_kl_mean = 0.0;
   double es_update_norm = 0.0;
@@ -162,6 +166,7 @@ class APPOTrainer {
 
   struct ESPopulationFitness {
     std::vector<float> fitness{};
+    std::vector<float> reward{};
     std::vector<float> winrate{};
     std::vector<float> kl{};
   };

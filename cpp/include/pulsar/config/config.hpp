@@ -162,8 +162,8 @@ struct ESLoraConfig {
   bool update_norm_clip = true;
   float max_update_norm = 0.002F;
   float max_kl_mean = 0.01F;
-  bool require_winrate_signal = true;
-  float min_winrate_std = 1.0e-6F;
+  bool require_fitness_signal = true;
+  float min_fitness_std = 1.0e-6F;
 };
 
 struct PPOConfig {
@@ -192,6 +192,7 @@ struct PPOConfig {
   bool adaptive_entropy = false;
   float entropy_decay_score = 0.60F;
   float entropy_low_coef = 0.005F;
+  float max_policy_log_ratio = 5.0F;
   bool plasticity = false;
   int plasticity_interval = 40;
   float plasticity_shrink = 0.999F;

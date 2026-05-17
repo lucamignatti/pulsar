@@ -6,7 +6,7 @@ The training loop combines three complementary signals:
 
 1. **APPO**: the main local optimizer.
 2. **Contrastive goal-conditioned auxiliary**: self-supervised future-goal encoders (state-action and goal) trained with symmetric InfoNCE. Provides a representation-learning signal that never shapes the environment reward.
-3. **Slow Rank-4 ES-LoRA**:  periodic global parameter-space search over a LoRA adapter on the final policy layer, driven by true sparse winrate with KL penalty.
+3. **Slow Rank-4 ES-LoRA**:  periodic global parameter-space search over a LoRA adapter on the final policy layer, driven by rollout reward with KL penalty.
 
 The production setup trains 1v1, 2v2, and 3v3 from the start using one stable reward function. The curriculum layer is still available, but the default config uses it only as a mode-allocation wrapper rather than a staged reward schedule.
 
@@ -15,7 +15,7 @@ The production setup trains 1v1, 2v2, and 3v3 from the start using one stable re
 - **Encoder**: **Mamba-2**
 - **Contrastive goal-conditioned encoder pair**: state-action encoder and goal encoder trained with symmetric InfoNCE
 - **Rank-4 LoRA adapter** on the final policy layer: mutated by ES, also trainable by APPO
-- **ES-LoRA** periodic global optimizer: population sampling, antithetic evaluation, sparse-outcome fitness
+- **ES-LoRA** periodic global optimizer: population sampling, antithetic evaluation, reward-based fitness
 - **Self-play league** with ELO ratings, snapshot management, and periodic evaluation against past policies
 - **All-mode training** with PCGrad over per-mode minibatch groups
 - 

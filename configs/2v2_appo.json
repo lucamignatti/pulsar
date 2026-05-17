@@ -18,7 +18,7 @@
     "score": 10.0,
     "concede": 0.0,
     "neutral": 0.0,
-    "neutral_no_touch": 0.0
+    "neutral_no_touch": -1.0
   },
   "mechanic_rewards": {
     "kickoff_first_touch": 0.0,
@@ -92,7 +92,7 @@
           "score": 0.0,
           "concede": 0.0,
           "neutral": 0.0,
-          "neutral_no_touch": 0.0
+          "neutral_no_touch": -1.0
         },
         "mechanic_rewards_override": {
           "kickoff_first_touch": 0.0,
@@ -164,7 +164,7 @@
           "score": 10.0,
           "concede": 0.0,
           "neutral": 0.0,
-          "neutral_no_touch": 0.0
+          "neutral_no_touch": -1.0
         },
         "mechanic_rewards_override": {
           "kickoff_first_touch": 0.0,
@@ -236,7 +236,7 @@
           "score": 10.0,
           "concede": 0.0,
           "neutral": 0.0,
-          "neutral_no_touch": 0.0
+          "neutral_no_touch": -1.0
         },
         "mechanic_rewards_override": {
           "kickoff_first_touch": 0.0,
@@ -335,6 +335,7 @@
     "adaptive_entropy": false,
     "entropy_decay_score": 0.6,
     "entropy_low_coef": 0.005,
+    "max_policy_log_ratio": 5.0,
     "plasticity": false,
     "plasticity_interval": 40,
     "plasticity_shrink": 0.999,
@@ -370,8 +371,8 @@
     "update_norm_clip": true,
     "max_update_norm": 0.002,
     "max_kl_mean": 0.01,
-    "require_winrate_signal": true,
-    "min_winrate_std": 1.0e-6
+    "require_fitness_signal": true,
+    "min_fitness_std": 1.0e-6
   },
   "self_play_league": {
     "enabled": true,

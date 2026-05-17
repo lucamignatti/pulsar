@@ -94,7 +94,11 @@ int main() {
     {
       torch::NoGradGuard no_grad;
       const torch::Tensor obs_seq = torch::randn({4, 3, model_config.observation_dim});
-      const auto sequence_out = actor->forward_sequence(obs_seq);
+      torch::Tensor episode_starts = torch::zeros({4, 3}, torch::kFloat32);
+      episode_starts[0].fill_(1.0F);
+      episode_starts[2][1] = 1.0F;
+      episode_starts[3][2] = 1.0F;
+      const auto sequence_out = actor->forward_sequence(obs_seq, {}, episode_starts);
       torch::Tensor state = actor->initial_recurrent_state(3, torch::kCPU);
       std::vector<torch::Tensor> step_logits;
       for (int t = 0; t < obs_seq.size(0); ++t) {
@@ -102,7 +106,7 @@ int main() {
         const auto step_out = actor->forward_step_stateful(
             obs_seq[t],
             state,
-            torch::zeros({3}, torch::kFloat32),
+            episode_starts[t],
             &next_state);
         state = next_state;
         step_logits.push_back(step_out.policy_logits);
