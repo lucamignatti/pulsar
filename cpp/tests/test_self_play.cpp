@@ -17,15 +17,12 @@
 namespace {
 
 // Safely remove a directory tree without relying on std::filesystem::remove_all,
-// which may resolve to a broken implementation in libtorch's bundled libstdc++.
+// which resolves to a broken implementation in libtorch's bundled libstdc++ on some systems.
 void safe_remove_all(const std::filesystem::path& path) {
-  namespace fs = std::filesystem;
-  std::error_code ec;
-  fs::remove_all(path, ec);
-  if (ec && fs::exists(path)) {
-    // libtorch's bundled filesystem choked; fall back to POSIX.
-    std::system(("rm -rf " + path.string()).c_str());
-  }
+  // Avoid std::filesystem::remove_all entirely because both the throwing
+  // and error_code overloads jump through a null function pointer inside
+  // libtorch's bundled libstdc++. Use POSIX rm -rf directly.
+  std::system(("rm -rf " + path.string() + " 2>/dev/null").c_str());
 }
 
 void test_snapshot_save_load_trim_and_assignment() {
