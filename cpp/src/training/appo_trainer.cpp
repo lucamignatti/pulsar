@@ -246,16 +246,26 @@ struct CapturedGrad {
   torch::Tensor grad;
 };
 
-std::vector<CapturedGrad> capture_gradients(torch::nn::Module& module) {
-  std::vector<CapturedGrad> out;
-  for (auto& p : module.parameters()) {
-    if (p.grad().defined()) {
-      out.push_back({p, p.grad().detach().clone()});
-    } else {
-      out.push_back({p, torch::Tensor{}});
+void accumulate_gradients(torch::nn::Module& module, std::vector<CapturedGrad>& accumulated) {
+  if (accumulated.empty()) {
+    for (auto& p : module.parameters()) {
+      accumulated.push_back({p, torch::Tensor{}});
     }
   }
-  return out;
+  size_t i = 0;
+  for (auto& p : module.parameters()) {
+    if (i >= accumulated.size()) {
+      accumulated.push_back({p, torch::Tensor{}});
+    }
+    if (p.grad().defined()) {
+      if (accumulated[i].grad.defined()) {
+        accumulated[i].grad.add_(p.grad().detach());
+      } else {
+        accumulated[i].grad = p.grad().detach().clone();
+      }
+    }
+    ++i;
+  }
 }
 
 void zero_existing_gradients(torch::nn::Module& module) {
@@ -294,78 +304,44 @@ torch::Tensor smooth_l1_value_loss(
   return torch::where(abs_error < delta_tensor, quadratic, linear).mean();
 }
 
-void apply_pcgrad(std::vector<CapturedGrad>& group_a, std::vector<CapturedGrad>& group_b) {
-  std::vector<torch::Tensor> flat_a_parts, flat_b_parts;
-  for (size_t i = 0; i < group_a.size(); ++i) {
-    if (group_a[i].grad.defined() && group_b[i].grad.defined()) {
-      flat_a_parts.push_back(group_a[i].grad.view({-1}));
-      flat_b_parts.push_back(group_b[i].grad.view({-1}));
-    }
-  }
-  if (flat_a_parts.empty()) return;
-
-  torch::Tensor ga_all = torch::cat(flat_a_parts, 0);
-  torch::Tensor gb_all = torch::cat(flat_b_parts, 0);
-
-  const torch::Tensor dot = ga_all.dot(gb_all);
-  const torch::Tensor conflict = (dot < 0).to(ga_all.scalar_type());
-  const torch::Tensor norm_a_sq = ga_all.dot(ga_all).clamp_min(1.0e-12);
-  const torch::Tensor norm_b_sq = gb_all.dot(gb_all).clamp_min(1.0e-12);
-  torch::Tensor ga_orig = ga_all.clone();
-  torch::Tensor gb_orig = gb_all.clone();
-  ga_all = ga_orig - conflict * (dot / norm_b_sq) * gb_orig;
-  gb_all = gb_orig - conflict * (dot / norm_a_sq) * ga_orig;
-
-  size_t offset_a = 0, offset_b = 0;
-  for (size_t i = 0; i < group_a.size(); ++i) {
-    if (group_a[i].grad.defined() && group_b[i].grad.defined()) {
-      auto sz = static_cast<int64_t>(group_a[i].grad.numel());
-      group_a[i].grad = ga_all.slice(0, static_cast<int64_t>(offset_a), static_cast<int64_t>(offset_a) + sz).view(group_a[i].grad.sizes()).clone();
-      group_b[i].grad = gb_all.slice(0, static_cast<int64_t>(offset_b), static_cast<int64_t>(offset_b) + sz).view(group_b[i].grad.sizes()).clone();
-      offset_a += static_cast<size_t>(sz);
-      offset_b += static_cast<size_t>(sz);
-    }
-  }
-}
-
 // Multi-group PCGrad: project each group's gradient against all others.
 // groups[idx][param] = gradient tensor for that group+parameter.
 void apply_pcgrad_multi(std::vector<std::vector<CapturedGrad>>& groups) {
   if (groups.size() < 2) return;
 
-  // Flatten each group into a single vector.
+  // Flatten each group into the full parameter vector. Objective-level groups
+  // touch different heads, so missing gradients must participate as zeros.
   std::vector<torch::Tensor> flats;
-  std::vector<std::vector<std::pair<size_t, int64_t>>> layouts;
+  std::vector<std::pair<size_t, int64_t>> layout;
+  std::vector<bool> active_params(groups[0].size(), false);
   flats.reserve(groups.size());
-  layouts.reserve(groups.size());
+  layout.reserve(groups[0].size());
 
+  for (size_t i = 0; i < groups[0].size(); ++i) {
+    layout.push_back({i, groups[0][i].param.numel()});
+  }
   for (auto& group : groups) {
     std::vector<torch::Tensor> parts;
-    std::vector<std::pair<size_t, int64_t>> layout;
-    for (size_t i = 0; i < group.size(); ++i) {
+    parts.reserve(group.size());
+    for (size_t i = 0; i < groups[0].size(); ++i) {
       if (group[i].grad.defined()) {
+        active_params[i] = true;
         parts.push_back(group[i].grad.view({-1}));
-        layout.push_back({i, group[i].grad.numel()});
+      } else {
+        parts.push_back(torch::zeros({group[i].param.numel()}, group[i].param.options()));
       }
     }
-    if (!parts.empty()) {
-      flats.push_back(torch::cat(parts, 0));
-    } else {
-      flats.push_back(torch::zeros({1}, groups[0][0].grad.options()));
-    }
-    layouts.push_back(std::move(layout));
+    flats.push_back(torch::cat(parts, 0));
   }
 
-  // Iteratively project each gradient against all others.
-  for (size_t iter = 0; iter < groups.size(); ++iter) {
-    for (size_t i = 0; i < groups.size(); ++i) {
-      for (size_t j = 0; j < groups.size(); ++j) {
-        if (i == j) continue;
-        const torch::Tensor dot = flats[i].dot(flats[j]);
-        if (dot.item<float>() < 0.0F) {
-          const torch::Tensor norm_j_sq = flats[j].dot(flats[j]).clamp_min(1.0e-12);
-          flats[i] = flats[i] - (dot / norm_j_sq) * flats[j];
-        }
+  // Standard PCGrad sweep: project each group once against every other group.
+  for (size_t i = 0; i < groups.size(); ++i) {
+    for (size_t j = 0; j < groups.size(); ++j) {
+      if (i == j) continue;
+      const torch::Tensor dot = flats[i].dot(flats[j]);
+      if (dot.item<float>() < 0.0F) {
+        const torch::Tensor norm_j_sq = flats[j].dot(flats[j]).clamp_min(1.0e-12);
+        flats[i] = flats[i] - (dot / norm_j_sq) * flats[j];
       }
     }
   }
@@ -373,8 +349,13 @@ void apply_pcgrad_multi(std::vector<std::vector<CapturedGrad>>& groups) {
   // Unflatten back into per-parameter gradients.
   for (size_t g = 0; g < groups.size(); ++g) {
     int64_t offset = 0;
-    for (const auto& [param_idx, sz] : layouts[g]) {
-      groups[g][param_idx].grad = flats[g].slice(0, offset, offset + sz).view(groups[g][param_idx].grad.sizes()).clone();
+    for (const auto& [param_idx, sz] : layout) {
+      if (active_params[param_idx]) {
+        groups[g][param_idx].grad =
+            flats[g].slice(0, offset, offset + sz).view(groups[g][param_idx].param.sizes()).clone();
+      } else {
+        groups[g][param_idx].grad = torch::Tensor{};
+      }
       offset += sz;
     }
   }
@@ -1168,8 +1149,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       int num_modes_present = (has_1v1 ? 1 : 0) + (has_2v2 ? 1 : 0) + (has_3v3 ? 1 : 0);
 
       std::vector<torch::Tensor> mode_agent_indices_list;
-      bool use_mode_pcgrad = config_.ppo.pcgrad && num_modes_present > 1;
-      if (use_mode_pcgrad) {
+      const bool use_pcgrad = config_.ppo.pcgrad;
+      const bool split_modes_for_pcgrad = use_pcgrad && num_modes_present > 1;
+      if (split_modes_for_pcgrad) {
         if (has_1v1) {
           torch::Tensor mask = agent_mode_ids == 1;
           mode_agent_indices_list.push_back(agent_indices.index({mask}));
@@ -1187,7 +1169,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       }
 
       // Process each mode group (or the full batch if single mode).
-      std::vector<std::vector<CapturedGrad>> mode_grad_groups;
+      std::vector<std::vector<CapturedGrad>> pcgrad_groups;
       double combined_total_active = 0.0;
 
       for (const torch::Tensor& mode_agent_indices : mode_agent_indices_list) {
@@ -1210,9 +1192,12 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         }
         combined_total_active += mode_total_active;
 
-        if (use_mode_pcgrad || accumulated_minibatches == 0) {
+        if (use_pcgrad || accumulated_minibatches == 0) {
           actor_optimizer_.zero_grad();
         }
+        std::vector<CapturedGrad> mode_task_grad_group;
+        std::vector<CapturedGrad> mode_goal_critic_grad_group;
+        std::vector<CapturedGrad> mode_goal_actor_grad_group;
 
         for (int micro_agent_offset = 0; micro_agent_offset < mode_count; micro_agent_offset += agents_per_forward) {
           const int micro_count = std::min(agents_per_forward, mode_count - micro_agent_offset);
@@ -1378,13 +1363,20 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
             const auto sample_weight = active_samples / mode_total_active;
 
-            const torch::Tensor loss =
+            const torch::Tensor task_loss =
                 policy_loss
                 + config_.ppo.value_coef * value_loss
-                + config_.goal_critic.lambda_Zg * goal_loss
-                + config_.goal_critic.lambda_goal_actor * actor_goal_loss
                 + entropy_floor_loss
                 - effective_entropy_coef * entropy;
+            const torch::Tensor weighted_task_loss = task_loss * sample_weight;
+            const torch::Tensor weighted_goal_critic_loss =
+                config_.goal_critic.lambda_Zg * goal_loss * sample_weight;
+            const torch::Tensor weighted_goal_actor_loss =
+                config_.goal_critic.lambda_goal_actor * actor_goal_loss * sample_weight;
+            const torch::Tensor loss =
+                task_loss
+                + config_.goal_critic.lambda_Zg * goal_loss
+                + config_.goal_critic.lambda_goal_actor * actor_goal_loss;
             if (!torch::isfinite(loss).item<bool>()) {
               ++metrics.nonfinite_loss_skips;
               std::cerr << "skipping non-finite APPO loss"
@@ -1397,9 +1389,34 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
               continue;
             }
 
-            const int effective_accumulation_steps = use_mode_pcgrad ? 1 : optimizer_accumulation_steps;
-            torch::Tensor combined_loss = loss * sample_weight / static_cast<double>(effective_accumulation_steps);
-            (combined_loss * cuda_amp_loss_scale).backward();
+            const int effective_accumulation_steps = use_pcgrad ? 1 : optimizer_accumulation_steps;
+            if (use_pcgrad) {
+              std::vector<std::pair<torch::Tensor, std::vector<CapturedGrad>*>> objective_losses;
+              objective_losses.push_back({
+                  weighted_task_loss / static_cast<double>(effective_accumulation_steps),
+                  &mode_task_grad_group});
+              if (config_.goal_critic.lambda_Zg > 0.0F && weighted_goal_critic_loss.requires_grad()) {
+                objective_losses.push_back({
+                    weighted_goal_critic_loss / static_cast<double>(effective_accumulation_steps),
+                    &mode_goal_critic_grad_group});
+              }
+              if (config_.goal_critic.lambda_goal_actor > 0.0F && weighted_goal_actor_loss.requires_grad()) {
+                objective_losses.push_back({
+                    weighted_goal_actor_loss / static_cast<double>(effective_accumulation_steps),
+                    &mode_goal_actor_grad_group});
+              }
+
+              for (size_t objective_idx = 0; objective_idx < objective_losses.size(); ++objective_idx) {
+                zero_existing_gradients(*actor_);
+                const bool retain_graph = objective_idx + 1 < objective_losses.size();
+                (objective_losses[objective_idx].first * cuda_amp_loss_scale).backward({}, retain_graph);
+                accumulate_gradients(*actor_, *objective_losses[objective_idx].second);
+              }
+            } else {
+              torch::Tensor combined_loss =
+                  loss * sample_weight / static_cast<double>(effective_accumulation_steps);
+              (combined_loss * cuda_amp_loss_scale).backward();
+            }
             accumulated_has_backward = true;
 
             policy_loss_sum = policy_loss_sum + policy_loss.detach().to(torch::kFloat32) * active_samples;
@@ -1411,36 +1428,44 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           }
         }
 
-        if (use_mode_pcgrad) {
-          mode_grad_groups.push_back(capture_gradients(*actor_));
+        if (use_pcgrad) {
+          if (!mode_task_grad_group.empty()) {
+            pcgrad_groups.push_back(std::move(mode_task_grad_group));
+          }
+          if (!mode_goal_critic_grad_group.empty()) {
+            pcgrad_groups.push_back(std::move(mode_goal_critic_grad_group));
+          }
+          if (!mode_goal_actor_grad_group.empty()) {
+            pcgrad_groups.push_back(std::move(mode_goal_actor_grad_group));
+          }
         }
       }
 
       accumulated_minibatches++;
       accumulated_total_active += combined_total_active;
 
-      // If multiple modes were present, apply PCGrad across mode gradient groups.
-      if (use_mode_pcgrad && !mode_grad_groups.empty()) {
+      // Apply PCGrad across mode/objective groups, then materialize their sum.
+      if (use_pcgrad && !pcgrad_groups.empty()) {
         zero_existing_gradients(*actor_);
-        apply_pcgrad_multi(mode_grad_groups);
-        for (size_t i = 0; i < mode_grad_groups[0].size(); ++i) {
+        apply_pcgrad_multi(pcgrad_groups);
+        for (size_t i = 0; i < pcgrad_groups[0].size(); ++i) {
           torch::Tensor combined;
           bool has_any = false;
-          for (const auto& group : mode_grad_groups) {
+          for (const auto& group : pcgrad_groups) {
             if (group[i].grad.defined()) {
               combined = has_any ? combined + group[i].grad : group[i].grad;
               has_any = true;
             }
           }
           if (has_any) {
-            mode_grad_groups[0][i].param.mutable_grad() = combined;
+            pcgrad_groups[0][i].param.mutable_grad() = combined;
           }
         }
       }
 
       const bool at_epoch_end = agent_offset + logical_agents_per_batch >= total_agents;
       const bool should_step_optimizer =
-          use_mode_pcgrad ||
+          use_pcgrad ||
           accumulated_minibatches >= optimizer_accumulation_steps ||
           at_epoch_end;
       if (!should_step_optimizer) {
