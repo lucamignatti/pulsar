@@ -1565,10 +1565,10 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 torch::Tensor entropy_floor_loss = torch::zeros({}, active_advantages.options());
                 if (config_.ppo.entropy_floor > 0.0F && effective_entropy_floor_coef > 0.0F) {
                   const torch::Tensor entropy_floor_mask = active_masks.to(torch::kFloat32).sum(-1) > 1.0F;
-                  const torch::Tensor entropy_floor = torch::full_like(entropy_values, config_.ppo.entropy_floor);
-                  const torch::Tensor clamped = torch::relu(entropy_floor - entropy_values).masked_select(entropy_floor_mask).square();
-                  const torch::Tensor count = entropy_floor_mask.sum().clamp_min(1.0);
-                  entropy_floor_loss = effective_entropy_floor_coef * clamped.sum() / count;
+                  if (entropy_floor_mask.any().item<bool>()) {
+                    const torch::Tensor entropy_floor = torch::full_like(entropy_values, config_.ppo.entropy_floor);
+                    entropy_floor_loss = effective_entropy_floor_coef * torch::relu(entropy_floor - entropy_values).index({entropy_floor_mask}).square().mean();
+                  }
                 }
 
                 torch::Tensor chunk_returns = mode_gpu_returns_mb.narrow(0, chunk_start, loss_steps).reshape({samples});
@@ -1618,15 +1618,20 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 const torch::Tensor weighted_goal_critic_loss = config_.goal_critic.lambda_Zg * goal_loss * sample_weight;
                 const torch::Tensor weighted_goal_actor_loss = config_.goal_critic.lambda_goal_actor * actor_goal_loss * sample_weight;
                 const torch::Tensor loss = task_loss + config_.goal_critic.lambda_Zg * goal_loss + config_.goal_critic.lambda_goal_actor * actor_goal_loss;
+                if (!torch::isfinite(loss).item<bool>()) {
+                  ++result.nonfinite_skips;
+                  continue;
+                }
 
                 if (use_pcgrad_local) {
+                  const int effective_accum = 1;
                   std::vector<std::pair<torch::Tensor, std::vector<CapturedGrad>*>> objective_losses;
-                  objective_losses.push_back({weighted_task_loss, &gpu_task_group});
+                  objective_losses.push_back({weighted_task_loss / static_cast<double>(effective_accum), &gpu_task_group});
                   if (config_.goal_critic.lambda_Zg > 0.0F && weighted_goal_critic_loss.requires_grad()) {
-                    objective_losses.push_back({weighted_goal_critic_loss, &gpu_goal_critic_group});
+                    objective_losses.push_back({weighted_goal_critic_loss / static_cast<double>(effective_accum), &gpu_goal_critic_group});
                   }
                   if (config_.goal_critic.lambda_goal_actor > 0.0F && weighted_goal_actor_loss.requires_grad()) {
-                    objective_losses.push_back({weighted_goal_actor_loss, &gpu_goal_actor_group});
+                    objective_losses.push_back({weighted_goal_actor_loss / static_cast<double>(effective_accum), &gpu_goal_actor_group});
                   }
                   for (size_t oi = 0; oi < objective_losses.size(); ++oi) {
                     zero_existing_gradients(*gpu_act);
