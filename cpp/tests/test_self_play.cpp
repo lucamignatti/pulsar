@@ -92,7 +92,7 @@ void test_opponent_inference_and_elo_math() {
   config.ppo.device = "cpu";
 
   const auto root = std::filesystem::temp_directory_path() / "pulsar_self_play_infer";
-  std::filesystem::remove_all(root);
+  safe_remove_all(root);
   auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
@@ -127,7 +127,7 @@ void test_opponent_inference_and_elo_math() {
     pulsar::test::require(!actions.requires_grad(), "opponent actions should be inference-only");
     pulsar::test::require(inference_seconds >= 0.0, "inference timing should be recorded");
   }
-  std::filesystem::remove_all(root);
+  safe_remove_all(root);
 
   double winner = 1000.0;
   double loser = 1000.0;
