@@ -2239,133 +2239,91 @@ void APPOTrainer::collect_rollout(
       std::map<std::string, int> mode_scored;
     };
 
-    for (int step = 0; step < config_.ppo.rollout_length; ++step) {
-      PULSAR_TRACE_SCOPE_CAT("trainer", "collect_step_sharded");
-      std::mutex self_play_inference_mutex;
-      std::vector<std::future<PendingShardStep>> pending_futures;
-      pending_futures.reserve(collectors_.size());
+    // Launch one async task per shard that processes all rollout steps.
+    // This reduces std::async launches from (shards × steps) to just shards.
+    struct ShardResult {
+      std::size_t shard;
+      std::vector<PendingShardStep> steps;
+    };
+    std::vector<std::future<ShardResult>> shard_futures;
+    shard_futures.reserve(collectors_.size());
 
-      for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
-        BatchedRocketSimCollector* collector_ptr = collectors_[shard].get();
-        PPOActor shard_actor = rollout_actors[shard];
-        ObservationNormalizer* shard_normalizer = &shard_normalizers[shard];
-        ObservationNormalizer* shard_normalizer_update = &shard_normalizer_updates[shard];
-        torch::Tensor recurrent_state = rollout_recurrent_states[shard];
-        const torch::Device shard_device = shard_devices_.empty() ? device_ : shard_devices_[shard];
-        pending_futures.push_back(std::async(
-            std::launch::async,
-            [&, shard, collector_ptr, shard_actor, shard_normalizer, shard_normalizer_update, recurrent_state, shard_device]() mutable {
+    for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
+      BatchedRocketSimCollector* collector_ptr = collectors_[shard].get();
+      PPOActor shard_actor = rollout_actors[shard];
+      ObservationNormalizer* shard_normalizer = &shard_normalizers[shard];
+      ObservationNormalizer* shard_normalizer_update = &shard_normalizer_updates[shard];
+      torch::Tensor recurrent_state = rollout_recurrent_states[shard];
+      const torch::Device shard_device = shard_devices_.empty() ? device_ : shard_devices_[shard];
+      const std::size_t shard_idx = shard;
+
+      shard_futures.push_back(std::async(std::launch::async,
+          [&, collector_ptr, shard_actor, shard_normalizer, shard_normalizer_update, recurrent_state, shard_device, shard_idx]() mutable -> ShardResult {
+        ShardResult result;
+        result.shard = shard_idx;
+        result.steps.reserve(config_.ppo.rollout_length);
         auto& collector = *collector_ptr;
+
 #ifdef PULSAR_HAS_CUDA
         std::optional<c10::cuda::CUDAGuard> shard_device_guard;
         if (shard_device.is_cuda()) {
           shard_device_guard.emplace(shard_device);
         }
-        if (shard < shard_collection_streams_.size()) {
-          c10::cuda::setCurrentCUDAStream(shard_collection_streams_[shard]);
+        if (shard_idx < shard_collection_streams_.size()) {
+          c10::cuda::setCurrentCUDAStream(shard_collection_streams_[shard_idx]);
         }
 #endif
-        torch::Tensor raw_obs_host = collector.host_observations();
-        torch::Tensor episode_starts_host = collector.host_episode_starts();
-        torch::Tensor action_masks_host = collector.host_action_masks();
-        torch::Tensor learner_active_host = collector.host_learner_active();
-        torch::Tensor raw_obs = raw_obs_host.to(shard_device, use_pinned_host_buffers_);
-        torch::Tensor episode_starts = episode_starts_host.to(shard_device, use_pinned_host_buffers_);
-        torch::Tensor action_masks = action_masks_host.to(shard_device, use_pinned_host_buffers_).to(torch::kBool);
 
-        torch::Tensor normalized_obs;
-        torch::Tensor actions;
-        torch::Tensor action_log_probs;
-        ActorStepOutput output;
-        const auto policy_start = std::chrono::steady_clock::now();
-        {
-          PULSAR_TRACE_SCOPE_CAT("trainer", "policy_forward_shard");
-          torch::NoGradGuard no_grad;
-          shard_normalizer->update(raw_obs);
-          shard_normalizer_update->update(raw_obs);
-          normalized_obs = shard_normalizer->normalize(raw_obs);
-          const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
-          torch::Tensor next_state;
-          output = shard_actor->forward_step_stateful(
-              normalized_obs,
-              recurrent_state,
-              episode_starts,
-              &next_state,
-              goal_values);
-          if (next_state.defined()) {
-            recurrent_state = next_state;
-          }
-          actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
-        }
-        if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
-          torch::cuda::synchronize();
-        }
-        double policy_seconds =
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - policy_start).count();
+        for (int step = 0; step < config_.ppo.rollout_length; ++step) {
+          PendingShardStep shard_step;
+          shard_step.shard = shard_idx;
+          shard_step.agent_offset = static_cast<int>(shard_agent_offsets_[shard_idx]);
 
-        if (self_play_manager_ && self_play_manager_->has_snapshots()) {
-          torch::Tensor opponent_actions;
-          torch::Tensor snapshot_ids = collector.host_snapshot_ids().to(shard_device, use_pinned_host_buffers_);
-          torch::Tensor self_play_raw_obs = raw_obs;
-          torch::Tensor self_play_action_masks = action_masks;
-          torch::Tensor self_play_episode_starts = episode_starts;
-          torch::Tensor self_play_snapshot_ids = snapshot_ids;
-          if (shard_device != device_) {
-            self_play_raw_obs = raw_obs.to(device_);
-            self_play_action_masks = action_masks.to(device_);
-            self_play_episode_starts = episode_starts.to(device_);
-            self_play_snapshot_ids = snapshot_ids.to(device_);
-          }
-          double self_play_seconds = 0.0;
-          std::lock_guard<std::mutex> lock(self_play_inference_mutex);
-          self_play_manager_->infer_opponent_actions(
-              rollout_actor,
-              self_play_raw_obs,
-              self_play_action_masks,
-              self_play_episode_starts,
-              self_play_snapshot_ids,
-              &opponent_actions,
-              &self_play_seconds);
-          policy_seconds += self_play_seconds;
-          if (opponent_actions.device() != actions.device()) {
-            opponent_actions = opponent_actions.to(actions.device());
-          }
-          if (snapshot_ids.device() != actions.device()) {
-            snapshot_ids = snapshot_ids.to(actions.device());
-          }
-          actions = torch::where(snapshot_ids >= 0, opponent_actions, actions);
-        }
+          torch::Tensor raw_obs_host = collector.host_observations();
+          torch::Tensor episode_starts_host = collector.host_episode_starts();
+          torch::Tensor action_masks_host = collector.host_action_masks();
+          torch::Tensor learner_active_host = collector.host_learner_active();
+          torch::Tensor raw_obs = raw_obs_host.to(shard_device, use_pinned_host_buffers_);
+          torch::Tensor episode_starts = episode_starts_host.to(shard_device, use_pinned_host_buffers_);
+          torch::Tensor action_masks = action_masks_host.to(shard_device, use_pinned_host_buffers_).to(torch::kBool);
 
-        PendingShardStep shard_step;
-        shard_step.agent_offset = static_cast<int>(shard_agent_offsets_[shard]);
-        shard_step.shard = shard;
-        shard_step.normalized_obs = normalized_obs;
-        shard_step.episode_starts_host = episode_starts_host;
-        shard_step.action_masks_host = action_masks_host;
-        shard_step.learner_active_host = learner_active_host;
-        shard_step.action_log_probs = action_log_probs;
-        shard_step.sampled_value = output.value_win_logits.squeeze(-1);
-        shard_step.next_recurrent_state = recurrent_state;
-        shard_step.policy_forward_seconds = policy_seconds;
+          torch::Tensor normalized_obs;
+          torch::Tensor actions;
+          torch::Tensor action_log_probs;
+          ActorStepOutput output;
+          const auto policy_start = std::chrono::steady_clock::now();
+          {
+            torch::NoGradGuard no_grad;
+            shard_normalizer->update(raw_obs);
+            shard_normalizer_update->update(raw_obs);
+            normalized_obs = shard_normalizer->normalize(raw_obs);
+            const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
+            torch::Tensor next_state;
+            output = shard_actor->forward_step_stateful(
+                normalized_obs, recurrent_state, episode_starts, &next_state, goal_values);
+            if (next_state.defined()) recurrent_state = next_state;
+            actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
+          }
+          if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
+            torch::cuda::synchronize();
+          }
+          shard_step.policy_forward_seconds =
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - policy_start).count();
 
-        const auto decode_start = std::chrono::steady_clock::now();
-        {
-          PULSAR_TRACE_SCOPE_CAT("trainer", "action_decode_shard");
+          const auto decode_start = std::chrono::steady_clock::now();
           shard_step.action_indices_cpu = actions.contiguous().to(torch::kCPU);
-          torch::Tensor action_indices_cpu = shard_step.action_indices_cpu;
-          PULSAR_TRACE_SCOPE_CAT("trainer", "async_step_shard");
           collector.step(
               std::span<const std::int64_t>(
-                  action_indices_cpu.data_ptr<std::int64_t>(),
-                  static_cast<std::size_t>(action_indices_cpu.numel())),
+                  shard_step.action_indices_cpu.data_ptr<std::int64_t>(),
+                  static_cast<std::size_t>(shard_step.action_indices_cpu.numel())),
               &shard_step.timings);
 
-          // Process done-reset inside the async task to parallelize across shards.
+          // Done-reset processing inside the shard task.
           torch::Tensor dones_host = collector.host_dones();
           torch::Tensor terminal_labels = collector.host_terminal_outcome_labels();
           const auto* dones_ptr = dones_host.data_ptr<float>();
           const auto* tl_ptr = terminal_labels.data_ptr<std::int64_t>();
-          const auto* la_ptr = shard_step.learner_active_host.data_ptr<float>();
+          const auto* la_ptr = learner_active_host.data_ptr<float>();
           torch::Tensor env_touch_host = collector.host_env_touched();
           torch::Tensor env_multi_touch_host = collector.host_env_multi_touched();
           const auto* env_touch_ptr = env_touch_host.data_ptr<float>();
@@ -2379,8 +2337,7 @@ void APPOTrainer::collect_rollout(
           const int64_t coll_ape = (coll_num_envs > 0) ? (coll_agents / coll_num_envs) : 2;
           for (int64_t env_agent_begin = 0; env_agent_begin < terminal_labels.numel(); env_agent_begin += coll_ape) {
             const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + coll_ape, terminal_labels.numel());
-            bool env_goal_scored = false;
-            bool env_goal_conceded = false;
+            bool env_goal_scored = false, env_goal_conceded = false;
             for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
               if (la_ptr[i] > 0.5F && dones_ptr[i] > 0.5F) {
                 if (tl_ptr[i] == 0) env_goal_scored = true;
@@ -2391,8 +2348,7 @@ void APPOTrainer::collect_rollout(
             if (env_goal_conceded) shard_step.goals_conceded++;
           }
           for (int64_t env_agent_begin = 0; env_agent_begin < dones_host.numel(); env_agent_begin += coll_ape) {
-            bool env_done = false;
-            bool env_scored = false;
+            bool env_done = false, env_scored = false;
             const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + coll_ape, dones_host.numel());
             for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
               env_done = env_done || dones_ptr[i] > 0.5F;
@@ -2411,23 +2367,41 @@ void APPOTrainer::collect_rollout(
               if (env_scored) shard_step.mode_scored[cmode]++;
             }
           }
-        }
-        shard_step.action_decode_seconds =
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
-        return shard_step;
-            }));
-      }
 
-      for (auto& pending_future : pending_futures) {
-        PendingShardStep shard_step = pending_future.get();
-        metrics.policy_forward_seconds += shard_step.policy_forward_seconds;
-        metrics.action_decode_seconds += shard_step.action_decode_seconds;
+          shard_step.action_decode_seconds =
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
+          shard_step.normalized_obs = normalized_obs;
+          shard_step.episode_starts_host = episode_starts_host;
+          shard_step.action_masks_host = action_masks_host;
+          shard_step.learner_active_host = learner_active_host;
+          shard_step.action_log_probs = action_log_probs;
+          shard_step.sampled_value = output.value_win_logits.squeeze(-1);
+          shard_step.next_recurrent_state = recurrent_state;
+          result.steps.push_back(std::move(shard_step));
+        }
+        return result;
+      }));
+    }
+
+    // Wait for all shard tasks and aggregate results per step.
+    std::vector<std::vector<PendingShardStep>> all_shard_steps(collectors_.size());
+    for (auto& fut : shard_futures) {
+      ShardResult shard_result = fut.get();
+      metrics.policy_forward_seconds += [&] { double s = 0; for (auto& st : shard_result.steps) s += st.policy_forward_seconds; return s; }();
+      metrics.action_decode_seconds += [&] { double s = 0; for (auto& st : shard_result.steps) s += st.action_decode_seconds; return s; }();
+      all_shard_steps[shard_result.shard] = std::move(shard_result.steps);
+    }
+
+    // Process results step by step (order matters for rollout storage).
+    for (int step = 0; step < config_.ppo.rollout_length; ++step) {
+      for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
+        PendingShardStep& shard_step = all_shard_steps[shard][step];
         if (shard_step.next_recurrent_state.defined()) {
-          rollout_recurrent_states[shard_step.shard] = shard_step.next_recurrent_state;
+          rollout_recurrent_states[shard] = shard_step.next_recurrent_state;
         }
         accumulate_timings(collector_timings, shard_step.timings);
 
-        // Aggregate done-reset counts pre-computed inside the async shard task.
+        // Aggregate done-reset counts.
         total_goals_scored += shard_step.goals_scored;
         total_goals_conceded += shard_step.goals_conceded;
         completed_episodes += shard_step.completed_episodes;
@@ -2441,7 +2415,7 @@ void APPOTrainer::collect_rollout(
         for (const auto& [mode, count] : shard_step.mode_multi_touched) mode_multi_touched[mode] += count;
         for (const auto& [mode, count] : shard_step.mode_scored) mode_scored[mode] += count;
 
-        auto& collector = *collectors_[shard_step.shard];
+        auto& collector = *collectors_[shard];
         torch::Tensor dones_host = collector.host_dones();
         torch::Tensor truncated_host = collector.host_truncated();
         torch::Tensor bootstrap_truncated_host = collector.host_bootstrap_truncated();
