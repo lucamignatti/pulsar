@@ -82,15 +82,15 @@
         "min_agent_steps": 0,
         "rolling_window_size": 1,
         "consecutive_success_threshold": 1,
-        "required_touch_episode_rate": 0.9,
-        "required_multi_touch_episode_rate": 0.9,
+        "required_touch_episode_rate": 0.99,
+        "required_multi_touch_episode_rate": 0.95,
         "required_scored_episode_rate": 0.0,
         "unlocked_mechanics": [],
         "outcome_override": {
-          "score": 10.0,
-          "concede": -6.0,
+          "score": 0.0,
+          "concede": 0.0,
           "neutral": 0.0,
-          "neutral_no_touch": -8.0
+          "neutral_no_touch": 0.0
         },
         "mechanic_rewards_override": {
           "kickoff_first_touch": 0.0,
@@ -144,7 +144,7 @@
           "possession_distance_decay": 1000.0,
           "dense_reward_cap_per_episode": 0.0,
           "flat_touch_weight": 50.0,
-          "team_spirit": 1.0
+          "team_spirit": 0.0
         }
       },
       {
@@ -159,10 +159,10 @@
         "required_scored_episode_rate": 0.9,
         "unlocked_mechanics": [],
         "outcome_override": {
-          "score": 50.0,
-          "concede": -6.0,
+          "score": 20.0,
+          "concede": 0.0,
           "neutral": 0.0,
-          "neutral_no_touch": -8.0
+          "neutral_no_touch": 0.0
         },
         "mechanic_rewards_override": {
           "kickoff_first_touch": 0.0,
@@ -186,12 +186,12 @@
         "dense_rewards_override": {
           "ball_touch_vel_weight": 0.0,
           "touch_direction_weight": 0.0,
-          "speed_toward_ball_weight": 1.0,
+          "speed_toward_ball_weight": 0.5,
           "speed_toward_ball_decay": 1000.0,
           "face_ball_weight": 0.0,
           "air_reward_weight": 0.15,
           "air_reward_ball_z_min": 200.0,
-          "velocity_ball_to_goal_weight": 15.0,
+          "velocity_ball_to_goal_weight": 0.0,
           "max_ball_speed": 6000.0,
           "air_touch_weight": 0.0,
           "air_touch_max_air_time": 1.75,
@@ -215,8 +215,8 @@
           "possession_window_ticks": 180,
           "possession_distance_decay": 1000.0,
           "dense_reward_cap_per_episode": 0.0,
-          "flat_touch_weight": 5.0,
-          "team_spirit": 1.0
+          "flat_touch_weight": 2.0,
+          "team_spirit": 0.0
         }
       },
       {
@@ -250,7 +250,7 @@
           "score": 10.0,
           "concede": -6.0,
           "neutral": 0.0,
-          "neutral_no_touch": -8.0
+          "neutral_no_touch": 0.0
         },
         "mechanic_rewards_override": {
           "kickoff_first_touch": 0.0,
@@ -304,7 +304,7 @@
           "possession_distance_decay": 1000.0,
           "dense_reward_cap_per_episode": 0.0,
           "flat_touch_weight": 0.0,
-          "team_spirit": 1.0
+          "team_spirit": 0.0
         }
       }
     ]
