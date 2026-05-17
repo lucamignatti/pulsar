@@ -461,7 +461,10 @@ void reduce_captured_grad_groups(
 void reduce_gradients_from_replicas(
     PPOActor& primary,
     const std::vector<PPOActor>& replicas) {
+  if (!primary) return;
   auto primary_params = primary->named_parameters(true);
+  if (primary_params.size() == 0) return;
+  const torch::Device primary_device = primary->parameters().front().device();
   for (const auto& replica : replicas) {
     if (!replica) continue;
     auto replica_params = replica->named_parameters(true);
@@ -472,9 +475,9 @@ void reduce_gradients_from_replicas(
       if (!replica_grad.defined()) continue;
       torch::Tensor primary_grad = primary_tensor->mutable_grad();
       if (primary_grad.defined()) {
-        primary_grad.add_(replica_grad.to(primary->parameters().front().device()));
+        primary_grad.add_(replica_grad.to(primary_device));
       } else {
-        primary_tensor->mutable_grad() = replica_grad.to(primary->parameters().front().device());
+        primary_tensor->mutable_grad() = replica_grad.to(primary_device);
       }
     }
   }
@@ -484,6 +487,7 @@ void reduce_gradients_from_replicas(
 void sync_actor_to_replicas(
     const PPOActor& primary,
     std::vector<PPOActor>& replicas) {
+  if (!primary) return;
   for (auto& replica : replicas) {
     if (replica) {
       copy_ppo_actor_tensors_to(primary, replica, replica->parameters().front().device());
