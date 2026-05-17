@@ -2222,9 +2222,21 @@ void APPOTrainer::collect_rollout(
       torch::Tensor sampled_value{};
       torch::Tensor next_recurrent_state{};
       CollectorTimings timings{};
-      std::future<void> step_future{};
       double policy_forward_seconds = 0.0;
       double action_decode_seconds = 0.0;
+      // Done-reset metrics computed inside the async shard task.
+      int goals_scored = 0;
+      int goals_conceded = 0;
+      int completed_episodes = 0;
+      int scored_episodes = 0;
+      int touched_episodes = 0;
+      int multi_touched_episodes = 0;
+      std::int64_t ball_prox_steps = 0;
+      std::int64_t ball_prox_denom = 0;
+      std::map<std::string, int> mode_completed;
+      std::map<std::string, int> mode_touched;
+      std::map<std::string, int> mode_multi_touched;
+      std::map<std::string, int> mode_scored;
     };
 
     for (int step = 0; step < config_.ppo.rollout_length; ++step) {
@@ -2341,18 +2353,64 @@ void APPOTrainer::collect_rollout(
           PULSAR_TRACE_SCOPE_CAT("trainer", "action_decode_shard");
           shard_step.action_indices_cpu = actions.contiguous().to(torch::kCPU);
           torch::Tensor action_indices_cpu = shard_step.action_indices_cpu;
-          BatchedRocketSimCollector* collector_ptr = &collector;
-          CollectorTimings* shard_timings = &shard_step.timings;
-          shard_step.step_future = std::async(
-              std::launch::async,
-              [collector_ptr, action_indices_cpu, shard_timings]() mutable {
-                PULSAR_TRACE_SCOPE_CAT("trainer", "async_step_shard");
-                collector_ptr->step(
-                    std::span<const std::int64_t>(
-                        action_indices_cpu.data_ptr<std::int64_t>(),
-                        static_cast<std::size_t>(action_indices_cpu.numel())),
-                    shard_timings);
-              });
+          PULSAR_TRACE_SCOPE_CAT("trainer", "async_step_shard");
+          collector.step(
+              std::span<const std::int64_t>(
+                  action_indices_cpu.data_ptr<std::int64_t>(),
+                  static_cast<std::size_t>(action_indices_cpu.numel())),
+              &shard_step.timings);
+
+          // Process done-reset inside the async task to parallelize across shards.
+          torch::Tensor dones_host = collector.host_dones();
+          torch::Tensor terminal_labels = collector.host_terminal_outcome_labels();
+          const auto* dones_ptr = dones_host.data_ptr<float>();
+          const auto* tl_ptr = terminal_labels.data_ptr<std::int64_t>();
+          const auto* la_ptr = shard_step.learner_active_host.data_ptr<float>();
+          torch::Tensor env_touch_host = collector.host_env_touched();
+          torch::Tensor env_multi_touch_host = collector.host_env_multi_touched();
+          const auto* env_touch_ptr = env_touch_host.data_ptr<float>();
+          const auto* env_multi_touch_ptr = env_multi_touch_host.data_ptr<float>();
+          torch::Tensor ball_prox_host = collector.host_ball_proximity();
+          shard_step.ball_prox_steps = ball_prox_host.sum().item<int64_t>();
+          shard_step.ball_prox_denom = ball_prox_host.numel();
+
+          const int64_t coll_agents = static_cast<int64_t>(collector.total_agents());
+          const int64_t coll_num_envs = static_cast<int64_t>(collector.num_envs());
+          const int64_t coll_ape = (coll_num_envs > 0) ? (coll_agents / coll_num_envs) : 2;
+          for (int64_t env_agent_begin = 0; env_agent_begin < terminal_labels.numel(); env_agent_begin += coll_ape) {
+            const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + coll_ape, terminal_labels.numel());
+            bool env_goal_scored = false;
+            bool env_goal_conceded = false;
+            for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
+              if (la_ptr[i] > 0.5F && dones_ptr[i] > 0.5F) {
+                if (tl_ptr[i] == 0) env_goal_scored = true;
+                if (tl_ptr[i] == 1) env_goal_conceded = true;
+              }
+            }
+            if (env_goal_scored) shard_step.goals_scored++;
+            if (env_goal_conceded) shard_step.goals_conceded++;
+          }
+          for (int64_t env_agent_begin = 0; env_agent_begin < dones_host.numel(); env_agent_begin += coll_ape) {
+            bool env_done = false;
+            bool env_scored = false;
+            const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + coll_ape, dones_host.numel());
+            for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
+              env_done = env_done || dones_ptr[i] > 0.5F;
+              env_scored = env_scored || (dones_ptr[i] > 0.5F && tl_ptr[i] == 0);
+            }
+            if (env_done) {
+              shard_step.completed_episodes++;
+              if (env_scored) shard_step.scored_episodes++;
+              const int64_t env_idx = env_agent_begin / coll_ape;
+              if (env_touch_ptr[env_idx] > 0.5F) shard_step.touched_episodes++;
+              if (env_multi_touch_ptr[env_idx] > 0.5F) shard_step.multi_touched_episodes++;
+              const std::string& cmode = collector.mode();
+              shard_step.mode_completed[cmode]++;
+              if (env_touch_ptr[env_idx] > 0.5F) shard_step.mode_touched[cmode]++;
+              if (env_multi_touch_ptr[env_idx] > 0.5F) shard_step.mode_multi_touched[cmode]++;
+              if (env_scored) shard_step.mode_scored[cmode]++;
+            }
+          }
         }
         shard_step.action_decode_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
@@ -2362,13 +2420,26 @@ void APPOTrainer::collect_rollout(
 
       for (auto& pending_future : pending_futures) {
         PendingShardStep shard_step = pending_future.get();
-        shard_step.step_future.get();
         metrics.policy_forward_seconds += shard_step.policy_forward_seconds;
         metrics.action_decode_seconds += shard_step.action_decode_seconds;
         if (shard_step.next_recurrent_state.defined()) {
           rollout_recurrent_states[shard_step.shard] = shard_step.next_recurrent_state;
         }
         accumulate_timings(collector_timings, shard_step.timings);
+
+        // Aggregate done-reset counts pre-computed inside the async shard task.
+        total_goals_scored += shard_step.goals_scored;
+        total_goals_conceded += shard_step.goals_conceded;
+        completed_episodes += shard_step.completed_episodes;
+        scored_episodes += shard_step.scored_episodes;
+        touched_episodes += shard_step.touched_episodes;
+        multi_touched_episodes += shard_step.multi_touched_episodes;
+        total_ball_proximity_steps += shard_step.ball_prox_steps;
+        total_ball_proximity_denom += shard_step.ball_prox_denom;
+        for (const auto& [mode, count] : shard_step.mode_completed) mode_completed[mode] += count;
+        for (const auto& [mode, count] : shard_step.mode_touched) mode_touched[mode] += count;
+        for (const auto& [mode, count] : shard_step.mode_multi_touched) mode_multi_touched[mode] += count;
+        for (const auto& [mode, count] : shard_step.mode_scored) mode_scored[mode] += count;
 
         auto& collector = *collectors_[shard_step.shard];
         torch::Tensor dones_host = collector.host_dones();
@@ -2378,66 +2449,6 @@ void APPOTrainer::collect_rollout(
         torch::Tensor extrinsic_rewards_host = collector.host_rewards();
         torch::Tensor gameplay_r_host = collector.host_gameplay_rewards();
         torch::Tensor mechanic_r_host = collector.host_mechanic_rewards();
-        const auto* dones_ptr = dones_host.data_ptr<float>();
-
-        torch::Tensor ball_prox_host = collector.host_ball_proximity();
-        total_ball_proximity_steps += ball_prox_host.sum().item<int64_t>();
-        total_ball_proximity_denom += ball_prox_host.numel();
-
-        const auto* tl_ptr = terminal_labels.data_ptr<std::int64_t>();
-        const auto* la_ptr = shard_step.learner_active_host.data_ptr<float>();
-        torch::Tensor env_touch_host = collector.host_env_touched();
-        torch::Tensor env_multi_touch_host = collector.host_env_multi_touched();
-        const auto* env_touch_ptr = env_touch_host.data_ptr<float>();
-        const auto* env_multi_touch_ptr = env_multi_touch_host.data_ptr<float>();
-        const int64_t coll_agents = static_cast<int64_t>(collector.total_agents());
-        const int64_t coll_num_envs = static_cast<int64_t>(collector.num_envs());
-        const int64_t coll_ape = (coll_num_envs > 0) ? (coll_agents / coll_num_envs) : 2;
-        for (int64_t env_agent_begin = 0; env_agent_begin < terminal_labels.numel(); env_agent_begin += coll_ape) {
-          const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + coll_ape, terminal_labels.numel());
-          bool env_done = false;
-          bool env_scored = false;
-          bool env_conceded = false;
-          for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
-            if (la_ptr[i] > 0.5F && dones_ptr[i] > 0.5F) {
-              env_done = true;
-              if (tl_ptr[i] == 0) env_scored = true;
-              if (tl_ptr[i] == 1) env_conceded = true;
-            }
-          }
-          if (env_done) {
-            if (env_scored) total_goals_scored++;
-            if (env_conceded) total_goals_conceded++;
-          }
-        }
-        for (int64_t env_agent_begin = 0; env_agent_begin < dones_host.numel(); env_agent_begin += coll_ape) {
-          bool env_done = false;
-          bool env_scored = false;
-          const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + coll_ape, dones_host.numel());
-          for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
-            env_done = env_done || dones_ptr[i] > 0.5F;
-            env_scored = env_scored || (dones_ptr[i] > 0.5F && tl_ptr[i] == 0);
-          }
-           if (env_done) {
-              completed_episodes++;
-              if (env_scored) {
-                scored_episodes++;
-              }
-              const int64_t env_idx = env_agent_begin / coll_ape;
-              if (env_touch_ptr[env_idx] > 0.5F) {
-                touched_episodes++;
-              }
-              if (env_multi_touch_ptr[env_idx] > 0.5F) {
-                multi_touched_episodes++;
-              }
-              // per-mode tracking
-              const std::string& cmode = collector.mode();
-              mode_completed[cmode]++;
-              if (env_touch_ptr[env_idx] > 0.5F) mode_touched[cmode]++;
-              if (env_multi_touch_ptr[env_idx] > 0.5F) mode_multi_touched[cmode]++;
-              if (env_scored) mode_scored[cmode]++;
-            }
-         }
 
         accumulated_sampled_value += shard_step.sampled_value.sum().item<double>();
         accumulated_value_count += static_cast<int64_t>(shard_step.sampled_value.numel());
