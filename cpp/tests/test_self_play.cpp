@@ -16,6 +16,18 @@
 
 namespace {
 
+// Safely remove a directory tree without relying on std::filesystem::remove_all,
+// which may resolve to a broken implementation in libtorch's bundled libstdc++.
+void safe_remove_all(const std::filesystem::path& path) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  fs::remove_all(path, ec);
+  if (ec && fs::exists(path)) {
+    // libtorch's bundled filesystem choked; fall back to POSIX.
+    std::system(("rm -rf " + path.string()).c_str());
+  }
+}
+
 void test_snapshot_save_load_trim_and_assignment() {
   namespace fs = std::filesystem;
   pulsar::ExperimentConfig config = pulsar::test::make_test_config();
@@ -28,7 +40,7 @@ void test_snapshot_save_load_trim_and_assignment() {
   config.ppo.device = "cpu";
 
   const fs::path root = fs::temp_directory_path() / "pulsar_self_play_test";
-  fs::remove_all(root);
+  safe_remove_all(root);
   auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
@@ -69,7 +81,7 @@ void test_snapshot_save_load_trim_and_assignment() {
         league_changed_reloaded.has_snapshots(),
         "self-play snapshot load should tolerate league sampling config changes");
   }
-  fs::remove_all(root);
+  safe_remove_all(root);
 }
 
 void test_opponent_inference_and_elo_math() {
@@ -194,7 +206,7 @@ void test_snapshot_reload_preserves_actor_config() {
   config.goal_critic.hidden_dim = 256;
 
   const fs::path root = fs::temp_directory_path() / "pulsar_self_play_actor_test";
-  fs::remove_all(root);
+  safe_remove_all(root);
   auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
@@ -235,7 +247,7 @@ void test_snapshot_reload_preserves_actor_config() {
         "snapshot goal critic should have matching embedding dim");
   }
 
-  fs::remove_all(root);
+  safe_remove_all(root);
 }
 
 void test_self_play_eval_runs_and_loaded_snapshots_are_bounded() {
@@ -253,7 +265,7 @@ void test_self_play_eval_runs_and_loaded_snapshots_are_bounded() {
   config.ppo.device = "cpu";
 
   const fs::path root = fs::temp_directory_path() / "pulsar_self_play_eval_test";
-  fs::remove_all(root);
+  safe_remove_all(root);
   auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
@@ -276,13 +288,13 @@ void test_self_play_eval_runs_and_loaded_snapshots_are_bounded() {
     pulsar::test::require(!metrics.ratings.empty(), "self-play evaluation should report ELO ratings");
   }
 
-  fs::remove_all(root);
+  safe_remove_all(root);
 }
 
 void test_checkpoint_metadata_validation() {
   namespace fs = std::filesystem;
   const fs::path root = fs::temp_directory_path() / "pulsar_metadata_validation_test";
-  fs::remove_all(root);
+  safe_remove_all(root);
   fs::create_directories(root);
 
   {
@@ -361,7 +373,7 @@ void test_checkpoint_metadata_validation() {
     pulsar::test::require(threw, "empty critic heads should throw");
   }
 
-  fs::remove_all(root);
+  safe_remove_all(root);
 }
 
 void test_self_play_league_default_config() {
@@ -387,7 +399,7 @@ void test_rng_state_round_trip() {
   config.ppo.device = "cpu";
 
   const fs::path root = fs::temp_directory_path() / "pulsar_rng_test";
-  fs::remove_all(root);
+  safe_remove_all(root);
   auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
@@ -406,7 +418,7 @@ void test_rng_state_round_trip() {
   pulsar::test::require(assignment_before.enabled == assignment_after.enabled,
                         "rng restore should reproduce same assignment");
 
-  fs::remove_all(root);
+  safe_remove_all(root);
 }
 
 void test_restore_ratings() {
@@ -417,7 +429,7 @@ void test_restore_ratings() {
   config.ppo.device = "cpu";
 
   const fs::path root = fs::temp_directory_path() / "pulsar_ratings_restore_test";
-  fs::remove_all(root);
+  safe_remove_all(root);
   auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
@@ -432,7 +444,7 @@ void test_restore_ratings() {
     pulsar::test::require(restored.at("1v1") == 1100.0, "1v1 rating should be 1100");
     pulsar::test::require(restored.at("2v2") == 1050.0, "2v2 rating should be 1050");
   }
-  fs::remove_all(root);
+  safe_remove_all(root);
 }
 
 void test_ratings_include_all_curriculum_modes() {
@@ -450,7 +462,7 @@ void test_ratings_include_all_curriculum_modes() {
   config.ppo.device = "cpu";
 
   const fs::path root = fs::temp_directory_path() / "pulsar_ratings_modes_test";
-  fs::remove_all(root);
+  safe_remove_all(root);
   auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
@@ -461,7 +473,7 @@ void test_ratings_include_all_curriculum_modes() {
   pulsar::test::require(ratings.at("2v2") == 987.0, "2v2 rating should be initialized");
   pulsar::test::require(ratings.at("3v3") == 987.0, "3v3 rating should be initialized");
 
-  fs::remove_all(root);
+  safe_remove_all(root);
 }
 
 void test_snapshot_mode_is_preserved() {
@@ -476,7 +488,7 @@ void test_snapshot_mode_is_preserved() {
   config.ppo.device = "cpu";
 
   const fs::path root = fs::temp_directory_path() / "pulsar_snapshot_mode_test";
-  fs::remove_all(root);
+  safe_remove_all(root);
   auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
@@ -503,7 +515,7 @@ void test_snapshot_mode_is_preserved() {
     pulsar::test::require(assignment.enabled, "assignment should be enabled");
   }
 
-  fs::remove_all(root);
+  safe_remove_all(root);
 }
 
 }  // namespace
