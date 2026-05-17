@@ -1459,9 +1459,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           torch::Tensor mode_gpu_learner_active_mb = rollout.learner_active.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(gpu_device);
           torch::Tensor mode_gpu_actions_mb = rollout.actions.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(gpu_device);
           torch::Tensor mode_gpu_action_log_probs_mb = rollout.action_log_probs.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(gpu_device);
-          torch::Tensor micro_agent_indices_gpu = micro_agent_indices.to(gpu_device);
-          torch::Tensor mode_gpu_advantages_mb = normalized_advantages.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices_gpu);
-          torch::Tensor mode_gpu_returns_mb = sparse_returns.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices_gpu);
+          torch::Tensor mode_gpu_advantages_mb = normalized_advantages.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(gpu_device);
+          torch::Tensor mode_gpu_returns_mb = sparse_returns.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(gpu_device);
 
           for (int seq_start = 0; seq_start < rollout.rollout_length(); seq_start += seq_len) {
             const int chunk_start = seq_start;
@@ -1533,8 +1532,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                   (raw_log_ratio.detach().abs() > std::log1p(static_cast<double>(config_.ppo.clip_range)))
                       .to(torch::kFloat32)
                       .mean();
-              policy_approx_kl_sum = policy_approx_kl_sum + approx_kl * active_samples;
-              policy_clip_fraction_sum = policy_clip_fraction_sum + clip_fraction * active_samples;
+              policy_approx_kl_sum = policy_approx_kl_sum + approx_kl.to(device_) * active_samples;
+              policy_clip_fraction_sum = policy_clip_fraction_sum + clip_fraction.to(device_) * active_samples;
               const double chunk_max_log_ratio =
                   raw_log_ratio.detach().abs().max().item<double>();
               policy_log_ratio_abs_max = std::max(policy_log_ratio_abs_max, chunk_max_log_ratio);
@@ -1593,7 +1592,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                   config_.goal_critic.max_future_horizon);
               const int goal_dim = config_.goal_critic.goal_dim;
 
-              torch::Tensor flat_future_goal_pos = future_goal_pos.to(device_).reshape({samples, goal_dim});
+              torch::Tensor flat_future_goal_pos = future_goal_pos.to(gpu_device).reshape({samples, goal_dim});
               torch::Tensor active_future_goal_pos = flat_future_goal_pos.index({flat_active});
 
               const auto active_count = active_features.size(0);
@@ -1632,9 +1631,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
               }
 
               chunk_sampled_goal_norm = active_future_goal_pos.norm(2, -1).mean();
-              sampled_goal_distance_sum = sampled_goal_distance_sum + chunk_sampled_goal_norm.detach().to(torch::kFloat32) * active_samples;
-              goal_critic_loss_sum = goal_critic_loss_sum + goal_loss.detach().to(torch::kFloat32) * active_samples;
-              goal_score_sum = goal_score_sum + chunk_goal_score.detach().to(torch::kFloat32) * active_samples;
+              sampled_goal_distance_sum = sampled_goal_distance_sum + chunk_sampled_goal_norm.detach().to(torch::kFloat32).to(device_) * active_samples;
+              goal_critic_loss_sum = goal_critic_loss_sum + goal_loss.detach().to(torch::kFloat32).to(device_) * active_samples;
+              goal_score_sum = goal_score_sum + chunk_goal_score.detach().to(torch::kFloat32).to(device_) * active_samples;
             }
 
             const auto sample_weight = active_samples / mode_total_active;
@@ -1695,9 +1694,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             }
             accumulated_has_backward = true;
 
-            policy_loss_sum = policy_loss_sum + policy_loss.detach().to(torch::kFloat32) * active_samples;
-            value_loss_sum = value_loss_sum + value_loss.detach().to(torch::kFloat32) * active_samples;
-            entropy_sum = entropy_sum + entropy.detach().to(torch::kFloat32) * active_samples;
+            policy_loss_sum = policy_loss_sum + policy_loss.detach().to(torch::kFloat32).to(device_) * active_samples;
+            value_loss_sum = value_loss_sum + value_loss.detach().to(torch::kFloat32).to(device_) * active_samples;
+            entropy_sum = entropy_sum + entropy.detach().to(torch::kFloat32).to(device_) * active_samples;
             metrics.forward_backward_seconds +=
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - forward_backward_start).count();
             metric_steps += active_sample_count;
