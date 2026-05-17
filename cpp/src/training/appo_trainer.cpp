@@ -10,6 +10,7 @@
 #include <future>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -37,6 +38,7 @@
 #include "pulsar/tracing/tracing.hpp"
 
 #ifdef PULSAR_HAS_CUDA
+#include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDACachingAllocator.h>
 #endif
 
@@ -145,6 +147,26 @@ void sample_cuda_memory_stats(TrainerMetrics& metrics, const torch::Device& devi
 #endif
 }
 
+void sample_cuda_memory_stats(TrainerMetrics& metrics, const std::vector<torch::Device>& devices) noexcept {
+  TrainerMetrics aggregate{};
+  for (const torch::Device& device : devices) {
+    TrainerMetrics per_device{};
+    sample_cuda_memory_stats(per_device, device);
+    aggregate.cuda_memory_allocated_mb += per_device.cuda_memory_allocated_mb;
+    aggregate.cuda_memory_reserved_mb += per_device.cuda_memory_reserved_mb;
+    aggregate.cuda_max_memory_allocated_mb += per_device.cuda_max_memory_allocated_mb;
+    aggregate.cuda_max_memory_reserved_mb += per_device.cuda_max_memory_reserved_mb;
+    aggregate.cuda_alloc_retries += per_device.cuda_alloc_retries;
+    aggregate.cuda_ooms += per_device.cuda_ooms;
+  }
+  metrics.cuda_memory_allocated_mb = aggregate.cuda_memory_allocated_mb;
+  metrics.cuda_memory_reserved_mb = aggregate.cuda_memory_reserved_mb;
+  metrics.cuda_max_memory_allocated_mb = aggregate.cuda_max_memory_allocated_mb;
+  metrics.cuda_max_memory_reserved_mb = aggregate.cuda_max_memory_reserved_mb;
+  metrics.cuda_alloc_retries = aggregate.cuda_alloc_retries;
+  metrics.cuda_ooms = aggregate.cuda_ooms;
+}
+
 void trim_released_host_memory() noexcept {
 #if defined(__linux__)
   malloc_trim(0);
@@ -191,6 +213,50 @@ torch::Device resolve_runtime_device(const std::string& device_name) {
   return device;
 }
 
+std::vector<torch::Device> resolve_runtime_devices(const std::string& device_name) {
+  torch::Device requested(device_name);
+  if (!requested.is_cuda()) {
+    return {requested};
+  }
+  if (requested.has_index()) {
+    return {requested};
+  }
+#ifdef PULSAR_HAS_CUDA
+  const int device_count = static_cast<int>(torch::cuda::device_count());
+  if (device_count > 0) {
+    std::vector<torch::Device> devices;
+    devices.reserve(static_cast<std::size_t>(device_count));
+    for (int index = 0; index < device_count; ++index) {
+      devices.emplace_back(torch::kCUDA, index);
+    }
+    return devices;
+  }
+#endif
+  return {torch::Device(torch::kCUDA, 0)};
+}
+
+std::string join_device_list(const std::vector<torch::Device>& devices) {
+  std::string joined;
+  for (std::size_t i = 0; i < devices.size(); ++i) {
+    if (i > 0) {
+      joined += ",";
+    }
+    joined += devices[i].str();
+  }
+  return joined;
+}
+
+std::vector<torch::Device> assign_shard_devices(
+    const std::vector<torch::Device>& devices,
+    std::size_t num_shards) {
+  std::vector<torch::Device> result;
+  result.reserve(num_shards);
+  for (std::size_t shard = 0; shard < num_shards; ++shard) {
+    result.push_back(devices[shard % devices.size()]);
+  }
+  return result;
+}
+
 void synchronize_cuda_if_needed(const torch::Device& device, const char* context) noexcept {
   if (!device.is_cuda()) {
     return;
@@ -199,6 +265,12 @@ void synchronize_cuda_if_needed(const torch::Device& device, const char* context
     torch::cuda::synchronize();
   } catch (const std::exception& exc) {
     std::cerr << "cuda synchronize failed during " << context << ": " << exc.what() << '\n';
+  }
+}
+
+void synchronize_cuda_if_needed(const std::vector<torch::Device>& devices, const char* context) noexcept {
+  for (const torch::Device& device : devices) {
+    synchronize_cuda_if_needed(device, context);
   }
 }
 
@@ -357,6 +429,64 @@ void apply_pcgrad_multi(std::vector<std::vector<CapturedGrad>>& groups) {
         groups[g][param_idx].grad = torch::Tensor{};
       }
       offset += sz;
+    }
+  }
+}
+
+// Reduce CapturedGrad groups from GPU replicas into the primary groups.
+// replica_groups_list[replica_idx][group_idx][param_idx] -> added to primary_groups.
+void reduce_captured_grad_groups(
+    std::vector<std::vector<CapturedGrad>>& primary_groups,
+    const std::vector<std::vector<std::vector<CapturedGrad>>>& replica_groups_list,
+    const torch::Device& primary_device) {
+  for (const auto& replica_groups : replica_groups_list) {
+    if (replica_groups.empty()) continue;
+    for (size_t g = 0; g < replica_groups.size(); ++g) {
+      if (g >= primary_groups.size()) break;
+      for (size_t p = 0; p < replica_groups[g].size(); ++p) {
+        if (p >= primary_groups[g].size()) break;
+        if (replica_groups[g][p].grad.defined()) {
+          if (primary_groups[g][p].grad.defined()) {
+            primary_groups[g][p].grad.add_(replica_groups[g][p].grad.to(primary_device));
+          } else {
+            primary_groups[g][p].grad = replica_groups[g][p].grad.to(primary_device);
+          }
+        }
+      }
+    }
+  }
+}
+
+// Reduce regular (non-PCGrad) gradients from replica actors into the primary actor.
+void reduce_gradients_from_replicas(
+    PPOActor& primary,
+    const std::vector<PPOActor>& replicas) {
+  auto primary_params = primary->named_parameters(true);
+  for (const auto& replica : replicas) {
+    if (!replica) continue;
+    auto replica_params = replica->named_parameters(true);
+    for (const auto& item : replica_params) {
+      torch::Tensor* primary_tensor = primary_params.find(item.key());
+      if (primary_tensor == nullptr) continue;
+      torch::Tensor replica_grad = item.value().mutable_grad();
+      if (!replica_grad.defined()) continue;
+      torch::Tensor primary_grad = primary_tensor->mutable_grad();
+      if (primary_grad.defined()) {
+        primary_grad.add_(replica_grad.to(primary->parameters().front().device()));
+      } else {
+        primary_tensor->mutable_grad() = replica_grad.to(primary->parameters().front().device());
+      }
+    }
+  }
+}
+
+// Sync weights from primary actor to all replica actors.
+void sync_actor_to_replicas(
+    const PPOActor& primary,
+    std::vector<PPOActor>& replicas) {
+  for (auto& replica : replicas) {
+    if (replica) {
+      copy_ppo_actor_tensors_to(primary, replica, replica->parameters().front().device());
     }
   }
 }
@@ -720,6 +850,8 @@ APPOTrainer::APPOTrainer(
       actor_normalizer_(config_.model.observation_dim),
       actor_optimizer_(actor_->parameters(), torch::optim::AdamOptions(config_.ppo.learning_rate).eps(1.0e-5F)),
       device_(resolve_runtime_device(config_.ppo.device)),
+      compute_devices_(resolve_runtime_devices(config_.ppo.device)),
+      shard_devices_(assign_shard_devices(compute_devices_, collectors_.size())),
       rollout_(make_rollout_storage(
           config_,
           static_cast<int>(total_agents_for_collectors(collectors_)),
@@ -747,7 +879,10 @@ APPOTrainer::APPOTrainer(
     throw std::invalid_argument("APPOTrainer collectors must contain agents.");
   }
   seed_everything(config_.env.seed);
-  configure_cuda_runtime(device_);
+  device_ = compute_devices_.front();
+  for (const auto& compute_device : compute_devices_) {
+    configure_cuda_runtime(compute_device);
+  }
   use_pinned_host_buffers_ = device_.is_cuda();
 #ifdef PULSAR_HAS_CUDA
   if (device_.is_cuda()) {
@@ -755,8 +890,9 @@ APPOTrainer::APPOTrainer(
     const std::size_t num_shards = collectors_.size();
     shard_collection_streams_.reserve(num_shards);
     for (std::size_t i = 0; i < num_shards; ++i) {
+      const torch::Device shard_device = shard_devices_[i];
       shard_collection_streams_.emplace_back(
-          at::cuda::getStreamFromPool(false, device_.index()));
+          at::cuda::getStreamFromPool(false, shard_device.index()));
     }
   }
 #endif
@@ -766,6 +902,13 @@ APPOTrainer::APPOTrainer(
   maybe_initialize_from_checkpoint();
   actor_snapshot_ = clone_ppo_actor(actor_, device_);
   actor_snapshot_->eval();
+
+  // Clone actor replicas to each additional compute GPU for data-parallel updates.
+  for (size_t i = 1; i < compute_devices_.size(); ++i) {
+    auto replica = clone_ppo_actor(actor_, compute_devices_[i]);
+    replica->train();
+    compute_actors_.push_back(std::move(replica));
+  }
 
   shard_agent_offsets_.clear();
   std::int64_t agent_offset = 0;
@@ -789,10 +932,16 @@ APPOTrainer::APPOTrainer(
       env_offset += collector->num_envs();
     }
   }
+  if (log_initialization_) {
+    std::cout << "compute_devices=" << join_device_list(compute_devices_)
+              << " collection_shards=" << collectors_.size()
+              << " collection_workers=" << config_.ppo.collection_workers
+              << '\n';
+  }
 }
 
 APPOTrainer::~APPOTrainer() {
-  synchronize_cuda_if_needed(device_, "trainer shutdown");
+  synchronize_cuda_if_needed(compute_devices_, "trainer shutdown");
 }
 
 std::int64_t APPOTrainer::model_parameter_count() const {
@@ -898,10 +1047,12 @@ void APPOTrainer::rebuild_collectors() {
 
 #ifdef PULSAR_HAS_CUDA
   if (device_.is_cuda()) {
+    shard_devices_ = assign_shard_devices(compute_devices_, collectors_.size());
     shard_collection_streams_.clear();
     for (std::size_t i = 0; i < collectors_.size(); ++i) {
+      const torch::Device shard_device = shard_devices_[i];
       shard_collection_streams_.push_back(
-          at::cuda::getStreamFromPool(false, device_.index()));
+          at::cuda::getStreamFromPool(false, shard_device.index()));
     }
   }
 #endif
@@ -1212,12 +1363,22 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   torch::Tensor sparse_returns = sparse_advantages + extrinsic_values.detach();
 
   int completed_minibatches = 0;
+  const size_t num_update_gpus = compute_devices_.size();
+  // Per-GPU PCGrad group storage for multi-GPU gradient reduction.
+  std::vector<std::vector<std::vector<CapturedGrad>>> gpu_pcgrad_groups(num_update_gpus);
+  std::vector<bool> gpu_has_backward(num_update_gpus, false);
   for (int epoch = 0; epoch < config_.ppo.update_epochs; ++epoch) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "update_epoch");
     const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
     for (int agent_offset = 0; agent_offset < total_agents; agent_offset += logical_agents_per_batch) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "update_minibatch");
       const auto minibatch_start = std::chrono::steady_clock::now();
+
+      // Select GPU for this minibatch (round-robin across compute devices).
+      const size_t gpu_idx = completed_minibatches % num_update_gpus;
+      const torch::Device gpu_device = compute_devices_[gpu_idx];
+      PPOActor& gpu_actor = (gpu_idx == 0) ? actor_ : compute_actors_[gpu_idx - 1];
+
       const int count = std::min(logical_agents_per_batch, total_agents - agent_offset);
       const torch::Tensor agent_indices = perm.narrow(0, agent_offset, count);
 
@@ -1249,7 +1410,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       }
 
       // Process each mode group (or the full batch if single mode).
-      std::vector<std::vector<CapturedGrad>> pcgrad_groups;
+      // Use per-GPU gradient storage for multi-GPU reduction.
+      std::vector<std::vector<CapturedGrad>>& pcgrad_groups = gpu_pcgrad_groups[gpu_idx];
+      pcgrad_groups.clear();
       double combined_total_active = 0.0;
 
       for (const torch::Tensor& mode_agent_indices : mode_agent_indices_list) {
@@ -1274,6 +1437,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
         if (use_pcgrad || accumulated_minibatches == 0) {
           actor_optimizer_.zero_grad();
+          if (gpu_idx > 0) {
+            zero_existing_gradients(*gpu_actor);
+          }
         }
         std::vector<CapturedGrad> mode_task_grad_group;
         std::vector<CapturedGrad> mode_goal_critic_grad_group;
@@ -1283,13 +1449,13 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           const int micro_count = std::min(agents_per_forward, mode_count - micro_agent_offset);
           const torch::Tensor micro_agent_indices = mode_agent_indices.narrow(0, micro_agent_offset, micro_count);
 
-          torch::Tensor mode_gpu_obs_mb = rollout.obs.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(device_);
-          torch::Tensor mode_gpu_episode_starts_mb = rollout.episode_starts.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(device_);
-          torch::Tensor mode_gpu_action_masks_mb = rollout.action_masks.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(device_);
-          torch::Tensor mode_gpu_learner_active_mb = rollout.learner_active.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(device_);
-          torch::Tensor mode_gpu_actions_mb = rollout.actions.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(device_);
-          torch::Tensor mode_gpu_action_log_probs_mb = rollout.action_log_probs.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(device_);
-          torch::Tensor micro_agent_indices_gpu = micro_agent_indices.to(device_);
+          torch::Tensor mode_gpu_obs_mb = rollout.obs.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(gpu_device);
+          torch::Tensor mode_gpu_episode_starts_mb = rollout.episode_starts.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(gpu_device);
+          torch::Tensor mode_gpu_action_masks_mb = rollout.action_masks.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(gpu_device);
+          torch::Tensor mode_gpu_learner_active_mb = rollout.learner_active.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(gpu_device);
+          torch::Tensor mode_gpu_actions_mb = rollout.actions.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(gpu_device);
+          torch::Tensor mode_gpu_action_log_probs_mb = rollout.action_log_probs.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(gpu_device);
+          torch::Tensor micro_agent_indices_gpu = micro_agent_indices.to(gpu_device);
           torch::Tensor mode_gpu_advantages_mb = normalized_advantages.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices_gpu);
           torch::Tensor mode_gpu_returns_mb = sparse_returns.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices_gpu);
 
@@ -1310,7 +1476,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
               const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_critic.goal_dim);
               const torch::Tensor episode_starts =
                   mode_gpu_episode_starts_mb.narrow(0, chunk_start, chunk_steps);
-              output = actor_->forward_sequence(obs, goal_values, episode_starts);
+              output = gpu_actor->forward_sequence(obs, goal_values, episode_starts);
             }
 
             if (loss_steps <= 0) continue;
@@ -1328,7 +1494,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             const torch::Tensor flat_active = learner_active.reshape({samples}) > 0.5F;
 
             torch::Tensor flat_logits = policy_logits.reshape({samples, config_.model.action_dim});
-            torch::Tensor flat_features = features.reshape({samples, static_cast<int64_t>(actor_->feature_dim())});
+            torch::Tensor flat_features = features.reshape({samples, static_cast<int64_t>(gpu_actor->feature_dim())});
             torch::Tensor flat_masks = action_masks.reshape({samples, config_.model.action_dim});
             torch::Tensor flat_actions = old_actions.reshape({samples});
             torch::Tensor flat_old_log_probs = old_log_probs.reshape({samples});
@@ -1436,16 +1602,16 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 const torch::Tensor act_sub = active_actions.index({idx});
                 const torch::Tensor goal_sub = active_future_goal_pos.index({idx});
 
-                sa_emb = actor_->goal_critic()->sa_embedding(feat_sub, act_sub);
-                g_emb = actor_->goal_critic()->goal_embedding(goal_sub);
+                sa_emb = gpu_actor->goal_critic()->sa_embedding(feat_sub, act_sub);
+                g_emb = gpu_actor->goal_critic()->goal_embedding(goal_sub);
               } else {
-                sa_emb = actor_->goal_critic()->sa_embedding(active_features, active_actions);
-                g_emb = actor_->goal_critic()->goal_embedding(active_future_goal_pos);
+                sa_emb = gpu_actor->goal_critic()->sa_embedding(active_features, active_actions);
+                g_emb = gpu_actor->goal_critic()->goal_embedding(active_future_goal_pos);
               }
               const torch::Tensor sa_logits = compute_pairwise_negative_l2_logits(sa_emb, g_emb);
               goal_loss = compute_symmetric_infonce_loss(sa_logits, config_.goal_critic.logsumexp_penalty_coeff);
               actor_goal_loss = goal_actor_critic_loss(
-                  actor_->goal_critic(),
+                  gpu_actor->goal_critic(),
                   active_features,
                   active_logits,
                   active_masks,
@@ -1454,7 +1620,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
               {
                 torch::NoGradGuard no_grad;
-                const torch::Tensor goal_scores = actor_->goal_critic()->forward(
+                const torch::Tensor goal_scores = gpu_actor->goal_critic()->forward(
                     active_features.detach(),
                     active_actions,
                     active_future_goal_pos);
@@ -1513,10 +1679,10 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
               }
 
               for (size_t objective_idx = 0; objective_idx < objective_losses.size(); ++objective_idx) {
-                zero_existing_gradients(*actor_);
+                zero_existing_gradients(*gpu_actor);
                 const bool retain_graph = objective_idx + 1 < objective_losses.size();
                 (objective_losses[objective_idx].first * cuda_amp_loss_scale).backward({}, retain_graph);
-                accumulate_gradients(*actor_, *objective_losses[objective_idx].second);
+                accumulate_gradients(*gpu_actor, *objective_losses[objective_idx].second);
               }
             } else {
               torch::Tensor combined_loss =
@@ -1550,9 +1716,10 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       accumulated_minibatches++;
       accumulated_total_active += combined_total_active;
 
-      // Apply PCGrad across mode/objective groups, then materialize their sum.
+      // Apply PCGrad across mode/objective groups on the current GPU actor,
+      // then materialize their sum into that GPU's parameter gradients.
       if (use_pcgrad && !pcgrad_groups.empty()) {
-        zero_existing_gradients(*actor_);
+        zero_existing_gradients(*gpu_actor);
         apply_pcgrad_multi(pcgrad_groups);
         for (size_t i = 0; i < pcgrad_groups[0].size(); ++i) {
           torch::Tensor combined;
@@ -1584,6 +1751,11 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         continue;
       }
 
+      // Reduce gradients from replica GPU actors into the primary actor before stepping.
+      if (num_update_gpus > 1) {
+        reduce_gradients_from_replicas(actor_, compute_actors_);
+      }
+
       const auto optim_start = std::chrono::steady_clock::now();
       double grad_norm = 0.0;
       bool stepped_optimizer = false;
@@ -1602,6 +1774,20 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         }
       }
       actor_optimizer_.zero_grad();
+
+      // Sync updated primary weights back to all replica GPU actors.
+      if (num_update_gpus > 1) {
+        sync_actor_to_replicas(actor_, compute_actors_);
+        // Clear any residual gradients on replicas after sync.
+        for (auto& replica : compute_actors_) {
+          if (replica) zero_existing_gradients(*replica);
+        }
+      }
+
+      // Clear per-GPU PCGrad group storage for the next accumulation period.
+      for (size_t g = 0; g < num_update_gpus; ++g) {
+        gpu_pcgrad_groups[g].clear();
+      }
       metrics.optimizer_step_seconds +=
           std::chrono::duration<double>(std::chrono::steady_clock::now() - optim_start).count();
       if (stepped_optimizer) {
@@ -2007,9 +2193,27 @@ void APPOTrainer::collect_rollout(
   std::map<std::string, int> mode_scored;
   std::vector<torch::Tensor> rollout_recurrent_states;
   rollout_recurrent_states.reserve(collectors_.size());
-  for (const auto& collector_ptr : collectors_) {
+  std::vector<PPOActor> rollout_actors;
+  rollout_actors.reserve(collectors_.size());
+  std::vector<ObservationNormalizer> shard_normalizers;
+  shard_normalizers.reserve(collectors_.size());
+  std::vector<ObservationNormalizer> shard_normalizer_updates;
+  shard_normalizer_updates.reserve(collectors_.size());
+  for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
+    const auto& collector_ptr = collectors_[shard];
+    const torch::Device shard_device = shard_devices_.empty() ? device_ : shard_devices_[shard];
+    if (shard_device == device_) {
+      rollout_actors.push_back(rollout_actor);
+    } else {
+      rollout_actors.push_back(clone_ppo_actor(rollout_actor, shard_device));
+      rollout_actors.back()->eval();
+    }
+    shard_normalizers.push_back(normalizer.clone());
+    shard_normalizers.back().to(shard_device);
+    shard_normalizer_updates.emplace_back(config_.model.observation_dim);
+    shard_normalizer_updates.back().to(shard_device);
     rollout_recurrent_states.push_back(
-        rollout_actor->initial_recurrent_state(static_cast<int64_t>(collector_ptr->total_agents()), device_));
+        rollout_actors.back()->initial_recurrent_state(static_cast<int64_t>(collector_ptr->total_agents()), shard_device));
   }
 
   if (collectors_.size() > 1) {
@@ -2024,18 +2228,34 @@ void APPOTrainer::collect_rollout(
       torch::Tensor action_indices_cpu{};
       torch::Tensor action_log_probs{};
       torch::Tensor sampled_value{};
+      torch::Tensor next_recurrent_state{};
       CollectorTimings timings{};
-      std::future<void> step_future{};
+      double policy_forward_seconds = 0.0;
+      double action_decode_seconds = 0.0;
     };
 
     for (int step = 0; step < config_.ppo.rollout_length; ++step) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "collect_step_sharded");
-      std::vector<PendingShardStep> pending;
-      pending.reserve(collectors_.size());
+      std::mutex self_play_inference_mutex;
+      std::vector<std::future<PendingShardStep>> pending_futures;
+      pending_futures.reserve(collectors_.size());
 
       for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
-        auto& collector = *collectors_[shard];
+        BatchedRocketSimCollector* collector_ptr = collectors_[shard].get();
+        PPOActor shard_actor = rollout_actors[shard];
+        ObservationNormalizer* shard_normalizer = &shard_normalizers[shard];
+        ObservationNormalizer* shard_normalizer_update = &shard_normalizer_updates[shard];
+        torch::Tensor recurrent_state = rollout_recurrent_states[shard];
+        const torch::Device shard_device = shard_devices_.empty() ? device_ : shard_devices_[shard];
+        pending_futures.push_back(std::async(
+            std::launch::async,
+            [&, shard, collector_ptr, shard_actor, shard_normalizer, shard_normalizer_update, recurrent_state, shard_device]() mutable {
+        auto& collector = *collector_ptr;
 #ifdef PULSAR_HAS_CUDA
+        std::optional<c10::cuda::CUDAGuard> shard_device_guard;
+        if (shard_device.is_cuda()) {
+          shard_device_guard.emplace(shard_device);
+        }
         if (shard < shard_collection_streams_.size()) {
           c10::cuda::setCurrentCUDAStream(shard_collection_streams_[shard]);
         }
@@ -2044,9 +2264,9 @@ void APPOTrainer::collect_rollout(
         torch::Tensor episode_starts_host = collector.host_episode_starts();
         torch::Tensor action_masks_host = collector.host_action_masks();
         torch::Tensor learner_active_host = collector.host_learner_active();
-        torch::Tensor raw_obs = raw_obs_host.to(device_, use_pinned_host_buffers_);
-        torch::Tensor episode_starts = episode_starts_host.to(device_, use_pinned_host_buffers_);
-        torch::Tensor action_masks = action_masks_host.to(device_, use_pinned_host_buffers_).to(torch::kBool);
+        torch::Tensor raw_obs = raw_obs_host.to(shard_device, use_pinned_host_buffers_);
+        torch::Tensor episode_starts = episode_starts_host.to(shard_device, use_pinned_host_buffers_);
+        torch::Tensor action_masks = action_masks_host.to(shard_device, use_pinned_host_buffers_).to(torch::kBool);
 
         torch::Tensor normalized_obs;
         torch::Tensor actions;
@@ -2056,43 +2276,62 @@ void APPOTrainer::collect_rollout(
         {
           PULSAR_TRACE_SCOPE_CAT("trainer", "policy_forward_shard");
           torch::NoGradGuard no_grad;
-          normalizer.update(raw_obs);
-          normalized_obs = normalizer.normalize(raw_obs);
+          shard_normalizer->update(raw_obs);
+          shard_normalizer_update->update(raw_obs);
+          normalized_obs = shard_normalizer->normalize(raw_obs);
           const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
           torch::Tensor next_state;
-          output = rollout_actor->forward_step_stateful(
+          output = shard_actor->forward_step_stateful(
               normalized_obs,
-              rollout_recurrent_states[shard],
+              recurrent_state,
               episode_starts,
               &next_state,
               goal_values);
           if (next_state.defined()) {
-            rollout_recurrent_states[shard] = next_state;
+            recurrent_state = next_state;
           }
           actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
         }
         if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
           torch::cuda::synchronize();
         }
-        metrics.policy_forward_seconds +=
+        double policy_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - policy_start).count();
 
         if (self_play_manager_ && self_play_manager_->has_snapshots()) {
           torch::Tensor opponent_actions;
-          torch::Tensor snapshot_ids = collector.host_snapshot_ids().to(device_, use_pinned_host_buffers_);
+          torch::Tensor snapshot_ids = collector.host_snapshot_ids().to(shard_device, use_pinned_host_buffers_);
+          torch::Tensor self_play_raw_obs = raw_obs;
+          torch::Tensor self_play_action_masks = action_masks;
+          torch::Tensor self_play_episode_starts = episode_starts;
+          torch::Tensor self_play_snapshot_ids = snapshot_ids;
+          if (shard_device != device_) {
+            self_play_raw_obs = raw_obs.to(device_);
+            self_play_action_masks = action_masks.to(device_);
+            self_play_episode_starts = episode_starts.to(device_);
+            self_play_snapshot_ids = snapshot_ids.to(device_);
+          }
+          double self_play_seconds = 0.0;
+          std::lock_guard<std::mutex> lock(self_play_inference_mutex);
           self_play_manager_->infer_opponent_actions(
               rollout_actor,
-              raw_obs,
-              action_masks,
-              episode_starts,
-              snapshot_ids,
+              self_play_raw_obs,
+              self_play_action_masks,
+              self_play_episode_starts,
+              self_play_snapshot_ids,
               &opponent_actions,
-              &metrics.policy_forward_seconds);
+              &self_play_seconds);
+          policy_seconds += self_play_seconds;
+          if (opponent_actions.device() != actions.device()) {
+            opponent_actions = opponent_actions.to(actions.device());
+          }
+          if (snapshot_ids.device() != actions.device()) {
+            snapshot_ids = snapshot_ids.to(actions.device());
+          }
           actions = torch::where(snapshot_ids >= 0, opponent_actions, actions);
         }
 
-        pending.emplace_back();
-        PendingShardStep& shard_step = pending.back();
+        PendingShardStep shard_step;
         shard_step.agent_offset = static_cast<int>(shard_agent_offsets_[shard]);
         shard_step.shard = shard;
         shard_step.normalized_obs = normalized_obs;
@@ -2101,31 +2340,34 @@ void APPOTrainer::collect_rollout(
         shard_step.learner_active_host = learner_active_host;
         shard_step.action_log_probs = action_log_probs;
         shard_step.sampled_value = output.value_win_logits.squeeze(-1);
+        shard_step.next_recurrent_state = recurrent_state;
+        shard_step.policy_forward_seconds = policy_seconds;
 
         const auto decode_start = std::chrono::steady_clock::now();
         {
           PULSAR_TRACE_SCOPE_CAT("trainer", "action_decode_shard");
           shard_step.action_indices_cpu = actions.contiguous().to(torch::kCPU);
-          BatchedRocketSimCollector* collector_ptr = &collector;
           torch::Tensor action_indices_cpu = shard_step.action_indices_cpu;
-          CollectorTimings* shard_timings = &shard_step.timings;
-          shard_step.step_future = std::async(
-              std::launch::async,
-              [collector_ptr, action_indices_cpu, shard_timings]() mutable {
-                PULSAR_TRACE_SCOPE_CAT("trainer", "async_step_shard");
-                collector_ptr->step(
-                    std::span<const std::int64_t>(
-                        action_indices_cpu.data_ptr<std::int64_t>(),
-                        static_cast<std::size_t>(action_indices_cpu.numel())),
-                    shard_timings);
-              });
+          PULSAR_TRACE_SCOPE_CAT("trainer", "async_step_shard");
+          collector.step(
+              std::span<const std::int64_t>(
+                  action_indices_cpu.data_ptr<std::int64_t>(),
+                  static_cast<std::size_t>(action_indices_cpu.numel())),
+              &shard_step.timings);
         }
-        metrics.action_decode_seconds +=
+        shard_step.action_decode_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
+        return shard_step;
+            }));
       }
 
-      for (PendingShardStep& shard_step : pending) {
-        shard_step.step_future.get();
+      for (auto& pending_future : pending_futures) {
+        PendingShardStep shard_step = pending_future.get();
+        metrics.policy_forward_seconds += shard_step.policy_forward_seconds;
+        metrics.action_decode_seconds += shard_step.action_decode_seconds;
+        if (shard_step.next_recurrent_state.defined()) {
+          rollout_recurrent_states[shard_step.shard] = shard_step.next_recurrent_state;
+        }
         accumulate_timings(collector_timings, shard_step.timings);
 
         auto& collector = *collectors_[shard_step.shard];
@@ -2257,23 +2499,30 @@ void APPOTrainer::collect_rollout(
       final_values.reserve(collectors_.size());
       for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
         auto& collector = *collectors_[shard];
+        PPOActor& shard_actor = rollout_actors[shard];
+        ObservationNormalizer& shard_normalizer = shard_normalizers[shard];
+        const torch::Device shard_device = shard_devices_.empty() ? device_ : shard_devices_[shard];
 #ifdef PULSAR_HAS_CUDA
+        std::optional<c10::cuda::CUDAGuard> shard_device_guard;
+        if (shard_device.is_cuda()) {
+          shard_device_guard.emplace(shard_device);
+        }
         if (shard < shard_collection_streams_.size()) {
           c10::cuda::setCurrentCUDAStream(shard_collection_streams_[shard]);
         }
 #endif
-        torch::Tensor final_raw_obs = collector.host_observations().to(device_, use_pinned_host_buffers_);
-        torch::Tensor final_normalized = normalizer.normalize(final_raw_obs);
-        torch::Tensor final_starts = collector.host_episode_starts().to(device_, use_pinned_host_buffers_);
+        torch::Tensor final_raw_obs = collector.host_observations().to(shard_device, use_pinned_host_buffers_);
+        torch::Tensor final_normalized = shard_normalizer.normalize(final_raw_obs);
+        torch::Tensor final_starts = collector.host_episode_starts().to(shard_device, use_pinned_host_buffers_);
         const torch::Tensor final_goal_values = policy_goal_values_like(final_normalized, config_.goal_critic.goal_dim);
         torch::Tensor unused_next_state;
-        ActorStepOutput final_output = rollout_actor->forward_step_stateful(
+        ActorStepOutput final_output = shard_actor->forward_step_stateful(
             final_normalized,
             rollout_recurrent_states[shard],
             final_starts,
             &unused_next_state,
             final_goal_values);
-        final_values.push_back(final_output.value_win_logits.squeeze(-1));
+        final_values.push_back(final_output.value_win_logits.squeeze(-1).to(device_));
       }
       std::unordered_map<std::string, torch::Tensor> bootstrap_values;
       bootstrap_values["extrinsic"] = torch::cat(final_values, 0);
@@ -2484,6 +2733,13 @@ void APPOTrainer::collect_rollout(
     std::unordered_map<std::string, torch::Tensor> bootstrap_values;
     bootstrap_values["extrinsic"] = final_output.value_win_logits.squeeze(-1);
     dest.set_final_values(bootstrap_values);
+    }
+  }
+
+  if (collectors_.size() > 1) {
+    for (auto& update : shard_normalizer_updates) {
+      update.to(device_);
+      normalizer.merge(update);
     }
   }
 
@@ -2831,6 +3087,10 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
 
     if (curriculum_.stage_index() >= kEsLoraMinStage && update_index % config_.es_lora.es_interval == 0) {
       run_es_lora_update(update_index, coll_metrics);
+      // Sync ES-LoRA weight changes to replica actors.
+      if (compute_actors_.size() > 0) {
+        sync_actor_to_replicas(actor_, compute_actors_);
+      }
       discard_overlapped_rollout = discard_overlapped_rollout || overlap_collection_update;
     }
 
@@ -2841,6 +3101,10 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       for (auto& p : actor_->parameters()) {
         if (!p.requires_grad() || p.dim() < 2) continue;
         actor_optimizer_.state().erase(p.unsafeGetTensorImpl());
+      }
+      // Sync plasticity weight changes to replica actors.
+      if (compute_actors_.size() > 0) {
+        sync_actor_to_replicas(actor_, compute_actors_);
       }
       discard_overlapped_rollout = discard_overlapped_rollout || overlap_collection_update;
     }
@@ -2917,7 +3181,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     const CgroupMemoryStats cgroup_memory = current_cgroup_memory_stats();
     coll_metrics.cgroup_memory_current_mb = cgroup_memory.current_mb;
     coll_metrics.cgroup_memory_limit_mb = cgroup_memory.limit_mb;
-    sample_cuda_memory_stats(coll_metrics, device_);
+    sample_cuda_memory_stats(coll_metrics, compute_devices_);
 
     append_metrics_line(checkpoint_dir, update_index, global_step, coll_metrics);
     std::cout << "update=" << update_index

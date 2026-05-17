@@ -199,6 +199,7 @@ TORCH_MODULE(PPOActor);
 
 PPOActor load_ppo_actor(const std::string& checkpoint_path, const std::string& device);
 PPOActor clone_ppo_actor(const PPOActor& source, const torch::Device& device);
+void copy_ppo_actor_tensors_to(const PPOActor& source, PPOActor& target, const torch::Device& device);
 
 #else
 

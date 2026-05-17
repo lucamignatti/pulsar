@@ -183,9 +183,12 @@ class APPOTrainer {
   ControllerActionTable action_table_{};
   PPOActor actor_{nullptr};
   PPOActor actor_snapshot_{nullptr};
+  std::vector<PPOActor> compute_actors_;
   ObservationNormalizer actor_normalizer_;
   torch::optim::Adam actor_optimizer_;
   torch::Device device_{torch::kCPU};
+  std::vector<torch::Device> compute_devices_{};
+  std::vector<torch::Device> shard_devices_{};
   RolloutStorage rollout_;
   RolloutStorage rollout_B_;
   std::filesystem::path run_output_root_{};

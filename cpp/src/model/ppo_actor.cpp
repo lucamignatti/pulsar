@@ -16,7 +16,7 @@
 namespace pulsar {
 namespace {
 
-void copy_module_tensors_to(const PPOActor& source, PPOActor& target, const torch::Device& device) {
+void copy_module_tensors_to(const PPOActor& source, PPOActor& target, const torch::Device&) {
   torch::NoGradGuard no_grad;
 
   const auto source_params = source->named_parameters(true);
@@ -631,6 +631,13 @@ PPOActor clone_ppo_actor(const PPOActor& source, const torch::Device& device) {
   clone->to(device);
   copy_module_tensors_to(source, clone, device);
   return clone;
+}
+
+void copy_ppo_actor_tensors_to(const PPOActor& source, PPOActor& target, const torch::Device& device) {
+  if (!source || !target) {
+    throw std::invalid_argument("copy_ppo_actor_tensors_to requires non-null actors.");
+  }
+  copy_module_tensors_to(source, target, device);
 }
 
 }  // namespace pulsar
