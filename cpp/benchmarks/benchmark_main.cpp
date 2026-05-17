@@ -89,7 +89,7 @@ int main(int argc, char** argv) {
     pulsar::ExperimentConfig config = pulsar::load_experiment_config(config_path.string());
     int override_start = 3;
     if (argc > 3 && std::string(argv[3]).find('=') == std::string::npos) {
-      config.ppo.device = resolve_runtime_device(argv[3]).str();
+      config.ppo.device = argv[3];
       override_start = 4;
     }
     for (int arg_index = override_start; arg_index < argc; ++arg_index) {
