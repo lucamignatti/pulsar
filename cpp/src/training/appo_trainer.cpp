@@ -1625,6 +1625,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
                 if (use_pcgrad_local) {
                   const int effective_accum = 1;
+                  // Collect all active objectives for this chunk.
                   std::vector<std::pair<torch::Tensor, std::vector<CapturedGrad>*>> objective_losses;
                   objective_losses.push_back({weighted_task_loss / static_cast<double>(effective_accum), &gpu_task_group});
                   if (config_.goal_critic.lambda_Zg > 0.0F && weighted_goal_critic_loss.requires_grad()) {
@@ -1633,12 +1634,14 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                   if (config_.goal_critic.lambda_goal_actor > 0.0F && weighted_goal_actor_loss.requires_grad()) {
                     objective_losses.push_back({weighted_goal_actor_loss / static_cast<double>(effective_accum), &gpu_goal_actor_group});
                   }
-                  for (size_t oi = 0; oi < objective_losses.size(); ++oi) {
-                    zero_existing_gradients(*gpu_act);
-                    const bool retain = oi + 1 < objective_losses.size();
-                    (objective_losses[oi].first * cuda_amp_loss_scale_local).backward({}, retain);
-                    accumulate_gradients(*gpu_act, *objective_losses[oi].second);
-                  }
+
+                  // Distribute objectives across GPUs: each GPU backpropagates only
+                  // ONE objective. Gradients are combined during reduction.
+                  const int num_obj = static_cast<int>(objective_losses.size());
+                  const int my_obj = (num_obj > 0) ? (static_cast<int>(g) % num_obj) : 0;
+                  zero_existing_gradients(*gpu_act);
+                  (objective_losses[my_obj].first * cuda_amp_loss_scale_local).backward();
+                  accumulate_gradients(*gpu_act, *objective_losses[my_obj].second);
                 } else {
                   (loss * sample_weight / static_cast<double>(optimizer_accumulation_steps_local) * cuda_amp_loss_scale_local).backward();
                 }
