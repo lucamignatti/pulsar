@@ -2221,6 +2221,16 @@ void APPOTrainer::collect_rollout(
       torch::Tensor action_log_probs{};
       torch::Tensor sampled_value{};
       torch::Tensor next_recurrent_state{};
+      // Post-step tensors captured inside the async task.
+      torch::Tensor dones_host{};
+      torch::Tensor truncated_host{};
+      torch::Tensor bootstrap_truncated_host{};
+      torch::Tensor terminal_labels{};
+      torch::Tensor extrinsic_rewards_host{};
+      torch::Tensor gameplay_r_host{};
+      torch::Tensor mechanic_r_host{};
+      torch::Tensor goal_pos_host{};
+      torch::Tensor terminal_obs_host{};
       CollectorTimings timings{};
       double policy_forward_seconds = 0.0;
       double action_decode_seconds = 0.0;
@@ -2370,6 +2380,16 @@ void APPOTrainer::collect_rollout(
 
           shard_step.action_decode_seconds =
               std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
+          // Capture post-step tensors so the main thread doesn't read stale collector state.
+          shard_step.dones_host = std::move(dones_host);
+          shard_step.truncated_host = collector.host_truncated();
+          shard_step.bootstrap_truncated_host = collector.host_bootstrap_truncated();
+          shard_step.terminal_labels = std::move(terminal_labels);
+          shard_step.extrinsic_rewards_host = collector.host_rewards();
+          shard_step.gameplay_r_host = collector.host_gameplay_rewards();
+          shard_step.mechanic_r_host = collector.host_mechanic_rewards();
+          shard_step.goal_pos_host = collector.host_goal_positions();
+          shard_step.terminal_obs_host = collector.host_terminal_observations();
           shard_step.normalized_obs = normalized_obs;
           shard_step.episode_starts_host = episode_starts_host;
           shard_step.action_masks_host = action_masks_host;
@@ -2415,19 +2435,20 @@ void APPOTrainer::collect_rollout(
         for (const auto& [mode, count] : shard_step.mode_multi_touched) mode_multi_touched[mode] += count;
         for (const auto& [mode, count] : shard_step.mode_scored) mode_scored[mode] += count;
 
-        auto& collector = *collectors_[shard];
-        torch::Tensor dones_host = collector.host_dones();
-        torch::Tensor truncated_host = collector.host_truncated();
-        torch::Tensor bootstrap_truncated_host = collector.host_bootstrap_truncated();
-        torch::Tensor terminal_labels = collector.host_terminal_outcome_labels();
-        torch::Tensor extrinsic_rewards_host = collector.host_rewards();
-        torch::Tensor gameplay_r_host = collector.host_gameplay_rewards();
-        torch::Tensor mechanic_r_host = collector.host_mechanic_rewards();
+        // Use tensors captured by the async task (not stale collector state).
+        torch::Tensor& dones_host = shard_step.dones_host;
+        torch::Tensor& truncated_host = shard_step.truncated_host;
+        torch::Tensor& bootstrap_truncated_host = shard_step.bootstrap_truncated_host;
+        torch::Tensor& terminal_labels = shard_step.terminal_labels;
+        torch::Tensor& extrinsic_rewards_host = shard_step.extrinsic_rewards_host;
+        torch::Tensor& gameplay_r_host = shard_step.gameplay_r_host;
+        torch::Tensor& mechanic_r_host = shard_step.mechanic_r_host;
+        torch::Tensor& goal_pos_host = shard_step.goal_pos_host;
+        torch::Tensor& terminal_obs_host = shard_step.terminal_obs_host;
 
         accumulated_sampled_value += shard_step.sampled_value.sum().item<double>();
         accumulated_value_count += static_cast<int64_t>(shard_step.sampled_value.numel());
 
-        torch::Tensor goal_pos_host = collector.host_goal_positions();
         torch::Tensor goal_norms = goal_pos_host.norm(2, 1);
         float gd_min = goal_norms.min().item<float>();
         float gd_mean = goal_norms.mean().item<float>();
@@ -2437,8 +2458,6 @@ void APPOTrainer::collect_rollout(
         if (gd_min < min_goal_distance) {
           min_goal_distance = static_cast<double>(gd_min);
         }
-
-        torch::Tensor terminal_obs_host = collector.host_terminal_observations();
 
         const auto learner_step_count = static_cast<std::int64_t>(shard_step.learner_active_host.sum().item<float>());
         total_reward += (extrinsic_rewards_host * shard_step.learner_active_host).sum().item<double>();
@@ -2470,6 +2489,7 @@ void APPOTrainer::collect_rollout(
             goal_pos_host,
             terminal_labels,
             terminal_obs_host);
+        auto& collector = *collectors_[shard];
         dest.set_mode_ids_slice(step, shard_step.agent_offset, collector.mode_id());
 
         local_collected_steps += learner_step_count;
