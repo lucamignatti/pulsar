@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <span>
 #include <stdexcept>
 
 namespace pulsar {
@@ -47,7 +49,25 @@ void zero_fill(float*& out, std::size_t count) {
   out += static_cast<std::ptrdiff_t>(count);
 }
 
-void write_agent_obs(const EnvState& state, const EnvConfig& config, AgentId agent_id, float* dst) {
+void validate_car_order(const EnvState& state, std::span<const AgentId> car_order) {
+  if (car_order.empty()) return;
+  if (car_order.size() != state.cars.size()) {
+    throw std::invalid_argument("PulsarObsBuilder received a car order with the wrong size.");
+  }
+  std::uint64_t seen = 0;
+  for (const AgentId other_id : car_order) {
+    if (other_id >= state.cars.size() || other_id >= 64U) {
+      throw std::invalid_argument("PulsarObsBuilder received an invalid car order.");
+    }
+    const std::uint64_t bit = 1ULL << other_id;
+    if ((seen & bit) != 0U) {
+      throw std::invalid_argument("PulsarObsBuilder received an invalid car order.");
+    }
+    seen |= bit;
+  }
+}
+
+void write_agent_obs(const EnvState& state, const EnvConfig& config, AgentId agent_id, std::span<const AgentId> car_order, float* dst) {
   const CarState& self = state.cars[agent_id];
   const bool inverted = self.team == Team::Orange;
 
@@ -71,7 +91,9 @@ void write_agent_obs(const EnvState& state, const EnvConfig& config, AgentId age
 
   std::size_t ally_count = 0;
   std::size_t enemy_count = 0;
-  for (std::size_t other_id = 0; other_id < state.cars.size() && ally_count < static_cast<std::size_t>(config.team_size - 1); ++other_id) {
+  const std::size_t order_size = car_order.empty() ? state.cars.size() : car_order.size();
+  for (std::size_t order_idx = 0; order_idx < order_size && ally_count < static_cast<std::size_t>(config.team_size - 1); ++order_idx) {
+    const AgentId other_id = car_order.empty() ? order_idx : car_order[order_idx];
     if (other_id == agent_id) {
       continue;
     }
@@ -88,7 +110,8 @@ void write_agent_obs(const EnvState& state, const EnvConfig& config, AgentId age
     ++ally_count;
   }
 
-  for (std::size_t other_id = 0; other_id < state.cars.size() && enemy_count < static_cast<std::size_t>(config.team_size); ++other_id) {
+  for (std::size_t order_idx = 0; order_idx < order_size && enemy_count < static_cast<std::size_t>(config.team_size); ++order_idx) {
+    const AgentId other_id = car_order.empty() ? order_idx : car_order[order_idx];
     if (other_id == agent_id) {
       continue;
     }
@@ -111,20 +134,25 @@ PulsarObsBuilder::PulsarObsBuilder(EnvConfig config) : config_(std::move(config)
 
 std::vector<float> PulsarObsBuilder::build_obs(const EnvState& state, AgentId agent_id) const {
   std::vector<float> obs(obs_dim());
-  write_agent_obs(state, config_, agent_id, obs.data());
+  write_agent_obs(state, config_, agent_id, {}, obs.data());
   return obs;
 }
 
 void PulsarObsBuilder::build_obs_batch(const EnvState& state, std::span<float> out) const {
+  build_obs_batch(state, out, {});
+}
+
+void PulsarObsBuilder::build_obs_batch(const EnvState& state, std::span<float> out, std::span<const AgentId> car_order) const {
   const std::size_t stride = obs_dim();
   const std::size_t expected = state.cars.size() * stride;
   if (out.size() != expected) {
     throw std::invalid_argument("PulsarObsBuilder::build_obs_batch received an output span with the wrong size.");
   }
+  validate_car_order(state, car_order);
 
   for (std::size_t agent_id = 0; agent_id < state.cars.size(); ++agent_id) {
     float* dst = out.data() + static_cast<std::ptrdiff_t>(agent_id * stride);
-    write_agent_obs(state, config_, agent_id, dst);
+    write_agent_obs(state, config_, agent_id, car_order, dst);
   }
 }
 

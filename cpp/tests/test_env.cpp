@@ -82,6 +82,32 @@ void test_obs_content_and_done() {
   pulsar::test::require(tick_truncated[0] == 1, "max tick timeout should truncate");
 }
 
+void test_obs_shuffled_car_order() {
+  pulsar::ExperimentConfig config = pulsar::test::make_test_config();
+  config.env.team_size = 3;
+
+  pulsar::EnvState state;
+  pulsar::FixedTeamSizeMutator fixed(config.env);
+  pulsar::KickoffMutator kickoff(config.env);
+  fixed.apply(state, 13);
+  kickoff.apply(state, 13);
+
+  for (std::size_t idx = 0; idx < state.cars.size(); ++idx) {
+    state.cars[idx].position = {100.0F * static_cast<float>(idx + 1), 0.0F, 17.0F};
+  }
+
+  pulsar::PulsarObsBuilder obs_builder(config.env);
+  std::vector<float> obs(state.cars.size() * obs_builder.obs_dim());
+  const std::vector<pulsar::AgentId> car_order{2, 1, 0, 5, 4, 3};
+  obs_builder.build_obs_batch(state, obs, car_order);
+
+  pulsar::test::require(nearly_equal(obs[72], state.cars[2].position.x / 2300.0F), "first ally slot should follow shuffled order");
+  pulsar::test::require(nearly_equal(obs[92], state.cars[1].position.x / 2300.0F), "second ally slot should follow shuffled order");
+  pulsar::test::require(nearly_equal(obs[112], state.cars[5].position.x / 2300.0F), "first enemy slot should follow shuffled order");
+  pulsar::test::require(nearly_equal(obs[132], state.cars[4].position.x / 2300.0F), "second enemy slot should follow shuffled order");
+  pulsar::test::require(nearly_equal(obs[152], state.cars[3].position.x / 2300.0F), "third enemy slot should follow shuffled order");
+}
+
 void test_mutators() {
   pulsar::ExperimentConfig config = pulsar::test::make_test_config();
   pulsar::EnvState state;
@@ -137,6 +163,7 @@ void test_rocketsim_reproducibility() {
 int main() {
   try {
     test_obs_content_and_done();
+    test_obs_shuffled_car_order();
     test_mutators();
     test_rocketsim_reproducibility();
     std::cout << "pulsar_env_tests passed\n";

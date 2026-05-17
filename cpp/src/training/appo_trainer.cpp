@@ -741,6 +741,7 @@ void APPOTrainer::apply_curriculum_to_collectors() {
   }
   if (self_play_manager_) {
     self_play_manager_->set_curriculum_stage(curriculum_.stage_index());
+    self_play_manager_->set_current_mode(curriculum_.primary_mode());
   }
 }
 
@@ -2481,6 +2482,10 @@ TrainerBenchmarkMetrics APPOTrainer::benchmark(int updates) {
   benchmark_progress_ = true;
 
   if (curriculum_.enabled()) {
+    curriculum_.initialize_stage();
+    if (!curriculum_.mode_allocation().empty()) {
+      rebuild_collectors();
+    }
     apply_curriculum_to_collectors();
     apply_curriculum_lr();
   }
@@ -2615,7 +2620,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     if (resumed_update_index_ == 0) {
       curriculum_.initialize_stage();
     }
-    if (curriculum_.mode_allocation().size() > 1) {
+    if (!curriculum_.mode_allocation().empty()) {
       rebuild_collectors();
     }
     apply_curriculum_to_collectors();

@@ -103,6 +103,7 @@ class BatchedRocketSimCollector {
     TransitionEnginePtr engine;
     SelfPlayAssignment assignment;
     std::uint64_t reset_seed = 0;
+    std::vector<AgentId> obs_car_order{};
     std::vector<ControllerState> action_scratch{};
     std::vector<std::uint8_t> terminated_scratch{};
     std::vector<std::uint8_t> truncated_scratch{};
@@ -110,6 +111,8 @@ class BatchedRocketSimCollector {
 
   [[nodiscard]] HostBuffers allocate_host_buffers(bool pin_host_memory) const;
   void assign_env(std::size_t env_idx, std::uint64_t seed);
+  void refresh_obs_car_order(std::size_t env_idx, std::uint64_t seed);
+  void build_env_obs_batch(std::size_t env_idx, const EnvState& state, std::span<float> out) const;
   void finalize_step(CollectorTimings* timings);
   void initialize(std::vector<TransitionEnginePtr> engines, bool pin_host_memory);
   void rebuild_host_buffers(HostBuffers& buffers, CollectorTimings* timings);

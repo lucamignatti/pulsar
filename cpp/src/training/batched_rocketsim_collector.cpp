@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <numeric>
+#include <random>
 #include <stdexcept>
 #include <utility>
 
@@ -39,6 +41,13 @@ void compute_goal_position(const EnvState& state, const GoalMappingConfig& cfg, 
   out[0] = ball.position.x / cfg.arena_max_distance;
   out[1] = ball.position.y / cfg.arena_max_distance;
   out[2] = ball.position.z / cfg.arena_max_distance;
+}
+
+std::uint64_t mix_obs_order_seed(std::uint64_t seed, std::size_t env_idx) {
+  std::uint64_t x = seed + 0x9e3779b97f4a7c15ULL + (static_cast<std::uint64_t>(env_idx) << 6U);
+  x = (x ^ (x >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+  x = (x ^ (x >> 27U)) * 0x94d049bb133111ebULL;
+  return x ^ (x >> 31U);
 }
 
 }  // namespace
@@ -97,6 +106,7 @@ void BatchedRocketSimCollector::initialize(
         .engine = std::move(engines[env_idx]),
         .assignment = {},
         .reset_seed = config_.env.seed + static_cast<std::uint64_t>(env_idx),
+        .obs_car_order = {},
         .action_scratch = std::vector<ControllerState>(agent_count),
         .terminated_scratch = std::vector<std::uint8_t>(agent_count, 0),
         .truncated_scratch = std::vector<std::uint8_t>(agent_count, 0),
@@ -302,6 +312,25 @@ void BatchedRocketSimCollector::assign_env(std::size_t env_idx, std::uint64_t se
   } else {
     envs_[env_idx].assignment = {};
   }
+  refresh_obs_car_order(env_idx, seed);
+}
+
+void BatchedRocketSimCollector::refresh_obs_car_order(std::size_t env_idx, std::uint64_t seed) {
+  auto& order = envs_[env_idx].obs_car_order;
+  order.resize(envs_[env_idx].engine->num_agents());
+  std::iota(order.begin(), order.end(), AgentId{0});
+  if (order.size() <= 2) return;
+
+  std::mt19937_64 rng(mix_obs_order_seed(seed, env_idx));
+  std::shuffle(order.begin(), order.end(), rng);
+}
+
+void BatchedRocketSimCollector::build_env_obs_batch(std::size_t env_idx, const EnvState& state, std::span<float> out) const {
+  if (const auto* pulsar_obs_builder = dynamic_cast<const PulsarObsBuilder*>(obs_builder_.get())) {
+    pulsar_obs_builder->build_obs_batch(state, out, envs_[env_idx].obs_car_order);
+    return;
+  }
+  obs_builder_->build_obs_batch(state, out);
 }
 
 void BatchedRocketSimCollector::rebuild_host_buffers(HostBuffers& buffers, CollectorTimings* timings) {
@@ -313,7 +342,8 @@ void BatchedRocketSimCollector::rebuild_host_buffers(HostBuffers& buffers, Colle
     for (std::size_t env_idx = begin; env_idx < end; ++env_idx) {
       const std::size_t agent_offset = agent_offsets_[env_idx];
       const std::size_t count = envs_[env_idx].engine->num_agents();
-      obs_builder_->build_obs_batch(
+      build_env_obs_batch(
+          env_idx,
           envs_[env_idx].engine->state(),
           std::span<float>(
               obs_ptr + static_cast<std::ptrdiff_t>(agent_offset * obs_stride),
@@ -499,7 +529,8 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
       }
 
       if (reset_needed) {
-        obs_builder_->build_obs_batch(
+        build_env_obs_batch(
+            env_idx,
             current_state,
             std::span<float>(
                 terminal_obs_ptr + static_cast<std::ptrdiff_t>(agent_begin * obs_stride),
