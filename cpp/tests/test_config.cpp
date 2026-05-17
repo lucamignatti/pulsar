@@ -17,6 +17,7 @@ int main() {
     config.model.num_encoder_blocks = 2;
     config.model.sequence_length = 4;
     config.model.max_forward_samples = 1024;
+    pulsar::test::require(config.ppo.overlap_collection_update, "default trainer should overlap collection/update");
     pulsar::validate_experiment_config(config);
 
     // Test 2: JSON round-trip
@@ -133,6 +134,8 @@ int main() {
                             "production config starts with all ranked team sizes");
       pulsar::test::require(prod.self_play_league.enabled, "self_play_league enabled in production");
       pulsar::test::require(prod.self_play_league.max_snapshots == 4, "max_snapshots in production");
+      pulsar::test::require(prod.ppo.overlap_collection_update,
+                            "production config should overlap collection/update by default");
     }
 
     // Test 15: stable_json is deterministic

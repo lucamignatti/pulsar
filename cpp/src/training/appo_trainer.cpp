@@ -18,9 +18,11 @@
 
 #if defined(__linux__)
 #include <malloc.h>
+#include <sys/resource.h>
 #include <unistd.h>
 #elif defined(__APPLE__)
 #include <mach/mach.h>
+#include <sys/resource.h>
 #endif
 
 #include <nlohmann/json.hpp>
@@ -33,6 +35,10 @@
 #include "pulsar/training/curriculum.hpp"
 #include "pulsar/training/ppo_math.hpp"
 #include "pulsar/tracing/tracing.hpp"
+
+#ifdef PULSAR_HAS_CUDA
+#include <c10/cuda/CUDACachingAllocator.h>
+#endif
 
 namespace pulsar {
 namespace {
@@ -58,6 +64,85 @@ double current_process_rss_mb() {
   }
 #endif
   return 0.0;
+}
+
+double current_process_peak_rss_mb() {
+#if defined(__linux__) || defined(__APPLE__)
+  struct rusage usage {};
+  if (getrusage(RUSAGE_SELF, &usage) != 0) {
+    return 0.0;
+  }
+#if defined(__APPLE__)
+  return static_cast<double>(usage.ru_maxrss) / (1024.0 * 1024.0);
+#else
+  return static_cast<double>(usage.ru_maxrss) / 1024.0;
+#endif
+#else
+  return 0.0;
+#endif
+}
+
+struct CgroupMemoryStats {
+  double current_mb = 0.0;
+  double limit_mb = 0.0;
+};
+
+double read_memory_bytes_file(const std::filesystem::path& path) {
+  std::ifstream input(path);
+  std::string value;
+  if (!(input >> value) || value.empty() || value == "max") {
+    return 0.0;
+  }
+  try {
+    const double bytes = std::stod(value);
+    constexpr double kLikelyUnlimitedBytes = 1.0e18;
+    return bytes >= kLikelyUnlimitedBytes ? 0.0 : bytes;
+  } catch (...) {
+    return 0.0;
+  }
+}
+
+CgroupMemoryStats current_cgroup_memory_stats() {
+  CgroupMemoryStats stats{};
+#if defined(__linux__)
+  stats.current_mb = read_memory_bytes_file("/sys/fs/cgroup/memory.current") / (1024.0 * 1024.0);
+  stats.limit_mb = read_memory_bytes_file("/sys/fs/cgroup/memory.max") / (1024.0 * 1024.0);
+  if (stats.current_mb <= 0.0 && stats.limit_mb <= 0.0) {
+    stats.current_mb = read_memory_bytes_file("/sys/fs/cgroup/memory/memory.usage_in_bytes") / (1024.0 * 1024.0);
+    stats.limit_mb = read_memory_bytes_file("/sys/fs/cgroup/memory/memory.limit_in_bytes") / (1024.0 * 1024.0);
+  }
+#endif
+  return stats;
+}
+
+void sample_cuda_memory_stats(TrainerMetrics& metrics, const torch::Device& device) noexcept {
+#ifdef PULSAR_HAS_CUDA
+  if (!device.is_cuda()) {
+    return;
+  }
+  try {
+    const auto device_index = static_cast<c10::DeviceIndex>(device.index());
+    const auto stats = c10::cuda::CUDACachingAllocator::getDeviceStats(device_index);
+    constexpr std::size_t aggregate =
+        static_cast<std::size_t>(c10::CachingAllocator::StatType::AGGREGATE);
+    constexpr double mb = 1024.0 * 1024.0;
+    metrics.cuda_memory_allocated_mb =
+        static_cast<double>(stats.allocated_bytes[aggregate].current) / mb;
+    metrics.cuda_memory_reserved_mb =
+        static_cast<double>(stats.reserved_bytes[aggregate].current) / mb;
+    metrics.cuda_max_memory_allocated_mb =
+        static_cast<double>(stats.allocated_bytes[aggregate].peak) / mb;
+    metrics.cuda_max_memory_reserved_mb =
+        static_cast<double>(stats.reserved_bytes[aggregate].peak) / mb;
+    metrics.cuda_alloc_retries = stats.num_alloc_retries;
+    metrics.cuda_ooms = stats.num_ooms;
+  } catch (const std::exception& exc) {
+    std::cerr << "cuda memory stats unavailable: " << exc.what() << '\n';
+  }
+#else
+  (void)metrics;
+  (void)device;
+#endif
 }
 
 void trim_released_host_memory() noexcept {
@@ -372,6 +457,15 @@ void append_metrics_line(
       {"optimizer_step_seconds", metrics.optimizer_step_seconds},
       {"self_play_eval_seconds", metrics.self_play_eval_seconds},
       {"process_rss_mb", metrics.process_rss_mb},
+      {"process_peak_rss_mb", metrics.process_peak_rss_mb},
+      {"cgroup_memory_current_mb", metrics.cgroup_memory_current_mb},
+      {"cgroup_memory_limit_mb", metrics.cgroup_memory_limit_mb},
+      {"cuda_memory_allocated_mb", metrics.cuda_memory_allocated_mb},
+      {"cuda_memory_reserved_mb", metrics.cuda_memory_reserved_mb},
+      {"cuda_max_memory_allocated_mb", metrics.cuda_max_memory_allocated_mb},
+      {"cuda_max_memory_reserved_mb", metrics.cuda_max_memory_reserved_mb},
+      {"cuda_alloc_retries", metrics.cuda_alloc_retries},
+      {"cuda_ooms", metrics.cuda_ooms},
       {"es_fitness_mean", metrics.es_fitness_mean},
       {"es_fitness_std", metrics.es_fitness_std},
       {"es_fitness_best", metrics.es_fitness_best},
@@ -2518,25 +2612,10 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     const bool has_next = train_forever || index + 1 < updates;
     const bool overlap_collection_update = has_next && config_.ppo.overlap_collection_update;
 
-    ObservationNormalizer collection_normalizer =
-        overlap_collection_update ? actor_normalizer_.clone() : ObservationNormalizer(0);
+    std::optional<ObservationNormalizer> collection_normalizer;
 
-    // 1. Launch training and, when explicitly enabled, overlap it with collection
-    // from the previous policy snapshot.
-    std::future<TrainerMetrics> train_future = std::async(std::launch::async, [&]() {
-      return update_actor(rollout_);
-    });
-
-    std::future<std::int64_t> collect_future;
-    if (overlap_collection_update) {
-      collect_future = std::async(std::launch::async, [&]() {
-        std::int64_t steps = 0;
-        collect_rollout(rollout_B_, next_coll_metrics, &steps, actor_snapshot_, collection_normalizer);
-        return steps;
-      });
-    }
-
-    // 2. Main thread CPU work that overlaps with the update.
+    // 1. Main thread CPU work that can overlap with the update when overlap
+    // collection is enabled.
     {
       double scored = static_cast<double>(coll_metrics.scored_episodes);
       double completed = static_cast<double>(std::max(coll_metrics.completed_episodes, static_cast<int64_t>(1)));
@@ -2548,13 +2627,26 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       }
     }
 
-    // 3. Wait for training to finish before touching actor_.
-    TrainerMetrics train_metrics = train_future.get();
+    // 2. Update the actor on the main thread so CUDA/Torch thread-local
+    // resources do not churn every iteration. Optional overlap only
+    // backgrounds collection for the next rollout.
+    TrainerMetrics train_metrics{};
+    std::future<std::int64_t> collect_future;
     if (overlap_collection_update) {
+      collection_normalizer.emplace(actor_normalizer_.clone());
+      collect_future = std::async(std::launch::async, [&]() {
+        std::int64_t steps = 0;
+        collect_rollout(rollout_B_, next_coll_metrics, &steps, actor_snapshot_, *collection_normalizer);
+        return steps;
+      });
+      train_metrics = update_actor(rollout_);
       next_coll_steps = collect_future.get();
+      actor_normalizer_ = collection_normalizer->clone();
+    } else {
+      train_metrics = update_actor(rollout_);
     }
 
-    // 4. Self-play / ES-LoRA / plasticity (touch actor_, safe now)
+    // 3. Self-play / ES-LoRA / plasticity (touch actor_, safe now)
     if (self_play_manager_) {
       const SelfPlayMetrics self_play_metrics =
           self_play_manager_->on_update(actor_, actor_normalizer_, global_step, update_index);
@@ -2577,7 +2669,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       }
     }
 
-    // 5. Curriculum checks + rebuild (may touch collectors, safe after collection)
+    // 4. Curriculum checks + rebuild (may touch collectors, safe after collection)
     if (curriculum_.enabled()) {
       bool stage_changed = false;
       if (curriculum_.check_promotion(
@@ -2599,7 +2691,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       }
     }
 
-    // 6. Clone snapshot for next iteration's collection after all work using
+    // 5. Clone snapshot for next iteration's collection after all work using
     // the previous snapshot has completed.
     PPOActor new_snapshot{nullptr};
     if (has_next) {
@@ -2608,7 +2700,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       new_snapshot->eval();
     }
 
-    // 7. In the default memory-safe mode, collect after the update with the
+    // 6. In the default memory-safe mode, collect after the update with the
     // fresh policy snapshot.
     if (has_next && !overlap_collection_update) {
       collect_rollout(rollout_B_, next_coll_metrics, &next_coll_steps, new_snapshot, actor_normalizer_);
@@ -2639,6 +2731,11 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
             : 0.0;
     trim_released_host_memory();
     coll_metrics.process_rss_mb = current_process_rss_mb();
+    coll_metrics.process_peak_rss_mb = current_process_peak_rss_mb();
+    const CgroupMemoryStats cgroup_memory = current_cgroup_memory_stats();
+    coll_metrics.cgroup_memory_current_mb = cgroup_memory.current_mb;
+    coll_metrics.cgroup_memory_limit_mb = cgroup_memory.limit_mb;
+    sample_cuda_memory_stats(coll_metrics, device_);
 
     append_metrics_line(checkpoint_dir, update_index, global_step, coll_metrics);
     std::cout << "update=" << update_index
@@ -2663,6 +2760,11 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " goals=" << coll_metrics.goals_scored << "/" << coll_metrics.goals_conceded
               << " es_fitness=" << coll_metrics.es_fitness_mean
               << " rss_mb=" << coll_metrics.process_rss_mb
+              << " peak_rss_mb=" << coll_metrics.process_peak_rss_mb
+              << " cgroup_mem_mb=" << coll_metrics.cgroup_memory_current_mb << "/" << coll_metrics.cgroup_memory_limit_mb
+              << " cuda_reserved_mb=" << coll_metrics.cuda_memory_reserved_mb
+              << " cuda_max_reserved_mb=" << coll_metrics.cuda_max_memory_reserved_mb
+              << " cuda_ooms=" << coll_metrics.cuda_ooms
               << " league_snapshots=" << coll_metrics.self_play_snapshot_count
               << " curriculum=" << curriculum_.state().stage_index
               << " cur_steps=" << curriculum_.state().agent_steps_in_stage
@@ -2701,11 +2803,21 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       add_metric("Optimization", "nonfinite_grad_norm_skips", coll_metrics.nonfinite_grad_norm_skips);
       add_metric("Optimization", "rollout_steps", coll_metrics.rollout_steps);
       add_metric("Optimization", "effective_entropy_coef", coll_metrics.effective_entropy_coef);
-      add_metric("Optimization", "process_rss_mb", coll_metrics.process_rss_mb);
       add_metric("Optimization", "self_play_snapshot_count", coll_metrics.self_play_snapshot_count);
       add_metric("Optimization", "curriculum_stage", curriculum_.state().stage_index);
       add_metric("Optimization", "curriculum_agent_steps", curriculum_.state().agent_steps_in_stage);
       add_metric("Optimization", "curriculum_promotion_counter", curriculum_.state().promotion_counter);
+
+      add_metric("System", "process_rss_mb", coll_metrics.process_rss_mb);
+      add_metric("System", "process_peak_rss_mb", coll_metrics.process_peak_rss_mb);
+      add_metric("System", "cgroup_memory_current_mb", coll_metrics.cgroup_memory_current_mb);
+      add_metric("System", "cgroup_memory_limit_mb", coll_metrics.cgroup_memory_limit_mb);
+      add_metric("System", "cuda_memory_allocated_mb", coll_metrics.cuda_memory_allocated_mb);
+      add_metric("System", "cuda_memory_reserved_mb", coll_metrics.cuda_memory_reserved_mb);
+      add_metric("System", "cuda_max_memory_allocated_mb", coll_metrics.cuda_max_memory_allocated_mb);
+      add_metric("System", "cuda_max_memory_reserved_mb", coll_metrics.cuda_max_memory_reserved_mb);
+      add_metric("System", "cuda_alloc_retries", coll_metrics.cuda_alloc_retries);
+      add_metric("System", "cuda_ooms", coll_metrics.cuda_ooms);
 
       add_metric("Rewards", "total_reward_mean", coll_metrics.total_reward_mean);
       add_metric("Rewards", "gameplay_reward_mean", coll_metrics.gameplay_reward_mean);

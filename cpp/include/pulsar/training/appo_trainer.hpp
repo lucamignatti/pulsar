@@ -51,6 +51,15 @@ struct TrainerMetrics {
   double optimizer_step_seconds = 0.0;
   double self_play_eval_seconds = 0.0;
   double process_rss_mb = 0.0;
+  double process_peak_rss_mb = 0.0;
+  double cgroup_memory_current_mb = 0.0;
+  double cgroup_memory_limit_mb = 0.0;
+  double cuda_memory_allocated_mb = 0.0;
+  double cuda_memory_reserved_mb = 0.0;
+  double cuda_max_memory_allocated_mb = 0.0;
+  double cuda_max_memory_reserved_mb = 0.0;
+  int64_t cuda_alloc_retries = 0;
+  int64_t cuda_ooms = 0;
   double total_reward_mean = 0.0;
   double gameplay_reward_mean = 0.0;
   double mechanic_reward_mean = 0.0;
