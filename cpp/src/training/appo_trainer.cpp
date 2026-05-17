@@ -1459,8 +1459,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           torch::Tensor mode_gpu_learner_active_mb = rollout.learner_active.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(gpu_device);
           torch::Tensor mode_gpu_actions_mb = rollout.actions.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(gpu_device);
           torch::Tensor mode_gpu_action_log_probs_mb = rollout.action_log_probs.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(gpu_device);
-          torch::Tensor mode_gpu_advantages_mb = normalized_advantages.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(gpu_device);
-          torch::Tensor mode_gpu_returns_mb = sparse_returns.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices).to(gpu_device);
+          torch::Tensor mode_gpu_advantages_mb = normalized_advantages.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices.to(device_)).to(gpu_device);
+          torch::Tensor mode_gpu_returns_mb = sparse_returns.narrow(0, 0, rollout_steps).index_select(1, micro_agent_indices.to(device_)).to(gpu_device);
 
           for (int seq_start = 0; seq_start < rollout.rollout_length(); seq_start += seq_len) {
             const int chunk_start = seq_start;
