@@ -1565,10 +1565,10 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 torch::Tensor entropy_floor_loss = torch::zeros({}, active_advantages.options());
                 if (config_.ppo.entropy_floor > 0.0F && effective_entropy_floor_coef > 0.0F) {
                   const torch::Tensor entropy_floor_mask = active_masks.to(torch::kFloat32).sum(-1) > 1.0F;
-                  if (entropy_floor_mask.any().item<bool>()) {
-                    const torch::Tensor entropy_floor = torch::full_like(entropy_values, config_.ppo.entropy_floor);
-                    entropy_floor_loss = effective_entropy_floor_coef * torch::relu(entropy_floor - entropy_values).index({entropy_floor_mask}).square().mean();
-                  }
+                  const torch::Tensor entropy_floor = torch::full_like(entropy_values, config_.ppo.entropy_floor);
+                  const torch::Tensor clamped = torch::relu(entropy_floor - entropy_values).masked_select(entropy_floor_mask).square();
+                  const torch::Tensor count = entropy_floor_mask.sum().clamp_min(1.0);
+                  entropy_floor_loss = effective_entropy_floor_coef * clamped.sum() / count;
                 }
 
                 torch::Tensor chunk_returns = mode_gpu_returns_mb.narrow(0, chunk_start, loss_steps).reshape({samples});
@@ -1618,10 +1618,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 const torch::Tensor weighted_goal_critic_loss = config_.goal_critic.lambda_Zg * goal_loss * sample_weight;
                 const torch::Tensor weighted_goal_actor_loss = config_.goal_critic.lambda_goal_actor * actor_goal_loss * sample_weight;
                 const torch::Tensor loss = task_loss + config_.goal_critic.lambda_Zg * goal_loss + config_.goal_critic.lambda_goal_actor * actor_goal_loss;
-                if (!torch::isfinite(loss).item<bool>()) {
-                  ++result.nonfinite_skips;
-                  continue;
-                }
 
                 if (use_pcgrad_local) {
                   std::vector<std::pair<torch::Tensor, std::vector<CapturedGrad>*>> objective_losses;
@@ -2218,6 +2214,7 @@ void APPOTrainer::collect_rollout(
       torch::Tensor sampled_value{};
       torch::Tensor next_recurrent_state{};
       CollectorTimings timings{};
+      std::future<void> step_future{};
       double policy_forward_seconds = 0.0;
       double action_decode_seconds = 0.0;
     };
@@ -2336,12 +2333,18 @@ void APPOTrainer::collect_rollout(
           PULSAR_TRACE_SCOPE_CAT("trainer", "action_decode_shard");
           shard_step.action_indices_cpu = actions.contiguous().to(torch::kCPU);
           torch::Tensor action_indices_cpu = shard_step.action_indices_cpu;
-          PULSAR_TRACE_SCOPE_CAT("trainer", "async_step_shard");
-          collector.step(
-              std::span<const std::int64_t>(
-                  action_indices_cpu.data_ptr<std::int64_t>(),
-                  static_cast<std::size_t>(action_indices_cpu.numel())),
-              &shard_step.timings);
+          BatchedRocketSimCollector* collector_ptr = &collector;
+          CollectorTimings* shard_timings = &shard_step.timings;
+          shard_step.step_future = std::async(
+              std::launch::async,
+              [collector_ptr, action_indices_cpu, shard_timings]() mutable {
+                PULSAR_TRACE_SCOPE_CAT("trainer", "async_step_shard");
+                collector_ptr->step(
+                    std::span<const std::int64_t>(
+                        action_indices_cpu.data_ptr<std::int64_t>(),
+                        static_cast<std::size_t>(action_indices_cpu.numel())),
+                    shard_timings);
+              });
         }
         shard_step.action_decode_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
@@ -2351,6 +2354,7 @@ void APPOTrainer::collect_rollout(
 
       for (auto& pending_future : pending_futures) {
         PendingShardStep shard_step = pending_future.get();
+        shard_step.step_future.get();
         metrics.policy_forward_seconds += shard_step.policy_forward_seconds;
         metrics.action_decode_seconds += shard_step.action_decode_seconds;
         if (shard_step.next_recurrent_state.defined()) {
