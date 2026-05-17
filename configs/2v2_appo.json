@@ -311,7 +311,7 @@
   },
   "ppo": {
     "num_envs": 384,
-    "collection_workers": 16,
+    "collection_workers": 4,
     "collection_shards": 4,
     "init_checkpoint": "",
     "rollout_length": 64,
