@@ -114,13 +114,24 @@ bool Curriculum::check_promotion(
     const std::map<std::string, double>& mode_scored_rates,
     std::int64_t agent_steps) {
   static const std::map<std::string, double> kNoMultiTouchRates{};
-  return check_promotion(mode_touch_rates, kNoMultiTouchRates, mode_scored_rates, agent_steps);
+  static const std::map<std::string, int> kNoCompletedEpisodes{};
+  return check_promotion(mode_touch_rates, kNoMultiTouchRates, mode_scored_rates, kNoCompletedEpisodes, agent_steps);
 }
 
 bool Curriculum::check_promotion(
     const std::map<std::string, double>& mode_touch_rates,
     const std::map<std::string, double>& mode_multi_touch_rates,
     const std::map<std::string, double>& mode_scored_rates,
+    std::int64_t agent_steps) {
+  static const std::map<std::string, int> kNoCompletedEpisodes{};
+  return check_promotion(mode_touch_rates, mode_multi_touch_rates, mode_scored_rates, kNoCompletedEpisodes, agent_steps);
+}
+
+bool Curriculum::check_promotion(
+    const std::map<std::string, double>& mode_touch_rates,
+    const std::map<std::string, double>& mode_multi_touch_rates,
+    const std::map<std::string, double>& mode_scored_rates,
+    const std::map<std::string, int>& mode_completed_episodes,
     std::int64_t agent_steps) {
   if (!config_.enabled) return false;
 
@@ -135,6 +146,17 @@ bool Curriculum::check_promotion(
   const auto& stage = stages[static_cast<std::size_t>(idx)];
 
   if (state_.agent_steps_in_stage < stage.min_agent_steps) return false;
+
+  if (stage.min_completed_episodes_per_mode > 0) {
+    for (const auto& [mode, frac] : stage.mode_allocation) {
+      auto completed_it = mode_completed_episodes.find(mode);
+      const int completed = completed_it != mode_completed_episodes.end() ? completed_it->second : 0;
+      if (completed < stage.min_completed_episodes_per_mode) {
+        state_.promotion_counter = 0;
+        return false;
+      }
+    }
+  }
 
   const int window_size = stage.rolling_window_size;
   if (window_size <= 0) return false;

@@ -102,6 +102,7 @@ struct TrainerMetrics {
   std::map<std::string, double> mode_touch_rates{};
   std::map<std::string, double> mode_multi_touch_rates{};
   std::map<std::string, double> mode_scored_rates{};
+  std::map<std::string, int> mode_completed_episodes{};
 };
 
 struct TrainerBenchmarkMetrics {

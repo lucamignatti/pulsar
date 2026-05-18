@@ -86,6 +86,7 @@ struct CurriculumStageConfig {
   int64_t min_agent_steps = 20'000'000LL;
   int rolling_window_size = 10;
   int consecutive_success_threshold = 5;
+  int min_completed_episodes_per_mode = 0;
   float required_touch_episode_rate = 0.0F;
   float required_multi_touch_episode_rate = 0.0F;
   float required_scored_episode_rate = 0.0F;

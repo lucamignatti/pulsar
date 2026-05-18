@@ -202,6 +202,7 @@ void to_json(json& j, const CurriculumStageConfig& value) {
       {"min_agent_steps", value.min_agent_steps},
       {"rolling_window_size", value.rolling_window_size},
       {"consecutive_success_threshold", value.consecutive_success_threshold},
+      {"min_completed_episodes_per_mode", value.min_completed_episodes_per_mode},
       {"required_touch_episode_rate", value.required_touch_episode_rate},
       {"required_multi_touch_episode_rate", value.required_multi_touch_episode_rate},
       {"required_scored_episode_rate", value.required_scored_episode_rate},
@@ -229,6 +230,7 @@ void from_json(const json& j, CurriculumStageConfig& value) {
   const int window_size = j.value("promotion_window_updates", j.value("rolling_window_size", 10));
   value.rolling_window_size = j.value("rolling_window_size", window_size);
   value.consecutive_success_threshold = j.value("consecutive_success_threshold", 5);
+  value.min_completed_episodes_per_mode = j.value("min_completed_episodes_per_mode", 0);
   value.required_touch_episode_rate = j.value("required_touch_episode_rate", 0.0F);
   value.required_multi_touch_episode_rate = j.value("required_multi_touch_episode_rate", 0.0F);
   value.required_scored_episode_rate = j.value("required_scored_episode_rate", 0.0F);

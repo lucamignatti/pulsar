@@ -683,6 +683,9 @@ void append_metrics_line(
   for (const auto& [mode, rate] : metrics.mode_scored_rates) {
     line["mode_" + mode + "_scored_episode_rate"] = rate;
   }
+  for (const auto& [mode, count] : metrics.mode_completed_episodes) {
+    line["mode_" + mode + "_completed_episodes"] = count;
+  }
   for (const auto& [mode, rating] : metrics.elo_ratings) {
     line["elo_" + mode] = rating;
   }
@@ -748,6 +751,7 @@ void register_mode_wandb_sections(nlohmann::json& sections, const std::string& m
   register_wandb_metric_section(sections, mode, "mode_" + mode + "_touch_episode_rate");
   register_wandb_metric_section(sections, mode, "mode_" + mode + "_multi_touch_episode_rate");
   register_wandb_metric_section(sections, mode, "mode_" + mode + "_scored_episode_rate");
+  register_wandb_metric_section(sections, mode, "mode_" + mode + "_completed_episodes");
 }
 
 std::shared_ptr<MutatorSequence> make_es_eval_reset_mutator(const EnvConfig& config) {
@@ -2902,6 +2906,7 @@ void APPOTrainer::collect_rollout(
           ? static_cast<double>(multi_touched_episodes) / static_cast<double>(completed_episodes)
           : 0.0;
   for (const auto& [mode, comp] : mode_completed) {
+    metrics.mode_completed_episodes[mode] = comp;
     metrics.mode_touch_rates[mode] = comp > 0
         ? static_cast<double>(mode_touched[mode]) / static_cast<double>(comp)
         : 0.0;
@@ -3260,6 +3265,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
           coll_metrics.mode_touch_rates,
           coll_metrics.mode_multi_touch_rates,
           coll_metrics.mode_scored_rates,
+          coll_metrics.mode_completed_episodes,
           coll_steps)) {
         if (curriculum_.mode_allocation_changed()) {
           rebuild_collectors();
@@ -3456,6 +3462,9 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       }
       for (const auto& [mode, rate] : coll_metrics.mode_scored_rates) {
         add_metric(mode, "mode_" + mode + "_scored_episode_rate", rate);
+      }
+      for (const auto& [mode, count] : coll_metrics.mode_completed_episodes) {
+        add_metric(mode, "mode_" + mode + "_completed_episodes", count);
       }
       if (curriculum_.stage_index() >= kEsLoraMinStage && update_index % config_.es_lora.es_interval == 0) {
         add_metric("ES-LoRA", "es_fitness_mean", coll_metrics.es_fitness_mean);

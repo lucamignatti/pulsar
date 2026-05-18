@@ -49,6 +49,12 @@ class Curriculum {
       const std::map<std::string, double>& mode_multi_touch_rates,
       const std::map<std::string, double>& mode_scored_rates,
       std::int64_t agent_steps);
+  bool check_promotion(
+      const std::map<std::string, double>& mode_touch_rates,
+      const std::map<std::string, double>& mode_multi_touch_rates,
+      const std::map<std::string, double>& mode_scored_rates,
+      const std::map<std::string, int>& mode_completed_episodes,
+      std::int64_t agent_steps);
   void initialize_stage();
 
   const CurriculumState& state() const;
