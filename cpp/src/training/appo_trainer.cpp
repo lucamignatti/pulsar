@@ -2426,6 +2426,10 @@ void APPOTrainer::collect_rollout(
 #endif
 
         for (int step = 0; step < config_.ppo.rollout_length; ++step) {
+          if (config_.model.sequence_length > 0 && step % config_.model.sequence_length == 0) {
+            recurrent_state = shard_actor->initial_recurrent_state(
+                static_cast<int64_t>(collector.total_agents()), shard_device);
+          }
           PendingShardStep shard_step;
           shard_step.shard = shard_idx;
           shard_step.agent_offset = static_cast<int>(shard_agent_offsets_[shard_idx]);
@@ -2697,6 +2701,10 @@ void APPOTrainer::collect_rollout(
 #endif
     for (int step = 0; step < config_.ppo.rollout_length; ++step) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "collect_step");
+      if (config_.model.sequence_length > 0 && step % config_.model.sequence_length == 0) {
+        rollout_recurrent_states[0] = rollout_actor->initial_recurrent_state(
+            static_cast<int64_t>(collector_->total_agents()), device_);
+      }
       torch::Tensor raw_obs_host = collector_->host_observations();
     torch::Tensor episode_starts_host = collector_->host_episode_starts();
     torch::Tensor action_masks_host = collector_->host_action_masks();
