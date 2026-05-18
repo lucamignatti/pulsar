@@ -157,8 +157,14 @@ int main() {
       pulsar::test::require(prod.curriculum.enabled, "curriculum enabled in production");
       pulsar::test::require(prod.curriculum.stages.size() == 3, "three curriculum stages in production");
       pulsar::test::require(prod.curriculum.stages[0].mode_allocation.size() == 1 &&
-                                prod.curriculum.stages[0].mode_allocation.count("3v3") == 1,
-                            "production config starts touch curriculum in 3v3");
+                                prod.curriculum.stages[0].mode_allocation.count("1v1") == 1,
+                            "production config starts touch acquisition in 1v1");
+      pulsar::test::require(prod.curriculum.stages[0].required_touch_episode_rate < 0.99f,
+                            "touch acquisition threshold should be reachable before mixed modes");
+      pulsar::test::require(prod.curriculum.stages[0].dense_rewards_override.speed_toward_ball_weight > 0.0f,
+                            "touch acquisition should provide approach shaping before first contact");
+      pulsar::test::require(prod.curriculum.stages[0].outcome_override.neutral_no_touch > -1.0f,
+                            "touch acquisition should not swamp sparse touch credit with no-touch penalties");
       pulsar::test::require(prod.self_play_league.enabled, "self_play_league enabled in production");
       pulsar::test::require(prod.self_play_league.max_snapshots == 4, "max_snapshots in production");
       pulsar::test::require(prod.ppo.max_policy_log_ratio == 5.0f,
@@ -169,8 +175,8 @@ int main() {
                             "production config should rely on clipping instead of preclip update skips");
       pulsar::test::require(prod.es_lora.require_fitness_signal,
                             "production ES should require a reward-fitness signal");
-      pulsar::test::require(!prod.ppo.overlap_collection_update,
-                            "production config should keep PPO rollouts on-policy by default");
+      pulsar::test::require(prod.ppo.overlap_collection_update,
+                            "production config should overlap collection/update");
       pulsar::test::require(prod.outcome.neutral_no_touch < 0.0f,
                             "production config should penalize no-touch collapse");
       pulsar::test::require(prod.curriculum.stages[2].outcome_override.neutral_no_touch < 0.0f,

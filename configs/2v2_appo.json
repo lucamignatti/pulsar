@@ -79,21 +79,21 @@
     "stages": [
       {
         "name": "stage1-touch",
-        "mode_allocation": { "3v3": 1.0 },
+        "mode_allocation": { "1v1": 1.0 },
         "learning_rate": 0.0002,
-        "min_agent_steps": 20000000,
-        "rolling_window_size": 20,
-        "consecutive_success_threshold": 5,
+        "min_agent_steps": 5000000,
+        "rolling_window_size": 10,
+        "consecutive_success_threshold": 3,
         "min_completed_episodes_per_mode": 32,
-        "required_touch_episode_rate": 0.99,
-        "required_multi_touch_episode_rate": 0.95,
+        "required_touch_episode_rate": 0.7,
+        "required_multi_touch_episode_rate": 0.2,
         "required_scored_episode_rate": 0.0,
         "unlocked_mechanics": [],
         "outcome_override": {
           "score": 0.0,
           "concede": 0.0,
           "neutral": 0.0,
-          "neutral_no_touch": -1.0
+          "neutral_no_touch": -0.25
         },
         "mechanic_rewards_override": {
           "kickoff_first_touch": 0.0,
@@ -117,9 +117,9 @@
         "dense_rewards_override": {
           "ball_touch_vel_weight": 0.0,
           "touch_direction_weight": 0.0,
-          "speed_toward_ball_weight": 0.0,
-          "speed_toward_ball_decay": 1000.0,
-          "face_ball_weight": 0.0,
+          "speed_toward_ball_weight": 0.01,
+          "speed_toward_ball_decay": 3000.0,
+          "face_ball_weight": 0.002,
           "air_reward_weight": 0.0,
           "air_reward_ball_z_min": 200.0,
           "velocity_ball_to_goal_weight": 0.0,
@@ -346,7 +346,7 @@
     "plasticity_shrink": 0.999,
     "plasticity_noise": 0.0001,
     "pcgrad": true,
-    "overlap_collection_update": false
+    "overlap_collection_update": true
   },
   "goal_mapping": {
     "arena_max_distance": 8192.0
@@ -356,7 +356,7 @@
     "hidden_dim": 384,
     "embedding_dim": 64,
     "logsumexp_penalty_coeff": 0.01,
-    "lambda_Zg": 0.4,
+    "lambda_Zg": 1.0,
     "lambda_goal_actor": 0.1,
     "contrastive_batch_size": 2048,
     "max_future_horizon": 256

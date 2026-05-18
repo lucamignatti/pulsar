@@ -608,20 +608,10 @@ void BatchedRocketSimCollector::step(std::span<const ControllerState> actions, C
 }
 
 void BatchedRocketSimCollector::step(std::span<const std::int64_t> action_indices, CollectorTimings* timings) {
-  PULSAR_TRACE_SCOPE_CAT("collector", "step_discrete");
+  PULSAR_TRACE_SCOPE_CAT("collector", "step_discrete_fused");
   if (action_indices.size() != total_agents_) {
     throw std::invalid_argument("BatchedRocketSimCollector::step action span has incorrect size.");
   }
-
-  // Preserve the original, known-good collector semantics: decode discrete
-  // indices to controller states, then use the controller step path and
-  // finalize_step(). The fused optimized path below is intentionally bypassed
-  // because it changed rollout/reward/reset semantics enough to cause policy
-  // collapse in long runs.
-  std::vector<ControllerState> parsed_actions(total_agents_);
-  action_parser_->parse_actions_into(action_indices, parsed_actions);
-  step(std::span<const ControllerState>(parsed_actions.data(), parsed_actions.size()), timings);
-  return;
 
   const auto step_start = std::chrono::steady_clock::now();
 
