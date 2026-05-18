@@ -152,7 +152,7 @@
       },
       {
         "name": "stage2-touch-goal",
-        "mode_allocation": { "1v1": 0.34, "2v2": 0.33, "3v3": 0.33 },
+        "mode_allocation": { "1v1": 0.33, "2v2": 0.33, "3v3": 0.34 },
         "learning_rate": 0.0002,
         "min_agent_steps": 20000000,
         "rolling_window_size": 20,
@@ -225,7 +225,7 @@
       },
       {
         "name": "stage3-sparse",
-        "mode_allocation": { "1v1": 0.34, "2v2": 0.33, "3v3": 0.33 },
+        "mode_allocation": { "1v1": 0.33, "2v2": 0.33, "3v3": 0.34 },
         "learning_rate": 0.0002,
         "min_agent_steps": 20000000,
         "rolling_window_size": 20,
@@ -346,7 +346,7 @@
     "plasticity_shrink": 0.999,
     "plasticity_noise": 0.0001,
     "pcgrad": true,
-    "overlap_collection_update": false
+    "overlap_collection_update": true
   },
   "goal_mapping": {
     "arena_max_distance": 8192.0
@@ -356,7 +356,7 @@
     "hidden_dim": 384,
     "embedding_dim": 64,
     "logsumexp_penalty_coeff": 0.01,
-    "lambda_Zg": 1.0,
+    "lambda_Zg": 0.4,
     "lambda_goal_actor": 0.1,
     "contrastive_batch_size": 2048,
     "max_future_horizon": 256
