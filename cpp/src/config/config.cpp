@@ -510,7 +510,7 @@ void from_json(const json& j, PPOConfig& value) {
   value.plasticity_shrink = j.value("plasticity_shrink", 0.999F);
   value.plasticity_noise = j.value("plasticity_noise", 1.0e-4F);
   value.pcgrad = j.value("pcgrad", false);
-  value.overlap_collection_update = j.value("overlap_collection_update", true);
+  value.overlap_collection_update = j.value("overlap_collection_update", false);
 }
 
 void to_json(json& j, const SelfPlayLeagueConfig& value) {

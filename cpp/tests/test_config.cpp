@@ -17,7 +17,7 @@ int main() {
     config.model.num_encoder_blocks = 2;
     config.model.sequence_length = 4;
     config.model.max_forward_samples = 1024;
-    pulsar::test::require(config.ppo.overlap_collection_update, "default trainer should overlap collection/update");
+    pulsar::test::require(!config.ppo.overlap_collection_update, "default trainer should keep PPO collection on-policy");
     pulsar::validate_experiment_config(config);
 
     // Test 2: JSON round-trip
@@ -169,8 +169,8 @@ int main() {
                             "production config should skip pathological preclip gradients");
       pulsar::test::require(prod.es_lora.require_fitness_signal,
                             "production ES should require a reward-fitness signal");
-      pulsar::test::require(prod.ppo.overlap_collection_update,
-                            "production config should overlap collection/update by default");
+      pulsar::test::require(!prod.ppo.overlap_collection_update,
+                            "production config should keep PPO rollouts on-policy by default");
       pulsar::test::require(prod.outcome.neutral_no_touch < 0.0f,
                             "production config should penalize no-touch collapse");
       pulsar::test::require(prod.curriculum.stages[2].outcome_override.neutral_no_touch < 0.0f,
