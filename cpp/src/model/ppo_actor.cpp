@@ -67,6 +67,10 @@ void validate_es_lora_config(const ESLoraConfig& config) {
   }
 }
 
+torch::Tensor normalize_goal_embedding(const torch::Tensor& embedding) {
+  return embedding / embedding.norm(2, -1, true).clamp_min(1.0e-6F);
+}
+
 }  // namespace
 
 LoRALinearImpl::LoRALinearImpl(int in_features, int out_features, int rank, float lora_alpha)
@@ -410,12 +414,12 @@ torch::Tensor GoalCriticImpl::sa_embedding(const torch::Tensor& features, const 
   const torch::Tensor action_tensor = action_inputs.dim() == 1
       ? torch::nn::functional::one_hot(action_inputs.to(torch::kLong), action_dim_).to(features.device()).to(torch::kFloat32)
       : action_inputs.to(features.device()).to(torch::kFloat32);
-  return sa_encoder_->forward(torch::cat({features, action_tensor}, -1));
+  return normalize_goal_embedding(sa_encoder_->forward(torch::cat({features, action_tensor}, -1)));
 }
 
 torch::Tensor GoalCriticImpl::goal_embedding(const torch::Tensor& goal_values) {
   PULSAR_TRACE_SCOPE_CAT("actor", "goal_embedding");
-  return goal_encoder_->forward(goal_values.to(torch::kFloat32));
+  return normalize_goal_embedding(goal_encoder_->forward(goal_values.to(torch::kFloat32)));
 }
 
 torch::nn::Sequential PPOActorImpl::make_value_win_head(int input_dim) const {

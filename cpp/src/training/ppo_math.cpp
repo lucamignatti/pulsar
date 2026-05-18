@@ -248,7 +248,11 @@ torch::Tensor compute_symmetric_infonce_loss(
   const torch::Tensor col_lse = torch::logsumexp(logits_f32, 0);
   const torch::Tensor row_loss = -(diag - row_lse).mean();
   const torch::Tensor col_loss = -(diag - col_lse).mean();
-  const torch::Tensor penalty = logsumexp_penalty_coeff * (row_lse.mean() + col_lse.mean());
+  // With negative-distance logits, a linear logsumexp term is unbounded below:
+  // the model can reduce the loss by driving all logits toward large negative
+  // values. Penalize the partition magnitude instead so the auxiliary
+  // contrastive objective cannot create runaway embedding scales.
+  const torch::Tensor penalty = logsumexp_penalty_coeff * (row_lse.square().mean() + col_lse.square().mean());
   return row_loss + col_loss + penalty;
 }
 
