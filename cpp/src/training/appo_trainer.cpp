@@ -46,6 +46,7 @@ namespace pulsar {
 namespace {
 
 constexpr int kEsLoraMinStage = 2;  // keep early touch/scoring curriculum on PPO/GCRL only
+constexpr int kSelfPlayMinStage = 2;
 
 double current_process_rss_mb() {
 #if defined(__linux__)
@@ -947,6 +948,9 @@ APPOTrainer::APPOTrainer(
       const std::size_t shard_env_offset = env_offset;
       collector->set_self_play_assignment_fn(
           [this, shard_env_offset](std::size_t env_idx, std::uint64_t seed) {
+            if (curriculum_.enabled() && curriculum_.stage_index() < kSelfPlayMinStage) {
+              return SelfPlayAssignment{};
+            }
             return self_play_manager_->sample_assignment(shard_env_offset + env_idx, seed);
           });
       env_offset += collector->num_envs();
@@ -1167,6 +1171,9 @@ void APPOTrainer::rebuild_collectors() {
       const std::string collector_mode = collector->mode();
       collector->set_self_play_assignment_fn(
           [this, shard_env_offset, collector_mode](std::size_t env_idx, std::uint64_t seed) {
+            if (curriculum_.enabled() && curriculum_.stage_index() < kSelfPlayMinStage) {
+              return SelfPlayAssignment{};
+            }
             self_play_manager_->set_current_mode(collector_mode);
             return self_play_manager_->sample_assignment(shard_env_offset + env_idx, seed);
           });
@@ -3242,7 +3249,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     }
 
     // 3. Self-play / ES-LoRA / plasticity (touch actor_, safe now)
-    if (self_play_manager_) {
+    if (self_play_manager_ && (!curriculum_.enabled() || curriculum_.stage_index() >= kSelfPlayMinStage)) {
       const SelfPlayMetrics self_play_metrics =
           self_play_manager_->on_update(actor_, actor_normalizer_, global_step, update_index);
       coll_metrics.self_play_eval_seconds = self_play_metrics.eval_seconds;
