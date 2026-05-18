@@ -161,12 +161,12 @@ int main() {
                             "production config starts touch curriculum in 3v3");
       pulsar::test::require(prod.self_play_league.enabled, "self_play_league enabled in production");
       pulsar::test::require(prod.self_play_league.max_snapshots == 4, "max_snapshots in production");
-      pulsar::test::require(prod.ppo.max_policy_log_ratio == 2.0f,
-                            "production config should bound stale policy log ratios");
-      pulsar::test::require(prod.ppo.target_kl > 0.0f,
-                            "production config should skip high-KL PPO updates");
-      pulsar::test::require(prod.ppo.max_preclip_grad_norm > 0.0f,
-                            "production config should skip pathological preclip gradients");
+      pulsar::test::require(prod.ppo.max_policy_log_ratio == 5.0f,
+                            "production config should preserve PPO log-ratio headroom");
+      pulsar::test::require(prod.ppo.target_kl == 0.0f,
+                            "production config should not skip PPO updates by KL guard");
+      pulsar::test::require(prod.ppo.max_preclip_grad_norm == 0.0f,
+                            "production config should rely on clipping instead of preclip update skips");
       pulsar::test::require(prod.es_lora.require_fitness_signal,
                             "production ES should require a reward-fitness signal");
       pulsar::test::require(!prod.ppo.overlap_collection_update,
