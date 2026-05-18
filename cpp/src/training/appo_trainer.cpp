@@ -632,6 +632,10 @@ void append_metrics_line(
       {"rollout_steps", metrics.rollout_steps},
       {"completed_episodes", metrics.completed_episodes},
       {"scored_episodes", metrics.scored_episodes},
+      {"conceded_episodes", metrics.conceded_episodes},
+      {"neutral_episodes", metrics.neutral_episodes},
+      {"no_touch_episodes", metrics.no_touch_episodes},
+      {"truncated_episodes", metrics.truncated_episodes},
       {"goal_critic_loss", metrics.goal_critic_loss},
       {"mean_goal_score", metrics.mean_goal_score},
       {"mean_sampled_goal_distance", metrics.mean_sampled_goal_distance},
@@ -670,6 +674,10 @@ void append_metrics_line(
       {"es_lora_b_norm", metrics.es_lora_b_norm},
       {"es_seconds", metrics.es_seconds},
       {"scored_episode_rate", metrics.scored_episode_rate},
+      {"conceded_episode_rate", metrics.conceded_episode_rate},
+      {"neutral_episode_rate", metrics.neutral_episode_rate},
+      {"no_touch_episode_rate", metrics.no_touch_episode_rate},
+      {"truncated_episode_rate", metrics.truncated_episode_rate},
       {"touch_episode_rate", metrics.touch_episode_rate},
       {"multi_touch_episode_rate", metrics.multi_touch_episode_rate},
       {"effective_entropy_coef", metrics.effective_entropy_coef},
@@ -2311,6 +2319,10 @@ void APPOTrainer::collect_rollout(
   int64_t total_ball_proximity_denom = 0;
   int completed_episodes = 0;
   int scored_episodes = 0;
+  int conceded_episodes = 0;
+  int neutral_episodes = 0;
+  int no_touch_episodes = 0;
+  int truncated_episodes = 0;
   int touched_episodes = 0;
   int multi_touched_episodes = 0;
   std::map<std::string, int> mode_completed;
@@ -2380,6 +2392,10 @@ void APPOTrainer::collect_rollout(
       int goals_conceded = 0;
       int completed_episodes = 0;
       int scored_episodes = 0;
+      int conceded_episodes = 0;
+      int neutral_episodes = 0;
+      int no_touch_episodes = 0;
+      int truncated_episodes = 0;
       int touched_episodes = 0;
       int multi_touched_episodes = 0;
       std::int64_t ball_prox_steps = 0;
@@ -2489,8 +2505,10 @@ void APPOTrainer::collect_rollout(
 
           // Done-reset processing inside the shard task.
           torch::Tensor dones_host = collector.host_dones();
+          torch::Tensor truncated_host = collector.host_truncated();
           torch::Tensor terminal_labels = collector.host_terminal_outcome_labels();
           const auto* dones_ptr = dones_host.data_ptr<float>();
+          const auto* truncated_ptr = truncated_host.data_ptr<float>();
           const auto* tl_ptr = terminal_labels.data_ptr<std::int64_t>();
           const auto* la_ptr = learner_active_host.data_ptr<float>();
           torch::Tensor env_touch_host = collector.host_env_touched();
@@ -2518,14 +2536,23 @@ void APPOTrainer::collect_rollout(
           }
           for (int64_t env_agent_begin = 0; env_agent_begin < dones_host.numel(); env_agent_begin += coll_ape) {
             bool env_done = false, env_scored = false;
+            bool env_conceded = false, env_neutral = false, env_no_touch = false, env_truncated = false;
             const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + coll_ape, dones_host.numel());
             for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
               env_done = env_done || dones_ptr[i] > 0.5F;
               env_scored = env_scored || (dones_ptr[i] > 0.5F && tl_ptr[i] == 0);
+              env_conceded = env_conceded || (dones_ptr[i] > 0.5F && tl_ptr[i] == 1);
+              env_neutral = env_neutral || (dones_ptr[i] > 0.5F && tl_ptr[i] == 2);
+              env_no_touch = env_no_touch || (dones_ptr[i] > 0.5F && tl_ptr[i] == 3);
+              env_truncated = env_truncated || (dones_ptr[i] > 0.5F && truncated_ptr[i] > 0.5F);
             }
             if (env_done) {
               shard_step.completed_episodes++;
               if (env_scored) shard_step.scored_episodes++;
+              if (env_conceded) shard_step.conceded_episodes++;
+              if (env_neutral) shard_step.neutral_episodes++;
+              if (env_no_touch) shard_step.no_touch_episodes++;
+              if (env_truncated) shard_step.truncated_episodes++;
               const int64_t env_idx = env_agent_begin / coll_ape;
               if (env_touch_ptr[env_idx] > 0.5F) shard_step.touched_episodes++;
               if (env_multi_touch_ptr[env_idx] > 0.5F) shard_step.multi_touched_episodes++;
@@ -2587,6 +2614,10 @@ void APPOTrainer::collect_rollout(
         total_goals_conceded += shard_step.goals_conceded;
         completed_episodes += shard_step.completed_episodes;
         scored_episodes += shard_step.scored_episodes;
+        conceded_episodes += shard_step.conceded_episodes;
+        neutral_episodes += shard_step.neutral_episodes;
+        no_touch_episodes += shard_step.no_touch_episodes;
+        truncated_episodes += shard_step.truncated_episodes;
         touched_episodes += shard_step.touched_episodes;
         multi_touched_episodes += shard_step.multi_touched_episodes;
         total_ball_proximity_steps += shard_step.ball_prox_steps;
@@ -2789,6 +2820,7 @@ void APPOTrainer::collect_rollout(
 
     const auto* tl_ptr = terminal_labels.data_ptr<std::int64_t>();
     const auto* la_ptr = learner_active_host.data_ptr<float>();
+    const auto* truncated_ptr = truncated_host.data_ptr<float>();
     torch::Tensor env_touch_host = collector_->host_env_touched();
     torch::Tensor env_multi_touch_host = collector_->host_env_multi_touched();
     const auto* env_touch_ptr = env_touch_host.data_ptr<float>();
@@ -2812,16 +2844,28 @@ void APPOTrainer::collect_rollout(
     for (int64_t env_agent_begin = 0; env_agent_begin < dones_host.numel(); env_agent_begin += coll_ape) {
       bool env_done = false;
       bool env_scored = false;
+      bool env_conceded = false;
+      bool env_neutral = false;
+      bool env_no_touch = false;
+      bool env_truncated = false;
       const int64_t env_agent_end = std::min<int64_t>(env_agent_begin + coll_ape, dones_host.numel());
       for (int64_t i = env_agent_begin; i < env_agent_end; ++i) {
         env_done = env_done || dones_ptr[i] > 0.5F;
         env_scored = env_scored || (dones_ptr[i] > 0.5F && tl_ptr[i] == 0);
+        env_conceded = env_conceded || (dones_ptr[i] > 0.5F && tl_ptr[i] == 1);
+        env_neutral = env_neutral || (dones_ptr[i] > 0.5F && tl_ptr[i] == 2);
+        env_no_touch = env_no_touch || (dones_ptr[i] > 0.5F && tl_ptr[i] == 3);
+        env_truncated = env_truncated || (dones_ptr[i] > 0.5F && truncated_ptr[i] > 0.5F);
       }
       if (env_done) {
         completed_episodes++;
         if (env_scored) {
           scored_episodes++;
         }
+        if (env_conceded) conceded_episodes++;
+        if (env_neutral) neutral_episodes++;
+        if (env_no_touch) no_touch_episodes++;
+        if (env_truncated) truncated_episodes++;
         const int64_t env_idx = env_agent_begin / coll_ape;
         if (env_touch_ptr[env_idx] > 0.5F) {
           touched_episodes++;
@@ -2928,6 +2972,30 @@ void APPOTrainer::collect_rollout(
   metrics.rollout_steps = dest.rollout_length();
   metrics.completed_episodes = completed_episodes;
   metrics.scored_episodes = scored_episodes;
+  metrics.conceded_episodes = conceded_episodes;
+  metrics.neutral_episodes = neutral_episodes;
+  metrics.no_touch_episodes = no_touch_episodes;
+  metrics.truncated_episodes = truncated_episodes;
+  metrics.scored_episode_rate =
+      completed_episodes > 0
+          ? static_cast<double>(scored_episodes) / static_cast<double>(completed_episodes)
+          : 0.0;
+  metrics.conceded_episode_rate =
+      completed_episodes > 0
+          ? static_cast<double>(conceded_episodes) / static_cast<double>(completed_episodes)
+          : 0.0;
+  metrics.neutral_episode_rate =
+      completed_episodes > 0
+          ? static_cast<double>(neutral_episodes) / static_cast<double>(completed_episodes)
+          : 0.0;
+  metrics.no_touch_episode_rate =
+      completed_episodes > 0
+          ? static_cast<double>(no_touch_episodes) / static_cast<double>(completed_episodes)
+          : 0.0;
+  metrics.truncated_episode_rate =
+      completed_episodes > 0
+          ? static_cast<double>(truncated_episodes) / static_cast<double>(completed_episodes)
+          : 0.0;
   metrics.touch_episode_rate =
       completed_episodes > 0
           ? static_cast<double>(touched_episodes) / static_cast<double>(completed_episodes)
@@ -3395,8 +3463,13 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " rollout_steps=" << coll_metrics.rollout_steps
               << " completed_eps=" << coll_metrics.completed_episodes
               << " scored_eps=" << coll_metrics.scored_episodes
+              << " conceded_eps=" << coll_metrics.conceded_episodes
+              << " neutral_eps=" << coll_metrics.neutral_episodes
+              << " no_touch_eps=" << coll_metrics.no_touch_episodes
+              << " trunc_eps=" << coll_metrics.truncated_episodes
               << " touch_rate=" << coll_metrics.touch_episode_rate
               << " multi_touch_rate=" << coll_metrics.multi_touch_episode_rate
+              << " no_touch_rate=" << coll_metrics.no_touch_episode_rate
               << " sampled_goal_dist=" << coll_metrics.mean_sampled_goal_distance
               << " mean_goal_dist=" << coll_metrics.mean_goal_distance
               << " ball_prox=" << coll_metrics.ball_proximity_rate
@@ -3473,9 +3546,17 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       add_metric("Rewards", "gameplay_reward_mean", coll_metrics.gameplay_reward_mean);
       add_metric("Rewards", "mechanic_reward_mean", coll_metrics.mechanic_reward_mean);
       add_metric("Rewards", "completed_episodes", coll_metrics.completed_episodes);
+      add_metric("Rewards", "conceded_episodes", coll_metrics.conceded_episodes);
+      add_metric("Rewards", "neutral_episodes", coll_metrics.neutral_episodes);
+      add_metric("Rewards", "no_touch_episodes", coll_metrics.no_touch_episodes);
+      add_metric("Rewards", "truncated_episodes", coll_metrics.truncated_episodes);
       add_metric("Rewards", "touch_episode_rate", coll_metrics.touch_episode_rate);
       add_metric("Rewards", "multi_touch_episode_rate", coll_metrics.multi_touch_episode_rate);
       add_metric("Rewards", "scored_episode_rate", coll_metrics.scored_episode_rate);
+      add_metric("Rewards", "conceded_episode_rate", coll_metrics.conceded_episode_rate);
+      add_metric("Rewards", "neutral_episode_rate", coll_metrics.neutral_episode_rate);
+      add_metric("Rewards", "no_touch_episode_rate", coll_metrics.no_touch_episode_rate);
+      add_metric("Rewards", "truncated_episode_rate", coll_metrics.truncated_episode_rate);
       add_metric("Rewards", "ball_proximity_rate", coll_metrics.ball_proximity_rate);
 
       add_metric("GCRL", "sampled_value_win_mean", coll_metrics.sampled_value_win_mean);

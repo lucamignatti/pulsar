@@ -72,6 +72,10 @@ struct TrainerMetrics {
   int64_t rollout_steps = 0;
   int64_t completed_episodes = 0;
   int64_t scored_episodes = 0;
+  int64_t conceded_episodes = 0;
+  int64_t neutral_episodes = 0;
+  int64_t no_touch_episodes = 0;
+  int64_t truncated_episodes = 0;
 
   double goal_critic_loss = 0.0;
   double mean_goal_score = 0.0;
@@ -93,6 +97,10 @@ struct TrainerMetrics {
   double es_lora_b_norm = 0.0;
   double es_seconds = 0.0;
   double scored_episode_rate = 0.0;
+  double conceded_episode_rate = 0.0;
+  double neutral_episode_rate = 0.0;
+  double no_touch_episode_rate = 0.0;
+  double truncated_episode_rate = 0.0;
   double touch_episode_rate = 0.0;
   double multi_touch_episode_rate = 0.0;
   double effective_entropy_coef = 0.0;
