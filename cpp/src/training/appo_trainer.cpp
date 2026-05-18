@@ -3185,9 +3185,10 @@ TrainerBenchmarkMetrics APPOTrainer::benchmark(int updates) {
         collection_actors_[i]->eval();
       }
     }
-    // Run ES-LoRA update at the same cadence as the training loop.
+    // Run ES-LoRA update.  In benchmark mode we ignore curriculum stage
+    // and purely follow es_interval so the user can dial ES frequency directly.
     const int update_index = index + 1;
-    if (curriculum_.stage_index() >= kEsLoraMinStage && update_index % config_.es_lora.es_interval == 0) {
+    if (config_.es_lora.es_interval > 0 && update_index % config_.es_lora.es_interval == 0) {
       TrainerMetrics es_metrics{};
       std::cout << "bench_es_update_start update=" << update_index << '/' << bounded_updates << '\n' << std::flush;
       run_es_lora_update(update_index, es_metrics);

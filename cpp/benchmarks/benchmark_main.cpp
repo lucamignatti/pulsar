@@ -73,6 +73,8 @@ void apply_benchmark_override(pulsar::ExperimentConfig& config, const std::strin
     config.model.max_forward_samples = std::stoi(value);
   } else if (key == "pcgrad") {
     config.ppo.pcgrad = parse_bool_override(value);
+  } else if (key == "es_interval") {
+    config.es_lora.es_interval = std::stoi(value);
   } else {
     throw std::invalid_argument("unknown benchmark override: " + key);
   }
