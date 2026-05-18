@@ -1717,13 +1717,17 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                     objective_losses.push_back({weighted_goal_actor_loss / static_cast<double>(effective_accum), &gpu_goal_actor_group});
                   }
 
-                  // Distribute objectives across GPUs: each GPU backpropagates only
-                  // ONE objective. Gradients are combined during reduction.
-                  const int num_obj = static_cast<int>(objective_losses.size());
-                  const int my_obj = (num_obj > 0) ? (static_cast<int>(g) % num_obj) : 0;
-                  zero_existing_gradients(*gpu_act);
-                  (objective_losses[my_obj].first * cuda_amp_loss_scale_local).backward();
-                  accumulate_gradients(*gpu_act, *objective_losses[my_obj].second);
+                  // Compute every objective on every GPU chunk. The previous
+                  // implementation assigned one objective per GPU, which meant
+                  // single-GPU runs trained only the task objective and multi-GPU
+                  // runs trained each objective on different data shards. PCGrad
+                  // requires per-objective gradients for the same local batch.
+                  for (int obj_index = 0; obj_index < static_cast<int>(objective_losses.size()); ++obj_index) {
+                    zero_existing_gradients(*gpu_act);
+                    const bool retain_graph = obj_index + 1 < static_cast<int>(objective_losses.size());
+                    (objective_losses[obj_index].first * cuda_amp_loss_scale_local).backward({}, retain_graph);
+                    accumulate_gradients(*gpu_act, *objective_losses[obj_index].second);
+                  }
                 } else {
                   (loss * sample_weight / static_cast<double>(optimizer_accumulation_steps_local) * cuda_amp_loss_scale_local).backward();
                 }
