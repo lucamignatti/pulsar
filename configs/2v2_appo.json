@@ -16,7 +16,7 @@
   },
   "outcome": {
     "score": 20.0,
-    "concede": -20.0,
+    "concede": -16.0,
     "neutral": 0.0,
     "neutral_no_touch": 0.0
   },
@@ -151,20 +151,20 @@
         }
       },
       {
-        "name": "stage1-multi-touch",
-        "mode_allocation": { "1v1": 0.33, "2v2": 0.33, "3v3": 0.34 },
+        "name": "stage1-score-1v1",
+        "mode_allocation": { "1v1": 1.0 },
         "learning_rate": 0.0002,
         "min_agent_steps": 20000000,
         "rolling_window_size": 20,
         "consecutive_success_threshold": 5,
         "min_completed_episodes_per_mode": 32,
         "required_touch_episode_rate": 0.0,
-        "required_multi_touch_episode_rate": 0.9,
-        "required_scored_episode_rate": 0.0,
+        "required_multi_touch_episode_rate": 0.0,
+        "required_scored_episode_rate": 0.35,
         "unlocked_mechanics": [],
         "outcome_override": {
-          "score": 0.0,
-          "concede": 0.0,
+          "score": 20.0,
+          "concede": -16.0,
           "neutral": 0.0,
           "neutral_no_touch": 0.0
         },
@@ -188,14 +188,14 @@
           "mechanic_reward_cap_per_episode": 0.0
         },
         "dense_rewards_override": {
-          "ball_touch_vel_weight": 0.0,
-          "touch_direction_weight": 0.0,
-          "speed_toward_ball_weight": 0.0,
-          "speed_toward_ball_decay": 1000.0,
-          "face_ball_weight": 0.0,
+          "ball_touch_vel_weight": 2.0,
+          "touch_direction_weight": 1.0,
+          "speed_toward_ball_weight": 1.0,
+          "speed_toward_ball_decay": 3000.0,
+          "face_ball_weight": 0.1,
           "air_reward_weight": 0.15,
           "air_reward_ball_z_min": 200.0,
-          "velocity_ball_to_goal_weight": 0.0,
+          "velocity_ball_to_goal_weight": 2.0,
           "max_ball_speed": 6000.0,
           "air_touch_weight": 0.0,
           "air_touch_max_air_time": 1.75,
@@ -219,12 +219,12 @@
           "possession_window_ticks": 180,
           "possession_distance_decay": 1000.0,
           "dense_reward_cap_per_episode": 0.0,
-          "flat_touch_weight": 50.0,
+          "flat_touch_weight": 5.0,
           "team_spirit": 0.0
         }
       },
       {
-        "name": "stage2-goal-rate",
+        "name": "stage2-mixed-fundamentals",
         "mode_allocation": { "1v1": 0.33, "2v2": 0.33, "3v3": 0.34 },
         "learning_rate": 0.0002,
         "min_agent_steps": 20000000,
@@ -233,11 +233,11 @@
         "min_completed_episodes_per_mode": 32,
         "required_touch_episode_rate": 0.0,
         "required_multi_touch_episode_rate": 0.0,
-        "required_scored_episode_rate": 0.9,
+        "required_scored_episode_rate": 0.45,
         "unlocked_mechanics": [],
         "outcome_override": {
           "score": 20.0,
-          "concede": -20.0,
+          "concede": -16.0,
           "neutral": 0.0,
           "neutral_no_touch": 0.0
         },
@@ -261,14 +261,14 @@
           "mechanic_reward_cap_per_episode": 0.0
         },
         "dense_rewards_override": {
-          "ball_touch_vel_weight": 0.0,
-          "touch_direction_weight": 0.0,
-          "speed_toward_ball_weight": 0.0,
-          "speed_toward_ball_decay": 1000.0,
-          "face_ball_weight": 0.0,
+          "ball_touch_vel_weight": 2.0,
+          "touch_direction_weight": 2.0,
+          "speed_toward_ball_weight": 0.5,
+          "speed_toward_ball_decay": 3000.0,
+          "face_ball_weight": 0.05,
           "air_reward_weight": 0.15,
           "air_reward_ball_z_min": 200.0,
-          "velocity_ball_to_goal_weight": 0.0,
+          "velocity_ball_to_goal_weight": 2.0,
           "max_ball_speed": 6000.0,
           "air_touch_weight": 0.0,
           "air_touch_max_air_time": 1.75,
@@ -292,7 +292,7 @@
           "possession_window_ticks": 180,
           "possession_distance_decay": 1000.0,
           "dense_reward_cap_per_episode": 0.0,
-          "flat_touch_weight": 2.0,
+          "flat_touch_weight": 0.0,
           "team_spirit": 0.0
         }
       },
@@ -310,7 +310,7 @@
         "unlocked_mechanics": [],
         "outcome_override": {
           "score": 20.0,
-          "concede": -20.0,
+          "concede": -16.0,
           "neutral": 0.0,
           "neutral_no_touch": 0.0
         },
