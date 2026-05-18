@@ -26,6 +26,10 @@ int main() {
     auto loaded = pulsar::load_experiment_config(tmp.string());
     pulsar::test::require(loaded.ppo.rollout_length == 128, "round-trip rollout_length");
     pulsar::test::require(loaded.ppo.minibatch_size == 256, "round-trip minibatch");
+    pulsar::test::require(loaded.ppo.target_kl == config.ppo.target_kl, "round-trip target_kl");
+    pulsar::test::require(
+        loaded.ppo.max_preclip_grad_norm == config.ppo.max_preclip_grad_norm,
+        "round-trip max_preclip_grad_norm");
     pulsar::test::require(loaded.model.encoder_dim == 512, "round-trip encoder_dim");
     std::filesystem::remove(tmp);
 
@@ -112,6 +116,20 @@ int main() {
     catch (const std::invalid_argument&) { caught = true; }
     pulsar::test::require(caught, "negative max_policy_log_ratio should throw");
 
+    // Test 12c: reject negative optimizer guards
+    bad = config;
+    bad.ppo.target_kl = -0.01f;
+    caught = false;
+    try { pulsar::validate_experiment_config(bad); }
+    catch (const std::invalid_argument&) { caught = true; }
+    pulsar::test::require(caught, "negative target_kl should throw");
+    bad = config;
+    bad.ppo.max_preclip_grad_norm = -1.0f;
+    caught = false;
+    try { pulsar::validate_experiment_config(bad); }
+    catch (const std::invalid_argument&) { caught = true; }
+    pulsar::test::require(caught, "negative max_preclip_grad_norm should throw");
+
     // Test 13: reject invalid es_lora.population_size when antithetic
     bad = config;
     bad.es_lora.population_size = 7;
@@ -143,8 +161,12 @@ int main() {
                             "production config starts touch curriculum in 3v3");
       pulsar::test::require(prod.self_play_league.enabled, "self_play_league enabled in production");
       pulsar::test::require(prod.self_play_league.max_snapshots == 4, "max_snapshots in production");
-      pulsar::test::require(prod.ppo.max_policy_log_ratio == 5.0f,
+      pulsar::test::require(prod.ppo.max_policy_log_ratio == 2.0f,
                             "production config should bound stale policy log ratios");
+      pulsar::test::require(prod.ppo.target_kl > 0.0f,
+                            "production config should skip high-KL PPO updates");
+      pulsar::test::require(prod.ppo.max_preclip_grad_norm > 0.0f,
+                            "production config should skip pathological preclip gradients");
       pulsar::test::require(prod.es_lora.require_fitness_signal,
                             "production ES should require a reward-fitness signal");
       pulsar::test::require(prod.ppo.overlap_collection_update,

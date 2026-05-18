@@ -193,6 +193,8 @@ struct PPOConfig {
   float entropy_decay_score = 0.60F;
   float entropy_low_coef = 0.005F;
   float max_policy_log_ratio = 5.0F;
+  float target_kl = 0.0F;
+  float max_preclip_grad_norm = 0.0F;
   bool plasticity = false;
   int plasticity_interval = 40;
   float plasticity_shrink = 0.999F;

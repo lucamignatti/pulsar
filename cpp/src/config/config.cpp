@@ -462,6 +462,8 @@ void to_json(json& j, const PPOConfig& value) {
       {"entropy_decay_score", value.entropy_decay_score},
       {"entropy_low_coef", value.entropy_low_coef},
       {"max_policy_log_ratio", value.max_policy_log_ratio},
+      {"target_kl", value.target_kl},
+      {"max_preclip_grad_norm", value.max_preclip_grad_norm},
       {"plasticity", value.plasticity},
       {"plasticity_interval", value.plasticity_interval},
       {"plasticity_shrink", value.plasticity_shrink},
@@ -499,6 +501,8 @@ void from_json(const json& j, PPOConfig& value) {
   value.entropy_decay_score = j.value("entropy_decay_score", 0.60F);
   value.entropy_low_coef = j.value("entropy_low_coef", 0.005F);
   value.max_policy_log_ratio = j.value("max_policy_log_ratio", 5.0F);
+  value.target_kl = j.value("target_kl", 0.0F);
+  value.max_preclip_grad_norm = j.value("max_preclip_grad_norm", 0.0F);
   value.plasticity = j.value("plasticity", false);
   value.plasticity_interval = j.value("plasticity_interval", 40);
   value.plasticity_shrink = j.value("plasticity_shrink", 0.999F);
@@ -770,6 +774,12 @@ void validate_experiment_config(const ExperimentConfig& config) {
   }
   if (config.ppo.max_policy_log_ratio < 0.0F) {
     throw std::invalid_argument("ppo.max_policy_log_ratio must be non-negative.");
+  }
+  if (config.ppo.target_kl < 0.0F) {
+    throw std::invalid_argument("ppo.target_kl must be non-negative.");
+  }
+  if (config.ppo.max_preclip_grad_norm < 0.0F) {
+    throw std::invalid_argument("ppo.max_preclip_grad_norm must be non-negative.");
   }
   if (config.ppo.value_loss_delta < 0.0F) {
     throw std::invalid_argument("ppo.value_loss_delta must be non-negative.");

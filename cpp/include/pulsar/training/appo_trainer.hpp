@@ -44,6 +44,8 @@ struct TrainerMetrics {
   double policy_log_ratio_abs_max = 0.0;
   int64_t nonfinite_loss_skips = 0;
   int64_t nonfinite_grad_norm_skips = 0;
+  int64_t kl_guard_skips = 0;
+  int64_t grad_norm_guard_skips = 0;
   double obs_build_seconds = 0.0;
   double mask_build_seconds = 0.0;
   double policy_forward_seconds = 0.0;

@@ -45,7 +45,7 @@
 namespace pulsar {
 namespace {
 
-constexpr int kEsLoraMinStage = 0;  // enable ES LoRA from the first update
+constexpr int kEsLoraMinStage = 2;  // keep early touch/scoring curriculum on PPO/GCRL only
 
 double current_process_rss_mb() {
 #if defined(__linux__)
@@ -622,6 +622,8 @@ void append_metrics_line(
       {"policy_log_ratio_abs_max", metrics.policy_log_ratio_abs_max},
       {"nonfinite_loss_skips", metrics.nonfinite_loss_skips},
       {"nonfinite_grad_norm_skips", metrics.nonfinite_grad_norm_skips},
+      {"kl_guard_skips", metrics.kl_guard_skips},
+      {"grad_norm_guard_skips", metrics.grad_norm_guard_skips},
       {"total_reward_mean", metrics.total_reward_mean},
       {"gameplay_reward_mean", metrics.gameplay_reward_mean},
       {"mechanic_reward_mean", metrics.mechanic_reward_mean},
@@ -1372,6 +1374,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   int accumulated_minibatches = 0;
   bool accumulated_has_backward = false;
   double accumulated_total_active = 0.0;
+  double accumulated_policy_kl_sum = 0.0;
+  double accumulated_policy_kl_count = 0.0;
 
   const auto& all_values = rollout.all_values();
   const auto& all_rewards = rollout.all_rewards();
@@ -1765,6 +1769,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           entropy_sum = entropy_sum + task_result.entropy_sum;
           policy_approx_kl_sum = policy_approx_kl_sum + task_result.policy_approx_kl;
           policy_clip_fraction_sum = policy_clip_fraction_sum + task_result.policy_clip_frac;
+          accumulated_policy_kl_sum += task_result.policy_approx_kl;
+          accumulated_policy_kl_count += static_cast<double>(task_result.active_count);
           policy_log_ratio_abs_max = std::max(policy_log_ratio_abs_max, task_result.policy_log_ratio_max);
           goal_critic_loss_sum = goal_critic_loss_sum + task_result.goal_critic_loss;
           goal_score_sum = goal_score_sum + task_result.goal_score;
@@ -1823,6 +1829,29 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         actor_optimizer_.zero_grad();
         accumulated_minibatches = 0;
         accumulated_total_active = 0.0;
+        accumulated_policy_kl_sum = 0.0;
+        accumulated_policy_kl_count = 0.0;
+        continue;
+      }
+      const double accumulated_policy_kl =
+          accumulated_policy_kl_count > 0.0
+              ? accumulated_policy_kl_sum / accumulated_policy_kl_count
+              : 0.0;
+      if (config_.ppo.target_kl > 0.0F &&
+          accumulated_policy_kl > static_cast<double>(config_.ppo.target_kl)) {
+        ++metrics.kl_guard_skips;
+        actor_optimizer_.zero_grad();
+        accumulated_minibatches = 0;
+        accumulated_has_backward = false;
+        accumulated_total_active = 0.0;
+        accumulated_policy_kl_sum = 0.0;
+        accumulated_policy_kl_count = 0.0;
+        if (benchmark_progress_) {
+          std::cout << "bench_update_optimizer_skipped reason=target_kl"
+                    << " approx_kl=" << accumulated_policy_kl
+                    << " target_kl=" << config_.ppo.target_kl
+                    << '\n' << std::flush;
+        }
         continue;
       }
 
@@ -1840,10 +1869,19 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         scale_existing_gradients(*actor_, cuda_amp_loss_scale);
         const auto grad_norm_value = torch::nn::utils::clip_grad_norm_(actor_->parameters(), config_.ppo.max_grad_norm);
         grad_norm = static_cast<double>(grad_norm_value);
-        if (std::isfinite(grad_norm)) {
+        const bool grad_guard_hit =
+            config_.ppo.max_preclip_grad_norm > 0.0F &&
+            grad_norm > static_cast<double>(config_.ppo.max_preclip_grad_norm);
+        if (std::isfinite(grad_norm) && !grad_guard_hit) {
           grad_norm_sum = grad_norm_sum + grad_norm * accumulated_total_active;
           actor_optimizer_.step();
           stepped_optimizer = true;
+        } else if (std::isfinite(grad_norm)) {
+          ++metrics.grad_norm_guard_skips;
+          std::cerr << "skipping APPO optimizer step with preclip grad_norm="
+                    << grad_norm
+                    << " max_preclip_grad_norm=" << config_.ppo.max_preclip_grad_norm
+                    << '\n';
         } else {
           ++metrics.nonfinite_grad_norm_skips;
           std::cerr << "skipping APPO optimizer step with non-finite grad_norm=" << grad_norm << '\n';
@@ -1867,6 +1905,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       accumulated_minibatches = 0;
       accumulated_has_backward = false;
       accumulated_total_active = 0.0;
+      accumulated_policy_kl_sum = 0.0;
+      accumulated_policy_kl_count = 0.0;
       ++completed_minibatches;
       if (benchmark_progress_) {
         const double minibatch_seconds =
@@ -3275,6 +3315,8 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     coll_metrics.policy_log_ratio_abs_max = train_metrics.policy_log_ratio_abs_max;
     coll_metrics.nonfinite_loss_skips = train_metrics.nonfinite_loss_skips;
     coll_metrics.nonfinite_grad_norm_skips = train_metrics.nonfinite_grad_norm_skips;
+    coll_metrics.kl_guard_skips = train_metrics.kl_guard_skips;
+    coll_metrics.grad_norm_guard_skips = train_metrics.grad_norm_guard_skips;
     coll_metrics.update_seconds = train_metrics.update_seconds;
     coll_metrics.forward_backward_seconds = train_metrics.forward_backward_seconds;
     coll_metrics.optimizer_step_seconds = train_metrics.optimizer_step_seconds;
@@ -3309,6 +3351,8 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " max_log_ratio=" << coll_metrics.policy_log_ratio_abs_max
               << " nonfinite_loss_skips=" << coll_metrics.nonfinite_loss_skips
               << " nonfinite_grad_skips=" << coll_metrics.nonfinite_grad_norm_skips
+              << " kl_guard_skips=" << coll_metrics.kl_guard_skips
+              << " grad_guard_skips=" << coll_metrics.grad_norm_guard_skips
               << " total_reward=" << coll_metrics.total_reward_mean
               << " gameplay_reward=" << coll_metrics.gameplay_reward_mean
               << " mechanic_reward=" << coll_metrics.mechanic_reward_mean
@@ -3369,6 +3413,8 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       add_metric("Optimization", "policy_log_ratio_abs_max", coll_metrics.policy_log_ratio_abs_max);
       add_metric("Optimization", "nonfinite_loss_skips", coll_metrics.nonfinite_loss_skips);
       add_metric("Optimization", "nonfinite_grad_norm_skips", coll_metrics.nonfinite_grad_norm_skips);
+      add_metric("Optimization", "kl_guard_skips", coll_metrics.kl_guard_skips);
+      add_metric("Optimization", "grad_norm_guard_skips", coll_metrics.grad_norm_guard_skips);
       add_metric("Optimization", "rollout_steps", coll_metrics.rollout_steps);
       add_metric("Optimization", "effective_entropy_coef", coll_metrics.effective_entropy_coef);
       add_metric("Optimization", "self_play_snapshot_count", coll_metrics.self_play_snapshot_count);
