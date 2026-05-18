@@ -189,6 +189,7 @@ class APPOTrainer {
   torch::Device device_{torch::kCPU};
   std::vector<torch::Device> compute_devices_{};
   std::vector<torch::Device> shard_devices_{};
+  std::vector<PPOActor> collection_actors_;  // persistent per-GPU collection replicas
   RolloutStorage rollout_;
   RolloutStorage rollout_B_;
   std::filesystem::path run_output_root_{};

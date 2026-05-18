@@ -914,6 +914,16 @@ APPOTrainer::APPOTrainer(
     compute_actors_.push_back(std::move(replica));
   }
 
+  // Persistent collection actors: one per shard device for policy inference during rollout.
+  for (size_t i = 0; i < shard_devices_.size(); ++i) {
+    if (shard_devices_[i] == device_) {
+      collection_actors_.push_back(actor_snapshot_);  // shared, don't clone
+    } else {
+      collection_actors_.push_back(clone_ppo_actor(actor_snapshot_, shard_devices_[i]));
+      collection_actors_.back()->eval();
+    }
+  }
+
   shard_agent_offsets_.clear();
   std::int64_t agent_offset = 0;
   for (const auto& collector : collectors_) {
@@ -1090,6 +1100,17 @@ void APPOTrainer::rebuild_collectors() {
   total_agents_ = total_agents_for_collectors(collectors_);
   if (total_agents_ == 0) {
     throw std::invalid_argument("rebuild_collectors produced zero agents");
+  }
+
+  // Rebuild persistent collection actors for new shard count
+  collection_actors_.clear();
+  for (std::size_t i = 0; i < shard_devices_.size(); ++i) {
+    if (shard_devices_[i] == device_) {
+      collection_actors_.push_back(actor_snapshot_);
+    } else {
+      collection_actors_.push_back(clone_ppo_actor(actor_snapshot_, shard_devices_[i]));
+      collection_actors_.back()->eval();
+    }
   }
 
 #ifdef PULSAR_HAS_CUDA
@@ -2237,10 +2258,20 @@ void APPOTrainer::collect_rollout(
   shard_normalizers.reserve(collectors_.size());
   std::vector<ObservationNormalizer> shard_normalizer_updates;
   shard_normalizer_updates.reserve(collectors_.size());
+
+  // Use persistent collection actors (synced when snapshot changes) instead of cloning per rollout.
+  // Fall back to cloning if collection_actors_ is stale (e.g., after a snapshot change without sync).
+  const bool use_persistent = collection_actors_.size() == collectors_.size();
+  if (use_persistent) {
+    std::cout << "collect_rollout using_persistent_actors=" << collection_actors_.size()
+              << " shards=" << collectors_.size() << '\n' << std::flush;
+  }
   for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
     const auto& collector_ptr = collectors_[shard];
     const torch::Device shard_device = shard_devices_.empty() ? device_ : shard_devices_[shard];
-    if (shard_device == device_) {
+    if (use_persistent) {
+      rollout_actors.push_back(collection_actors_[shard]);
+    } else if (shard_device == device_) {
       rollout_actors.push_back(rollout_actor);
     } else {
       rollout_actors.push_back(clone_ppo_actor(rollout_actor, shard_device));
@@ -2256,6 +2287,7 @@ void APPOTrainer::collect_rollout(
 
   if (collectors_.size() > 1) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "collect_loop_sharded");
+    std::cout << "collect_rollout PATH=sharded collectors=" << collectors_.size() << '\n' << std::flush;
     struct PendingShardStep {
       int agent_offset = 0;
       std::size_t shard = 0;
@@ -2341,7 +2373,7 @@ void APPOTrainer::collect_rollout(
           torch::Tensor learner_active_host = collector.host_learner_active();
           torch::Tensor raw_obs = raw_obs_host.to(shard_device, use_pinned_host_buffers_);
           torch::Tensor episode_starts = episode_starts_host.to(shard_device, use_pinned_host_buffers_);
-          torch::Tensor action_masks = action_masks_host.to(shard_device, use_pinned_host_buffers_).to(torch::kBool);
+          torch::Tensor action_masks = action_masks_host.to(shard_device, use_pinned_host_buffers_);  // uint8, sample_masked_actions handles it
 
           torch::Tensor normalized_obs;
           torch::Tensor actions;
@@ -2581,6 +2613,7 @@ void APPOTrainer::collect_rollout(
     }
   } else {
     PULSAR_TRACE_SCOPE_CAT("trainer", "collect_loop");
+    std::cout << "collect_rollout PATH=single collectors=" << collectors_.size() << '\n' << std::flush;
 #ifdef PULSAR_HAS_CUDA
     c10::cuda::setCurrentCUDAStream(default_collect_stream);
 #endif
@@ -2592,7 +2625,7 @@ void APPOTrainer::collect_rollout(
     torch::Tensor learner_active_host = collector_->host_learner_active();
     torch::Tensor raw_obs = raw_obs_host.to(device_, use_pinned_host_buffers_);
     torch::Tensor episode_starts = episode_starts_host.to(device_, use_pinned_host_buffers_);
-    torch::Tensor action_masks = action_masks_host.to(device_, use_pinned_host_buffers_).to(torch::kBool);
+    torch::Tensor action_masks = action_masks_host.to(device_, use_pinned_host_buffers_);  // uint8
 
     torch::Tensor normalized_obs;
     torch::Tensor actions;
@@ -2986,6 +3019,15 @@ TrainerBenchmarkMetrics APPOTrainer::benchmark(int updates) {
     synchronize_cuda_if_needed(device_, "benchmark snapshot clone");
     actor_snapshot_ = clone_ppo_actor(actor_, device_);
     actor_snapshot_->eval();
+    // Sync persistent collection actors with new snapshot
+    for (size_t i = 0; i < collection_actors_.size(); ++i) {
+      if (collection_actors_[i] && shard_devices_[i] == device_) {
+        collection_actors_[i] = actor_snapshot_;
+      } else if (collection_actors_[i]) {
+        collection_actors_[i] = clone_ppo_actor(actor_snapshot_, shard_devices_[i]);
+        collection_actors_[i]->eval();
+      }
+    }
     rollout_.clear();
   }
 
@@ -3190,6 +3232,15 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       synchronize_cuda_if_needed(device_, "snapshot clone");
       new_snapshot = clone_ppo_actor(actor_, device_);
       new_snapshot->eval();
+      // Sync persistent collection actors
+      for (size_t i = 0; i < collection_actors_.size(); ++i) {
+        if (collection_actors_[i] && shard_devices_[i] == device_) {
+          collection_actors_[i] = new_snapshot;
+        } else if (collection_actors_[i]) {
+          collection_actors_[i] = clone_ppo_actor(new_snapshot, shard_devices_[i]);
+          collection_actors_[i]->eval();
+        }
+      }
     }
 
     // 6. In the default memory-safe mode, collect after the update with the
