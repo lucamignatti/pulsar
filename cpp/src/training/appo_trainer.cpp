@@ -2435,6 +2435,7 @@ void APPOTrainer::collect_rollout(
           torch::Tensor actions;
           torch::Tensor action_log_probs;
           ActorStepOutput output;
+          double self_play_inference_seconds = 0.0;
           const auto policy_start = std::chrono::steady_clock::now();
           {
             torch::NoGradGuard no_grad;
@@ -2447,12 +2448,25 @@ void APPOTrainer::collect_rollout(
                 normalized_obs, recurrent_state, episode_starts, &next_state, goal_values);
             if (next_state.defined()) recurrent_state = next_state;
             actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
+            if (self_play_manager_ && self_play_manager_->has_snapshots()) {
+              torch::Tensor opponent_actions;
+              torch::Tensor snapshot_ids = collector.host_snapshot_ids().to(shard_device, use_pinned_host_buffers_);
+              self_play_manager_->infer_opponent_actions(
+                  shard_actor,
+                  raw_obs,
+                  action_masks,
+                  episode_starts,
+                  snapshot_ids,
+                  &opponent_actions,
+                  &self_play_inference_seconds);
+              actions = torch::where(snapshot_ids >= 0, opponent_actions, actions);
+            }
           }
           if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
             torch::cuda::synchronize();
           }
           shard_step.policy_forward_seconds =
-              std::chrono::duration<double>(std::chrono::steady_clock::now() - policy_start).count();
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - policy_start).count() + self_play_inference_seconds;
 
           const auto decode_start = std::chrono::steady_clock::now();
           shard_step.action_indices_cpu = actions.contiguous().to(torch::kCPU);
@@ -2514,20 +2528,22 @@ void APPOTrainer::collect_rollout(
 
           shard_step.action_decode_seconds =
               std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
-          // Capture post-step tensors so the main thread doesn't read stale collector state.
-          shard_step.dones_host = std::move(dones_host);
-          shard_step.truncated_host = collector.host_truncated();
-          shard_step.bootstrap_truncated_host = collector.host_bootstrap_truncated();
-          shard_step.terminal_labels = std::move(terminal_labels);
-          shard_step.extrinsic_rewards_host = collector.host_rewards();
-          shard_step.gameplay_r_host = collector.host_gameplay_rewards();
-          shard_step.mechanic_r_host = collector.host_mechanic_rewards();
-          shard_step.goal_pos_host = collector.host_goal_positions();
-          shard_step.terminal_obs_host = collector.host_terminal_observations();
+          // Capture snapshots of mutable collector buffers. Tensor assignment is
+          // shallow; without clone(), every PendingShardStep would point at the
+          // collector's final reused host buffers after this shard finishes.
+          shard_step.dones_host = dones_host.clone();
+          shard_step.truncated_host = collector.host_truncated().clone();
+          shard_step.bootstrap_truncated_host = collector.host_bootstrap_truncated().clone();
+          shard_step.terminal_labels = terminal_labels.clone();
+          shard_step.extrinsic_rewards_host = collector.host_rewards().clone();
+          shard_step.gameplay_r_host = collector.host_gameplay_rewards().clone();
+          shard_step.mechanic_r_host = collector.host_mechanic_rewards().clone();
+          shard_step.goal_pos_host = collector.host_goal_positions().clone();
+          shard_step.terminal_obs_host = collector.host_terminal_observations().clone();
           shard_step.normalized_obs = normalized_obs;
-          shard_step.episode_starts_host = episode_starts_host;
-          shard_step.action_masks_host = action_masks_host;
-          shard_step.learner_active_host = learner_active_host;
+          shard_step.episode_starts_host = episode_starts_host.clone();
+          shard_step.action_masks_host = action_masks_host.clone();
+          shard_step.learner_active_host = learner_active_host.clone();
           shard_step.action_log_probs = action_log_probs;
           shard_step.sampled_value = output.value_win_logits.squeeze(-1);
           shard_step.next_recurrent_state = recurrent_state;

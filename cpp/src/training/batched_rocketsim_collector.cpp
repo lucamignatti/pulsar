@@ -636,8 +636,8 @@ void BatchedRocketSimCollector::step(std::span<const std::int64_t> action_indice
   float* env_multi_touch_ptr = host_env_multi_touched_.data_ptr<float>();
   float* bootstrap_truncated_ptr = host_bootstrap_truncated_.data_ptr<float>();
 
-  // Next buffer pointers
-  next_buffers_.episode_starts.copy_(host_dones_);
+  // Next buffer pointers. `episode_starts` is copied after the step loop,
+  // once host_dones_ contains this step's freshly-computed reset flags.
   float* next_obs_ptr = next_buffers_.obs.data_ptr<float>();
   std::uint8_t* next_masks_ptr = next_buffers_.action_masks.data_ptr<std::uint8_t>();
   float* next_learner_ptr = next_buffers_.learner_active.data_ptr<float>();
@@ -647,10 +647,7 @@ void BatchedRocketSimCollector::step(std::span<const std::int64_t> action_indice
   const std::size_t action_stride = static_cast<std::size_t>(action_dim_);
   const float* ler_ptr = current_buffers_.learner_active.data_ptr<float>();
 
-  const bool any_gameplay = reward_engine_.has_any_gameplay_reward();
-  const bool any_mechanic = reward_engine_.has_any_mechanic_reward();
   const bool has_team_spirit = reward_engine_.has_team_spirit();
-  const bool terminal_only = !any_gameplay && !any_mechanic;
 
   executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
     for (std::size_t env_idx = begin; env_idx < end; ++env_idx) {
@@ -723,27 +720,14 @@ void BatchedRocketSimCollector::step(std::span<const std::int64_t> action_indice
             : -1;
         labels_ptr[gi] = static_cast<std::int64_t>(label);
 
-        if (terminal_only) {
-          float term = 0.0F;
-          if (done) {
-            if (label == 0) term = reward_engine_.outcome_score();
-            else if (label == 1) term = reward_engine_.outcome_concede();
-            else if (label == 2) term = reward_engine_.outcome_neutral();
-            else if (label == 3) term = reward_engine_.outcome_neutral_no_touch();
-          }
-          reward_ptr[gi] = term;
-          gp_reward_ptr[gi] = 0.0F;
-          mech_reward_ptr[gi] = 0.0F;
-        } else {
-          RewardBreakdown bd = reward_engine_.compute(
-              current_state.tick, car, current_state,
-              static_cast<int>(config_.env.team_size),
-              agent_reward_states_[gi], env_reward_states_[env_idx],
-              done, label);
-          reward_ptr[gi] = bd.total;
-          gp_reward_ptr[gi] = bd.gameplay;
-          mech_reward_ptr[gi] = bd.mechanic;
-        }
+        RewardBreakdown bd = reward_engine_.compute(
+            current_state.tick, car, current_state,
+            static_cast<int>(config_.env.team_size),
+            agent_reward_states_[gi], env_reward_states_[env_idx],
+            done, label);
+        reward_ptr[gi] = bd.total;
+        gp_reward_ptr[gi] = bd.gameplay;
+        mech_reward_ptr[gi] = bd.mechanic;
 
         float goal_pos[3];
         compute_goal_position(current_state, config_.goal_mapping, goal_pos);
@@ -821,6 +805,10 @@ void BatchedRocketSimCollector::step(std::span<const std::int64_t> action_indice
       }
     }
   });
+
+  // Mark the next observation as an episode start exactly when the just-taken
+  // step ended an episode. This must happen after the loop fills host_dones_.
+  next_buffers_.episode_starts.copy_(host_dones_);
 
   // Swap buffers
   std::swap(current_buffers_, next_buffers_);
