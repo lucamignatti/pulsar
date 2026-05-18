@@ -2314,10 +2314,7 @@ void APPOTrainer::collect_rollout(
   // Use persistent collection actors (synced when snapshot changes) instead of cloning per rollout.
   // Fall back to cloning if collection_actors_ is stale (e.g., after a snapshot change without sync).
   const bool use_persistent = collection_actors_.size() == collectors_.size();
-  if (use_persistent) {
-    std::cout << "collect_rollout using_persistent_actors=" << collection_actors_.size()
-              << " shards=" << collectors_.size() << '\n' << std::flush;
-  }
+
   for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
     const auto& collector_ptr = collectors_[shard];
     const torch::Device shard_device = shard_devices_.empty() ? device_ : shard_devices_[shard];
@@ -2339,7 +2336,6 @@ void APPOTrainer::collect_rollout(
 
   if (collectors_.size() > 1) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "collect_loop_sharded");
-    std::cout << "collect_rollout PATH=sharded collectors=" << collectors_.size() << '\n' << std::flush;
     struct PendingShardStep {
       int agent_offset = 0;
       std::size_t shard = 0;
@@ -2665,7 +2661,6 @@ void APPOTrainer::collect_rollout(
     }
   } else {
     PULSAR_TRACE_SCOPE_CAT("trainer", "collect_loop");
-    std::cout << "collect_rollout PATH=single collectors=" << collectors_.size() << '\n' << std::flush;
 #ifdef PULSAR_HAS_CUDA
     c10::cuda::setCurrentCUDAStream(default_collect_stream);
 #endif
