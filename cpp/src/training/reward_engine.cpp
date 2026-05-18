@@ -43,6 +43,59 @@ void RewardEngine::set_unlocked_mechanics(const std::vector<std::string>& mechan
   }
 }
 
+bool RewardEngine::has_any_gameplay_reward() const {
+  return dense_cfg_.ball_touch_vel_weight > 0.0F ||
+         dense_cfg_.flat_touch_weight > 0.0F ||
+         dense_cfg_.touch_direction_weight > 0.0F ||
+         dense_cfg_.speed_toward_ball_weight > 0.0F ||
+         dense_cfg_.face_ball_weight > 0.0F ||
+         dense_cfg_.air_reward_weight > 0.0F ||
+         dense_cfg_.velocity_ball_to_goal_weight > 0.0F ||
+         dense_cfg_.air_touch_weight > 0.0F ||
+         dense_cfg_.save_boost_weight > 0.0F ||
+         dense_cfg_.boost_efficiency_weight > 0.0F ||
+         dense_cfg_.boost_used_weight > 0.0F ||
+         dense_cfg_.defensive_positioning_weight > 0.0F ||
+         dense_cfg_.shot_accuracy_weight > 0.0F ||
+         dense_cfg_.boost_pickup_big_weight > 0.0F ||
+         dense_cfg_.boost_pickup_small_weight > 0.0F ||
+         dense_cfg_.possession_chain_weight > 0.0F ||
+         dense_cfg_.possession_proximity_weight > 0.0F ||
+         dense_cfg_.possession_speed_toward_ball_weight > 0.0F ||
+         dense_cfg_.possession_face_ball_weight > 0.0F;
+}
+
+bool RewardEngine::has_any_mechanic_reward() const {
+  return mechanic_cfg_.kickoff_first_touch > 0.0F ||
+         mechanic_cfg_.speed_flip > 0.0F ||
+         mechanic_cfg_.wavedash > 0.0F ||
+         mechanic_cfg_.chain_dash_bonus > 0.0F ||
+         mechanic_cfg_.half_flip > 0.0F ||
+         mechanic_cfg_.wall_dash > 0.0F ||
+         mechanic_cfg_.air_dribble_base > 0.0F ||
+         mechanic_cfg_.flip_reset > 0.0F ||
+         mechanic_cfg_.ceiling_shot > 0.0F ||
+         mechanic_cfg_.double_tap > 0.0F ||
+         mechanic_cfg_.preflip > 0.0F ||
+         mechanic_cfg_.redirect > 0.0F ||
+         mechanic_cfg_.pogo > 0.0F ||
+         mechanic_cfg_.pinch > 0.0F ||
+         mechanic_cfg_.team_pinch > 0.0F;
+}
+
+bool RewardEngine::has_team_spirit() const {
+  return dense_cfg_.team_spirit > 0.0F;
+}
+
+bool RewardEngine::has_velocity_ball_to_goal() const {
+  return dense_cfg_.velocity_ball_to_goal_weight > 0.0F;
+}
+
+float RewardEngine::outcome_score() const { return outcome_.score; }
+float RewardEngine::outcome_concede() const { return outcome_.concede; }
+float RewardEngine::outcome_neutral() const { return outcome_.neutral; }
+float RewardEngine::outcome_neutral_no_touch() const { return outcome_.neutral_no_touch; }
+
 bool RewardEngine::is_mechanic_unlocked(const std::string& name) const {
   if (unlocked_mechanics_.empty()) return true;  // not configured -> all unlocked (backward compat)
   return unlocked_mechanics_.count(name) > 0;

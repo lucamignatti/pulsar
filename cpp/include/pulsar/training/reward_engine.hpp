@@ -60,6 +60,18 @@ class RewardEngine {
   void update_config(const ExperimentConfig& cfg);
   void set_unlocked_mechanics(const std::vector<std::string>& mechanics);
 
+  // Fast-path queries: returns true if ANY reward of this type has non-zero weight
+  [[nodiscard]] bool has_any_gameplay_reward() const;
+  [[nodiscard]] bool has_any_mechanic_reward() const;
+  // Specific expensive reward checks
+  [[nodiscard]] bool has_team_spirit() const;
+  [[nodiscard]] bool has_velocity_ball_to_goal() const;
+  // Terminal-only reward fast path: direct outcome accessors for collector
+  [[nodiscard]] float outcome_score() const;
+  [[nodiscard]] float outcome_concede() const;
+  [[nodiscard]] float outcome_neutral() const;
+  [[nodiscard]] float outcome_neutral_no_touch() const;
+
   RewardBreakdown compute(
       int global_tick,
       const CarState& car,

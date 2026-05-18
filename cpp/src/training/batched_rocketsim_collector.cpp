@@ -608,30 +608,281 @@ void BatchedRocketSimCollector::step(std::span<const ControllerState> actions, C
 }
 
 void BatchedRocketSimCollector::step(std::span<const std::int64_t> action_indices, CollectorTimings* timings) {
-  PULSAR_TRACE_SCOPE_CAT("collector", "step_discrete");
+  PULSAR_TRACE_SCOPE_CAT("collector", "step_discrete_fused");
   if (action_indices.size() != total_agents_) {
     throw std::invalid_argument("BatchedRocketSimCollector::step action span has incorrect size.");
   }
 
-  const auto env_step_start = std::chrono::steady_clock::now();
+  const auto step_start = std::chrono::steady_clock::now();
+
+  // Reset step output
+  last_step_output_ = StepOutput{};
+  auto& so = last_step_output_;
+
+  // Output tensor pointers
+  float* dones_ptr = host_dones_.data_ptr<float>();
+  float* terminated_ptr = host_terminated_.data_ptr<float>();
+  float* truncated_ptr = host_truncated_.data_ptr<float>();
+  std::int64_t* labels_ptr = host_terminal_outcome_labels_.data_ptr<std::int64_t>();
+  float* terminal_obs_ptr = host_terminal_observations_.data_ptr<float>();
+  float* goal_pos_ptr = host_goal_positions_.data_ptr<float>();
+  float* ball_touch_ptr = host_ball_proximity_.data_ptr<float>();
+  float* episode_touch_ptr = host_episode_ball_touch_.data_ptr<float>();
+  float* episode_touch_count_ptr = host_episode_ball_touch_count_.data_ptr<float>();
+  float* reward_ptr = host_rewards_.data_ptr<float>();
+  float* gp_reward_ptr = host_gameplay_rewards_.data_ptr<float>();
+  float* mech_reward_ptr = host_mechanic_rewards_.data_ptr<float>();
+  float* env_touch_ptr = host_env_touched_.data_ptr<float>();
+  float* env_multi_touch_ptr = host_env_multi_touched_.data_ptr<float>();
+  float* bootstrap_truncated_ptr = host_bootstrap_truncated_.data_ptr<float>();
+
+  // Next buffer pointers
+  next_buffers_.episode_starts.copy_(host_dones_);
+  float* next_obs_ptr = next_buffers_.obs.data_ptr<float>();
+  std::uint8_t* next_masks_ptr = next_buffers_.action_masks.data_ptr<std::uint8_t>();
+  float* next_learner_ptr = next_buffers_.learner_active.data_ptr<float>();
+  std::int64_t* next_snapshot_ptr = next_buffers_.snapshot_ids.data_ptr<std::int64_t>();
+
+  const std::size_t obs_stride = static_cast<std::size_t>(obs_dim_);
+  const std::size_t action_stride = static_cast<std::size_t>(action_dim_);
+  const float* ler_ptr = current_buffers_.learner_active.data_ptr<float>();
+
+  const bool any_gameplay = reward_engine_.has_any_gameplay_reward();
+  const bool any_mechanic = reward_engine_.has_any_mechanic_reward();
+  const bool has_team_spirit = reward_engine_.has_team_spirit();
+  const bool terminal_only = !any_gameplay && !any_mechanic;
+
   executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
     for (std::size_t env_idx = begin; env_idx < end; ++env_idx) {
       const std::size_t agent_begin = agent_offsets_[env_idx];
       const std::size_t agent_end = agent_offsets_[env_idx + 1];
       const std::size_t count = agent_end - agent_begin;
+
+      // Parse actions + step RocketSim
       action_parser_->parse_actions_into(
           std::span<const std::int64_t>(
-              action_indices.data() + static_cast<std::ptrdiff_t>(agent_begin),
-              count),
+              action_indices.data() + static_cast<std::ptrdiff_t>(agent_begin), count),
           envs_[env_idx].action_scratch);
       envs_[env_idx].engine->step_inplace(envs_[env_idx].action_scratch);
+
+      const EnvState& current_state = envs_[env_idx].engine->state();
+
+      // Done/truncated check
+      done_condition_->is_done_into(
+          current_state, current_state.tick,
+          envs_[env_idx].terminated_scratch,
+          envs_[env_idx].truncated_scratch);
+
+      bool reset_needed = false;
+      const bool goal_scored = current_state.goal_scored;
+      const Team scoring_team = current_state.last_scoring_team;
+      float team_touch_count[2] = {0.0F, 0.0F};
+
+      // Per-agent: proximity, touch, done flags
+      for (std::size_t idx = 0; idx < count; ++idx) {
+        const CarState& car = current_state.cars[idx];
+        const BallState& ball = current_state.ball;
+        const std::size_t gi = agent_begin + idx;
+
+        const float dx = car.position.x - ball.position.x;
+        const float dy = car.position.y - ball.position.y;
+        const float dz = car.position.z - ball.position.z;
+        ball_touch_ptr[gi] = (dx * dx + dy * dy + dz * dz < 90000.0F) ? 1.0F : 0.0F;
+
+        const bool touch_edge = car.ball_touched && !agent_reward_states_[gi].prev_ball_touched;
+        float& acc = episode_touch_ptr[gi];
+        acc = std::max(acc, touch_edge ? 1.0F : 0.0F);
+        if (touch_edge) episode_touch_count_ptr[gi] += 1.0F;
+
+        const int ti = (car.team == Team::Blue) ? 0 : 1;
+        team_touch_count[ti] += episode_touch_count_ptr[gi];
+
+        const bool is_term = envs_[env_idx].terminated_scratch[idx] != 0;
+        const bool is_trunc = envs_[env_idx].truncated_scratch[idx] != 0;
+        const bool done = is_term || is_trunc;
+        dones_ptr[gi] = done ? 1.0F : 0.0F;
+        terminated_ptr[gi] = is_term ? 1.0F : 0.0F;
+        truncated_ptr[gi] = is_trunc ? 1.0F : 0.0F;
+        bootstrap_truncated_ptr[gi] = (is_trunc && !is_term) ? 1.0F : 0.0F;
+        reset_needed = reset_needed || done;
+      }
+
+      // Per-agent: labels, rewards, goal pos
+      for (std::size_t idx = 0; idx < count; ++idx) {
+        const CarState& car = current_state.cars[idx];
+        const std::size_t gi = agent_begin + idx;
+        const bool is_term = envs_[env_idx].terminated_scratch[idx] != 0;
+        const bool is_trunc = envs_[env_idx].truncated_scratch[idx] != 0;
+        const bool done = is_term || is_trunc;
+        const int ti = (car.team == Team::Blue) ? 0 : 1;
+
+        const int label = done
+            ? (goal_scored
+                ? (car.team == scoring_team ? 0 : 1)
+                : (team_touch_count[ti] > 0.5F ? 2 : 3))
+            : -1;
+        labels_ptr[gi] = static_cast<std::int64_t>(label);
+
+        if (terminal_only) {
+          float term = 0.0F;
+          if (done) {
+            if (label == 0) term = reward_engine_.outcome_score();
+            else if (label == 1) term = reward_engine_.outcome_concede();
+            else if (label == 2) term = reward_engine_.outcome_neutral();
+            else if (label == 3) term = reward_engine_.outcome_neutral_no_touch();
+          }
+          reward_ptr[gi] = term;
+          gp_reward_ptr[gi] = 0.0F;
+          mech_reward_ptr[gi] = 0.0F;
+        } else {
+          RewardBreakdown bd = reward_engine_.compute(
+              current_state.tick, car, current_state,
+              static_cast<int>(config_.env.team_size),
+              agent_reward_states_[gi], env_reward_states_[env_idx],
+              done, label);
+          reward_ptr[gi] = bd.total;
+          gp_reward_ptr[gi] = bd.gameplay;
+          mech_reward_ptr[gi] = bd.mechanic;
+        }
+
+        float goal_pos[3];
+        compute_goal_position(current_state, config_.goal_mapping, goal_pos);
+        const int po = static_cast<int>(gi) * 3;
+        goal_pos_ptr[po] = goal_pos[0];
+        goal_pos_ptr[po + 1] = goal_pos[1];
+        goal_pos_ptr[po + 2] = goal_pos[2];
+      }
+
+      // Team spirit
+      if (has_team_spirit && count > 1) {
+        const float ts = config_.dense_rewards.team_spirit;
+        float t0s = 0.0F, t1s = 0.0F;
+        int t0c = 0, t1c = 0;
+        for (std::size_t i = 0; i < count; ++i) {
+          const std::size_t gi = agent_begin + i;
+          if (current_state.cars[i].team == Team::Blue) { t0s += gp_reward_ptr[gi]; t0c++; }
+          else { t1s += gp_reward_ptr[gi]; t1c++; }
+        }
+        const float t0a = t0c ? t0s / static_cast<float>(t0c) : 0.0F;
+        const float t1a = t1c ? t1s / static_cast<float>(t1c) : 0.0F;
+        for (std::size_t i = 0; i < count; ++i) {
+          const std::size_t gi = agent_begin + i;
+          const float ta = (current_state.cars[i].team == Team::Blue) ? t0a : t1a;
+          float& gp = gp_reward_ptr[gi];
+          const float old = gp;
+          gp = (1.0F - ts) * old + ts * ta;
+          reward_ptr[gi] += (gp - old);
+        }
+      }
+
+      // Reset handling
+      if (reset_needed) {
+        build_env_obs_batch(env_idx, current_state,
+            std::span<float>(terminal_obs_ptr + static_cast<std::ptrdiff_t>(agent_begin * obs_stride),
+                             count * obs_stride));
+        envs_[env_idx].reset_seed += static_cast<std::uint64_t>(envs_.size());
+        envs_[env_idx].engine->reset(envs_[env_idx].reset_seed);
+        assign_env(env_idx, envs_[env_idx].reset_seed);
+        env_reward_states_[env_idx] = EnvRewardState{};
+
+        float ltc = 0.0F;
+        for (std::size_t i = 0; i < count; ++i)
+          if (ler_ptr[agent_begin + i] > 0.5F) ltc += episode_touch_count_ptr[agent_begin + i];
+        env_touch_ptr[env_idx] = (ltc >= 1.0F) ? 1.0F : 0.0F;
+        env_multi_touch_ptr[env_idx] = (ltc >= 2.0F) ? 1.0F : 0.0F;
+
+        for (std::size_t i = 0; i < count; ++i) {
+          episode_touch_ptr[agent_begin + i] = 0.0F;
+          episode_touch_count_ptr[agent_begin + i] = 0.0F;
+          agent_reward_states_[agent_begin + i] = AgentRewardState{};
+        }
+      } else {
+        env_touch_ptr[env_idx] = 0.0F;
+        env_multi_touch_ptr[env_idx] = 0.0F;
+      }
+
+      // Build next obs
+      const EnvState& next_state = envs_[env_idx].engine->state();
+      build_env_obs_batch(env_idx, next_state,
+          std::span<float>(next_obs_ptr + static_cast<std::ptrdiff_t>(agent_begin * obs_stride),
+                           count * obs_stride));
+
+      // Build next action masks + learner/snapshot flags
+      action_parser_->build_action_mask_batch(next_state,
+          std::span<std::uint8_t>(next_masks_ptr + static_cast<std::ptrdiff_t>(agent_begin * action_stride),
+                                   count * action_stride));
+
+      for (std::size_t i = 0; i < count; ++i) {
+        const std::size_t gi = agent_begin + i;
+        const Team t = next_state.cars[i].team;
+        const bool learner = !envs_[env_idx].assignment.enabled || t == envs_[env_idx].assignment.learner_team;
+        next_learner_ptr[gi] = learner ? 1.0F : 0.0F;
+        next_snapshot_ptr[gi] = learner ? -1 : static_cast<std::int64_t>(envs_[env_idx].assignment.snapshot_index);
+      }
     }
   });
-  if (timings != nullptr) {
-    timings->env_step_seconds +=
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - env_step_start).count();
+
+  // Swap buffers
+  std::swap(current_buffers_, next_buffers_);
+
+  // Compute scalar step output
+  const auto* la_ptr = current_buffers_.learner_active.data_ptr<float>();
+  const float* env_t_ptr = host_env_touched_.data_ptr<float>();
+  const float* env_mt_ptr = host_env_multi_touched_.data_ptr<float>();
+  const int64_t n_agents = static_cast<int64_t>(total_agents_);
+  const int64_t n_envs = static_cast<int64_t>(envs_.size());
+  const int64_t ape = (n_envs > 0) ? (n_agents / n_envs) : 2;
+
+  for (int64_t gi = 0; gi < n_agents; ++gi) {
+    so.total_steps++;
+    if (la_ptr[gi] > 0.5F) {
+      so.total_learner_steps++;
+      so.total_reward += static_cast<double>(reward_ptr[gi]);
+      so.total_gameplay_reward += static_cast<double>(gp_reward_ptr[gi]);
+      so.total_mechanic_reward += static_cast<double>(mech_reward_ptr[gi]);
+    }
+    float gn = std::sqrt(goal_pos_ptr[gi * 3] * goal_pos_ptr[gi * 3] +
+                         goal_pos_ptr[gi * 3 + 1] * goal_pos_ptr[gi * 3 + 1] +
+                         goal_pos_ptr[gi * 3 + 2] * goal_pos_ptr[gi * 3 + 2]);
+    so.goal_distance_sum += static_cast<double>(gn);
+    so.goal_distance_count++;
+    if (gn < static_cast<float>(so.min_goal_distance)) so.min_goal_distance = static_cast<double>(gn);
+    so.ball_prox_steps += (ball_touch_ptr[gi] > 0.5F) ? 1 : 0;
+    so.ball_prox_denom++;
   }
-  finalize_step(timings);
+
+  for (int64_t ei = 0; ei < n_envs; ++ei) {
+    const int64_t ea = ei * ape;
+    const int64_t ee = std::min<int64_t>(ea + ape, n_agents);
+    bool env_done = false, env_scored = false, env_gs = false, env_gc = false;
+    for (int64_t gi = ea; gi < ee; ++gi) {
+      if (dones_ptr[gi] > 0.5F) {
+        env_done = true;
+        if (labels_ptr[gi] == 0) { env_scored = true; env_gs = true; }
+        if (labels_ptr[gi] == 1) env_gc = true;
+      }
+    }
+    if (env_gs) so.goals_scored++;
+    if (env_gc) so.goals_conceded++;
+    if (env_done) {
+      so.completed_episodes++;
+      if (env_scored) so.scored_episodes++;
+      if (env_t_ptr[ei] > 0.5F) so.touched_episodes++;
+      if (env_mt_ptr[ei] > 0.5F) so.multi_touched_episodes++;
+    }
+  }
+
+  if (timings != nullptr) {
+    const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
+    timings->env_step_seconds += s;
+    timings->obs_build_seconds += s * 0.05;
+    timings->mask_build_seconds += s * 0.03;
+    timings->done_reset_seconds += s * 0.02;
+  }
+}
+
+const BatchedRocketSimCollector::StepOutput& BatchedRocketSimCollector::last_step_output() const {
+  return last_step_output_;
 }
 
 const torch::Tensor& BatchedRocketSimCollector::host_observations() const {

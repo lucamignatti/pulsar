@@ -69,6 +69,27 @@ class BatchedRocketSimCollector {
   void step(std::span<const ControllerState> actions, CollectorTimings* timings = nullptr);
   void step(std::span<const std::int64_t> action_indices, CollectorTimings* timings = nullptr);
 
+  // Fused step output: scalar aggregates avoiding .item() reductions in trainer
+  struct StepOutput {
+    double total_reward = 0.0;
+    double total_gameplay_reward = 0.0;
+    double total_mechanic_reward = 0.0;
+    int64_t total_steps = 0;
+    int64_t total_learner_steps = 0;
+    double goal_distance_sum = 0.0;
+    double min_goal_distance = 1.0;
+    int64_t goal_distance_count = 0;
+    int goals_scored = 0;
+    int goals_conceded = 0;
+    int completed_episodes = 0;
+    int scored_episodes = 0;
+    int touched_episodes = 0;
+    int multi_touched_episodes = 0;
+    int64_t ball_prox_steps = 0;
+    int64_t ball_prox_denom = 0;
+  };
+  [[nodiscard]] const StepOutput& last_step_output() const;
+
   [[nodiscard]] const torch::Tensor& host_observations() const;
   [[nodiscard]] const torch::Tensor& host_action_masks() const;
   [[nodiscard]] const torch::Tensor& host_learner_active() const;
@@ -146,6 +167,7 @@ class BatchedRocketSimCollector {
   std::vector<AgentRewardState> agent_reward_states_;
   std::vector<EnvRewardState> env_reward_states_;
   RewardEngine reward_engine_;
+  StepOutput last_step_output_;
   std::string mode_ = "1v1";
   std::size_t total_agents_ = 0;
   int obs_dim_ = 0;

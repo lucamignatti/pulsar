@@ -1004,11 +1004,11 @@ void APPOTrainer::rebuild_collectors() {
   const bool pin_host = device_.is_cuda();
 
   const int total_envs = config_.ppo.num_envs;
+  const int requested_shards = std::max(1, std::min(config_.ppo.collection_shards, total_envs));
 
   // allocate envs per mode, rounding to nearest integer
   std::vector<std::pair<std::string, int>> mode_envs;
   int allocated = 0;
-  float fractional_sum = 0.0F;
   for (const auto& [mode, frac] : alloc) {
     int envs = static_cast<int>(std::round(static_cast<float>(total_envs) * frac));
     if (envs <= 0) envs = 1;
@@ -1021,6 +1021,30 @@ void APPOTrainer::rebuild_collectors() {
     if (mode_envs.back().second <= 0) mode_envs.back().second = 1;
   }
 
+  // Distribute shards across modes: at least 1 shard per mode, distribute remainder
+  // proportional to env count.
+  const int num_modes = static_cast<int>(mode_envs.size());
+  int remaining_shards = requested_shards - num_modes;
+  std::vector<int> mode_shard_counts(num_modes, 1);
+  if (remaining_shards > 0) {
+    // Allocate extra shards proportional to env ratio
+    for (int i = 0; i < num_modes && remaining_shards > 0; ++i) {
+      int extra = static_cast<int>(std::round(
+          static_cast<float>(remaining_shards) *
+          static_cast<float>(mode_envs[i].second) / static_cast<float>(total_envs)));
+      extra = std::min(extra, remaining_shards);
+      mode_shard_counts[i] += extra;
+      remaining_shards -= extra;
+    }
+    // Any remaining shards go to the mode with most envs
+    if (remaining_shards > 0) {
+      int best = 0;
+      for (int i = 1; i < num_modes; ++i)
+        if (mode_envs[i].second > mode_envs[best].second) best = i;
+      mode_shard_counts[best] += remaining_shards;
+    }
+  }
+
   // save self-play state before rebuild
   const bool self_play_was_enabled = self_play_manager_ && self_play_manager_->enabled();
   const auto self_play_rng = self_play_was_enabled ? self_play_manager_->rng_state() : std::string{};
@@ -1028,19 +1052,38 @@ void APPOTrainer::rebuild_collectors() {
   // destroy old collectors
   collectors_.clear();
 
+  // Create per-shard collectors within each mode
   int env_seed_offset = 0;
-  for (const auto& [mode, env_count] : mode_envs) {
-    auto mode_cfg = config_;
-    mode_cfg.env.team_size = team_size_from_mode(mode);
-    mode_cfg.env.spawn_opponents = (mode_cfg.env.team_size >= 1);
-    mode_cfg.ppo.num_envs = env_count;
-    mode_cfg.env.seed += static_cast<std::uint64_t>(env_seed_offset);
-    env_seed_offset += env_count;
+  for (int mi = 0; mi < num_modes; ++mi) {
+    const auto& [mode, mode_total_envs] = mode_envs[mi];
+    const int n_shards = mode_shard_counts[mi];
 
-    auto collector = std::make_unique<BatchedRocketSimCollector>(
-        mode_cfg, obs_builder, action_parser, done_condition, pin_host);
-    collector->set_mode(mode);
-    collectors_.push_back(std::move(collector));
+    for (int si = 0; si < n_shards; ++si) {
+      const int base_envs = mode_total_envs / n_shards;
+      const int extra_envs = (si < (mode_total_envs % n_shards)) ? 1 : 0;
+      const int shard_envs = base_envs + extra_envs;
+      if (shard_envs <= 0) continue;
+
+      auto mode_cfg = config_;
+      mode_cfg.env.team_size = team_size_from_mode(mode);
+      mode_cfg.env.spawn_opponents = (mode_cfg.env.team_size >= 1);
+      mode_cfg.ppo.num_envs = shard_envs;
+      mode_cfg.env.seed += static_cast<std::uint64_t>(env_seed_offset);
+      env_seed_offset += shard_envs;
+
+      // Distribute collection_workers across shards
+      if (config_.ppo.collection_workers > 0) {
+        const int total_shards = [&]() { int s = 0; for (int c : mode_shard_counts) s += c; return s; }();
+        const int base_w = config_.ppo.collection_workers / total_shards;
+        const int extra_w = (si < (config_.ppo.collection_workers % total_shards)) ? 1 : 0;
+        mode_cfg.ppo.collection_workers = std::max(1, base_w + extra_w);
+      }
+
+      auto collector = std::make_unique<BatchedRocketSimCollector>(
+          mode_cfg, obs_builder, action_parser, done_condition, pin_host);
+      collector->set_mode(mode);
+      collectors_.push_back(std::move(collector));
+    }
   }
 
   // recompute agent counts
@@ -1107,8 +1150,11 @@ void APPOTrainer::rebuild_collectors() {
   // re-apply curriculum
   apply_curriculum_to_collectors();
 
-  std::cout << "rebuilt_collectors modes=" << mode_envs.size()
+  std::cout << "rebuilt_collectors collectors=" << collectors_.size()
+            << " modes=" << mode_envs.size()
             << " total_agents=" << total_agents_
+            << " total_envs=" << total_envs
+            << " devices=" << join_device_list(shard_devices_)
             << " rollout_length=" << config_.ppo.rollout_length << '\n';
 }
 
@@ -2421,7 +2467,7 @@ void APPOTrainer::collect_rollout(
         }
         accumulate_timings(collector_timings, shard_step.timings);
 
-        // Aggregate done-reset counts.
+        // Aggregate done-reset counts (computed in shard task).
         total_goals_scored += shard_step.goals_scored;
         total_goals_conceded += shard_step.goals_conceded;
         completed_episodes += shard_step.completed_episodes;
@@ -2490,7 +2536,7 @@ void APPOTrainer::collect_rollout(
             terminal_labels,
             terminal_obs_host);
         auto& collector = *collectors_[shard];
-        dest.set_mode_ids_slice(step, shard_step.agent_offset, collector.mode_id());
+        dest.set_mode_ids_slice(step, shard_step.agent_offset, static_cast<int>(collector.total_agents()), collector.mode_id());
 
         local_collected_steps += learner_step_count;
       }

@@ -84,6 +84,7 @@ class RolloutStorage {
   torch::Tensor mode_ids;  // int8, [rollout_length, num_agents], 0=unknown 1=1v1 2=2v2 3=3v3
   std::unordered_map<std::string, torch::Tensor> final_values_;
 
+  void set_mode_ids_slice(int step, int agent_offset, int agent_count, std::int8_t mode_id);
   void set_mode_ids_slice(int step, int agent_offset, std::int8_t mode_id);
 
  private:
