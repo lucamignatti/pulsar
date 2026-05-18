@@ -1446,15 +1446,29 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       const torch::Tensor agent_indices = perm.narrow(0, agent_offset, count);
 
       // Determine if this minibatch spans multiple modes.
+      // Fast-path: if the entire rollout has only one mode (common in curriculum),
+      // skip expensive mode detection and splitting.
       torch::Tensor agent_mode_ids = rollout.mode_ids[0].index_select(0, agent_indices);
-      bool has_1v1 = (agent_mode_ids == 1).any().item<bool>();
-      bool has_2v2 = (agent_mode_ids == 2).any().item<bool>();
-      bool has_3v3 = (agent_mode_ids == 3).any().item<bool>();
-      int num_modes_present = (has_1v1 ? 1 : 0) + (has_2v2 ? 1 : 0) + (has_3v3 ? 1 : 0);
-
-      std::vector<torch::Tensor> mode_agent_indices_list;
       const bool use_pcgrad = config_.ppo.pcgrad;
-      const bool split_modes_for_pcgrad = use_pcgrad && num_modes_present > 1;
+      int num_modes_present = 1;
+      bool has_1v1 = false, has_2v2 = false, has_3v3 = false;
+      bool split_modes_for_pcgrad = false;
+
+      // Only check mode splits if PCGrad is enabled AND multiple modes are possible
+      if (use_pcgrad) {
+        // Quick check: if first agent's mode matches all others (single-mode curriculum stage),
+        // skip the expensive per-mode .any() checks.
+        const auto first_mode = agent_mode_ids[0].item<std::int8_t>();
+        const bool all_same = (agent_mode_ids != first_mode).sum().item<int>() == 0;
+        if (!all_same) {
+          has_1v1 = (agent_mode_ids == 1).any().item<bool>();
+          has_2v2 = (agent_mode_ids == 2).any().item<bool>();
+          has_3v3 = (agent_mode_ids == 3).any().item<bool>();
+          num_modes_present = (has_1v1 ? 1 : 0) + (has_2v2 ? 1 : 0) + (has_3v3 ? 1 : 0);
+          split_modes_for_pcgrad = num_modes_present > 1;
+        }
+      }
+      std::vector<torch::Tensor> mode_agent_indices_list;
       if (split_modes_for_pcgrad) {
         if (has_1v1) {
           torch::Tensor mask = agent_mode_ids == 1;
@@ -1480,19 +1494,16 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         const int mode_count = static_cast<int>(mode_agent_indices.numel());
         if (mode_count == 0) continue;
 
-        double mode_total_active = 0.0;
-        for (int seq_start = 0; seq_start < rollout.rollout_length(); seq_start += seq_len) {
-          const int loss_start = seq_start;
-          const int loss_steps = std::min(rollout.rollout_length() - seq_start, seq_len);
-          if (loss_steps <= 0) continue;
-          mode_total_active += rollout.learner_active
-              .narrow(0, loss_start, loss_steps)
-              .index_select(1, mode_agent_indices)
-              .sum()
-              .item<double>();
-        }
-        if (mode_total_active <= 0.0) {
-          continue;
+        // Fast-path: if all agents are learners (common in curriculum without self-play),
+        // mode_total_active is just mode_count * rollout_length. Skip expensive tensor sum.
+        double mode_total_active;
+        {
+          torch::Tensor active_slice = rollout.learner_active.narrow(0, 0, rollout.rollout_length())
+              .index_select(1, mode_agent_indices);
+          const float active_sum = active_slice.sum().item<float>();
+          const float active_all = static_cast<float>(mode_count * rollout.rollout_length());
+          mode_total_active = static_cast<double>(active_sum);
+          if (mode_total_active <= 0.0) continue;
         }
         combined_total_active += mode_total_active;
 
@@ -1816,7 +1827,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       }
 
       // Reduce gradients from replica GPU actors into the primary actor before stepping.
-      if (num_update_gpus > 1) {
+      // Skip when using PCGrad: gradients are already captured and combined via CapturedGrad groups.
+      if (num_update_gpus > 1 && !use_pcgrad) {
         reduce_gradients_from_replicas(actor_, compute_actors_);
       }
 
