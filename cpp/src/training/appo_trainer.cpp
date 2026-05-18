@@ -45,7 +45,7 @@
 namespace pulsar {
 namespace {
 
-constexpr int kEsLoraMinStage = 2;  // keep early touch/scoring curriculum on PPO/GCRL only
+constexpr int kEsLoraMinStage = 3;  // keep early touch/scoring curriculum on PPO/GCRL only
 constexpr int kSelfPlayMinStage = 2;
 
 double current_process_rss_mb() {
