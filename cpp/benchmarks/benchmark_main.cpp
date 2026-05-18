@@ -178,6 +178,9 @@ int main(int argc, char** argv) {
     std::cout << "value_loss=" << metrics.value_loss << '\n';
     std::cout << "entropy=" << metrics.entropy << '\n';
     std::cout << "grad_norm=" << metrics.grad_norm << '\n';
+    std::cout << "es_updates=" << metrics.es_updates << '\n';
+    std::cout << "es_seconds=" << metrics.es_seconds << '\n';
+    std::cout << "es_eval_seconds=" << metrics.es_eval_seconds << '\n';
     return EXIT_SUCCESS;
   } catch (const std::exception& exc) {
     std::cerr << "pulsar_bench failed: " << exc.what() << '\n';

@@ -12,7 +12,9 @@ def find_repo_root(start: Path) -> Path:
     for candidate in (start, *start.parents):
         if (candidate / "configs" / "2v2_appo.json").exists():
             return candidate
-    raise FileNotFoundError("could not locate repo root containing configs/2v2_appo.json")
+    raise FileNotFoundError(
+        "could not locate repo root containing configs/2v2_appo.json"
+    )
 
 
 def main() -> int:
@@ -21,14 +23,18 @@ def main() -> int:
 
     bench_binary = Path(sys.argv[1]).resolve()
     repo_root = find_repo_root(bench_binary.parent)
-    base_config = json.loads((repo_root / "configs" / "2v2_appo.json").read_text(encoding="utf-8"))
-    base_config["model"].update({
-        "encoder_dim": 64,
-        "num_encoder_blocks": 1,
-        "sequence_length": 4,
-        "max_forward_samples": 256,
-        "value_hidden_dim": 64,
-    })
+    base_config = json.loads(
+        (repo_root / "configs" / "2v2_appo.json").read_text(encoding="utf-8")
+    )
+    base_config["model"].update(
+        {
+            "encoder_dim": 64,
+            "num_encoder_blocks": 1,
+            "sequence_length": 4,
+            "max_forward_samples": 256,
+            "value_hidden_dim": 64,
+        }
+    )
     base_config["ppo"]["rollout_length"] = 8
     base_config["ppo"]["minibatch_size"] = 32
     base_config["ppo"]["num_envs"] = 2
@@ -36,7 +42,9 @@ def main() -> int:
     base_config["ppo"]["collection_workers"] = 0
     base_config["ppo"]["device"] = "cpu"
     base_config["wandb"]["enabled"] = False
-    base_config["env"]["collision_meshes_path"] = str((repo_root / "collision_meshes").resolve())
+    base_config["env"]["collision_meshes_path"] = str(
+        (repo_root / "collision_meshes").resolve()
+    )
     base_config["goal_critic"]["hidden_dim"] = 64
     base_config["goal_critic"]["contrastive_batch_size"] = 16
     with tempfile.TemporaryDirectory(prefix="pulsar_bench_smoke_") as tmp:
@@ -61,6 +69,9 @@ def main() -> int:
         "overall_agent_steps_per_second",
         "forward_backward_seconds",
         "optimizer_step_seconds",
+        "es_updates",
+        "es_seconds",
+        "es_eval_seconds",
     }
     missing = sorted(required - metrics.keys())
     if missing:

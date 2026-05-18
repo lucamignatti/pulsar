@@ -2173,7 +2173,9 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
     B_stack = torch::randn({pop, out_features, rank}, tensor_options);
   }
 
+  const auto es_eval_start = std::chrono::steady_clock::now();
   ESPopulationFitness population = evaluate_es_population(A_stack, B_stack, update_index);
+  metrics.es_eval_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - es_eval_start).count();
   std::vector<float>& fitnesses = population.fitness;
   const uint64_t total_members = fitnesses.size();
   float mu = 0.0F;
@@ -3183,6 +3185,25 @@ TrainerBenchmarkMetrics APPOTrainer::benchmark(int updates) {
         collection_actors_[i]->eval();
       }
     }
+    // Run ES-LoRA update at the same cadence as the training loop.
+    const int update_index = index + 1;
+    if (curriculum_.stage_index() >= kEsLoraMinStage && update_index % config_.es_lora.es_interval == 0) {
+      TrainerMetrics es_metrics{};
+      std::cout << "bench_es_update_start update=" << update_index << '/' << bounded_updates << '\n' << std::flush;
+      run_es_lora_update(update_index, es_metrics);
+      // Sync ES-LoRA weight changes to replica actors.
+      if (compute_actors_.size() > 0) {
+        sync_actor_to_replicas(actor_, compute_actors_);
+      }
+      result.es_updates += 1;
+      result.es_seconds += es_metrics.es_seconds;
+      result.es_eval_seconds += es_metrics.es_eval_seconds;
+      std::cout << "bench_es_update_done update=" << update_index
+                << " es_seconds=" << es_metrics.es_seconds
+                << " es_eval_seconds=" << es_metrics.es_eval_seconds
+                << '\n' << std::flush;
+    }
+
     rollout_.clear();
   }
 

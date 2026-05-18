@@ -96,6 +96,7 @@ struct TrainerMetrics {
   double es_lora_a_norm = 0.0;
   double es_lora_b_norm = 0.0;
   double es_seconds = 0.0;
+  double es_eval_seconds = 0.0;
   double scored_episode_rate = 0.0;
   double conceded_episode_rate = 0.0;
   double neutral_episode_rate = 0.0;
@@ -131,6 +132,9 @@ struct TrainerBenchmarkMetrics {
   double value_loss = 0.0;
   double entropy = 0.0;
   double grad_norm = 0.0;
+  int es_updates = 0;
+  double es_seconds = 0.0;
+  double es_eval_seconds = 0.0;
 };
 
 class APPOTrainer {
