@@ -95,6 +95,21 @@ function(_pulsar_sanitize_torch_language_standard)
         )
       endif()
 
+      get_target_property(_torch_link_libraries "${_torch_target}" INTERFACE_LINK_LIBRARIES)
+      if(_torch_link_libraries)
+        set(_torch_link_libraries_clean "")
+        foreach(_torch_link_item IN LISTS _torch_link_libraries)
+          if(_torch_link_item MATCHES "^(hip|hiprtc|roc)::" AND NOT TARGET "${_torch_link_item}")
+            continue()
+          endif()
+          list(APPEND _torch_link_libraries_clean "${_torch_link_item}")
+        endforeach()
+        set_target_properties(
+          "${_torch_target}"
+          PROPERTIES INTERFACE_LINK_LIBRARIES "${_torch_link_libraries_clean}"
+        )
+      endif()
+
       get_target_property(_torch_compile_features "${_torch_target}" INTERFACE_COMPILE_FEATURES)
       if(_torch_compile_features)
         set_target_properties(
