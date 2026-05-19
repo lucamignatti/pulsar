@@ -350,6 +350,34 @@ void zero_existing_gradients(torch::nn::Module& module) {
   }
 }
 
+bool gradients_are_finite(const torch::nn::Module& module) {
+  for (const auto& p : module.parameters()) {
+    const torch::Tensor grad = p.grad();
+    if (grad.defined() && !torch::isfinite(grad).all().item<bool>()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool captured_group_has_grad(const std::vector<CapturedGrad>& group) {
+  for (const auto& captured : group) {
+    if (captured.grad.defined()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool captured_group_gradients_are_finite(const std::vector<CapturedGrad>& group) {
+  for (const auto& captured : group) {
+    if (captured.grad.defined() && !torch::isfinite(captured.grad).all().item<bool>()) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void scale_existing_gradients(torch::nn::Module& module, double scale) {
   if (scale == 1.0) {
     return;
@@ -411,10 +439,19 @@ void apply_pcgrad_multi(std::vector<std::vector<CapturedGrad>>& groups) {
   for (size_t i = 0; i < groups.size(); ++i) {
     for (size_t j = 0; j < groups.size(); ++j) {
       if (i == j) continue;
-      const torch::Tensor dot = flats[i].dot(flats[j]);
-      if (dot.item<float>() < 0.0F) {
-        const torch::Tensor norm_j_sq = flats[j].dot(flats[j]).clamp_min(1.0e-12);
-        flats[i] = flats[i] - (dot / norm_j_sq) * flats[j];
+      const torch::Tensor flat_i64 = flats[i].to(torch::kFloat64);
+      const torch::Tensor flat_j64 = flats[j].to(torch::kFloat64);
+      const torch::Tensor dot = flat_i64.dot(flat_j64);
+      if (!torch::isfinite(dot).item<bool>()) {
+        continue;
+      }
+      if (dot.item<double>() < 0.0) {
+        const torch::Tensor norm_j_sq = flat_j64.dot(flat_j64).clamp_min(1.0e-12);
+        if (!torch::isfinite(norm_j_sq).item<bool>()) {
+          continue;
+        }
+        const torch::Tensor coeff = (dot / norm_j_sq).to(flats[i].scalar_type());
+        flats[i] = flats[i] - coeff * flats[j];
       }
     }
   }
@@ -1554,6 +1591,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           double sampled_goal_dist = 0.0;
           double fwd_bwd_seconds = 0.0;
           int nonfinite_skips = 0;
+          int nonfinite_grad_skips = 0;
           bool has_backward = false;
           std::int64_t active_count = 0;
         };
@@ -1745,12 +1783,24 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                     zero_existing_gradients(*gpu_act);
                     const bool retain_graph = obj_index + 1 < static_cast<int>(objective_losses.size());
                     (objective_losses[obj_index].first * cuda_amp_loss_scale_local).backward({}, retain_graph);
+                    if (!gradients_are_finite(*gpu_act)) {
+                      ++result.nonfinite_grad_skips;
+                      zero_existing_gradients(*gpu_act);
+                      continue;
+                    }
                     accumulate_gradients(*gpu_act, *objective_losses[obj_index].second);
+                    result.has_backward = true;
                   }
                 } else {
                   (loss * sample_weight / static_cast<double>(optimizer_accumulation_steps_local) * cuda_amp_loss_scale_local).backward();
+                  if (!gradients_are_finite(*gpu_act)) {
+                    ++result.nonfinite_grad_skips;
+                    zero_existing_gradients(*gpu_act);
+                    result.has_backward = false;
+                    continue;
+                  }
+                  result.has_backward = true;
                 }
-                result.has_backward = true;
 
                 result.policy_loss_sum += policy_loss.detach().to(torch::kFloat32).to(device_).item<double>() * active_samples;
                 result.value_loss_sum += value_loss.detach().to(torch::kFloat32).to(device_).item<double>() * active_samples;
@@ -1799,19 +1849,20 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           goal_score_sum = goal_score_sum + task_result.goal_score;
           sampled_goal_distance_sum = sampled_goal_distance_sum + task_result.sampled_goal_dist;
           metrics.nonfinite_loss_skips += task_result.nonfinite_skips;
+          metrics.nonfinite_grad_norm_skips += task_result.nonfinite_grad_skips;
           metrics.forward_backward_seconds += task_result.fwd_bwd_seconds;
           accumulated_has_backward = accumulated_has_backward || task_result.has_backward;
           metric_steps += task_result.active_count;
         }
 
         if (use_pcgrad) {
-          if (!mode_task_grad_group.empty()) {
+          if (!mode_task_grad_group.empty() && captured_group_has_grad(mode_task_grad_group)) {
             pcgrad_groups.push_back(std::move(mode_task_grad_group));
           }
-          if (!mode_goal_critic_grad_group.empty()) {
+          if (!mode_goal_critic_grad_group.empty() && captured_group_has_grad(mode_goal_critic_grad_group)) {
             pcgrad_groups.push_back(std::move(mode_goal_critic_grad_group));
           }
-          if (!mode_goal_actor_grad_group.empty()) {
+          if (!mode_goal_actor_grad_group.empty() && captured_group_has_grad(mode_goal_actor_grad_group)) {
             pcgrad_groups.push_back(std::move(mode_goal_actor_grad_group));
           }
         }
@@ -1823,8 +1874,37 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       // Apply PCGrad across mode/objective groups, then materialize their sum
       // onto the primary actor's parameters.
       if (use_pcgrad && !pcgrad_groups.empty()) {
+        auto removed = std::remove_if(
+            pcgrad_groups.begin(),
+            pcgrad_groups.end(),
+            [](const std::vector<CapturedGrad>& group) {
+              return !captured_group_has_grad(group) || !captured_group_gradients_are_finite(group);
+            });
+        if (removed != pcgrad_groups.end()) {
+          metrics.nonfinite_grad_norm_skips += std::distance(removed, pcgrad_groups.end());
+          pcgrad_groups.erase(removed, pcgrad_groups.end());
+        }
+      }
+      if (use_pcgrad && pcgrad_groups.empty()) {
+        accumulated_has_backward = false;
+      }
+      if (use_pcgrad && !pcgrad_groups.empty()) {
         zero_existing_gradients(*actor_);
         apply_pcgrad_multi(pcgrad_groups);
+        bool pcgrad_finite = true;
+        for (const auto& group : pcgrad_groups) {
+          if (!captured_group_gradients_are_finite(group)) {
+            pcgrad_finite = false;
+            break;
+          }
+        }
+        if (!pcgrad_finite) {
+          ++metrics.nonfinite_grad_norm_skips;
+          pcgrad_groups.clear();
+          accumulated_has_backward = false;
+        }
+      }
+      if (use_pcgrad && !pcgrad_groups.empty()) {
         for (size_t i = 0; i < pcgrad_groups[0].size(); ++i) {
           torch::Tensor combined;
           bool has_any = false;

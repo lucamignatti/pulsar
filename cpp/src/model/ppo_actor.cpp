@@ -68,7 +68,7 @@ void validate_es_lora_config(const ESLoraConfig& config) {
 }
 
 torch::Tensor normalize_goal_embedding(const torch::Tensor& embedding) {
-  return embedding / embedding.norm(2, -1, true).clamp_min(1.0e-6F);
+  return embedding / embedding.norm(2, -1, true).clamp_min(1.0e-3F);
 }
 
 }  // namespace

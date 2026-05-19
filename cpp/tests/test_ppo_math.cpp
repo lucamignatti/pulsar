@@ -213,6 +213,17 @@ int main() {
       require(kl_diff > 0.0F, "KL between different distributions should be positive");
     }
 
+    // 11. Action masking should avoid infinities in the autograd graph.
+    {
+      auto logits = torch::tensor({{1.0F, 2.0F, 3.0F}, {0.5F, -0.5F, 1.5F}}, torch::kFloat32);
+      auto masks = torch::tensor({{true, false, true}, {false, true, true}}, torch::kBool);
+      auto masked = pulsar::apply_action_mask_to_logits(logits, masks);
+      require_finite(masked, "masked logits finite");
+      require(masked[0][1].item<float>() < -1.0e8F, "invalid action receives very low finite logit");
+      auto entropy = pulsar::masked_action_entropy(logits, masks);
+      require_finite(entropy, "masked entropy finite");
+    }
+
     std::cout << "pulsar_ppo_math_tests passed\n";
     return EXIT_SUCCESS;
   } catch (const std::exception& exc) {

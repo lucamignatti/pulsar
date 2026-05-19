@@ -20,6 +20,8 @@ void seed_everything(std::uint64_t seed) {
 
 namespace {
 
+constexpr float kMaskedLogit = -1.0e9F;
+
 torch::Tensor sample_categorical_from_logits(const torch::Tensor& logits) {
   const torch::Tensor uniform = torch::rand_like(logits).clamp_min_(1.0e-6);
   const torch::Tensor gumbel = -torch::log(-torch::log(uniform));
@@ -54,7 +56,7 @@ void scatter_tensor(torch::Tensor& dst, const torch::Tensor& indices, const torc
 }  // namespace
 
 torch::Tensor apply_action_mask_to_logits(const torch::Tensor& logits, const torch::Tensor& action_masks) {
-  return logits.masked_fill(action_masks.logical_not(), -std::numeric_limits<float>::infinity());
+  return logits.masked_fill(action_masks.logical_not(), kMaskedLogit);
 }
 
 torch::Tensor sample_masked_actions(
