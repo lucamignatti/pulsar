@@ -16,14 +16,38 @@ constexpr float kRetentionMin = 0.01F;
 constexpr float kRetentionMax = 0.9999F;
 
 __device__ __forceinline__ float sigmoidf_fast(float x) {
-  return 1.0F / (1.0F + expf(-x));
+  if (x >= 0.0F) {
+    const float z = expf(-x);
+    return 1.0F / (1.0F + z);
+  }
+  const float z = expf(x);
+  return z / (1.0F + z);
 }
 
 __device__ __forceinline__ float siluf_fast(float x) {
+  if (!isfinite(x)) {
+    return x > 0.0F ? x : 0.0F;
+  }
+  if (x > 20.0F) {
+    return x;
+  }
+  if (x < -20.0F) {
+    return x * expf(x);
+  }
   return x * sigmoidf_fast(x);
 }
 
 __device__ __forceinline__ float silu_gradf_fast(float x) {
+  if (!isfinite(x)) {
+    return x > 0.0F ? 1.0F : 0.0F;
+  }
+  if (x > 20.0F) {
+    return 1.0F;
+  }
+  if (x < -20.0F) {
+    const float e = expf(x);
+    return e * (1.0F + x);
+  }
   const float s = sigmoidf_fast(x);
   return s * (1.0F + x * (1.0F - s));
 }
@@ -147,10 +171,10 @@ __global__ void mamba2_scan_backward_kernel(
     grad_projected[proj_base + embed_dim] = grad_b * gate_b * (1.0F - gate_b);
     grad_projected[proj_base + 2 * embed_dim] = grad_c * gate_c * (1.0F - gate_c);
     grad_projected[proj_base + 3 * embed_dim] = grad_z * silu_gradf_fast(p3);
-    const float retention_grad_active =
-        (retention_unclamped > kRetentionMin && retention_unclamped < kRetentionMax) ? 1.0F : 0.0F;
     const float grad_retention_pre =
-        grad_retention * retention_grad_active * retention_unclamped * (1.0F - retention_unclamped);
+        (retention_unclamped > kRetentionMin && retention_unclamped < kRetentionMax)
+            ? grad_retention * retention_unclamped * (1.0F - retention_unclamped)
+            : 0.0F;
     grad_projected[proj_base + 4 * embed_dim] = grad_retention_pre;
     local_grad_decay += grad_retention_pre;
   }

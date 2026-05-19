@@ -205,6 +205,27 @@ int main() {
         throw std::runtime_error("mamba2 accelerator scan gradient mismatch");
       }
 
+      torch::Tensor extreme_projected = torch::zeros({1, 4, 25}, opts).set_requires_grad(true);
+      {
+        torch::NoGradGuard no_grad;
+        extreme_projected.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), torch::indexing::Slice(0, 5)}, 80.0F);
+        extreme_projected.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), torch::indexing::Slice(5, 10)}, 80.0F);
+        extreme_projected.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), torch::indexing::Slice(10, 15)}, 80.0F);
+        extreme_projected.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), torch::indexing::Slice(15, 20)}, -80.0F);
+        extreme_projected.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), torch::indexing::Slice(20, 25)}, 80.0F);
+      }
+      torch::Tensor extreme_decay = torch::full({5}, 80.0F, opts).set_requires_grad(true);
+      torch::Tensor extreme_skip = torch::full({5}, 8.0F, opts).set_requires_grad(true);
+      torch::Tensor extreme_reset = torch::zeros({1, 4}, opts);
+      const torch::Tensor extreme_out =
+          pulsar::mamba2_scan_mixed(extreme_projected, extreme_decay, extreme_skip, extreme_reset);
+      extreme_out.sum().backward();
+      if (!torch::isfinite(extreme_projected.grad()).all().item<bool>() ||
+          !torch::isfinite(extreme_decay.grad()).all().item<bool>() ||
+          !torch::isfinite(extreme_skip.grad()).all().item<bool>()) {
+        throw std::runtime_error("mamba2 accelerator extreme scan produced non-finite gradients");
+      }
+
       torch::Tensor conv_input = torch::randn({2, 6, 5}, opts).set_requires_grad(true);
       torch::Tensor conv_weight = torch::randn({5, 3}, opts).set_requires_grad(true);
       torch::Tensor conv_bias = torch::randn({5}, opts).set_requires_grad(true);
