@@ -145,7 +145,7 @@ class Mamba2ScanCudaFunction : public torch::autograd::Function<Mamba2ScanCudaFu
       torch::Tensor decay_bias,
       torch::Tensor skip,
       torch::Tensor reset_mask) {
-    const bool has_reset = reset_mask.defined();
+    const bool has_reset = reset_mask.defined() && reset_mask.numel() > 0;
     projected = projected.contiguous();
     decay_bias = decay_bias.contiguous();
     skip = skip.contiguous();
@@ -214,7 +214,7 @@ class Mamba2ScanHipFunction : public torch::autograd::Function<Mamba2ScanHipFunc
       torch::Tensor decay_bias,
       torch::Tensor skip,
       torch::Tensor reset_mask) {
-    const bool has_reset = reset_mask.defined();
+    const bool has_reset = reset_mask.defined() && reset_mask.numel() > 0;
     projected = projected.contiguous();
     decay_bias = decay_bias.contiguous();
     skip = skip.contiguous();
@@ -289,20 +289,26 @@ torch::Tensor mamba2_scan_mixed(
   validate_scan_inputs(projected, decay_bias, skip, reset_mask);
 #ifdef PULSAR_HAS_MAMBA2_CUDA_KERNELS
   if (can_use_cuda_scan(projected, decay_bias, skip)) {
+    const torch::Tensor reset_arg = reset_mask.defined()
+        ? reset_mask.to(projected.device()).to(torch::kFloat32)
+        : torch::empty({0}, projected.options());
     return Mamba2ScanCudaFunction::apply(
         projected,
         decay_bias,
         skip,
-        reset_mask.defined() ? reset_mask.to(projected.device()).to(torch::kFloat32) : reset_mask);
+        reset_arg);
   }
 #endif
 #ifdef PULSAR_HAS_MAMBA2_HIP_KERNELS
   if (can_use_cuda_scan(projected, decay_bias, skip)) {
+    const torch::Tensor reset_arg = reset_mask.defined()
+        ? reset_mask.to(projected.device()).to(torch::kFloat32)
+        : torch::empty({0}, projected.options());
     return Mamba2ScanHipFunction::apply(
         projected,
         decay_bias,
         skip,
-        reset_mask.defined() ? reset_mask.to(projected.device()).to(torch::kFloat32) : reset_mask);
+        reset_arg);
   }
 #endif
   return fallback_mamba2_scan_mixed(projected, decay_bias, skip, reset_mask);
