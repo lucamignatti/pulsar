@@ -111,6 +111,8 @@ void validate_step_inputs(
   }
 }
 
+}  // namespace
+
 #ifdef PULSAR_HAS_MAMBA2_CUDA_KERNELS
 std::tuple<torch::Tensor, torch::Tensor> mamba2_scan_forward_cuda(
     const torch::Tensor& projected,
@@ -131,7 +133,10 @@ std::tuple<torch::Tensor, torch::Tensor> mamba2_step_forward_cuda(
     const torch::Tensor& previous_scan,
     const torch::Tensor& decay_bias,
     const torch::Tensor& skip);
+#endif
 
+#ifdef PULSAR_HAS_MAMBA2_CUDA_KERNELS
+namespace {
 class Mamba2ScanCudaFunction : public torch::autograd::Function<Mamba2ScanCudaFunction> {
  public:
   static torch::Tensor forward(
@@ -174,6 +179,7 @@ class Mamba2ScanCudaFunction : public torch::autograd::Function<Mamba2ScanCudaFu
     return grads;
   }
 };
+}  // namespace
 #endif
 
 #ifdef PULSAR_HAS_MAMBA2_HIP_KERNELS
@@ -196,7 +202,10 @@ std::tuple<torch::Tensor, torch::Tensor> mamba2_step_forward_hip(
     const torch::Tensor& previous_scan,
     const torch::Tensor& decay_bias,
     const torch::Tensor& skip);
+#endif
 
+#ifdef PULSAR_HAS_MAMBA2_HIP_KERNELS
+namespace {
 class Mamba2ScanHipFunction : public torch::autograd::Function<Mamba2ScanHipFunction> {
  public:
   static torch::Tensor forward(
@@ -239,7 +248,10 @@ class Mamba2ScanHipFunction : public torch::autograd::Function<Mamba2ScanHipFunc
     return grads;
   }
 };
+}  // namespace
 #endif
+
+namespace {
 
 bool can_use_cuda_scan(const torch::Tensor& projected, const torch::Tensor& decay_bias, const torch::Tensor& skip) {
 #if defined(PULSAR_HAS_MAMBA2_CUDA_KERNELS) || defined(PULSAR_HAS_MAMBA2_HIP_KERNELS)

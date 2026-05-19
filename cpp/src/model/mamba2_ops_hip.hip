@@ -3,8 +3,6 @@
 
 #include <ATen/ATen.h>
 #include <ATen/hip/HIPContext.h>
-#include <c10/hip/HIPException.h>
-#include <c10/hip/HIPGuard.h>
 #include <hip/hip_runtime.h>
 
 namespace pulsar {
@@ -193,6 +191,19 @@ inline int blocks_for(int elements, int threads) {
   return (elements + threads - 1) / threads;
 }
 
+inline void set_hip_device_for(const at::Tensor& tensor) {
+  const int device_index = tensor.get_device();
+  if (device_index >= 0) {
+    const hipError_t error = hipSetDevice(device_index);
+    TORCH_CHECK(error == hipSuccess, "Mamba2 HIP set device failed: ", hipGetErrorString(error));
+  }
+}
+
+inline void check_hip_launch() {
+  const hipError_t error = hipGetLastError();
+  TORCH_CHECK(error == hipSuccess, "Mamba2 HIP kernel launch failed: ", hipGetErrorString(error));
+}
+
 }  // namespace
 
 std::tuple<at::Tensor, at::Tensor> mamba2_scan_forward_hip(
@@ -200,7 +211,7 @@ std::tuple<at::Tensor, at::Tensor> mamba2_scan_forward_hip(
     const at::Tensor& decay_bias,
     const at::Tensor& skip,
     const at::Tensor& reset_mask) {
-  const c10::hip::HIPGuard device_guard(projected.device());
+  set_hip_device_for(projected);
   const int batch = static_cast<int>(projected.size(0));
   const int sequence = static_cast<int>(projected.size(1));
   const int embed_dim = static_cast<int>(projected.size(2) / 5);
@@ -225,7 +236,7 @@ std::tuple<at::Tensor, at::Tensor> mamba2_scan_forward_hip(
       sequence,
       embed_dim,
       has_reset);
-  C10_HIP_KERNEL_LAUNCH_CHECK();
+  check_hip_launch();
   return {mixed, scan};
 }
 
@@ -236,7 +247,7 @@ std::vector<at::Tensor> mamba2_scan_backward_hip(
     const at::Tensor& skip,
     const at::Tensor& reset_mask,
     const at::Tensor& scan) {
-  const c10::hip::HIPGuard device_guard(projected.device());
+  set_hip_device_for(projected);
   const int batch = static_cast<int>(projected.size(0));
   const int sequence = static_cast<int>(projected.size(1));
   const int embed_dim = static_cast<int>(projected.size(2) / 5);
@@ -267,7 +278,7 @@ std::vector<at::Tensor> mamba2_scan_backward_hip(
       sequence,
       embed_dim,
       has_reset);
-  C10_HIP_KERNEL_LAUNCH_CHECK();
+  check_hip_launch();
   hipLaunchKernelGGL(
       reduce_batch_dim_kernel,
       dim3(embed_dim),
@@ -288,7 +299,7 @@ std::vector<at::Tensor> mamba2_scan_backward_hip(
       grad_skip.data_ptr<float>(),
       batch,
       embed_dim);
-  C10_HIP_KERNEL_LAUNCH_CHECK();
+  check_hip_launch();
   return {grad_projected, grad_decay_bias, grad_skip};
 }
 
@@ -297,7 +308,7 @@ std::tuple<at::Tensor, at::Tensor> mamba2_step_forward_hip(
     const at::Tensor& previous_scan,
     const at::Tensor& decay_bias,
     const at::Tensor& skip) {
-  const c10::hip::HIPGuard device_guard(projected.device());
+  set_hip_device_for(projected);
   const int batch = static_cast<int>(projected.size(0));
   const int embed_dim = static_cast<int>(projected.size(1) / 5);
   at::Tensor mixed = at::empty({batch, embed_dim}, projected.options());
@@ -318,7 +329,7 @@ std::tuple<at::Tensor, at::Tensor> mamba2_step_forward_hip(
       next_scan.data_ptr<float>(),
       batch,
       embed_dim);
-  C10_HIP_KERNEL_LAUNCH_CHECK();
+  check_hip_launch();
   return {mixed, next_scan};
 }
 
