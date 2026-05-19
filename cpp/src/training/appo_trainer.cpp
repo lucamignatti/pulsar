@@ -421,6 +421,7 @@ void apply_pcgrad_multi(std::vector<std::vector<CapturedGrad>>& groups) {
   for (size_t i = 0; i < groups[0].size(); ++i) {
     layout.push_back({i, groups[0][i].param.numel()});
   }
+  std::vector<torch::Tensor> zero_parts(groups[0].size());
   for (auto& group : groups) {
     std::vector<torch::Tensor> parts;
     parts.reserve(group.size());
@@ -429,7 +430,10 @@ void apply_pcgrad_multi(std::vector<std::vector<CapturedGrad>>& groups) {
         active_params[i] = true;
         parts.push_back(group[i].grad.view({-1}));
       } else {
-        parts.push_back(torch::zeros({group[i].param.numel()}, group[i].param.options()));
+        if (!zero_parts[i].defined()) {
+          zero_parts[i] = torch::zeros({group[i].param.numel()}, group[i].param.options());
+        }
+        parts.push_back(zero_parts[i]);
       }
     }
     flats.push_back(torch::cat(parts, 0));
@@ -439,18 +443,16 @@ void apply_pcgrad_multi(std::vector<std::vector<CapturedGrad>>& groups) {
   for (size_t i = 0; i < groups.size(); ++i) {
     for (size_t j = 0; j < groups.size(); ++j) {
       if (i == j) continue;
-      const torch::Tensor flat_i64 = flats[i].to(torch::kFloat64);
-      const torch::Tensor flat_j64 = flats[j].to(torch::kFloat64);
-      const torch::Tensor dot = flat_i64.dot(flat_j64);
+      const torch::Tensor dot = flats[i].dot(flats[j]);
       if (!torch::isfinite(dot).item<bool>()) {
         continue;
       }
-      if (dot.item<double>() < 0.0) {
-        const torch::Tensor norm_j_sq = flat_j64.dot(flat_j64).clamp_min(1.0e-12);
+      if (dot.item<float>() < 0.0F) {
+        const torch::Tensor norm_j_sq = flats[j].dot(flats[j]).clamp_min(1.0e-12F);
         if (!torch::isfinite(norm_j_sq).item<bool>()) {
           continue;
         }
-        const torch::Tensor coeff = (dot / norm_j_sq).to(flats[i].scalar_type());
+        const torch::Tensor coeff = dot / norm_j_sq;
         flats[i] = flats[i] - coeff * flats[j];
       }
     }
@@ -1673,13 +1675,14 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 torch::Tensor flat_old_log_probs = old_log_probs.reshape({samples});
                 torch::Tensor flat_advantages = chunk_advantages.reshape({samples});
 
-                const torch::Tensor active_logits = flat_logits.index({flat_active}).to(torch::kFloat32);
-                const torch::Tensor active_features = flat_features.index({flat_active}).to(torch::kFloat32);
-                const torch::Tensor active_masks = flat_masks.index({flat_active});
-                const torch::Tensor active_actions = flat_actions.index({flat_active});
-                const torch::Tensor active_old_log_probs = flat_old_log_probs.index({flat_active}).to(torch::kFloat32);
-                const torch::Tensor active_advantages = flat_advantages.index({flat_active}).to(torch::kFloat32);
-                const auto active_sample_count = active_logits.size(0);
+                const bool all_active = learner_active.min().item<float>() > 0.5F;
+                const torch::Tensor active_logits = all_active ? flat_logits.to(torch::kFloat32) : flat_logits.index({flat_active}).to(torch::kFloat32);
+                const torch::Tensor active_features = all_active ? flat_features.to(torch::kFloat32) : flat_features.index({flat_active}).to(torch::kFloat32);
+                const torch::Tensor active_masks = all_active ? flat_masks : flat_masks.index({flat_active});
+                const torch::Tensor active_actions = all_active ? flat_actions : flat_actions.index({flat_active});
+                const torch::Tensor active_old_log_probs = all_active ? flat_old_log_probs.to(torch::kFloat32) : flat_old_log_probs.index({flat_active}).to(torch::kFloat32);
+                const torch::Tensor active_advantages = all_active ? flat_advantages.to(torch::kFloat32) : flat_advantages.index({flat_active}).to(torch::kFloat32);
+                const auto active_sample_count = all_active ? samples : active_logits.size(0);
                 if (active_sample_count == 0) continue;
                 const auto active_samples = static_cast<double>(active_sample_count);
                 result.active_count += active_sample_count;
@@ -1714,9 +1717,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 }
 
                 torch::Tensor chunk_returns = mode_gpu_returns_mb.narrow(0, chunk_start, loss_steps).reshape({samples});
-                torch::Tensor active_returns = chunk_returns.index({flat_active}).to(torch::kFloat32);
+                torch::Tensor active_returns = all_active ? chunk_returns.to(torch::kFloat32) : chunk_returns.index({flat_active}).to(torch::kFloat32);
                 torch::Tensor flat_value_win_logits = output.value_win_logits.reshape({samples, 1});
-                torch::Tensor active_value_win_logits = flat_value_win_logits.index({flat_active}).to(torch::kFloat32);
+                torch::Tensor active_value_win_logits = all_active ? flat_value_win_logits.to(torch::kFloat32) : flat_value_win_logits.index({flat_active}).to(torch::kFloat32);
                 torch::Tensor value_loss = smooth_l1_value_loss(active_value_win_logits.squeeze(-1), active_returns, config_.ppo.value_loss_delta);
 
                 torch::Tensor goal_loss = torch::zeros({}, active_advantages.options());
@@ -1724,12 +1727,15 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 torch::Tensor chunk_goal_score = torch::zeros({}, active_advantages.options());
                 torch::Tensor chunk_sampled_goal_norm = torch::zeros({}, active_advantages.options());
                 {
-                  torch::Tensor chunk_goal_pos = rollout.goal_positions.narrow(0, chunk_start, loss_steps).index_select(1, gpu_micro_indices);
-                  torch::Tensor chunk_dones = rollout.dones.narrow(0, chunk_start, loss_steps).index_select(1, gpu_micro_indices);
-                  torch::Tensor chunk_ep_starts = rollout.episode_starts.narrow(0, chunk_start, loss_steps).index_select(1, gpu_micro_indices);
+                  torch::Tensor chunk_goal_pos =
+                      rollout.goal_positions.narrow(0, chunk_start, loss_steps).index_select(1, gpu_micro_indices).to(gpu_dev);
+                  torch::Tensor chunk_dones =
+                      rollout.dones.narrow(0, chunk_start, loss_steps).index_select(1, gpu_micro_indices).to(gpu_dev);
+                  torch::Tensor chunk_ep_starts =
+                      rollout.episode_starts.narrow(0, chunk_start, loss_steps).index_select(1, gpu_micro_indices).to(gpu_dev);
                   torch::Tensor future_goal_pos = sample_future_goal_positions(chunk_goal_pos, chunk_dones, chunk_ep_starts, config_.goal_critic.max_future_horizon);
-                  torch::Tensor flat_future_goal_pos = future_goal_pos.to(gpu_dev).reshape({samples, config_.goal_critic.goal_dim});
-                  torch::Tensor active_future_goal_pos = flat_future_goal_pos.index({flat_active});
+                  torch::Tensor flat_future_goal_pos = future_goal_pos.reshape({samples, config_.goal_critic.goal_dim});
+                  torch::Tensor active_future_goal_pos = all_active ? flat_future_goal_pos : flat_future_goal_pos.index({flat_active});
 
                   const auto active_count = active_features.size(0);
                   const int cb_size = config_.goal_critic.contrastive_batch_size;
@@ -2307,18 +2313,18 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
     return;
   }
 
-  torch::Tensor grad_A = torch::zeros(
-      {rank, in_features},
-      torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-  torch::Tensor grad_B = torch::zeros(
-      {out_features, rank},
-      torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-  for (uint64_t i = 0; i < total_members; ++i) {
-    grad_A.add_(A_stack[static_cast<long>(i)], normalized_f[i]);
-    grad_B.add_(B_stack[static_cast<long>(i)], normalized_f[i]);
-  }
-  grad_A.div_(static_cast<float>(total_members));
-  grad_B.div_(static_cast<float>(total_members));
+  const torch::Tensor fitness_weights = torch::from_blob(
+      normalized_f.data(),
+      {static_cast<long>(total_members)},
+      torch::TensorOptions().dtype(torch::kFloat32))
+      .clone()
+      .to(device_);
+  torch::Tensor grad_A =
+      (A_stack * fitness_weights.view({static_cast<long>(total_members), 1, 1})).sum(0) /
+      static_cast<float>(total_members);
+  torch::Tensor grad_B =
+      (B_stack * fitness_weights.view({static_cast<long>(total_members), 1, 1})).sum(0) /
+      static_cast<float>(total_members);
 
   const float step = es_cfg.eta_ES / es_cfg.sigma_ES;
   torch::Tensor delta_A = grad_A * step;

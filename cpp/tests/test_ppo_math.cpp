@@ -116,6 +116,41 @@ int main() {
       require_close(normalized.item<float>(), 0.0F, "one-sample normalized advantage zero");
     }
 
+    // 6b. CUDA/HIP PPO math accelerator parity when available.
+    if (torch::cuda::is_available()) {
+      auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+      auto values_cpu = torch::randn({7, 5}, torch::kFloat32);
+      auto rewards_cpu = torch::randn({7, 5}, torch::kFloat32);
+      auto dones_cpu = torch::zeros({7, 5}, torch::kFloat32);
+      dones_cpu[3][2] = 1.0F;
+      auto next_cpu = torch::randn({5}, torch::kFloat32);
+      auto boot_cpu = torch::zeros({7, 5}, torch::kFloat32);
+      boot_cpu[6].fill_(1.0F);
+      auto boot_values_cpu = torch::randn({7, 5}, torch::kFloat32);
+      auto expected = pulsar::compute_gae(values_cpu, rewards_cpu, dones_cpu, 0.97F, 0.91F, next_cpu, boot_cpu, boot_values_cpu);
+      auto actual = pulsar::compute_gae(
+          values_cpu.to(opts),
+          rewards_cpu.to(opts),
+          dones_cpu.to(opts),
+          0.97F,
+          0.91F,
+          next_cpu.to(opts),
+          boot_cpu.to(opts),
+          boot_values_cpu.to(opts)).to(torch::kCPU);
+      require(torch::allclose(actual, expected, 1.0e-5, 1.0e-5), "accelerated GAE parity");
+
+      auto active_cpu = torch::ones({7, 5}, torch::kFloat32);
+      active_cpu[0][0] = 0.0F;
+      auto norm_expected = pulsar::normalize_advantage(expected, active_cpu);
+      auto norm_actual = pulsar::normalize_advantage(expected.to(opts), active_cpu.to(opts)).to(torch::kCPU);
+      require(torch::allclose(norm_actual, norm_expected, 1.0e-5, 1.0e-5), "accelerated advantage normalization parity");
+
+      auto goals = torch::randn({7, 5, 3}, opts);
+      auto future = pulsar::sample_future_goal_positions(goals, dones_cpu.to(opts), boot_cpu.to(opts), 4);
+      require(future.sizes() == torch::IntArrayRef({7, 5, 3}), "accelerated future goals shape");
+      require_finite(future.to(torch::kCPU), "accelerated future goals finite");
+    }
+
     // 7. Config validation
     {
       pulsar::ExperimentConfig config = pulsar::test::make_test_config();

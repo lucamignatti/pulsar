@@ -132,27 +132,55 @@ if(PULSAR_ENABLE_TORCH)
         enable_language(CUDA)
         set(CMAKE_CUDA_STANDARD 17)
         set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-        target_sources(pulsar_torch PRIVATE cpp/src/model/mamba2_ops_cuda.cu)
-        target_compile_definitions(pulsar_torch PRIVATE PULSAR_HAS_MAMBA2_CUDA_KERNELS=1)
-        set_source_files_properties(cpp/src/model/mamba2_ops_cuda.cu PROPERTIES LANGUAGE CUDA)
-        message(STATUS "Mamba2 custom CUDA kernels enabled: ${CMAKE_CUDA_COMPILER}")
+        target_sources(
+          pulsar_torch
+          PRIVATE
+            cpp/src/model/mamba2_ops_cuda.cu
+            cpp/src/training/ppo_math_ops_cuda.cu
+        )
+        target_compile_definitions(
+          pulsar_torch
+          PRIVATE
+            PULSAR_HAS_MAMBA2_CUDA_KERNELS=1
+            PULSAR_HAS_PPO_MATH_CUDA_KERNELS=1
+        )
+        set_source_files_properties(
+          cpp/src/model/mamba2_ops_cuda.cu
+          cpp/src/training/ppo_math_ops_cuda.cu
+          PROPERTIES LANGUAGE CUDA
+        )
+        message(STATUS "Custom CUDA kernels enabled: ${CMAKE_CUDA_COMPILER}")
       else()
-        message(STATUS "Mamba2 custom CUDA kernels disabled: CUDA language compiler unavailable.")
+        message(STATUS "Custom CUDA kernels disabled: CUDA language compiler unavailable.")
       endif()
     else()
-      message(STATUS "Mamba2 custom CUDA kernels disabled: CUDAToolkit was not found.")
+      message(STATUS "Custom CUDA kernels disabled: CUDAToolkit was not found.")
     endif()
     check_language(HIP)
     if(CMAKE_HIP_COMPILER)
       enable_language(HIP)
       set(CMAKE_HIP_STANDARD 17)
       set(CMAKE_HIP_STANDARD_REQUIRED ON)
-      target_sources(pulsar_torch PRIVATE cpp/src/model/mamba2_ops_hip.hip)
-      target_compile_definitions(pulsar_torch PRIVATE PULSAR_HAS_MAMBA2_HIP_KERNELS=1)
-      set_source_files_properties(cpp/src/model/mamba2_ops_hip.hip PROPERTIES LANGUAGE HIP)
-      message(STATUS "Mamba2 custom HIP kernels enabled: ${CMAKE_HIP_COMPILER}")
+      target_sources(
+        pulsar_torch
+        PRIVATE
+          cpp/src/model/mamba2_ops_hip.hip
+          cpp/src/training/ppo_math_ops_hip.hip
+      )
+      target_compile_definitions(
+        pulsar_torch
+        PRIVATE
+          PULSAR_HAS_MAMBA2_HIP_KERNELS=1
+          PULSAR_HAS_PPO_MATH_HIP_KERNELS=1
+      )
+      set_source_files_properties(
+        cpp/src/model/mamba2_ops_hip.hip
+        cpp/src/training/ppo_math_ops_hip.hip
+        PROPERTIES LANGUAGE HIP
+      )
+      message(STATUS "Custom HIP kernels enabled: ${CMAKE_HIP_COMPILER}")
     else()
-      message(STATUS "Mamba2 custom HIP kernels disabled: HIP language compiler unavailable.")
+      message(STATUS "Custom HIP kernels disabled: HIP language compiler unavailable.")
     endif()
 
     add_executable(pulsar_appo_train cpp/src/apps/train_main.cpp)

@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
 
@@ -9,6 +10,48 @@
 #ifdef PULSAR_HAS_TORCH
 
 namespace pulsar {
+
+#ifdef PULSAR_HAS_PPO_MATH_CUDA_KERNELS
+torch::Tensor compute_gae_cuda(
+    const torch::Tensor& values,
+    const torch::Tensor& rewards,
+    const torch::Tensor& dones,
+    float gamma,
+    float gae_lambda,
+    const torch::Tensor& next_values,
+    const torch::Tensor& bootstrap_mask,
+    const torch::Tensor& bootstrap_values);
+
+torch::Tensor normalize_advantage_cuda(const torch::Tensor& advantages, const torch::Tensor& active_mask);
+
+torch::Tensor sample_future_goal_positions_cuda(
+    const torch::Tensor& goal_positions,
+    const torch::Tensor& dones,
+    const torch::Tensor& episode_starts,
+    int max_future,
+    std::uint32_t seed);
+#endif
+
+#ifdef PULSAR_HAS_PPO_MATH_HIP_KERNELS
+torch::Tensor compute_gae_hip(
+    const torch::Tensor& values,
+    const torch::Tensor& rewards,
+    const torch::Tensor& dones,
+    float gamma,
+    float gae_lambda,
+    const torch::Tensor& next_values,
+    const torch::Tensor& bootstrap_mask,
+    const torch::Tensor& bootstrap_values);
+
+torch::Tensor normalize_advantage_hip(const torch::Tensor& advantages, const torch::Tensor& active_mask);
+
+torch::Tensor sample_future_goal_positions_hip(
+    const torch::Tensor& goal_positions,
+    const torch::Tensor& dones,
+    const torch::Tensor& episode_starts,
+    int max_future,
+    std::uint32_t seed);
+#endif
 
 void seed_everything(std::uint64_t seed) {
   torch::manual_seed(static_cast<int64_t>(seed));
@@ -51,6 +94,15 @@ void scatter_tensor(torch::Tensor& dst, const torch::Tensor& indices, const torc
   if (dst.defined() && src.defined()) {
     dst.index_copy_(0, indices.to(dst.device()), src);
   }
+}
+
+bool can_use_ppo_math_accel(const torch::Tensor& tensor) {
+#if defined(PULSAR_HAS_PPO_MATH_CUDA_KERNELS) || defined(PULSAR_HAS_PPO_MATH_HIP_KERNELS)
+  return tensor.defined() && tensor.is_cuda() && tensor.scalar_type() == torch::kFloat32;
+#else
+  (void)tensor;
+  return false;
+#endif
 }
 
 }  // namespace
@@ -101,6 +153,37 @@ torch::Tensor compute_gae(
     const torch::Tensor& bootstrap_mask,
     const torch::Tensor& bootstrap_values) {
   PULSAR_TRACE_SCOPE_CAT("ppo_math", "compute_gae");
+  if (can_use_ppo_math_accel(values) &&
+      rewards.is_cuda() &&
+      dones.is_cuda() &&
+      rewards.scalar_type() == torch::kFloat32 &&
+      dones.scalar_type() == torch::kFloat32 &&
+      (!next_values.defined() || (next_values.is_cuda() && next_values.scalar_type() == torch::kFloat32)) &&
+      (!bootstrap_mask.defined() || (bootstrap_mask.is_cuda() && bootstrap_mask.scalar_type() == torch::kFloat32)) &&
+      (!bootstrap_values.defined() || (bootstrap_values.is_cuda() && bootstrap_values.scalar_type() == torch::kFloat32))) {
+#ifdef PULSAR_HAS_PPO_MATH_CUDA_KERNELS
+    return compute_gae_cuda(
+        values.contiguous(),
+        rewards.contiguous(),
+        dones.contiguous(),
+        gamma,
+        gae_lambda,
+        next_values.defined() ? next_values.contiguous() : torch::Tensor{},
+        bootstrap_mask.defined() ? bootstrap_mask.contiguous() : torch::Tensor{},
+        bootstrap_values.defined() ? bootstrap_values.contiguous() : torch::Tensor{});
+#endif
+#ifdef PULSAR_HAS_PPO_MATH_HIP_KERNELS
+    return compute_gae_hip(
+        values.contiguous(),
+        rewards.contiguous(),
+        dones.contiguous(),
+        gamma,
+        gae_lambda,
+        next_values.defined() ? next_values.contiguous() : torch::Tensor{},
+        bootstrap_mask.defined() ? bootstrap_mask.contiguous() : torch::Tensor{},
+        bootstrap_values.defined() ? bootstrap_values.contiguous() : torch::Tensor{});
+#endif
+  }
   const int64_t steps = values.size(0);
   const int64_t agents = values.size(1);
   torch::Tensor advantages = torch::zeros({steps, agents}, values.options());
@@ -149,6 +232,17 @@ torch::Tensor clipped_ppo_policy_loss(
 
 torch::Tensor normalize_advantage(const torch::Tensor& advantages, const torch::Tensor& active_mask) {
   PULSAR_TRACE_SCOPE_CAT("ppo_math", "normalize_advantage");
+  if (can_use_ppo_math_accel(advantages) && active_mask.defined() && active_mask.is_cuda()) {
+    const torch::Tensor active_arg = active_mask.scalar_type() == torch::kFloat32
+        ? active_mask.contiguous()
+        : active_mask.to(torch::kFloat32).contiguous();
+#ifdef PULSAR_HAS_PPO_MATH_CUDA_KERNELS
+    return normalize_advantage_cuda(advantages.contiguous(), active_arg);
+#endif
+#ifdef PULSAR_HAS_PPO_MATH_HIP_KERNELS
+    return normalize_advantage_hip(advantages.contiguous(), active_arg);
+#endif
+  }
   const int64_t active_count = active_mask.sum().item<int64_t>();
   if (active_count <= 0) {
     return advantages;
@@ -168,6 +262,27 @@ torch::Tensor sample_future_goal_positions(
     const torch::Tensor& episode_starts,
     int max_future) {
   PULSAR_TRACE_SCOPE_CAT("ppo_math", "sample_future_goal_positions");
+  if (can_use_ppo_math_accel(goal_positions) &&
+      (!dones.defined() || (dones.is_cuda() && dones.scalar_type() == torch::kFloat32)) &&
+      (!episode_starts.defined() || (episode_starts.is_cuda() && episode_starts.scalar_type() == torch::kFloat32))) {
+    const std::uint32_t seed = static_cast<std::uint32_t>(std::rand());
+#ifdef PULSAR_HAS_PPO_MATH_CUDA_KERNELS
+    return sample_future_goal_positions_cuda(
+        goal_positions.contiguous(),
+        dones.defined() ? dones.contiguous() : torch::Tensor{},
+        episode_starts.defined() ? episode_starts.contiguous() : torch::Tensor{},
+        max_future,
+        seed);
+#endif
+#ifdef PULSAR_HAS_PPO_MATH_HIP_KERNELS
+    return sample_future_goal_positions_hip(
+        goal_positions.contiguous(),
+        dones.defined() ? dones.contiguous() : torch::Tensor{},
+        episode_starts.defined() ? episode_starts.contiguous() : torch::Tensor{},
+        max_future,
+        seed);
+#endif
+  }
   const int64_t steps = goal_positions.size(0);
   const int64_t agents = goal_positions.size(1);
   const int64_t dim = goal_positions.size(2);
