@@ -26,6 +26,7 @@ __device__ __forceinline__ float silu_gradf_fast(float x) {
   return s * (1.0F + x * (1.0F - s));
 }
 
+template <bool HasReset>
 __global__ void mamba2_scan_forward_kernel(
     const float* __restrict__ projected,
     const float* __restrict__ decay_bias,
@@ -35,8 +36,7 @@ __global__ void mamba2_scan_forward_kernel(
     float* __restrict__ scan,
     int batch,
     int sequence,
-    int embed_dim,
-    bool has_reset) {
+    int embed_dim) {
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
   const int total = batch * embed_dim;
   if (index >= total) {
@@ -51,7 +51,10 @@ __global__ void mamba2_scan_forward_kernel(
   const int reset_base = b * sequence;
   float state = 0.0F;
   for (int t = 0; t < sequence; ++t) {
-    const float keep = (has_reset && reset[reset_base + t] > 0.5F) ? 0.0F : 1.0F;
+    float keep = 1.0F;
+    if constexpr (HasReset) {
+      keep = reset[reset_base + t] > 0.5F ? 0.0F : 1.0F;
+    }
     state *= keep;
 
     const float p0 = projected[base];
@@ -73,6 +76,7 @@ __global__ void mamba2_scan_forward_kernel(
   }
 }
 
+template <bool HasReset>
 __global__ void mamba2_scan_backward_kernel(
     const float* __restrict__ grad_mixed,
     const float* __restrict__ projected,
@@ -85,8 +89,7 @@ __global__ void mamba2_scan_backward_kernel(
     float* __restrict__ grad_skip_partial,
     int batch,
     int sequence,
-    int embed_dim,
-    bool has_reset) {
+    int embed_dim) {
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
   const int total = batch * embed_dim;
   if (index >= total) {
@@ -104,7 +107,10 @@ __global__ void mamba2_scan_backward_kernel(
   for (int t = sequence - 1; t >= 0; --t) {
     const int proj_base = ((b * sequence + t) * projected_stride) + d;
     const int out = (b * sequence + t) * embed_dim + d;
-    const float keep = (has_reset && reset[reset_base + t] > 0.5F) ? 0.0F : 1.0F;
+    float keep = 1.0F;
+    if constexpr (HasReset) {
+      keep = reset[reset_base + t] > 0.5F ? 0.0F : 1.0F;
+    }
     const float prev_scan = (t > 0) ? scan[((b * sequence + (t - 1)) * embed_dim) + d] : 0.0F;
 
     const float p0 = projected[proj_base];
@@ -152,31 +158,40 @@ __global__ void mamba2_scan_backward_kernel(
   grad_decay_partial[partial_index] = local_grad_decay;
 }
 
-__global__ void reduce_batch_dim_kernel(
-    const float* __restrict__ partial,
-    float* __restrict__ reduced,
+__global__ void reduce_batch_dim_pair_kernel(
+    const float* __restrict__ left_partial,
+    const float* __restrict__ right_partial,
+    float* __restrict__ left_reduced,
+    float* __restrict__ right_reduced,
     int batch,
     int embed_dim) {
   const int d = blockIdx.x;
   if (d >= embed_dim) {
     return;
   }
-  __shared__ float sums[256];
-  float sum = 0.0F;
+  __shared__ float left_sums[256];
+  __shared__ float right_sums[256];
+  float left_sum = 0.0F;
+  float right_sum = 0.0F;
   for (int b = threadIdx.x; b < batch; b += blockDim.x) {
-    sum += partial[b * embed_dim + d];
+    const int index = b * embed_dim + d;
+    left_sum += left_partial[index];
+    right_sum += right_partial[index];
   }
-  sums[threadIdx.x] = sum;
+  left_sums[threadIdx.x] = left_sum;
+  right_sums[threadIdx.x] = right_sum;
   __syncthreads();
 
   for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
     if (threadIdx.x < stride) {
-      sums[threadIdx.x] += sums[threadIdx.x + stride];
+      left_sums[threadIdx.x] += left_sums[threadIdx.x + stride];
+      right_sums[threadIdx.x] += right_sums[threadIdx.x + stride];
     }
     __syncthreads();
   }
   if (threadIdx.x == 0) {
-    reduced[d] = sums[0];
+    left_reduced[d] = left_sums[0];
+    right_reduced[d] = right_sums[0];
   }
 }
 
@@ -248,17 +263,29 @@ std::tuple<at::Tensor, at::Tensor> mamba2_scan_forward_cuda(
   at::Tensor scan = at::empty({batch, sequence, embed_dim}, projected.options());
   constexpr int kThreads = 256;
   const int elements = batch * embed_dim;
-  mamba2_scan_forward_kernel<<<blocks_for(elements, kThreads), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
-      projected.data_ptr<float>(),
-      decay_bias.data_ptr<float>(),
-      skip.data_ptr<float>(),
-      has_reset ? reset_mask.data_ptr<float>() : nullptr,
-      mixed.data_ptr<float>(),
-      scan.data_ptr<float>(),
-      batch,
-      sequence,
-      embed_dim,
-      has_reset);
+  if (has_reset) {
+    mamba2_scan_forward_kernel<true><<<blocks_for(elements, kThreads), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+        projected.data_ptr<float>(),
+        decay_bias.data_ptr<float>(),
+        skip.data_ptr<float>(),
+        reset_mask.data_ptr<float>(),
+        mixed.data_ptr<float>(),
+        scan.data_ptr<float>(),
+        batch,
+        sequence,
+        embed_dim);
+  } else {
+    mamba2_scan_forward_kernel<false><<<blocks_for(elements, kThreads), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+        projected.data_ptr<float>(),
+        decay_bias.data_ptr<float>(),
+        skip.data_ptr<float>(),
+        nullptr,
+        mixed.data_ptr<float>(),
+        scan.data_ptr<float>(),
+        batch,
+        sequence,
+        embed_dim);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {mixed, scan};
 }
@@ -284,28 +311,40 @@ std::vector<at::Tensor> mamba2_scan_backward_cuda(
   at::Tensor grad_skip = at::empty_like(skip);
   constexpr int kThreads = 256;
   const int elements = batch * embed_dim;
-  mamba2_scan_backward_kernel<<<blocks_for(elements, kThreads), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
-      grad_mixed.data_ptr<float>(),
-      projected.data_ptr<float>(),
-      decay_bias.data_ptr<float>(),
-      skip.data_ptr<float>(),
-      has_reset ? reset_mask.data_ptr<float>() : nullptr,
-      scan.data_ptr<float>(),
-      grad_projected.data_ptr<float>(),
-      grad_decay_partial.data_ptr<float>(),
-      grad_skip_partial.data_ptr<float>(),
-      batch,
-      sequence,
-      embed_dim,
-      has_reset);
+  if (has_reset) {
+    mamba2_scan_backward_kernel<true><<<blocks_for(elements, kThreads), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+        grad_mixed.data_ptr<float>(),
+        projected.data_ptr<float>(),
+        decay_bias.data_ptr<float>(),
+        skip.data_ptr<float>(),
+        reset_mask.data_ptr<float>(),
+        scan.data_ptr<float>(),
+        grad_projected.data_ptr<float>(),
+        grad_decay_partial.data_ptr<float>(),
+        grad_skip_partial.data_ptr<float>(),
+        batch,
+        sequence,
+        embed_dim);
+  } else {
+    mamba2_scan_backward_kernel<false><<<blocks_for(elements, kThreads), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+        grad_mixed.data_ptr<float>(),
+        projected.data_ptr<float>(),
+        decay_bias.data_ptr<float>(),
+        skip.data_ptr<float>(),
+        nullptr,
+        scan.data_ptr<float>(),
+        grad_projected.data_ptr<float>(),
+        grad_decay_partial.data_ptr<float>(),
+        grad_skip_partial.data_ptr<float>(),
+        batch,
+        sequence,
+        embed_dim);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  reduce_batch_dim_kernel<<<embed_dim, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+  reduce_batch_dim_pair_kernel<<<embed_dim, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
       grad_decay_partial.data_ptr<float>(),
-      grad_decay_bias.data_ptr<float>(),
-      batch,
-      embed_dim);
-  reduce_batch_dim_kernel<<<embed_dim, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
       grad_skip_partial.data_ptr<float>(),
+      grad_decay_bias.data_ptr<float>(),
       grad_skip.data_ptr<float>(),
       batch,
       embed_dim);

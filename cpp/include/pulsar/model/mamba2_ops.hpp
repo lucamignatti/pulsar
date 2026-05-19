@@ -8,6 +8,7 @@
 
 namespace pulsar {
 
+[[nodiscard]] bool mamba2_accelerator_kernels_available();
 [[nodiscard]] bool mamba2_cuda_kernels_available();
 
 torch::Tensor mamba2_scan_mixed(

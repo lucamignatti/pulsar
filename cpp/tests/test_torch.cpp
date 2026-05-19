@@ -125,7 +125,7 @@ int main() {
       }
     }
 
-    if (torch::cuda::is_available() && pulsar::mamba2_cuda_kernels_available()) {
+    if (torch::cuda::is_available() && pulsar::mamba2_accelerator_kernels_available()) {
       auto opts = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
       torch::Tensor projected = torch::randn({2, 6, 25}, opts).set_requires_grad(true);
       torch::Tensor decay_bias = torch::randn({5}, opts).set_requires_grad(true);
@@ -140,14 +140,14 @@ int main() {
       const torch::Tensor actual = pulsar::mamba2_scan_mixed(projected, decay_bias, skip, reset);
       const torch::Tensor expected = reference_mamba2_scan_mixed(projected_ref, decay_ref, skip_ref, reset);
       if (!torch::allclose(actual, expected, 1.0e-5, 1.0e-5)) {
-        throw std::runtime_error("mamba2 CUDA scan output mismatch");
+        throw std::runtime_error("mamba2 accelerator scan output mismatch");
       }
       actual.square().mean().backward();
       expected.square().mean().backward();
       if (!torch::allclose(projected.grad(), projected_ref.grad(), 1.0e-4, 1.0e-4) ||
           !torch::allclose(decay_bias.grad(), decay_ref.grad(), 1.0e-4, 1.0e-4) ||
           !torch::allclose(skip.grad(), skip_ref.grad(), 1.0e-4, 1.0e-4)) {
-        throw std::runtime_error("mamba2 CUDA scan gradient mismatch");
+        throw std::runtime_error("mamba2 accelerator scan gradient mismatch");
       }
     }
 

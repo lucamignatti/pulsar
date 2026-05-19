@@ -269,12 +269,16 @@ bool can_use_cuda_scan(const torch::Tensor& projected, const torch::Tensor& deca
 
 }  // namespace
 
-bool mamba2_cuda_kernels_available() {
+bool mamba2_accelerator_kernels_available() {
 #if defined(PULSAR_HAS_MAMBA2_CUDA_KERNELS) || defined(PULSAR_HAS_MAMBA2_HIP_KERNELS)
   return true;
 #else
   return false;
 #endif
+}
+
+bool mamba2_cuda_kernels_available() {
+  return mamba2_accelerator_kernels_available();
 }
 
 torch::Tensor mamba2_scan_mixed(
