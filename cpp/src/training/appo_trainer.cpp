@@ -2202,16 +2202,12 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
         torch::Tensor normalized_obs = actor_normalizer_.normalize(raw_obs);
 
         const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
-        torch::Tensor next_state;
         ActorStepOutput output = actor_->forward_step_stateful(
             normalized_obs,
             recurrent_state,
             episode_starts,
-            &next_state,
+            &recurrent_state,
             goal_values);
-        if (next_state.defined()) {
-          recurrent_state = next_state;
-        }
         torch::Tensor perturbed_logits = actor_->policy_eggroll_logits(
             output.features, A_stack, B_stack, es_cfg.sigma_ES, goal_values);
 
@@ -2576,8 +2572,7 @@ void APPOTrainer::collect_rollout(
 
         for (int step = 0; step < config_.ppo.rollout_length; ++step) {
           if (config_.model.sequence_length > 0 && step % config_.model.sequence_length == 0) {
-            recurrent_state = shard_actor->initial_recurrent_state(
-                static_cast<int64_t>(collector.total_agents()), shard_device);
+            recurrent_state.zero_();
           }
           PendingShardStep shard_step;
           shard_step.shard = shard_idx;
@@ -2603,10 +2598,8 @@ void APPOTrainer::collect_rollout(
             shard_normalizer_update->update(raw_obs);
             normalized_obs = shard_normalizer->normalize(raw_obs);
             const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
-            torch::Tensor next_state;
             output = shard_actor->forward_step_stateful(
-                normalized_obs, recurrent_state, episode_starts, &next_state, goal_values);
-            if (next_state.defined()) recurrent_state = next_state;
+                normalized_obs, recurrent_state, episode_starts, &recurrent_state, goal_values);
             actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
             if (self_play_manager_ && self_play_manager_->has_snapshots()) {
               torch::Tensor opponent_actions;
@@ -2845,12 +2838,11 @@ void APPOTrainer::collect_rollout(
         torch::Tensor final_normalized = shard_normalizer.normalize(final_raw_obs);
         torch::Tensor final_starts = collector.host_episode_starts().to(shard_device, use_pinned_host_buffers_);
         const torch::Tensor final_goal_values = policy_goal_values_like(final_normalized, config_.goal_critic.goal_dim);
-        torch::Tensor unused_next_state;
         ActorStepOutput final_output = shard_actor->forward_step_stateful(
             final_normalized,
             rollout_recurrent_states[shard],
             final_starts,
-            &unused_next_state,
+            nullptr,
             final_goal_values);
         final_values.push_back(final_output.value_win_logits.squeeze(-1).to(device_));
       }
@@ -2866,8 +2858,7 @@ void APPOTrainer::collect_rollout(
     for (int step = 0; step < config_.ppo.rollout_length; ++step) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "collect_step");
       if (config_.model.sequence_length > 0 && step % config_.model.sequence_length == 0) {
-        rollout_recurrent_states[0] = rollout_actor->initial_recurrent_state(
-            static_cast<int64_t>(collector_->total_agents()), device_);
+        rollout_recurrent_states[0].zero_();
       }
       torch::Tensor raw_obs_host = collector_->host_observations();
     torch::Tensor episode_starts_host = collector_->host_episode_starts();
@@ -2888,16 +2879,12 @@ void APPOTrainer::collect_rollout(
       normalizer.update(raw_obs);
       normalized_obs = normalizer.normalize(raw_obs);
       const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
-      torch::Tensor next_state;
       output = rollout_actor->forward_step_stateful(
           normalized_obs,
           rollout_recurrent_states[0],
           episode_starts,
-          &next_state,
+          &rollout_recurrent_states[0],
           goal_values);
-      if (next_state.defined()) {
-        rollout_recurrent_states[0] = next_state;
-      }
       actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
     }
     if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
@@ -3069,12 +3056,11 @@ void APPOTrainer::collect_rollout(
     torch::Tensor final_normalized = normalizer.normalize(final_raw_obs);
     torch::Tensor final_starts = collector_->host_episode_starts().to(device_, use_pinned_host_buffers_);
     const torch::Tensor final_goal_values = policy_goal_values_like(final_normalized, config_.goal_critic.goal_dim);
-    torch::Tensor unused_next_state;
     ActorStepOutput final_output = rollout_actor->forward_step_stateful(
         final_normalized,
         rollout_recurrent_states[0],
         final_starts,
-        &unused_next_state,
+        nullptr,
         final_goal_values);
 
     std::unordered_map<std::string, torch::Tensor> bootstrap_values;

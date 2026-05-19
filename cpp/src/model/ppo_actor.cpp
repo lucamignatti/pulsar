@@ -316,7 +316,17 @@ torch::Tensor Mamba2EncoderImpl::forward_step(
   }
 
   torch::Tensor token = input_projection_->forward(obs);
-  torch::Tensor next_state_tensor = next_state != nullptr ? torch::empty_like(current_state) : torch::Tensor{};
+  torch::Tensor next_state_tensor;
+  if (next_state != nullptr) {
+    if (next_state->defined() &&
+        next_state->sizes() == current_state.sizes() &&
+        next_state->device() == current_state.device() &&
+        next_state->scalar_type() == current_state.scalar_type()) {
+      next_state_tensor = *next_state;
+    } else {
+      next_state_tensor = torch::empty_like(current_state);
+    }
+  }
   for (std::size_t i = 0; i < blocks_.size(); ++i) {
     torch::Tensor next_conv_2;
     torch::Tensor next_conv_1;
