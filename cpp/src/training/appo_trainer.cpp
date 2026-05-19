@@ -1353,7 +1353,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       total_agents,
       std::max(requested_logical_agents_per_batch, min_agents_for_minibatch_cap));
   const int rollout_steps = rollout.rollout_length();
-  const bool use_cuda_amp = device_.is_cuda();
+  const bool use_cuda_amp = device_.is_cuda() && config_.ppo.cuda_amp;
   const double cuda_amp_loss_scale = 1.0;
   const int optimizer_accumulation_steps = std::max(1, config_.ppo.optimizer_accumulation_steps);
   int minibatches_per_epoch = 0;

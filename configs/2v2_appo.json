@@ -408,6 +408,7 @@
     "checkpoint_interval": 50,
     "max_rolling_checkpoints": 3,
     "synchronize_cuda_timing": false,
+    "cuda_amp": false,
     "adaptive_entropy": false,
     "entropy_decay_score": 0.6,
     "entropy_low_coef": 0.005,

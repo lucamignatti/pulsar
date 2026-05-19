@@ -17,6 +17,8 @@ int main() {
     config.model.num_encoder_blocks = 2;
     config.model.sequence_length = 4;
     config.model.max_forward_samples = 1024;
+    pulsar::test::require(!config.ppo.cuda_amp, "default trainer should not enable CUDA AMP implicitly");
+    config.ppo.cuda_amp = true;
     pulsar::test::require(!config.ppo.overlap_collection_update, "default trainer should keep PPO collection on-policy");
     pulsar::validate_experiment_config(config);
 
@@ -30,6 +32,7 @@ int main() {
     pulsar::test::require(
         loaded.ppo.max_preclip_grad_norm == config.ppo.max_preclip_grad_norm,
         "round-trip max_preclip_grad_norm");
+    pulsar::test::require(loaded.ppo.cuda_amp == config.ppo.cuda_amp, "round-trip cuda_amp");
     pulsar::test::require(loaded.model.encoder_dim == 512, "round-trip encoder_dim");
     std::filesystem::remove(tmp);
 
@@ -206,6 +209,8 @@ int main() {
                             "production config should not skip PPO updates by KL guard");
       pulsar::test::require(prod.ppo.max_preclip_grad_norm == 0.0f,
                             "production config should rely on clipping instead of preclip update skips");
+      pulsar::test::require(!prod.ppo.cuda_amp,
+                            "production config should keep CUDA AMP disabled unless explicitly re-enabled");
       pulsar::test::require(prod.es_lora.require_fitness_signal,
                             "production ES should require a reward-fitness signal");
       pulsar::test::require(prod.ppo.overlap_collection_update,

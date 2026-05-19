@@ -460,6 +460,7 @@ void to_json(json& j, const PPOConfig& value) {
       {"max_rolling_checkpoints", value.max_rolling_checkpoints},
 
       {"synchronize_cuda_timing", value.synchronize_cuda_timing},
+      {"cuda_amp", value.cuda_amp},
       {"adaptive_entropy", value.adaptive_entropy},
       {"entropy_decay_score", value.entropy_decay_score},
       {"entropy_low_coef", value.entropy_low_coef},
@@ -499,6 +500,7 @@ void from_json(const json& j, PPOConfig& value) {
   value.max_rolling_checkpoints = j.value("max_rolling_checkpoints", 5);
 
   value.synchronize_cuda_timing = j.value("synchronize_cuda_timing", false);
+  value.cuda_amp = j.value("cuda_amp", false);
   value.adaptive_entropy = j.value("adaptive_entropy", false);
   value.entropy_decay_score = j.value("entropy_decay_score", 0.60F);
   value.entropy_low_coef = j.value("entropy_low_coef", 0.005F);

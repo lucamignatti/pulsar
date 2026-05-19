@@ -190,6 +190,7 @@ struct PPOConfig {
   int checkpoint_interval = 10;
   int max_rolling_checkpoints = 5;
   bool synchronize_cuda_timing = false;
+  bool cuda_amp = false;
   bool adaptive_entropy = false;
   float entropy_decay_score = 0.60F;
   float entropy_low_coef = 0.005F;
