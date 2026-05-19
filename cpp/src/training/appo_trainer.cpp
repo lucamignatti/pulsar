@@ -360,37 +360,60 @@ bool gradients_are_finite(const torch::nn::Module& module) {
   return true;
 }
 
-bool zero_nonfinite_gradients(torch::nn::Module& module) {
+struct GradientSanitizeResult {
   bool changed = false;
-  for (auto& p : module.parameters()) {
-    torch::Tensor grad = p.mutable_grad();
+  std::string first_parameter;
+};
+
+GradientSanitizeResult zero_nonfinite_gradients(torch::nn::Module& module) {
+  GradientSanitizeResult result;
+  for (auto& item : module.named_parameters(true)) {
+    torch::Tensor grad = item.value().mutable_grad();
     if (!grad.defined()) {
       continue;
     }
     const torch::Tensor finite = torch::isfinite(grad);
     if (!finite.all().item<bool>()) {
+      if (!result.changed) {
+        result.first_parameter = item.key();
+      }
       grad.masked_fill_(finite.logical_not(), 0.0);
-      changed = true;
+      result.changed = true;
     }
   }
-  return changed;
+  return result;
 }
 
 double clip_existing_gradients(torch::nn::Module& module, double max_norm) {
-  torch::Tensor total_sq;
+  double max_abs = 0.0;
   for (auto& p : module.parameters()) {
     const torch::Tensor grad = p.grad();
     if (!grad.defined()) {
       continue;
     }
-    const torch::Tensor grad_sq = grad.detach().to(torch::kFloat32).square().sum();
-    total_sq = total_sq.defined() ? total_sq + grad_sq : grad_sq;
+    const double param_max = grad.detach().abs().max().item<double>();
+    if (!std::isfinite(param_max)) {
+      return param_max;
+    }
+    max_abs = std::max(max_abs, param_max);
   }
-  if (!total_sq.defined()) {
+  if (max_abs == 0.0) {
     return 0.0;
   }
-  const double total_sq_value = total_sq.item<double>();
-  const double total_norm = std::sqrt(total_sq_value);
+  double scaled_sq_sum = 0.0;
+  for (auto& p : module.parameters()) {
+    const torch::Tensor grad = p.grad();
+    if (!grad.defined()) {
+      continue;
+    }
+    const torch::Tensor scaled = grad.detach().to(torch::kFloat32) / max_abs;
+    const double param_scaled_sq = scaled.square().sum().item<double>();
+    if (!std::isfinite(param_scaled_sq)) {
+      return param_scaled_sq;
+    }
+    scaled_sq_sum += param_scaled_sq;
+  }
+  const double total_norm = max_abs * std::sqrt(scaled_sq_sum);
   if (!std::isfinite(total_norm) || max_norm <= 0.0 || total_norm <= max_norm) {
     return total_norm;
   }
@@ -2067,12 +2090,13 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         scale_existing_gradients(*actor_, cuda_amp_loss_scale);
         grad_norm = clip_existing_gradients(*actor_, config_.ppo.max_grad_norm);
         if (!std::isfinite(grad_norm)) {
-          const bool sanitized = zero_nonfinite_gradients(*actor_);
-          if (sanitized) {
+          const GradientSanitizeResult sanitized = zero_nonfinite_gradients(*actor_);
+          if (sanitized.changed) {
             grad_norm = clip_existing_gradients(*actor_, config_.ppo.max_grad_norm);
             if (std::isfinite(grad_norm)) {
-              std::cerr << "zeroed non-finite APPO gradient entries; recovered preclip grad_norm="
-                        << grad_norm << '\n';
+              std::cerr << "zeroed non-finite APPO gradient entries in "
+                        << sanitized.first_parameter
+                        << "; recovered preclip grad_norm=" << grad_norm << '\n';
             }
           }
         }
