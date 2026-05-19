@@ -11,6 +11,7 @@
 
 #include "pulsar/checkpoint/checkpoint.hpp"
 #include "pulsar/config/config.hpp"
+#include "pulsar/model/mamba2_ops.hpp"
 #include "pulsar/tracing/tracing.hpp"
 
 namespace pulsar {
@@ -227,29 +228,8 @@ torch::Tensor Mamba2BlockImpl::forward(const torch::Tensor& tokens, const torch:
   }
   conv_out = torch::silu(conv_out);
 
-  const auto projected = input_projection_->forward(conv_out).chunk(5, -1);
-  const torch::Tensor x = torch::silu(projected[0]);
-  const torch::Tensor b = torch::sigmoid(projected[1]);
-  const torch::Tensor c = torch::sigmoid(projected[2]);
-  const torch::Tensor z = torch::silu(projected[3]);
-  const torch::Tensor retention = torch::sigmoid(projected[4] + decay_bias_.view({1, 1, embed_dim_}))
-                                      .clamp(0.01, 0.9999);
-  const torch::Tensor recurrent_input = b * x;
-
-  torch::Tensor state = torch::zeros({batch, embed_dim_}, tokens.options());
-  std::vector<torch::Tensor> states;
-  states.reserve(static_cast<std::size_t>(sequence));
-  for (int64_t t = 0; t < sequence; ++t) {
-    if (reset.defined()) {
-      const torch::Tensor keep = (1.0F - reset.select(1, t)).view({batch, 1});
-      state = state * keep;
-    }
-    state = retention.select(1, t) * state + recurrent_input.select(1, t);
-    states.push_back(state);
-  }
-  const torch::Tensor scanned = torch::stack(states, 1);
-
-  torch::Tensor mixed = (c * scanned + skip_.view({1, 1, embed_dim_}) * x) * z;
+  const torch::Tensor projected = input_projection_->forward(conv_out);
+  torch::Tensor mixed = mamba2_scan_mixed(projected, decay_bias_, skip_, reset);
   if (use_layer_norm_) {
     mixed = output_norm_->forward(mixed);
   }
@@ -276,15 +256,8 @@ torch::Tensor Mamba2BlockImpl::forward_step(
   }
   conv_out = torch::silu(conv_out);
 
-  const auto projected = input_projection_->forward(conv_out).chunk(5, -1);
-  const torch::Tensor x = torch::silu(projected[0]);
-  const torch::Tensor b = torch::sigmoid(projected[1]);
-  const torch::Tensor c = torch::sigmoid(projected[2]);
-  const torch::Tensor z = torch::silu(projected[3]);
-  const torch::Tensor retention = torch::sigmoid(projected[4] + decay_bias_.view({1, embed_dim_}))
-                                      .clamp(0.01, 0.9999);
-  const torch::Tensor scan = retention * previous_scan + b * x;
-  torch::Tensor mixed = (c * scan + skip_.view({1, embed_dim_}) * x) * z;
+  const torch::Tensor projected = input_projection_->forward(conv_out);
+  auto [mixed, scan] = mamba2_step_mixed(projected, previous_scan, decay_bias_, skip_);
   if (use_layer_norm_) {
     mixed = output_norm_->forward(mixed);
   }

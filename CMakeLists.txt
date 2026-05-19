@@ -48,6 +48,7 @@ option(PULSAR_ENABLE_TRACING "Enable Perfetto-compatible trace instrumentation" 
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CTest)
+include(CheckLanguage)
 include(cmake/Dependencies.cmake)
 
 if(NOT Python3_EXECUTABLE)
@@ -106,6 +107,7 @@ if(PULSAR_ENABLE_TORCH)
     add_library(
       pulsar_torch
       cpp/src/model/ppo_actor.cpp
+      cpp/src/model/mamba2_ops.cpp
       cpp/src/model/normalizer.cpp
       cpp/src/training/rollout_storage.cpp
       cpp/src/training/ppo_math.cpp
@@ -123,6 +125,15 @@ if(PULSAR_ENABLE_TORCH)
     find_package(CUDAToolkit QUIET)
     if(CUDAToolkit_FOUND OR Torch_CUDA_FOUND)
       target_compile_definitions(pulsar_torch PUBLIC PULSAR_HAS_CUDA=1 PULSAR_ENABLE_AMP=1)
+      check_language(CUDA)
+      if(CMAKE_CUDA_COMPILER)
+        enable_language(CUDA)
+        set(CMAKE_CUDA_STANDARD 17)
+        set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+        target_sources(pulsar_torch PRIVATE cpp/src/model/mamba2_ops_cuda.cu)
+        target_compile_definitions(pulsar_torch PRIVATE PULSAR_HAS_MAMBA2_CUDA_KERNELS=1)
+        set_source_files_properties(cpp/src/model/mamba2_ops_cuda.cu PROPERTIES LANGUAGE CUDA)
+      endif()
     endif()
 
     add_executable(pulsar_appo_train cpp/src/apps/train_main.cpp)

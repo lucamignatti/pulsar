@@ -1,8 +1,10 @@
 #include <cstdlib>
+#include <vector>
 #include <iostream>
 #include <stdexcept>
 
 #include "pulsar/model/normalizer.hpp"
+#include "pulsar/model/mamba2_ops.hpp"
 #include "pulsar/model/ppo_actor.hpp"
 
 namespace {
@@ -26,6 +28,56 @@ pulsar::GoalCriticConfig default_goal_critic_config() {
   return cfg;
 }
 
+torch::Tensor reference_mamba2_scan_mixed(
+    const torch::Tensor& projected,
+    const torch::Tensor& decay_bias,
+    const torch::Tensor& skip,
+    const torch::Tensor& reset_mask = {}) {
+  const auto batch = projected.size(0);
+  const auto sequence = projected.size(1);
+  const auto embed_dim = projected.size(2) / 5;
+  const auto chunks = projected.chunk(5, -1);
+  const torch::Tensor x = torch::silu(chunks[0]);
+  const torch::Tensor b = torch::sigmoid(chunks[1]);
+  const torch::Tensor c = torch::sigmoid(chunks[2]);
+  const torch::Tensor z = torch::silu(chunks[3]);
+  const torch::Tensor retention =
+      torch::sigmoid(chunks[4] + decay_bias.view({1, 1, embed_dim})).clamp(0.01, 0.9999);
+  const torch::Tensor recurrent_input = b * x;
+  const torch::Tensor reset = reset_mask.defined()
+      ? reset_mask.to(projected.device()).to(projected.scalar_type())
+      : torch::Tensor{};
+  torch::Tensor state = torch::zeros({batch, embed_dim}, projected.options());
+  std::vector<torch::Tensor> states;
+  states.reserve(static_cast<std::size_t>(sequence));
+  for (int64_t t = 0; t < sequence; ++t) {
+    if (reset.defined()) {
+      state = state * (1.0F - reset.select(1, t)).view({batch, 1});
+    }
+    state = retention.select(1, t) * state + recurrent_input.select(1, t);
+    states.push_back(state);
+  }
+  const torch::Tensor scanned = torch::stack(states, 1);
+  return (c * scanned + skip.view({1, 1, embed_dim}) * x) * z;
+}
+
+std::tuple<torch::Tensor, torch::Tensor> reference_mamba2_step_mixed(
+    const torch::Tensor& projected,
+    const torch::Tensor& previous_scan,
+    const torch::Tensor& decay_bias,
+    const torch::Tensor& skip) {
+  const auto embed_dim = projected.size(1) / 5;
+  const auto chunks = projected.chunk(5, -1);
+  const torch::Tensor x = torch::silu(chunks[0]);
+  const torch::Tensor b = torch::sigmoid(chunks[1]);
+  const torch::Tensor c = torch::sigmoid(chunks[2]);
+  const torch::Tensor z = torch::silu(chunks[3]);
+  const torch::Tensor retention =
+      torch::sigmoid(chunks[4] + decay_bias.view({1, embed_dim})).clamp(0.01, 0.9999);
+  const torch::Tensor scan = retention * previous_scan + b * x;
+  return {(c * scan + skip.view({1, embed_dim}) * x) * z, scan};
+}
+
 }  // namespace
 
 int main() {
@@ -46,6 +98,59 @@ int main() {
     if (output.features.sizes() != torch::IntArrayRef({4, actor->feature_dim()})) {
       throw std::runtime_error("actor feature shape mismatch");
     }
+    {
+      const torch::Tensor projected = torch::randn({3, 5, 20}, torch::requires_grad());
+      const torch::Tensor decay_bias = torch::randn({4}, torch::requires_grad());
+      const torch::Tensor skip = torch::randn({4}, torch::requires_grad());
+      torch::Tensor reset = torch::zeros({3, 5});
+      reset[0][0] = 1.0F;
+      reset[1][3] = 1.0F;
+      const torch::Tensor actual = pulsar::mamba2_scan_mixed(projected, decay_bias, skip, reset);
+      const torch::Tensor expected = reference_mamba2_scan_mixed(projected, decay_bias, skip, reset);
+      if (!torch::allclose(actual, expected, 1.0e-6, 1.0e-6)) {
+        throw std::runtime_error("mamba2 scan fallback output mismatch");
+      }
+
+      const torch::Tensor projected_step = torch::randn({3, 20});
+      const torch::Tensor previous_scan = torch::randn({3, 4});
+      auto [step_mixed, step_scan] = pulsar::mamba2_step_mixed(projected_step, previous_scan, decay_bias.detach(), skip.detach());
+      auto [step_expected, scan_expected] =
+          reference_mamba2_step_mixed(projected_step, previous_scan, decay_bias.detach(), skip.detach());
+      if (step_mixed.sizes() != torch::IntArrayRef({3, 4}) || step_scan.sizes() != torch::IntArrayRef({3, 4})) {
+        throw std::runtime_error("mamba2 step output shape mismatch");
+      }
+      if (!torch::allclose(step_mixed, step_expected, 1.0e-6, 1.0e-6) ||
+          !torch::allclose(step_scan, scan_expected, 1.0e-6, 1.0e-6)) {
+        throw std::runtime_error("mamba2 step fallback output mismatch");
+      }
+    }
+
+    if (torch::cuda::is_available() && pulsar::mamba2_cuda_kernels_available()) {
+      auto opts = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+      torch::Tensor projected = torch::randn({2, 6, 25}, opts).set_requires_grad(true);
+      torch::Tensor decay_bias = torch::randn({5}, opts).set_requires_grad(true);
+      torch::Tensor skip = torch::randn({5}, opts).set_requires_grad(true);
+      torch::Tensor reset = torch::zeros({2, 6}, opts);
+      reset[0][2] = 1.0F;
+      reset[1][0] = 1.0F;
+
+      torch::Tensor projected_ref = projected.detach().clone().set_requires_grad(true);
+      torch::Tensor decay_ref = decay_bias.detach().clone().set_requires_grad(true);
+      torch::Tensor skip_ref = skip.detach().clone().set_requires_grad(true);
+      const torch::Tensor actual = pulsar::mamba2_scan_mixed(projected, decay_bias, skip, reset);
+      const torch::Tensor expected = reference_mamba2_scan_mixed(projected_ref, decay_ref, skip_ref, reset);
+      if (!torch::allclose(actual, expected, 1.0e-5, 1.0e-5)) {
+        throw std::runtime_error("mamba2 CUDA scan output mismatch");
+      }
+      actual.square().mean().backward();
+      expected.square().mean().backward();
+      if (!torch::allclose(projected.grad(), projected_ref.grad(), 1.0e-4, 1.0e-4) ||
+          !torch::allclose(decay_bias.grad(), decay_ref.grad(), 1.0e-4, 1.0e-4) ||
+          !torch::allclose(skip.grad(), skip_ref.grad(), 1.0e-4, 1.0e-4)) {
+        throw std::runtime_error("mamba2 CUDA scan gradient mismatch");
+      }
+    }
+
     {
       const torch::Tensor loss = output.policy_logits.square().mean()
           + output.value_win_logits.square().mean()
