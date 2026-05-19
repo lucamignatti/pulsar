@@ -79,9 +79,11 @@ function(_pulsar_sanitize_torch_language_standard)
   foreach(_torch_target IN ITEMS
     headeronly
     c10
+    c10_hip
     c10_cuda
     torch
     torch_cpu
+    torch_hip_library
     torch_cpu_library
     torch_library
   )
@@ -99,7 +101,11 @@ function(_pulsar_sanitize_torch_language_standard)
       if(_torch_link_libraries)
         set(_torch_link_libraries_clean "")
         foreach(_torch_link_item IN LISTS _torch_link_libraries)
-          if(_torch_link_item MATCHES "^(hip|hiprtc|roc)::" AND NOT TARGET "${_torch_link_item}")
+          set(_torch_link_target "${_torch_link_item}")
+          if(_torch_link_item MATCHES "^\\$<LINK_ONLY:((hip|hiprtc|roc)::[^>]+)>$")
+            set(_torch_link_target "${CMAKE_MATCH_1}")
+          endif()
+          if(_torch_link_target MATCHES "^(hip|hiprtc|roc)::" AND NOT TARGET "${_torch_link_target}")
             continue()
           endif()
           list(APPEND _torch_link_libraries_clean "${_torch_link_item}")
