@@ -20,6 +20,14 @@ bool should_pin_host_memory(const std::string& device) {
   return device.rfind("cuda", 0) == 0;
 }
 
+torch::Device resolve_startup_device(const std::string& device_name) {
+  torch::Device device(device_name);
+  if (device.is_cuda() && !device.has_index()) {
+    return torch::Device(torch::kCUDA, 0);
+  }
+  return device;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -74,7 +82,7 @@ int main(int argc, char** argv) {
           std::filesystem::path(argv[2]) / "policy_versions",
           obs_builder,
           action_parser,
-          torch::Device(config.ppo.device));
+          resolve_startup_device(config.ppo.device));
     }
 
     const int updates = argc > 3 ? std::stoi(argv[3]) : 0;
