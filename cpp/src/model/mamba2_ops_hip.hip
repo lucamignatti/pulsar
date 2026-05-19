@@ -1,7 +1,7 @@
 #include <tuple>
 #include <vector>
+#include <cstring>
 #include <cstdlib>
-#include <string>
 
 #include <ATen/ATen.h>
 #include <ATen/hip/HIPContext.h>
@@ -231,8 +231,11 @@ inline void check_hip_launch() {
 }
 
 inline bool use_direct_grad_reduce() {
-  const char* value = std::getenv("PULSAR_MAMBA2_GRAD_REDUCE");
-  return value == nullptr || std::string(value) != "pair";
+  static const bool direct_reduce = [] {
+    const char* value = std::getenv("PULSAR_MAMBA2_GRAD_REDUCE");
+    return value == nullptr || std::strcmp(value, "pair") != 0;
+  }();
+  return direct_reduce;
 }
 
 }  // namespace
@@ -310,8 +313,18 @@ std::vector<at::Tensor> mamba2_scan_backward_hip(
   const int elements = batch * embed_dim;
   const auto stream = at::hip::getCurrentHIPStream();
   if (direct_reduce) {
-    hipMemsetAsync(grad_decay_bias.data_ptr<float>(), 0, static_cast<std::size_t>(decay_bias.numel()) * sizeof(float), stream);
-    hipMemsetAsync(grad_skip.data_ptr<float>(), 0, static_cast<std::size_t>(skip.numel()) * sizeof(float), stream);
+    hipError_t error = hipMemsetAsync(
+        grad_decay_bias.data_ptr<float>(),
+        0,
+        static_cast<std::size_t>(decay_bias.numel()) * sizeof(float),
+        stream);
+    TORCH_CHECK(error == hipSuccess, "Mamba2 HIP grad_decay clear failed: ", hipGetErrorString(error));
+    error = hipMemsetAsync(
+        grad_skip.data_ptr<float>(),
+        0,
+        static_cast<std::size_t>(skip.numel()) * sizeof(float),
+        stream);
+    TORCH_CHECK(error == hipSuccess, "Mamba2 HIP grad_skip clear failed: ", hipGetErrorString(error));
     check_hip_launch();
   }
   if (has_reset) {

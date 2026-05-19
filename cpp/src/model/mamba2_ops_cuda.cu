@@ -1,7 +1,7 @@
 #include <tuple>
 #include <vector>
+#include <cstring>
 #include <cstdlib>
-#include <string>
 
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -249,8 +249,11 @@ void check_cuda_inputs(const at::Tensor& projected, const at::Tensor& decay_bias
 }
 
 inline bool use_direct_grad_reduce() {
-  const char* value = std::getenv("PULSAR_MAMBA2_GRAD_REDUCE");
-  return value == nullptr || std::string(value) != "pair";
+  static const bool direct_reduce = [] {
+    const char* value = std::getenv("PULSAR_MAMBA2_GRAD_REDUCE");
+    return value == nullptr || std::strcmp(value, "pair") != 0;
+  }();
+  return direct_reduce;
 }
 
 }  // namespace
@@ -326,8 +329,18 @@ std::vector<at::Tensor> mamba2_scan_backward_cuda(
   const int elements = batch * embed_dim;
   const auto stream = at::cuda::getCurrentCUDAStream();
   if (direct_reduce) {
-    cudaMemsetAsync(grad_decay_bias.data_ptr<float>(), 0, static_cast<std::size_t>(decay_bias.numel()) * sizeof(float), stream);
-    cudaMemsetAsync(grad_skip.data_ptr<float>(), 0, static_cast<std::size_t>(skip.numel()) * sizeof(float), stream);
+    cudaError_t error = cudaMemsetAsync(
+        grad_decay_bias.data_ptr<float>(),
+        0,
+        static_cast<std::size_t>(decay_bias.numel()) * sizeof(float),
+        stream);
+    TORCH_CHECK(error == cudaSuccess, "Mamba2 CUDA grad_decay clear failed: ", cudaGetErrorString(error));
+    error = cudaMemsetAsync(
+        grad_skip.data_ptr<float>(),
+        0,
+        static_cast<std::size_t>(skip.numel()) * sizeof(float),
+        stream);
+    TORCH_CHECK(error == cudaSuccess, "Mamba2 CUDA grad_skip clear failed: ", cudaGetErrorString(error));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
   if (has_reset) {

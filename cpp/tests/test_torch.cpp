@@ -142,8 +142,10 @@ int main() {
       if (!torch::allclose(actual, expected, 1.0e-5, 1.0e-5)) {
         throw std::runtime_error("mamba2 accelerator scan output mismatch");
       }
-      actual.square().mean().backward();
-      expected.square().mean().backward();
+      actual.square().mean().backward({}, true);
+      actual.mean().backward();
+      expected.square().mean().backward({}, true);
+      expected.mean().backward();
       if (!torch::allclose(projected.grad(), projected_ref.grad(), 1.0e-4, 1.0e-4) ||
           !torch::allclose(decay_bias.grad(), decay_ref.grad(), 1.0e-4, 1.0e-4) ||
           !torch::allclose(skip.grad(), skip_ref.grad(), 1.0e-4, 1.0e-4)) {
