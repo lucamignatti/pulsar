@@ -316,8 +316,7 @@ torch::Tensor Mamba2EncoderImpl::forward_step(
   }
 
   torch::Tensor token = input_projection_->forward(obs);
-  std::vector<torch::Tensor> next_blocks;
-  next_blocks.reserve(blocks_.size());
+  torch::Tensor next_state_tensor = next_state != nullptr ? torch::empty_like(current_state) : torch::Tensor{};
   for (std::size_t i = 0; i < blocks_.size(); ++i) {
     torch::Tensor next_conv_2;
     torch::Tensor next_conv_1;
@@ -330,10 +329,15 @@ torch::Tensor Mamba2EncoderImpl::forward_step(
         &next_conv_2,
         &next_conv_1,
         &next_scan);
-    next_blocks.push_back(torch::stack({next_conv_2, next_conv_1, next_scan}, 0));
+    if (next_state_tensor.defined()) {
+      torch::NoGradGuard no_grad;
+      next_state_tensor[static_cast<int64_t>(i)][0].copy_(next_conv_2);
+      next_state_tensor[static_cast<int64_t>(i)][1].copy_(next_conv_1);
+      next_state_tensor[static_cast<int64_t>(i)][2].copy_(next_scan);
+    }
   }
   if (next_state != nullptr) {
-    *next_state = torch::stack(next_blocks, 0).detach();
+    *next_state = next_state_tensor.detach();
   }
   return output_norm_->forward(token);
 }
