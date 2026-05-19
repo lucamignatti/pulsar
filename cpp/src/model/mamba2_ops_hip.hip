@@ -1,5 +1,7 @@
 #include <tuple>
 #include <vector>
+#include <cstdlib>
+#include <string>
 
 #include <ATen/ATen.h>
 #include <ATen/hip/HIPContext.h>
@@ -70,7 +72,7 @@ __global__ void mamba2_scan_forward_kernel(
   }
 }
 
-template <bool HasReset>
+template <bool HasReset, bool DirectReduce>
 __global__ void mamba2_scan_backward_kernel(
     const float* __restrict__ grad_mixed,
     const float* __restrict__ projected,
@@ -79,8 +81,8 @@ __global__ void mamba2_scan_backward_kernel(
     const float* __restrict__ reset,
     const float* __restrict__ scan,
     float* __restrict__ grad_projected,
-    float* __restrict__ grad_decay_partial,
-    float* __restrict__ grad_skip_partial,
+    float* __restrict__ grad_decay_out,
+    float* __restrict__ grad_skip_out,
     int batch,
     int sequence,
     int embed_dim) {
@@ -137,9 +139,14 @@ __global__ void mamba2_scan_backward_kernel(
     grad_projected[proj_base + 4 * embed_dim] = grad_retention_pre;
     local_grad_decay += grad_retention_pre;
   }
-  const int partial_index = b * embed_dim + d;
-  grad_skip_partial[partial_index] = local_grad_skip;
-  grad_decay_partial[partial_index] = local_grad_decay;
+  if constexpr (DirectReduce) {
+    atomicAdd(grad_skip_out + d, local_grad_skip);
+    atomicAdd(grad_decay_out + d, local_grad_decay);
+  } else {
+    const int partial_index = b * embed_dim + d;
+    grad_skip_out[partial_index] = local_grad_skip;
+    grad_decay_out[partial_index] = local_grad_decay;
+  }
 }
 
 __global__ void reduce_batch_dim_pair_kernel(
@@ -223,6 +230,11 @@ inline void check_hip_launch() {
   TORCH_CHECK(error == hipSuccess, "Mamba2 HIP kernel launch failed: ", hipGetErrorString(error));
 }
 
+inline bool use_direct_grad_reduce() {
+  const char* value = std::getenv("PULSAR_MAMBA2_GRAD_REDUCE");
+  return value == nullptr || std::string(value) != "pair";
+}
+
 }  // namespace
 
 std::tuple<at::Tensor, at::Tensor> mamba2_scan_forward_hip(
@@ -289,58 +301,110 @@ std::vector<at::Tensor> mamba2_scan_backward_hip(
   const int embed_dim = static_cast<int>(projected.size(2) / 5);
   const bool has_reset = reset_mask.defined();
   at::Tensor grad_projected = at::empty_like(projected);
-  at::Tensor grad_decay_partial = at::empty({batch, embed_dim}, projected.options());
-  at::Tensor grad_skip_partial = at::empty({batch, embed_dim}, projected.options());
+  const bool direct_reduce = use_direct_grad_reduce();
   at::Tensor grad_decay_bias = at::empty_like(decay_bias);
   at::Tensor grad_skip = at::empty_like(skip);
+  at::Tensor grad_decay_partial = direct_reduce ? at::Tensor{} : at::empty({batch, embed_dim}, projected.options());
+  at::Tensor grad_skip_partial = direct_reduce ? at::Tensor{} : at::empty({batch, embed_dim}, projected.options());
   constexpr int kThreads = 256;
   const int elements = batch * embed_dim;
+  const auto stream = at::hip::getCurrentHIPStream();
+  if (direct_reduce) {
+    hipMemsetAsync(grad_decay_bias.data_ptr<float>(), 0, static_cast<std::size_t>(decay_bias.numel()) * sizeof(float), stream);
+    hipMemsetAsync(grad_skip.data_ptr<float>(), 0, static_cast<std::size_t>(skip.numel()) * sizeof(float), stream);
+    check_hip_launch();
+  }
   if (has_reset) {
-    hipLaunchKernelGGL(
-        HIP_KERNEL_NAME(mamba2_scan_backward_kernel<true>),
-        dim3(blocks_for(elements, kThreads)),
-        dim3(kThreads),
-        0,
-        at::hip::getCurrentHIPStream(),
-        grad_mixed.data_ptr<float>(),
-        projected.data_ptr<float>(),
-        decay_bias.data_ptr<float>(),
-        skip.data_ptr<float>(),
-        reset_mask.data_ptr<float>(),
-        scan.data_ptr<float>(),
-        grad_projected.data_ptr<float>(),
-        grad_decay_partial.data_ptr<float>(),
-        grad_skip_partial.data_ptr<float>(),
-        batch,
-        sequence,
-        embed_dim);
+    if (direct_reduce) {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(mamba2_scan_backward_kernel<true, true>),
+          dim3(blocks_for(elements, kThreads)),
+          dim3(kThreads),
+          0,
+          stream,
+          grad_mixed.data_ptr<float>(),
+          projected.data_ptr<float>(),
+          decay_bias.data_ptr<float>(),
+          skip.data_ptr<float>(),
+          reset_mask.data_ptr<float>(),
+          scan.data_ptr<float>(),
+          grad_projected.data_ptr<float>(),
+          grad_decay_bias.data_ptr<float>(),
+          grad_skip.data_ptr<float>(),
+          batch,
+          sequence,
+          embed_dim);
+    } else {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(mamba2_scan_backward_kernel<true, false>),
+          dim3(blocks_for(elements, kThreads)),
+          dim3(kThreads),
+          0,
+          stream,
+          grad_mixed.data_ptr<float>(),
+          projected.data_ptr<float>(),
+          decay_bias.data_ptr<float>(),
+          skip.data_ptr<float>(),
+          reset_mask.data_ptr<float>(),
+          scan.data_ptr<float>(),
+          grad_projected.data_ptr<float>(),
+          grad_decay_partial.data_ptr<float>(),
+          grad_skip_partial.data_ptr<float>(),
+          batch,
+          sequence,
+          embed_dim);
+    }
   } else {
-    hipLaunchKernelGGL(
-        HIP_KERNEL_NAME(mamba2_scan_backward_kernel<false>),
-        dim3(blocks_for(elements, kThreads)),
-        dim3(kThreads),
-        0,
-        at::hip::getCurrentHIPStream(),
-        grad_mixed.data_ptr<float>(),
-        projected.data_ptr<float>(),
-        decay_bias.data_ptr<float>(),
-        skip.data_ptr<float>(),
-        nullptr,
-        scan.data_ptr<float>(),
-        grad_projected.data_ptr<float>(),
-        grad_decay_partial.data_ptr<float>(),
-        grad_skip_partial.data_ptr<float>(),
-        batch,
-        sequence,
-        embed_dim);
+    if (direct_reduce) {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(mamba2_scan_backward_kernel<false, true>),
+          dim3(blocks_for(elements, kThreads)),
+          dim3(kThreads),
+          0,
+          stream,
+          grad_mixed.data_ptr<float>(),
+          projected.data_ptr<float>(),
+          decay_bias.data_ptr<float>(),
+          skip.data_ptr<float>(),
+          nullptr,
+          scan.data_ptr<float>(),
+          grad_projected.data_ptr<float>(),
+          grad_decay_bias.data_ptr<float>(),
+          grad_skip.data_ptr<float>(),
+          batch,
+          sequence,
+          embed_dim);
+    } else {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(mamba2_scan_backward_kernel<false, false>),
+          dim3(blocks_for(elements, kThreads)),
+          dim3(kThreads),
+          0,
+          stream,
+          grad_mixed.data_ptr<float>(),
+          projected.data_ptr<float>(),
+          decay_bias.data_ptr<float>(),
+          skip.data_ptr<float>(),
+          nullptr,
+          scan.data_ptr<float>(),
+          grad_projected.data_ptr<float>(),
+          grad_decay_partial.data_ptr<float>(),
+          grad_skip_partial.data_ptr<float>(),
+          batch,
+          sequence,
+          embed_dim);
+    }
   }
   check_hip_launch();
+  if (direct_reduce) {
+    return {grad_projected, grad_decay_bias, grad_skip};
+  }
   hipLaunchKernelGGL(
       reduce_batch_dim_pair_kernel,
       dim3(embed_dim),
       dim3(kThreads),
       0,
-      at::hip::getCurrentHIPStream(),
+      stream,
       grad_decay_partial.data_ptr<float>(),
       grad_skip_partial.data_ptr<float>(),
       grad_decay_bias.data_ptr<float>(),
