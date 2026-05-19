@@ -163,7 +163,7 @@
         "required_scored_episode_rate": 0.15,
         "unlocked_mechanics": [],
         "outcome_override": {
-          "score": 5.0,
+          "score": 20.0,
           "concede": 0.0,
           "neutral": 0.0,
           "neutral_no_touch": 0.0
@@ -190,12 +190,12 @@
         "dense_rewards_override": {
           "ball_touch_vel_weight": 0.5,
           "touch_direction_weight": 0.5,
-          "speed_toward_ball_weight": 5.0,
+          "speed_toward_ball_weight": 2.5,
           "speed_toward_ball_decay": 3000.0,
           "face_ball_weight": 1.0,
           "air_reward_weight": 0.15,
           "air_reward_ball_z_min": 200.0,
-          "velocity_ball_to_goal_weight": 0.5,
+          "velocity_ball_to_goal_weight": 2.5,
           "max_ball_speed": 6000.0,
           "air_touch_weight": 0.0,
           "air_touch_max_air_time": 1.75,
@@ -242,23 +242,23 @@
           "neutral_no_touch": 0.0
         },
         "mechanic_rewards_override": {
-          "kickoff_first_touch": 0.0,
-          "speed_flip": 0.0,
-          "wavedash": 0.0,
-          "chain_dash_bonus": 0.0,
-          "half_flip": 0.0,
-          "wall_dash": 0.0,
-          "air_dribble_base": 0.0,
-          "air_dribble_scale": 0.0,
-          "flip_reset": 0.0,
-          "ceiling_shot": 0.0,
-          "double_tap": 0.0,
-          "preflip": 0.0,
-          "redirect": 0.0,
-          "pogo": 0.0,
-          "pinch": 0.0,
-          "team_pinch": 0.0,
-          "mechanic_reward_cap_per_episode": 0.0
+          "kickoff_first_touch": 4.0,
+          "speed_flip": 1.0,
+          "wavedash": 1.0,
+          "chain_dash_bonus": 0.5,
+          "half_flip": 0.1,
+          "wall_dash": 0.1,
+          "air_dribble_base": 4.0,
+          "air_dribble_scale": 2.0,
+          "flip_reset": 2.0,
+          "ceiling_shot": 3.0,
+          "double_tap": 3.0,
+          "preflip": 2.0,
+          "redirect": 3.0,
+          "pogo": 0.5,
+          "pinch": 1.0,
+          "team_pinch": 1.5,
+          "mechanic_reward_cap_per_episode": 15.0
         },
         "dense_rewards_override": {
           "ball_touch_vel_weight": 2.0,
@@ -310,7 +310,7 @@
         "unlocked_mechanics": [],
         "outcome_override": {
           "score": 20.0,
-          "concede": -16.0,
+          "concede": -18.0,
           "neutral": 0.0,
           "neutral_no_touch": 0.0
         },
