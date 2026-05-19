@@ -114,6 +114,7 @@ struct EnvConfig {
   int tick_skip = 8;
   int tick_rate = 120;
   int max_episode_ticks = 2250;
+  bool disable_truncation = false;
   float no_touch_timeout_seconds = 10.0F;
   bool no_touch_timeout_only_before_first_touch = false;
   bool spawn_opponents = true;

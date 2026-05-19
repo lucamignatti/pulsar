@@ -306,6 +306,7 @@ void to_json(json& j, const EnvConfig& value) {
       {"tick_skip", value.tick_skip},
       {"tick_rate", value.tick_rate},
       {"max_episode_ticks", value.max_episode_ticks},
+      {"disable_truncation", value.disable_truncation},
       {"no_touch_timeout_seconds", value.no_touch_timeout_seconds},
       {"no_touch_timeout_only_before_first_touch", value.no_touch_timeout_only_before_first_touch},
       {"spawn_opponents", value.spawn_opponents},
@@ -321,6 +322,7 @@ void from_json(const json& j, EnvConfig& value) {
   value.tick_skip = j.value("tick_skip", 8);
   value.tick_rate = j.value("tick_rate", 120);
   value.max_episode_ticks = j.value("max_episode_ticks", 2250);
+  value.disable_truncation = j.value("disable_truncation", false);
   value.no_touch_timeout_seconds = j.value("no_touch_timeout_seconds", 10.0F);
   value.no_touch_timeout_only_before_first_touch = j.value("no_touch_timeout_only_before_first_touch", false);
   value.spawn_opponents = j.value("spawn_opponents", true);

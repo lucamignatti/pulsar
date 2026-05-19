@@ -38,7 +38,7 @@ std::pair<std::vector<std::uint8_t>, std::vector<std::uint8_t>> SimpleDoneCondit
   if (goal_scored) {
     std::fill(terminated.begin(), terminated.end(), 1);
   }
-  if (timeout || no_touch_timeout) {
+  if (!config_.disable_truncation && (timeout || no_touch_timeout)) {
     std::fill(truncated.begin(), truncated.end(), 1);
   }
 
@@ -64,7 +64,7 @@ void SimpleDoneCondition::is_done_into(
   if (goal_scored) {
     std::fill(terminated.begin(), terminated.end(), 1);
   }
-  if (timeout || no_touch_timeout) {
+  if (!config_.disable_truncation && (timeout || no_touch_timeout)) {
     std::fill(truncated.begin(), truncated.end(), 1);
   }
 }

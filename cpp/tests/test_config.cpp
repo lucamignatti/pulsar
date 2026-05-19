@@ -157,6 +157,7 @@ int main() {
       auto prod = pulsar::load_experiment_config(config_path.string());
       pulsar::validate_experiment_config(prod);
       pulsar::test::require(prod.schema_version == 6, "production config schema");
+      pulsar::test::require(prod.env.disable_truncation, "production config disables truncation");
       pulsar::test::require(prod.curriculum.enabled, "curriculum enabled in production");
       pulsar::test::require(prod.curriculum.stages.size() == 4, "four curriculum stages in production");
       pulsar::test::require(prod.curriculum.stages[0].mode_allocation.size() == 1 &&

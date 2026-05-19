@@ -8,6 +8,7 @@
     "tick_skip": 8,
     "tick_rate": 120,
     "max_episode_ticks": 2250,
+    "disable_truncation": true,
     "no_touch_timeout_seconds": 6.0,
     "no_touch_timeout_only_before_first_touch": false,
     "spawn_opponents": true,

@@ -80,6 +80,14 @@ void test_obs_content_and_done() {
   const auto [tick_terminated, tick_truncated] = done.is_done(timeout_state, config.env.max_episode_ticks);
   pulsar::test::require(tick_terminated[0] == 0, "max tick timeout should not terminate");
   pulsar::test::require(tick_truncated[0] == 1, "max tick timeout should truncate");
+
+  auto no_trunc_config = config.env;
+  no_trunc_config.disable_truncation = true;
+  pulsar::SimpleDoneCondition no_trunc_done(no_trunc_config);
+  const auto [no_trunc_terminated, no_trunc_truncated] =
+      no_trunc_done.is_done(timeout_state, config.env.max_episode_ticks);
+  pulsar::test::require(no_trunc_terminated[0] == 0, "disabled truncation should not terminate");
+  pulsar::test::require(no_trunc_truncated[0] == 0, "disabled truncation should not truncate");
 }
 
 void test_obs_shuffled_car_order() {
