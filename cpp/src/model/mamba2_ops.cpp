@@ -275,8 +275,8 @@ class Mamba2CausalConvSiluCudaFunction : public torch::autograd::Function<Mamba2
     std::vector<torch::Tensor> grads = mamba2_causal_conv1d_silu_backward_cuda(
         grad_outputs[0].contiguous(),
         saved[0],
-        saved[1],
-        saved[2],
+        saved[1].contiguous(),
+        saved[2].contiguous(),
         saved[3],
         saved[4]);
     grads.push_back(torch::Tensor{});
@@ -391,8 +391,8 @@ class Mamba2CausalConvSiluHipFunction : public torch::autograd::Function<Mamba2C
     std::vector<torch::Tensor> grads = mamba2_causal_conv1d_silu_backward_hip(
         grad_outputs[0].contiguous(),
         saved[0],
-        saved[1],
-        saved[2],
+        saved[1].contiguous(),
+        saved[2].contiguous(),
         saved[3],
         saved[4]);
     grads.push_back(torch::Tensor{});

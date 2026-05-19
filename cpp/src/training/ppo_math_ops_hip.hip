@@ -59,19 +59,19 @@ __global__ void gae_kernel(
 __global__ void normalize_partial_kernel(
     const float* __restrict__ advantages,
     const float* __restrict__ active,
-    float* __restrict__ partial_sum,
-    float* __restrict__ partial_sumsq,
+    double* __restrict__ partial_sum,
+    double* __restrict__ partial_sumsq,
     float* __restrict__ partial_count,
     int elements) {
-  __shared__ float sums[256];
-  __shared__ float sumsqs[256];
+  __shared__ double sums[256];
+  __shared__ double sumsqs[256];
   __shared__ float counts[256];
-  float sum = 0.0F;
-  float sumsq = 0.0F;
+  double sum = 0.0;
+  double sumsq = 0.0;
   float count = 0.0F;
   for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < elements; i += blockDim.x * gridDim.x) {
     if (active[i] > 0.5F) {
-      const float v = advantages[i];
+      const double v = advantages[i];
       sum += v;
       sumsq += v * v;
       count += 1.0F;
@@ -98,26 +98,26 @@ __global__ void normalize_partial_kernel(
 
 __global__ void normalize_finish_kernel(
     const float* __restrict__ advantages,
-    const float* __restrict__ partial_sum,
-    const float* __restrict__ partial_sumsq,
+    const double* __restrict__ partial_sum,
+    const double* __restrict__ partial_sumsq,
     const float* __restrict__ partial_count,
     float* __restrict__ normalized,
     int elements,
     int partials) {
   __shared__ float stats[3];
   if (threadIdx.x == 0) {
-    float sum = 0.0F;
-    float sumsq = 0.0F;
+    double sum = 0.0;
+    double sumsq = 0.0;
     float count = 0.0F;
     for (int i = 0; i < partials; ++i) {
       sum += partial_sum[i];
       sumsq += partial_sumsq[i];
       count += partial_count[i];
     }
-    const float mean = count > 0.0F ? sum / count : 0.0F;
-    const float var = count > 1.0F ? fmaxf(sumsq / count - mean * mean, 0.0F) : 0.0F;
-    stats[0] = mean;
-    stats[1] = count > 1.0F ? rsqrtf(fmaxf(var, 1.0e-16F)) : 1.0F;
+    const double mean = count > 0.0F ? sum / static_cast<double>(count) : 0.0;
+    const double var = count > 1.0F ? fmax(sumsq / static_cast<double>(count) - mean * mean, 0.0) : 0.0;
+    stats[0] = static_cast<float>(mean);
+    stats[1] = count > 1.0F ? static_cast<float>(rsqrt(fmax(var, 1.0e-16))) : 1.0F;
     stats[2] = count;
   }
   __syncthreads();
@@ -229,21 +229,21 @@ at::Tensor normalize_advantage_hip(const at::Tensor& advantages, const at::Tenso
   at::Tensor normalized = at::empty_like(advantages);
   constexpr int kThreads = 256;
   const int partials = std::min(1024, std::max(1, blocks_for(elements, kThreads)));
-  at::Tensor partial_sum = at::empty({partials}, advantages.options());
-  at::Tensor partial_sumsq = at::empty({partials}, advantages.options());
+  at::Tensor partial_sum = at::empty({partials}, advantages.options().dtype(at::kDouble));
+  at::Tensor partial_sumsq = at::empty({partials}, advantages.options().dtype(at::kDouble));
   at::Tensor partial_count = at::empty({partials}, advantages.options());
   normalize_partial_kernel<<<partials, kThreads, 0, at::hip::getCurrentHIPStream()>>>(
       advantages.data_ptr<float>(),
       active_mask.data_ptr<float>(),
-      partial_sum.data_ptr<float>(),
-      partial_sumsq.data_ptr<float>(),
+      partial_sum.data_ptr<double>(),
+      partial_sumsq.data_ptr<double>(),
       partial_count.data_ptr<float>(),
       elements);
   check_hip_launch();
   normalize_finish_kernel<<<1, kThreads, 0, at::hip::getCurrentHIPStream()>>>(
       advantages.data_ptr<float>(),
-      partial_sum.data_ptr<float>(),
-      partial_sumsq.data_ptr<float>(),
+      partial_sum.data_ptr<double>(),
+      partial_sumsq.data_ptr<double>(),
       partial_count.data_ptr<float>(),
       normalized.data_ptr<float>(),
       elements,
