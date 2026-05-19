@@ -182,8 +182,8 @@ Mamba2BlockImpl::Mamba2BlockImpl(int embed_dim, int sequence_length, bool use_la
                             .padding(2)));
   input_projection_ = register_module("input_projection", torch::nn::Linear(embed_dim_, 5 * embed_dim_));
   output_projection_ = register_module("output_projection", torch::nn::Linear(embed_dim_, embed_dim_));
-  decay_bias_ = register_parameter("decay_bias", torch::full({embed_dim_}, 2.0F));
-  skip_ = register_parameter("skip", torch::ones({embed_dim_}));
+  decay_bias_ = register_parameter("decay_bias", torch::full({embed_dim_}, 4.0F));
+  skip_ = register_parameter("skip", torch::full({embed_dim_}, 0.1F));
 }
 
 torch::Tensor Mamba2BlockImpl::forward(const torch::Tensor& tokens, const torch::Tensor& reset_mask) {
@@ -272,6 +272,7 @@ torch::Tensor Mamba2EncoderImpl::forward(const torch::Tensor& obs) {
   torch::Tensor tokens = input_projection_->forward(obs).unsqueeze(1);
   for (Mamba2Block& block : blocks_) {
     tokens = block->forward(tokens);
+    tokens = torch::clamp(tokens, -100.0, 100.0);
   }
   tokens = output_norm_->forward(tokens);
   return tokens.squeeze(1);
@@ -289,6 +290,7 @@ torch::Tensor Mamba2EncoderImpl::forward_sequence(const torch::Tensor& obs_seq, 
       : torch::Tensor{};
   for (Mamba2Block& block : blocks_) {
     tokens = block->forward(tokens, reset_mask);
+    tokens = torch::clamp(tokens, -100.0, 100.0);
   }
   tokens = output_norm_->forward(tokens);
   return tokens.transpose(0, 1);
