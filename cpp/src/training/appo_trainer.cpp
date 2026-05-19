@@ -577,21 +577,38 @@ torch::Tensor goal_actor_critic_loss(
     const torch::Tensor& features,
     const torch::Tensor& logits,
     const torch::Tensor& masks,
-    const torch::Tensor& future_goals) {
+    const torch::Tensor& future_goals,
+    int contrastive_batch_size) {
   const auto active_count = features.size(0);
   if (active_count <= 0) {
     return torch::zeros({}, logits.options().dtype(torch::kFloat32));
   }
 
+  torch::Tensor selected_features = features;
+  torch::Tensor selected_logits = logits;
+  torch::Tensor selected_masks = masks;
+  torch::Tensor selected_goals = future_goals;
+  const int bounded_batch = std::max(1, contrastive_batch_size);
+  if (active_count > static_cast<c10::IntArrayRef::value_type>(bounded_batch)) {
+    const torch::Tensor idx = torch::randperm(
+        active_count,
+        torch::TensorOptions().dtype(torch::kLong).device(logits.device()))
+        .narrow(0, 0, bounded_batch);
+    selected_features = selected_features.index({idx});
+    selected_logits = selected_logits.index({idx});
+    selected_masks = selected_masks.index({idx});
+    selected_goals = selected_goals.index({idx});
+  }
+
   const torch::Tensor action_probs = sample_masked_gumbel_softmax(
-      logits,
-      masks,
+      selected_logits,
+      selected_masks,
       1.0F);
   ModuleRequiresGradGuard freeze_goal_critic(*goal_critic, false);
   return -goal_critic->forward(
-      features.detach(),
+      selected_features.detach(),
       action_probs,
-      future_goals.detach()).to(torch::kFloat32).mean();
+      selected_goals.detach()).to(torch::kFloat32).mean();
 }
 
 int cuda_mamba2_autograd_forward_sample_cap(const ModelConfig& config) {
@@ -1760,10 +1777,11 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                   goal_loss = compute_symmetric_infonce_loss(compute_pairwise_negative_l2_logits(sa_emb, g_emb), config_.goal_critic.logsumexp_penalty_coeff);
                   actor_goal_loss = goal_actor_critic_loss(
                       gpu_act->goal_critic(),
-                      selected_features,
-                      selected_logits,
-                      selected_masks,
-                      selected_future_goal_pos);
+                      active_features,
+                      active_logits,
+                      active_masks,
+                      active_future_goal_pos,
+                      config_.goal_critic.contrastive_batch_size);
                   chunk_goal_score = -((sa_emb.detach() - g_emb.detach()).square().sum(-1).clamp_min(1.0e-8F)).mean();
                   chunk_sampled_goal_norm = active_future_goal_pos.norm(2, -1).mean();
                   add_metric(sampled_goal_dist_metric, chunk_sampled_goal_norm, active_samples);
