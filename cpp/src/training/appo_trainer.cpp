@@ -935,7 +935,8 @@ APPOTrainer::APPOTrainer(
     throw std::invalid_argument("APPOTrainer collectors must contain agents.");
   }
   seed_everything(config_.env.seed);
-  device_ = compute_devices_.front();
+  const torch::Device primary_device = compute_devices_.front();
+  device_ = primary_device;
   for (const auto& compute_device : compute_devices_) {
     configure_cuda_runtime(compute_device);
   }
@@ -952,8 +953,8 @@ APPOTrainer::APPOTrainer(
     }
   }
 #endif
-  actor_->to(device_);
-  actor_normalizer_.to(device_);
+  actor_->to(primary_device);
+  actor_normalizer_.to(primary_device);
 
   maybe_initialize_from_checkpoint();
   actor_snapshot_ = clone_ppo_actor(actor_, device_);
@@ -1157,20 +1158,10 @@ void APPOTrainer::rebuild_collectors() {
     throw std::invalid_argument("rebuild_collectors produced zero agents");
   }
 
-  // Rebuild persistent collection actors for new shard count
-  collection_actors_.clear();
-  for (std::size_t i = 0; i < shard_devices_.size(); ++i) {
-    if (shard_devices_[i] == device_) {
-      collection_actors_.push_back(actor_snapshot_);
-    } else {
-      collection_actors_.push_back(clone_ppo_actor(actor_snapshot_, shard_devices_[i]));
-      collection_actors_.back()->eval();
-    }
-  }
+  shard_devices_ = assign_shard_devices(compute_devices_, collectors_.size());
 
 #ifdef PULSAR_HAS_CUDA
   if (device_.is_cuda()) {
-    shard_devices_ = assign_shard_devices(compute_devices_, collectors_.size());
     shard_collection_streams_.clear();
     for (std::size_t i = 0; i < collectors_.size(); ++i) {
       const torch::Device shard_device = shard_devices_[i];
@@ -1179,6 +1170,18 @@ void APPOTrainer::rebuild_collectors() {
     }
   }
 #endif
+
+  // Rebuild persistent collection actors for the new shard count and device layout.
+  collection_actors_.clear();
+  collection_actors_.reserve(shard_devices_.size());
+  for (std::size_t i = 0; i < shard_devices_.size(); ++i) {
+    if (shard_devices_[i] == device_) {
+      collection_actors_.push_back(actor_snapshot_);
+    } else {
+      collection_actors_.push_back(clone_ppo_actor(actor_snapshot_, shard_devices_[i]));
+      collection_actors_.back()->eval();
+    }
+  }
 
   // rebuild rollout storage
   const int action_dim = action_dim_for_collectors(collectors_);

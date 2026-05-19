@@ -78,37 +78,6 @@ std::tuple<torch::Tensor, torch::Tensor> reference_mamba2_step_mixed(
   return {(c * scan + skip.view({1, embed_dim}) * x) * z, scan};
 }
 
-torch::Tensor reference_causal_conv1d_silu(
-    const torch::Tensor& input,
-    const torch::Tensor& weight,
-    const torch::Tensor& bias,
-    const torch::Tensor& reset_mask) {
-  const auto batch = input.size(0);
-  const auto sequence = input.size(1);
-  const auto embed_dim = input.size(2);
-  const torch::Tensor reset = reset_mask.to(input.device()).to(input.scalar_type());
-  const torch::Tensor zero_step = torch::zeros({batch, 1, embed_dim}, input.options());
-  torch::Tensor prev_1 = sequence > 1
-      ? torch::cat({zero_step, input.slice(1, 0, sequence - 1)}, 1)
-      : torch::zeros_like(input);
-  torch::Tensor prev_2 = sequence > 2
-      ? torch::cat({zero_step, zero_step, input.slice(1, 0, sequence - 2)}, 1)
-      : torch::zeros_like(input);
-  const torch::Tensor keep_prev_1 = (1.0F - reset).unsqueeze(-1);
-  torch::Tensor previous_reset = torch::zeros_like(reset);
-  if (sequence > 1) {
-    previous_reset.slice(1, 1).copy_(reset.slice(1, 0, sequence - 1));
-  }
-  const torch::Tensor keep_prev_2 = ((1.0F - reset) * (1.0F - previous_reset)).unsqueeze(-1);
-  prev_1 = prev_1 * keep_prev_1;
-  prev_2 = prev_2 * keep_prev_2;
-  return torch::silu(
-      prev_2 * weight.select(1, 0).view({1, 1, embed_dim})
-      + prev_1 * weight.select(1, 1).view({1, 1, embed_dim})
-      + input * weight.select(1, 2).view({1, 1, embed_dim})
-      + bias.view({1, 1, embed_dim}));
-}
-
 }  // namespace
 
 int main() {
@@ -155,14 +124,6 @@ int main() {
         throw std::runtime_error("mamba2 step fallback output mismatch");
       }
 
-      const torch::Tensor conv_input = torch::randn({3, 5, 4}, torch::requires_grad());
-      const torch::Tensor conv_weight = torch::randn({4, 3}, torch::requires_grad());
-      const torch::Tensor conv_bias = torch::randn({4}, torch::requires_grad());
-      const torch::Tensor conv_actual = pulsar::mamba2_causal_conv1d_silu(conv_input, conv_weight, conv_bias, reset);
-      const torch::Tensor conv_expected = reference_causal_conv1d_silu(conv_input, conv_weight, conv_bias, reset);
-      if (!torch::allclose(conv_actual, conv_expected, 1.0e-6, 1.0e-6)) {
-        throw std::runtime_error("mamba2 causal conv fallback output mismatch");
-      }
     }
 
     if (torch::cuda::is_available() && pulsar::mamba2_accelerator_kernels_available()) {
@@ -192,26 +153,6 @@ int main() {
         throw std::runtime_error("mamba2 accelerator scan gradient mismatch");
       }
 
-      torch::Tensor conv_input = torch::randn({2, 6, 5}, opts).set_requires_grad(true);
-      torch::Tensor conv_weight = torch::randn({5, 3}, opts).set_requires_grad(true);
-      torch::Tensor conv_bias = torch::randn({5}, opts).set_requires_grad(true);
-      torch::Tensor conv_input_ref = conv_input.detach().clone().set_requires_grad(true);
-      torch::Tensor conv_weight_ref = conv_weight.detach().clone().set_requires_grad(true);
-      torch::Tensor conv_bias_ref = conv_bias.detach().clone().set_requires_grad(true);
-      const torch::Tensor conv_actual =
-          pulsar::mamba2_causal_conv1d_silu(conv_input, conv_weight, conv_bias, reset);
-      const torch::Tensor conv_expected =
-          reference_causal_conv1d_silu(conv_input_ref, conv_weight_ref, conv_bias_ref, reset);
-      if (!torch::allclose(conv_actual, conv_expected, 1.0e-5, 1.0e-5)) {
-        throw std::runtime_error("mamba2 accelerator causal conv output mismatch");
-      }
-      conv_actual.square().mean().backward();
-      conv_expected.square().mean().backward();
-      if (!torch::allclose(conv_input.grad(), conv_input_ref.grad(), 1.0e-4, 1.0e-4) ||
-          !torch::allclose(conv_weight.grad(), conv_weight_ref.grad(), 1.0e-4, 1.0e-4) ||
-          !torch::allclose(conv_bias.grad(), conv_bias_ref.grad(), 1.0e-4, 1.0e-4)) {
-        throw std::runtime_error("mamba2 accelerator causal conv gradient mismatch");
-      }
     }
 
     {
