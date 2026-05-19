@@ -64,6 +64,40 @@ std::tuple<torch::Tensor, torch::Tensor> fallback_mamba2_step_mixed(
   return {mixed, scan};
 }
 
+torch::Tensor fallback_causal_conv1d_silu(
+    const torch::Tensor& input,
+    const torch::Tensor& weight,
+    const torch::Tensor& bias,
+    const torch::Tensor& reset_mask) {
+  const auto batch = input.size(0);
+  const auto sequence = input.size(1);
+  const auto embed_dim = input.size(2);
+  const torch::Tensor zero_step = torch::zeros({batch, 1, embed_dim}, input.options());
+  torch::Tensor prev_1 = sequence > 1
+      ? torch::cat({zero_step, input.slice(1, 0, sequence - 1)}, 1)
+      : torch::zeros_like(input);
+  torch::Tensor prev_2 = sequence > 2
+      ? torch::cat({zero_step, zero_step, input.slice(1, 0, sequence - 2)}, 1)
+      : torch::zeros_like(input);
+  const torch::Tensor reset = reset_mask.to(input.device()).to(input.scalar_type());
+  const torch::Tensor keep_prev_1 = (1.0F - reset).unsqueeze(-1);
+  torch::Tensor previous_reset = torch::zeros_like(reset);
+  if (sequence > 1) {
+    previous_reset.slice(1, 1).copy_(reset.slice(1, 0, sequence - 1));
+  }
+  const torch::Tensor keep_prev_2 = ((1.0F - reset) * (1.0F - previous_reset)).unsqueeze(-1);
+  prev_1 = prev_1 * keep_prev_1;
+  prev_2 = prev_2 * keep_prev_2;
+  torch::Tensor out =
+      prev_2 * weight.select(1, 0).view({1, 1, embed_dim})
+      + prev_1 * weight.select(1, 1).view({1, 1, embed_dim})
+      + input * weight.select(1, 2).view({1, 1, embed_dim});
+  if (bias.defined()) {
+    out = out + bias.view({1, 1, embed_dim});
+  }
+  return torch::silu(out);
+}
+
 void validate_scan_inputs(
     const torch::Tensor& projected,
     const torch::Tensor& decay_bias,
@@ -111,6 +145,29 @@ void validate_step_inputs(
   }
 }
 
+void validate_causal_conv_inputs(
+    const torch::Tensor& input,
+    const torch::Tensor& weight,
+    const torch::Tensor& bias,
+    const torch::Tensor& reset_mask) {
+  if (!input.defined() || input.dim() != 3) {
+    throw std::invalid_argument("mamba2_causal_conv1d_silu requires input with shape [batch, sequence, dim].");
+  }
+  const auto embed_dim = input.size(2);
+  if (!weight.defined() || weight.dim() != 2 || weight.size(0) != embed_dim || weight.size(1) != 3) {
+    throw std::invalid_argument("mamba2_causal_conv1d_silu weight must have shape [dim, 3].");
+  }
+  if (!bias.defined() || bias.numel() != embed_dim) {
+    throw std::invalid_argument("mamba2_causal_conv1d_silu bias shape mismatch.");
+  }
+  if (!reset_mask.defined() ||
+      reset_mask.dim() != 2 ||
+      reset_mask.size(0) != input.size(0) ||
+      reset_mask.size(1) != input.size(1)) {
+    throw std::invalid_argument("mamba2_causal_conv1d_silu reset_mask must have shape [batch, sequence].");
+  }
+}
+
 }  // namespace
 
 #ifdef PULSAR_HAS_MAMBA2_CUDA_KERNELS
@@ -133,6 +190,20 @@ std::tuple<torch::Tensor, torch::Tensor> mamba2_step_forward_cuda(
     const torch::Tensor& previous_scan,
     const torch::Tensor& decay_bias,
     const torch::Tensor& skip);
+
+std::tuple<torch::Tensor, torch::Tensor> mamba2_causal_conv1d_silu_forward_cuda(
+    const torch::Tensor& input,
+    const torch::Tensor& weight,
+    const torch::Tensor& bias,
+    const torch::Tensor& reset_mask);
+
+std::vector<torch::Tensor> mamba2_causal_conv1d_silu_backward_cuda(
+    const torch::Tensor& grad_output,
+    const torch::Tensor& input,
+    const torch::Tensor& weight,
+    const torch::Tensor& bias,
+    const torch::Tensor& reset_mask,
+    const torch::Tensor& pre_activation);
 
 #endif
 
@@ -180,6 +251,38 @@ class Mamba2ScanCudaFunction : public torch::autograd::Function<Mamba2ScanCudaFu
     return grads;
   }
 };
+
+class Mamba2CausalConvSiluCudaFunction : public torch::autograd::Function<Mamba2CausalConvSiluCudaFunction> {
+ public:
+  static torch::Tensor forward(
+      torch::autograd::AutogradContext* ctx,
+      torch::Tensor input,
+      torch::Tensor weight,
+      torch::Tensor bias,
+      torch::Tensor reset_mask) {
+    input = input.contiguous();
+    reset_mask = reset_mask.to(input.device()).to(torch::kFloat32).contiguous();
+    auto [output, pre_activation] =
+        mamba2_causal_conv1d_silu_forward_cuda(input, weight, bias.contiguous(), reset_mask);
+    ctx->save_for_backward({input, weight, bias, reset_mask, pre_activation});
+    return output;
+  }
+
+  static torch::autograd::variable_list backward(
+      torch::autograd::AutogradContext* ctx,
+      torch::autograd::variable_list grad_outputs) {
+    const auto saved = ctx->get_saved_variables();
+    std::vector<torch::Tensor> grads = mamba2_causal_conv1d_silu_backward_cuda(
+        grad_outputs[0].contiguous(),
+        saved[0],
+        saved[1],
+        saved[2],
+        saved[3],
+        saved[4]);
+    grads.push_back(torch::Tensor{});
+    return grads;
+  }
+};
 }  // namespace
 #endif
 
@@ -203,6 +306,20 @@ std::tuple<torch::Tensor, torch::Tensor> mamba2_step_forward_hip(
     const torch::Tensor& previous_scan,
     const torch::Tensor& decay_bias,
     const torch::Tensor& skip);
+
+std::tuple<torch::Tensor, torch::Tensor> mamba2_causal_conv1d_silu_forward_hip(
+    const torch::Tensor& input,
+    const torch::Tensor& weight,
+    const torch::Tensor& bias,
+    const torch::Tensor& reset_mask);
+
+std::vector<torch::Tensor> mamba2_causal_conv1d_silu_backward_hip(
+    const torch::Tensor& grad_output,
+    const torch::Tensor& input,
+    const torch::Tensor& weight,
+    const torch::Tensor& bias,
+    const torch::Tensor& reset_mask,
+    const torch::Tensor& pre_activation);
 
 #endif
 
@@ -250,6 +367,38 @@ class Mamba2ScanHipFunction : public torch::autograd::Function<Mamba2ScanHipFunc
     return grads;
   }
 };
+
+class Mamba2CausalConvSiluHipFunction : public torch::autograd::Function<Mamba2CausalConvSiluHipFunction> {
+ public:
+  static torch::Tensor forward(
+      torch::autograd::AutogradContext* ctx,
+      torch::Tensor input,
+      torch::Tensor weight,
+      torch::Tensor bias,
+      torch::Tensor reset_mask) {
+    input = input.contiguous();
+    reset_mask = reset_mask.to(input.device()).to(torch::kFloat32).contiguous();
+    auto [output, pre_activation] =
+        mamba2_causal_conv1d_silu_forward_hip(input, weight, bias.contiguous(), reset_mask);
+    ctx->save_for_backward({input, weight, bias, reset_mask, pre_activation});
+    return output;
+  }
+
+  static torch::autograd::variable_list backward(
+      torch::autograd::AutogradContext* ctx,
+      torch::autograd::variable_list grad_outputs) {
+    const auto saved = ctx->get_saved_variables();
+    std::vector<torch::Tensor> grads = mamba2_causal_conv1d_silu_backward_hip(
+        grad_outputs[0].contiguous(),
+        saved[0],
+        saved[1],
+        saved[2],
+        saved[3],
+        saved[4]);
+    grads.push_back(torch::Tensor{});
+    return grads;
+  }
+};
 }  // namespace
 #endif
 
@@ -265,6 +414,22 @@ bool can_use_cuda_scan(const torch::Tensor& projected, const torch::Tensor& deca
   (void)projected;
   (void)decay_bias;
   (void)skip;
+  return false;
+#endif
+}
+
+bool can_use_cuda_conv(const torch::Tensor& input, const torch::Tensor& weight, const torch::Tensor& bias) {
+#if defined(PULSAR_HAS_MAMBA2_CUDA_KERNELS) || defined(PULSAR_HAS_MAMBA2_HIP_KERNELS)
+  return input.is_cuda() &&
+      input.scalar_type() == torch::kFloat32 &&
+      weight.is_cuda() &&
+      weight.scalar_type() == torch::kFloat32 &&
+      bias.is_cuda() &&
+      bias.scalar_type() == torch::kFloat32;
+#else
+  (void)input;
+  (void)weight;
+  (void)bias;
   return false;
 #endif
 }
@@ -341,6 +506,25 @@ std::tuple<torch::Tensor, torch::Tensor> mamba2_step_mixed(
   }
 #endif
   return fallback_mamba2_step_mixed(projected, previous_scan, decay_bias, skip);
+}
+
+torch::Tensor mamba2_causal_conv1d_silu(
+    const torch::Tensor& input,
+    const torch::Tensor& weight,
+    const torch::Tensor& bias,
+    const torch::Tensor& reset_mask) {
+  validate_causal_conv_inputs(input, weight, bias, reset_mask);
+#ifdef PULSAR_HAS_MAMBA2_CUDA_KERNELS
+  if (can_use_cuda_conv(input, weight, bias)) {
+    return Mamba2CausalConvSiluCudaFunction::apply(input, weight, bias, reset_mask);
+  }
+#endif
+#ifdef PULSAR_HAS_MAMBA2_HIP_KERNELS
+  if (can_use_cuda_conv(input, weight, bias)) {
+    return Mamba2CausalConvSiluHipFunction::apply(input, weight, bias, reset_mask);
+  }
+#endif
+  return fallback_causal_conv1d_silu(input, weight, bias, reset_mask);
 }
 
 }  // namespace pulsar

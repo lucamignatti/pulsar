@@ -1562,12 +1562,14 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         // Fast-path: if all agents are learners (common in curriculum without self-play),
         // mode_total_active is just mode_count * rollout_length. Skip expensive tensor sum.
         double mode_total_active;
+        bool mode_all_active = false;
         {
           torch::Tensor active_slice = rollout.learner_active.narrow(0, 0, rollout.rollout_length())
               .index_select(1, mode_agent_indices);
           const float active_sum = active_slice.sum().item<float>();
           const float active_all = static_cast<float>(mode_count * rollout.rollout_length());
           mode_total_active = static_cast<double>(active_sum);
+          mode_all_active = active_sum >= active_all - 0.5F;
           if (mode_total_active <= 0.0) continue;
         }
         combined_total_active += mode_total_active;
@@ -1608,6 +1610,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         const int seq_len_local = seq_len;
         const int rollout_steps_local = rollout_steps;
         const double mode_total_active_local = mode_total_active;
+        const bool mode_all_active_local = mode_all_active;
         const bool use_pcgrad_local = use_pcgrad;
         const bool use_cuda_amp_local = use_cuda_amp;
         const double cuda_amp_loss_scale_local = cuda_amp_loss_scale;
@@ -1623,6 +1626,24 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             std::vector<CapturedGrad>& gpu_task_group = result.task_group;
             std::vector<CapturedGrad>& gpu_goal_critic_group = result.goal_critic_group;
             std::vector<CapturedGrad>& gpu_goal_actor_group = result.goal_actor_group;
+            torch::Tensor policy_loss_metric;
+            torch::Tensor value_loss_metric;
+            torch::Tensor entropy_metric;
+            torch::Tensor policy_approx_kl_metric;
+            torch::Tensor policy_clip_frac_metric;
+            torch::Tensor policy_log_ratio_max_metric;
+            torch::Tensor goal_critic_loss_metric;
+            torch::Tensor goal_score_metric;
+            torch::Tensor sampled_goal_dist_metric;
+            auto add_metric = [](torch::Tensor& dst, const torch::Tensor& value, double weight) {
+              const torch::Tensor term = value.detach().to(torch::kFloat32) * weight;
+              dst = dst.defined() ? dst + term : term;
+            };
+            auto max_metric = [](torch::Tensor& dst, const torch::Tensor& value) {
+              const torch::Tensor term = value.detach().to(torch::kFloat32);
+              dst = dst.defined() ? torch::maximum(dst, term) : term;
+            };
+            const auto task_compute_start = std::chrono::steady_clock::now();
 
             for (int micro_agent_offset = 0; micro_agent_offset < mode_count_local; micro_agent_offset += agents_per_forward_local) {
               const int micro_count = std::min(agents_per_forward_local, mode_count_local - micro_agent_offset);
@@ -1649,7 +1670,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 if (loss_steps <= 0) continue;
 
                 const torch::Tensor obs = mode_gpu_obs_mb.narrow(0, chunk_start, loss_steps);
-                const auto fwd_bwd_start = std::chrono::steady_clock::now();
                 ActorSequenceOutput output;
                 {
                   OptionalCudaAutocastGuard autocast_guard(use_cuda_amp_local);
@@ -1667,7 +1687,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 const torch::Tensor chunk_advantages = mode_gpu_advantages_mb.narrow(0, chunk_start, loss_steps);
 
                 const auto samples = loss_steps * gpu_chunk_count;
-                const torch::Tensor flat_active = learner_active.reshape({samples}) > 0.5F;
                 torch::Tensor flat_logits = policy_logits.reshape({samples, config_.model.action_dim});
                 torch::Tensor flat_features = features.reshape({samples, static_cast<int64_t>(gpu_act->feature_dim())});
                 torch::Tensor flat_masks = action_masks.reshape({samples, config_.model.action_dim});
@@ -1675,7 +1694,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 torch::Tensor flat_old_log_probs = old_log_probs.reshape({samples});
                 torch::Tensor flat_advantages = chunk_advantages.reshape({samples});
 
-                const bool all_active = learner_active.min().item<float>() > 0.5F;
+                const bool all_active = mode_all_active_local;
+                const torch::Tensor flat_active = all_active ? torch::Tensor{} : learner_active.reshape({samples}) > 0.5F;
                 const torch::Tensor active_logits = all_active ? flat_logits.to(torch::kFloat32) : flat_logits.index({flat_active}).to(torch::kFloat32);
                 const torch::Tensor active_features = all_active ? flat_features.to(torch::kFloat32) : flat_features.index({flat_active}).to(torch::kFloat32);
                 const torch::Tensor active_masks = all_active ? flat_masks : flat_masks.index({flat_active});
@@ -1698,9 +1718,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                   const torch::Tensor metric_log_ratio = raw_log_ratio.detach().to(torch::kFloat32).clamp(-20.0F, 20.0F);
                   const torch::Tensor approx_kl = ((torch::exp(metric_log_ratio) - 1.0F) - metric_log_ratio).mean();
                   const torch::Tensor clip_fraction = (raw_log_ratio.detach().abs() > std::log1p(static_cast<double>(config_.ppo.clip_range))).to(torch::kFloat32).mean();
-                  result.policy_approx_kl += approx_kl.to(device_).item<double>() * active_samples;
-                  result.policy_clip_frac += clip_fraction.to(device_).item<double>() * active_samples;
-                  result.policy_log_ratio_max = std::max(result.policy_log_ratio_max, raw_log_ratio.detach().abs().max().item<double>());
+                  add_metric(policy_approx_kl_metric, approx_kl, active_samples);
+                  add_metric(policy_clip_frac_metric, clip_fraction, active_samples);
+                  max_metric(policy_log_ratio_max_metric, raw_log_ratio.detach().abs().max());
                 }
 
                 torch::Tensor epsilon = torch::full({active_advantages.size(0)}, config_.ppo.clip_range, active_advantages.options());
@@ -1755,9 +1775,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                     chunk_goal_score = gpu_act->goal_critic()->forward(active_features.detach(), active_actions, active_future_goal_pos).mean();
                   }
                   chunk_sampled_goal_norm = active_future_goal_pos.norm(2, -1).mean();
-                  result.sampled_goal_dist += chunk_sampled_goal_norm.detach().to(torch::kFloat32).to(device_).item<double>() * active_samples;
-                  result.goal_critic_loss += goal_loss.detach().to(torch::kFloat32).to(device_).item<double>() * active_samples;
-                  result.goal_score += chunk_goal_score.detach().to(torch::kFloat32).to(device_).item<double>() * active_samples;
+                  add_metric(sampled_goal_dist_metric, chunk_sampled_goal_norm, active_samples);
+                  add_metric(goal_critic_loss_metric, goal_loss, active_samples);
+                  add_metric(goal_score_metric, chunk_goal_score, active_samples);
                 }
 
                 const auto sample_weight = active_samples / mode_total_active_local;
@@ -1811,12 +1831,39 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                   result.has_backward = true;
                 }
 
-                result.policy_loss_sum += policy_loss.detach().to(torch::kFloat32).to(device_).item<double>() * active_samples;
-                result.value_loss_sum += value_loss.detach().to(torch::kFloat32).to(device_).item<double>() * active_samples;
-                result.entropy_sum += entropy.detach().to(torch::kFloat32).to(device_).item<double>() * active_samples;
-                result.fwd_bwd_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - fwd_bwd_start).count();
+                add_metric(policy_loss_metric, policy_loss, active_samples);
+                add_metric(value_loss_metric, value_loss, active_samples);
+                add_metric(entropy_metric, entropy, active_samples);
               }
             }
+            const auto metric_opts = torch::TensorOptions().dtype(torch::kFloat32).device(gpu_dev);
+            const torch::Tensor zero_metric = torch::zeros({}, metric_opts);
+            auto scalar_or_zero = [&](const torch::Tensor& tensor) -> torch::Tensor {
+              return tensor.defined() ? tensor.to(torch::kFloat32) : zero_metric;
+            };
+            const torch::Tensor packed_metrics = torch::stack({
+                scalar_or_zero(policy_loss_metric),
+                scalar_or_zero(value_loss_metric),
+                scalar_or_zero(entropy_metric),
+                scalar_or_zero(policy_approx_kl_metric),
+                scalar_or_zero(policy_clip_frac_metric),
+                scalar_or_zero(policy_log_ratio_max_metric),
+                scalar_or_zero(goal_critic_loss_metric),
+                scalar_or_zero(goal_score_metric),
+                scalar_or_zero(sampled_goal_dist_metric),
+            }).to(torch::kCPU);
+            const float* metric_data = packed_metrics.data_ptr<float>();
+            result.policy_loss_sum = metric_data[0];
+            result.value_loss_sum = metric_data[1];
+            result.entropy_sum = metric_data[2];
+            result.policy_approx_kl = metric_data[3];
+            result.policy_clip_frac = metric_data[4];
+            result.policy_log_ratio_max = metric_data[5];
+            result.goal_critic_loss = metric_data[6];
+            result.goal_score = metric_data[7];
+            result.sampled_goal_dist = metric_data[8];
+            result.fwd_bwd_seconds =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - task_compute_start).count();
             return result;
           }));
         }

@@ -199,34 +199,13 @@ torch::Tensor Mamba2BlockImpl::forward(const torch::Tensor& tokens, const torch:
   torch::Tensor conv_out;
   if (reset.defined()) {
     const torch::Tensor weight = causal_conv_->weight.squeeze(1);
-    const torch::Tensor zero_step = torch::zeros({batch, 1, embed_dim_}, tokens.options());
-    torch::Tensor prev_1 = sequence > 1
-        ? torch::cat({zero_step, block_input.slice(1, 0, sequence - 1)}, 1)
-        : torch::zeros_like(block_input);
-    torch::Tensor prev_2 = sequence > 2
-        ? torch::cat({zero_step, zero_step, block_input.slice(1, 0, sequence - 2)}, 1)
-        : torch::zeros_like(block_input);
-    const torch::Tensor keep_prev_1 = (1.0F - reset).unsqueeze(-1);
-    torch::Tensor previous_reset = torch::zeros_like(reset);
-    if (sequence > 1) {
-      previous_reset.slice(1, 1).copy_(reset.slice(1, 0, sequence - 1));
-    }
-    const torch::Tensor keep_prev_2 = ((1.0F - reset) * (1.0F - previous_reset)).unsqueeze(-1);
-    prev_1 = prev_1 * keep_prev_1;
-    prev_2 = prev_2 * keep_prev_2;
-    conv_out =
-        prev_2 * weight.select(1, 0).view({1, 1, embed_dim_})
-        + prev_1 * weight.select(1, 1).view({1, 1, embed_dim_})
-        + block_input * weight.select(1, 2).view({1, 1, embed_dim_});
-    if (causal_conv_->bias.defined()) {
-      conv_out = conv_out + causal_conv_->bias.view({1, 1, embed_dim_});
-    }
+    conv_out = mamba2_causal_conv1d_silu(block_input, weight, causal_conv_->bias, reset);
   } else {
     // Local causal mixing before the selective scan. Conv1d expects [B, C, S].
     torch::Tensor conv_input = block_input.transpose(1, 2);
     conv_out = causal_conv_->forward(conv_input).narrow(2, 0, sequence).transpose(1, 2);
+    conv_out = torch::silu(conv_out);
   }
-  conv_out = torch::silu(conv_out);
 
   const torch::Tensor projected = input_projection_->forward(conv_out);
   torch::Tensor mixed = mamba2_scan_mixed(projected, decay_bias_, skip_, reset);

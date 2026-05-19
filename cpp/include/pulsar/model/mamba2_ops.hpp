@@ -23,6 +23,12 @@ std::tuple<torch::Tensor, torch::Tensor> mamba2_step_mixed(
     const torch::Tensor& decay_bias,
     const torch::Tensor& skip);
 
+torch::Tensor mamba2_causal_conv1d_silu(
+    const torch::Tensor& input,
+    const torch::Tensor& weight,
+    const torch::Tensor& bias,
+    const torch::Tensor& reset_mask);
+
 }  // namespace pulsar
 
 #endif  // PULSAR_HAS_TORCH
