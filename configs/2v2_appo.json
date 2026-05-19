@@ -97,7 +97,7 @@
           "neutral_no_touch": 0.0
         },
         "mechanic_rewards_override": {
-          "kickoff_first_touch": 0.0,
+          "kickoff_first_touch": 75.0,
           "speed_flip": 0.0,
           "wavedash": 0.0,
           "chain_dash_bonus": 0.0,
@@ -116,9 +116,9 @@
           "mechanic_reward_cap_per_episode": 0.0
         },
         "dense_rewards_override": {
-          "ball_touch_vel_weight": 0.0,
+          "ball_touch_vel_weight": 10.0,
           "touch_direction_weight": 0.0,
-          "speed_toward_ball_weight": 5.0,
+          "speed_toward_ball_weight": 20.0,
           "speed_toward_ball_decay": 3000.0,
           "face_ball_weight": 1.0,
           "air_reward_weight": 0.15,
@@ -138,8 +138,8 @@
           "boost_pickup_big_threshold": 50.0,
           "boost_pickup_cap_per_episode": 0.0,
           "air_touch_cap_per_episode": 0.0,
-          "possession_chain_weight": 0.0,
-          "possession_chain_scale": 0.0,
+          "possession_chain_weight": 15.0,
+          "possession_chain_scale": 2.0,
           "possession_chain_timeout_ticks": 360,
           "possession_proximity_weight": 0.0,
           "possession_speed_toward_ball_weight": 0.0,

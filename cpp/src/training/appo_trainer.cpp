@@ -47,6 +47,7 @@ namespace {
 
 constexpr int kEsLoraMinStage = 0;
 constexpr int kSelfPlayMinStage = 0;
+constexpr int kTrainerStateVersion = 2;
 
 double current_process_rss_mb() {
 #if defined(__linux__)
@@ -1320,7 +1321,8 @@ void APPOTrainer::apply_curriculum_lr() {
 
 void APPOTrainer::maybe_initialize_from_checkpoint() {
   std::filesystem::path base;
-  if (!config_.ppo.init_checkpoint.empty()) {
+  const bool explicit_checkpoint = !config_.ppo.init_checkpoint.empty();
+  if (explicit_checkpoint) {
     base = std::filesystem::path(config_.ppo.init_checkpoint);
   } else {
     auto latest = find_latest_checkpoint(run_output_root_);
@@ -1329,7 +1331,38 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
   }
   const ExperimentConfig checkpoint_config = load_experiment_config((base / "config.json").string());
   const CheckpointMetadata metadata = load_checkpoint_metadata((base / "metadata.json").string());
-  validate_inference_checkpoint_metadata(metadata, checkpoint_config);
+  if (explicit_checkpoint) {
+    validate_inference_checkpoint_metadata(metadata, checkpoint_config);
+    if (log_initialization_) {
+      const bool config_matches = metadata.config_hash == config_hash(config_);
+      const int checkpoint_state_version = metadata.extra.value("trainer_state_version", 0);
+      if (!config_matches || checkpoint_state_version != kTrainerStateVersion) {
+        std::cerr << "warning: explicit checkpoint " << base.string()
+                  << " differs from active training state"
+                  << " config_match=" << (config_matches ? 1 : 0)
+                  << " trainer_state_version=" << checkpoint_state_version
+                  << " expected_trainer_state_version=" << kTrainerStateVersion
+                  << '\n';
+      }
+    }
+  } else {
+    try {
+      validate_checkpoint_metadata(metadata, config_);
+    } catch (const std::exception& e) {
+      throw std::runtime_error(
+          "Refusing to auto-resume checkpoint " + base.string() +
+          ": " + e.what() +
+          " Use a fresh output directory for a new run, or set ppo.init_checkpoint explicitly if you intentionally want this checkpoint.");
+    }
+    const int checkpoint_state_version = metadata.extra.value("trainer_state_version", 0);
+    if (checkpoint_state_version != kTrainerStateVersion) {
+      throw std::runtime_error(
+          "Refusing to auto-resume checkpoint " + base.string() +
+          ": trainer_state_version=" + std::to_string(checkpoint_state_version) +
+          " expected=" + std::to_string(kTrainerStateVersion) +
+          ". Use a fresh output directory for a new run, or set ppo.init_checkpoint explicitly if you intentionally want this older checkpoint.");
+    }
+  }
 
   const std::filesystem::path state_path = base / "state.pt";
   if (std::filesystem::exists(state_path)) {
@@ -3241,6 +3274,7 @@ void APPOTrainer::collect_rollout(
 
 CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_step, int update_index, const std::string& wandb_run_id) const {
   nlohmann::json extra = nlohmann::json::object();
+  extra["trainer_state_version"] = kTrainerStateVersion;
   if (!wandb_run_id.empty()) {
     extra["wandb_run_id"] = wandb_run_id;
   }
