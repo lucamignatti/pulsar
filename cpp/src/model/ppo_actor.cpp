@@ -197,7 +197,12 @@ torch::Tensor Mamba2BlockImpl::forward(const torch::Tensor& tokens, const torch:
       : torch::Tensor{};
 
   torch::Tensor conv_out;
-  if (reset.defined()) {
+  bool conv_out_is_activated = false;
+  if (reset.defined() && causal_conv_->bias.defined()) {
+    const torch::Tensor weight = causal_conv_->weight.squeeze(1);
+    conv_out = mamba2_causal_conv1d_silu(block_input, weight, causal_conv_->bias, reset);
+    conv_out_is_activated = true;
+  } else if (reset.defined()) {
     const torch::Tensor weight = causal_conv_->weight.squeeze(1);
     const torch::Tensor zero_step = torch::zeros({batch, 1, embed_dim_}, tokens.options());
     torch::Tensor prev_1 = sequence > 1
@@ -226,7 +231,9 @@ torch::Tensor Mamba2BlockImpl::forward(const torch::Tensor& tokens, const torch:
     torch::Tensor conv_input = block_input.transpose(1, 2);
     conv_out = causal_conv_->forward(conv_input).narrow(2, 0, sequence).transpose(1, 2);
   }
-  conv_out = torch::silu(conv_out);
+  if (!conv_out_is_activated) {
+    conv_out = torch::silu(conv_out);
+  }
 
   const torch::Tensor projected = input_projection_->forward(conv_out);
   torch::Tensor mixed = mamba2_scan_mixed(projected, decay_bias_, skip_, reset);

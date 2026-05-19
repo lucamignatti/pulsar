@@ -17,6 +17,12 @@ torch::Tensor mamba2_scan_mixed(
     const torch::Tensor& skip,
     const torch::Tensor& reset_mask = {});
 
+torch::Tensor mamba2_causal_conv1d_silu(
+    const torch::Tensor& input,
+    const torch::Tensor& weight,
+    const torch::Tensor& bias,
+    const torch::Tensor& reset_mask);
+
 std::tuple<torch::Tensor, torch::Tensor> mamba2_step_mixed(
     const torch::Tensor& projected,
     const torch::Tensor& previous_scan,

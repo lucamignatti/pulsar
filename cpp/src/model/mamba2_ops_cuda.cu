@@ -235,6 +235,128 @@ __global__ void mamba2_step_forward_kernel(
   mixed[b * embed_dim + d] = (gate_c * scan + skip[d] * x) * gate_z;
 }
 
+__global__ void causal_conv1d_silu_forward_kernel(
+    const float* __restrict__ input,
+    const float* __restrict__ weight,
+    const float* __restrict__ bias,
+    const float* __restrict__ reset,
+    float* __restrict__ output,
+    float* __restrict__ pre_activation,
+    int batch,
+    int sequence,
+    int embed_dim) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  const int total = batch * sequence * embed_dim;
+  if (index >= total) {
+    return;
+  }
+  const int d = index % embed_dim;
+  const int t = (index / embed_dim) % sequence;
+  const int b = index / (sequence * embed_dim);
+  const int reset_base = b * sequence;
+  const int current = (b * sequence + t) * embed_dim + d;
+  const float keep1 = (t > 0 && reset[reset_base + t] <= 0.5F) ? 1.0F : 0.0F;
+  const float keep2 =
+      (t > 1 && reset[reset_base + t] <= 0.5F && reset[reset_base + t - 1] <= 0.5F) ? 1.0F : 0.0F;
+  const float prev1 = keep1 > 0.0F ? input[current - embed_dim] : 0.0F;
+  const float prev2 = keep2 > 0.0F ? input[current - 2 * embed_dim] : 0.0F;
+  const float pre = prev2 * weight[d * 3] + prev1 * weight[d * 3 + 1] + input[current] * weight[d * 3 + 2] + bias[d];
+  pre_activation[index] = pre;
+  output[index] = siluf_fast(pre);
+}
+
+__global__ void causal_conv1d_silu_backward_input_kernel(
+    const float* __restrict__ grad_output,
+    const float* __restrict__ pre_activation,
+    const float* __restrict__ weight,
+    const float* __restrict__ reset,
+    float* __restrict__ grad_input,
+    int batch,
+    int sequence,
+    int embed_dim) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  const int total = batch * sequence * embed_dim;
+  if (index >= total) {
+    return;
+  }
+  const int d = index % embed_dim;
+  const int t = (index / embed_dim) % sequence;
+  const int b = index / (sequence * embed_dim);
+  const int reset_base = b * sequence;
+  const int current = (b * sequence + t) * embed_dim + d;
+  float grad = grad_output[current] * silu_gradf_fast(pre_activation[current]) * weight[d * 3 + 2];
+  if (t + 1 < sequence && reset[reset_base + t + 1] <= 0.5F) {
+    const int next = current + embed_dim;
+    grad += grad_output[next] * silu_gradf_fast(pre_activation[next]) * weight[d * 3 + 1];
+  }
+  if (t + 2 < sequence && reset[reset_base + t + 2] <= 0.5F && reset[reset_base + t + 1] <= 0.5F) {
+    const int next2 = current + 2 * embed_dim;
+    grad += grad_output[next2] * silu_gradf_fast(pre_activation[next2]) * weight[d * 3];
+  }
+  grad_input[current] = grad;
+}
+
+__global__ void causal_conv1d_silu_backward_params_kernel(
+    const float* __restrict__ grad_output,
+    const float* __restrict__ input,
+    const float* __restrict__ pre_activation,
+    const float* __restrict__ reset,
+    float* __restrict__ grad_weight,
+    float* __restrict__ grad_bias,
+    int batch,
+    int sequence,
+    int embed_dim) {
+  const int d = blockIdx.x;
+  if (d >= embed_dim) {
+    return;
+  }
+  __shared__ float sums0[256];
+  __shared__ float sums1[256];
+  __shared__ float sums2[256];
+  __shared__ float sums_bias[256];
+  float sum0 = 0.0F;
+  float sum1 = 0.0F;
+  float sum2 = 0.0F;
+  float sum_bias = 0.0F;
+  const int total = batch * sequence;
+  for (int i = threadIdx.x; i < total; i += blockDim.x) {
+    const int b = i / sequence;
+    const int t = i - b * sequence;
+    const int reset_base = b * sequence;
+    const int current = (b * sequence + t) * embed_dim + d;
+    const float g = grad_output[current] * silu_gradf_fast(pre_activation[current]);
+    if (t > 1 && reset[reset_base + t] <= 0.5F && reset[reset_base + t - 1] <= 0.5F) {
+      sum0 += g * input[current - 2 * embed_dim];
+    }
+    if (t > 0 && reset[reset_base + t] <= 0.5F) {
+      sum1 += g * input[current - embed_dim];
+    }
+    sum2 += g * input[current];
+    sum_bias += g;
+  }
+  sums0[threadIdx.x] = sum0;
+  sums1[threadIdx.x] = sum1;
+  sums2[threadIdx.x] = sum2;
+  sums_bias[threadIdx.x] = sum_bias;
+  __syncthreads();
+
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      sums0[threadIdx.x] += sums0[threadIdx.x + stride];
+      sums1[threadIdx.x] += sums1[threadIdx.x + stride];
+      sums2[threadIdx.x] += sums2[threadIdx.x + stride];
+      sums_bias[threadIdx.x] += sums_bias[threadIdx.x + stride];
+    }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) {
+    grad_weight[d * 3] = sums0[0];
+    grad_weight[d * 3 + 1] = sums1[0];
+    grad_weight[d * 3 + 2] = sums2[0];
+    grad_bias[d] = sums_bias[0];
+  }
+}
+
 inline int blocks_for(int elements, int threads) {
   return (elements + threads - 1) / threads;
 }
@@ -445,6 +567,77 @@ std::tuple<at::Tensor, at::Tensor> mamba2_step_forward_cuda(
       embed_dim);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {mixed, next_scan};
+}
+
+std::tuple<at::Tensor, at::Tensor> mamba2_causal_conv1d_silu_forward_cuda(
+    const at::Tensor& input,
+    const at::Tensor& weight,
+    const at::Tensor& bias,
+    const at::Tensor& reset_mask) {
+  TORCH_CHECK(input.is_cuda(), "Mamba2 CUDA conv kernel requires CUDA input tensor.");
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const int batch = static_cast<int>(input.size(0));
+  const int sequence = static_cast<int>(input.size(1));
+  const int embed_dim = static_cast<int>(input.size(2));
+  at::Tensor output = at::empty_like(input);
+  at::Tensor pre_activation = at::empty_like(input);
+  constexpr int kThreads = 256;
+  const int elements = batch * sequence * embed_dim;
+  causal_conv1d_silu_forward_kernel<<<blocks_for(elements, kThreads), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+      input.data_ptr<float>(),
+      weight.data_ptr<float>(),
+      bias.data_ptr<float>(),
+      reset_mask.data_ptr<float>(),
+      output.data_ptr<float>(),
+      pre_activation.data_ptr<float>(),
+      batch,
+      sequence,
+      embed_dim);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {output, pre_activation};
+}
+
+std::vector<at::Tensor> mamba2_causal_conv1d_silu_backward_cuda(
+    const at::Tensor& grad_output,
+    const at::Tensor& input,
+    const at::Tensor& weight,
+    const at::Tensor& bias,
+    const at::Tensor& reset_mask,
+    const at::Tensor& pre_activation) {
+  (void)bias;
+  TORCH_CHECK(input.is_cuda(), "Mamba2 CUDA conv kernel requires CUDA input tensor.");
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const int batch = static_cast<int>(input.size(0));
+  const int sequence = static_cast<int>(input.size(1));
+  const int embed_dim = static_cast<int>(input.size(2));
+  at::Tensor grad_input = at::empty_like(input);
+  at::Tensor grad_weight = at::empty_like(weight);
+  at::Tensor grad_bias = at::empty_like(bias);
+  constexpr int kThreads = 256;
+  const int elements = batch * sequence * embed_dim;
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  causal_conv1d_silu_backward_input_kernel<<<blocks_for(elements, kThreads), kThreads, 0, stream>>>(
+      grad_output.data_ptr<float>(),
+      pre_activation.data_ptr<float>(),
+      weight.data_ptr<float>(),
+      reset_mask.data_ptr<float>(),
+      grad_input.data_ptr<float>(),
+      batch,
+      sequence,
+      embed_dim);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  causal_conv1d_silu_backward_params_kernel<<<embed_dim, kThreads, 0, stream>>>(
+      grad_output.data_ptr<float>(),
+      input.data_ptr<float>(),
+      pre_activation.data_ptr<float>(),
+      reset_mask.data_ptr<float>(),
+      grad_weight.data_ptr<float>(),
+      grad_bias.data_ptr<float>(),
+      batch,
+      sequence,
+      embed_dim);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {grad_input, grad_weight, grad_bias};
 }
 
 }  // namespace pulsar
