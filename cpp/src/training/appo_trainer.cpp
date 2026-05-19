@@ -360,6 +360,50 @@ bool gradients_are_finite(const torch::nn::Module& module) {
   return true;
 }
 
+bool zero_nonfinite_gradients(torch::nn::Module& module) {
+  bool changed = false;
+  for (auto& p : module.parameters()) {
+    torch::Tensor grad = p.mutable_grad();
+    if (!grad.defined()) {
+      continue;
+    }
+    const torch::Tensor finite = torch::isfinite(grad);
+    if (!finite.all().item<bool>()) {
+      grad.masked_fill_(finite.logical_not(), 0.0);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+double clip_existing_gradients(torch::nn::Module& module, double max_norm) {
+  torch::Tensor total_sq;
+  for (auto& p : module.parameters()) {
+    const torch::Tensor grad = p.grad();
+    if (!grad.defined()) {
+      continue;
+    }
+    const torch::Tensor grad_sq = grad.detach().to(torch::kFloat32).square().sum();
+    total_sq = total_sq.defined() ? total_sq + grad_sq : grad_sq;
+  }
+  if (!total_sq.defined()) {
+    return 0.0;
+  }
+  const double total_sq_value = total_sq.item<double>();
+  const double total_norm = std::sqrt(total_sq_value);
+  if (!std::isfinite(total_norm) || max_norm <= 0.0 || total_norm <= max_norm) {
+    return total_norm;
+  }
+  const double scale = max_norm / (total_norm + 1.0e-6);
+  for (auto& p : module.parameters()) {
+    torch::Tensor grad = p.mutable_grad();
+    if (grad.defined()) {
+      grad.mul_(scale);
+    }
+  }
+  return total_norm;
+}
+
 bool captured_group_has_grad(const std::vector<CapturedGrad>& group) {
   for (const auto& captured : group) {
     if (captured.grad.defined()) {
@@ -2021,8 +2065,17 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       {
         PULSAR_TRACE_SCOPE_CAT("trainer", "update_optimizer");
         scale_existing_gradients(*actor_, cuda_amp_loss_scale);
-        const auto grad_norm_value = torch::nn::utils::clip_grad_norm_(actor_->parameters(), config_.ppo.max_grad_norm);
-        grad_norm = static_cast<double>(grad_norm_value);
+        grad_norm = clip_existing_gradients(*actor_, config_.ppo.max_grad_norm);
+        if (!std::isfinite(grad_norm)) {
+          const bool sanitized = zero_nonfinite_gradients(*actor_);
+          if (sanitized) {
+            grad_norm = clip_existing_gradients(*actor_, config_.ppo.max_grad_norm);
+            if (std::isfinite(grad_norm)) {
+              std::cerr << "zeroed non-finite APPO gradient entries; recovered preclip grad_norm="
+                        << grad_norm << '\n';
+            }
+          }
+        }
         const bool grad_guard_hit =
             config_.ppo.max_preclip_grad_norm > 0.0F &&
             grad_norm > static_cast<double>(config_.ppo.max_preclip_grad_norm);

@@ -226,7 +226,7 @@
       },
       {
         "name": "stage2-mixed-fundamentals",
-        "mode_allocation": { "1v1": 0.33, "2v2": 0.33, "3v3": 0.34 },
+        "mode_allocation": { "1v1": 0.33, "2v2": 0.34, "3v3": 0.33 },
         "learning_rate": 0.0002,
         "min_agent_steps": 20000000,
         "rolling_window_size": 20,
@@ -299,7 +299,7 @@
       },
       {
         "name": "stage3-terminal-goal",
-        "mode_allocation": { "1v1": 0.33, "2v2": 0.33, "3v3": 0.34 },
+        "mode_allocation": { "1v1": 0.33, "2v2": 0.34, "3v3": 0.33 },
         "learning_rate": 0.0002,
         "min_agent_steps": 20000000,
         "rolling_window_size": 20,
