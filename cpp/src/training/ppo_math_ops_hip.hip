@@ -10,6 +10,9 @@
 namespace pulsar {
 namespace {
 
+constexpr float kAdvantageStdFloor = 1.0F;
+constexpr float kAdvantageAbsCap = 10.0F;
+
 __device__ __forceinline__ std::uint32_t mix_u32(std::uint32_t x) {
   x ^= x >> 16;
   x *= 0x7feb352dU;
@@ -117,7 +120,7 @@ __global__ void normalize_finish_kernel(
     const double mean = count > 0.0F ? sum / static_cast<double>(count) : 0.0;
     const double var = count > 1.0F ? fmax(sumsq / static_cast<double>(count) - mean * mean, 0.0) : 0.0;
     stats[0] = static_cast<float>(mean);
-    stats[1] = count > 1.0F ? static_cast<float>(rsqrt(fmax(var, 1.0e-16))) : 1.0F;
+    stats[1] = count > 1.0F ? static_cast<float>(rsqrt(fmax(var, static_cast<double>(kAdvantageStdFloor * kAdvantageStdFloor)))) : 1.0F;
     stats[2] = count;
   }
   __syncthreads();
@@ -125,7 +128,8 @@ __global__ void normalize_finish_kernel(
   const float inv_std = stats[1];
   const float count = stats[2];
   for (int i = threadIdx.x; i < elements; i += blockDim.x) {
-    normalized[i] = count > 1.0F ? (advantages[i] - mean) * inv_std : advantages[i] - mean;
+    const float value = count > 1.0F ? (advantages[i] - mean) * inv_std : advantages[i] - mean;
+    normalized[i] = fminf(fmaxf(value, -kAdvantageAbsCap), kAdvantageAbsCap);
   }
 }
 

@@ -11,6 +11,17 @@
 
 namespace pulsar {
 
+namespace {
+
+constexpr float kAdvantageStdFloor = 1.0F;
+constexpr float kAdvantageAbsCap = 10.0F;
+
+torch::Tensor clamp_normalized_advantage(const torch::Tensor& normalized) {
+  return normalized.clamp(-kAdvantageAbsCap, kAdvantageAbsCap);
+}
+
+}  // namespace
+
 #ifdef PULSAR_HAS_PPO_MATH_CUDA_KERNELS
 torch::Tensor compute_gae_cuda(
     const torch::Tensor& values,
@@ -242,10 +253,10 @@ torch::Tensor normalize_advantage(const torch::Tensor& advantages, const torch::
   const torch::Tensor active_adv = advantages.masked_select(active_mask > 0.5F);
   const torch::Tensor mean = active_adv.mean();
   if (active_count <= 1) {
-    return advantages - mean;
+    return clamp_normalized_advantage(advantages - mean);
   }
-  const torch::Tensor std = active_adv.std(false).clamp_min(1.0e-8);
-  return (advantages - mean) / std;
+  const torch::Tensor std = active_adv.std(false).clamp_min(kAdvantageStdFloor);
+  return clamp_normalized_advantage((advantages - mean) / std);
 }
 
 torch::Tensor sample_future_goal_positions(

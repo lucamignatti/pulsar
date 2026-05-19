@@ -116,6 +116,15 @@ int main() {
       require_close(normalized.item<float>(), 0.0F, "one-sample normalized advantage zero");
     }
 
+    // 6a. Near-constant advantages should not be amplified into huge policy gradients.
+    {
+      const auto adv = torch::tensor({1.0F, 1.0F + 1.0e-7F, 1.0F - 1.0e-7F}, torch::kFloat32);
+      const auto mask = torch::ones({3}, torch::kFloat32);
+      const auto normalized = pulsar::normalize_advantage(adv, mask);
+      require_finite(normalized, "near-constant normalized advantage");
+      require(normalized.abs().max().item<float>() < 1.0e-4F, "near-constant advantage normalization should stay bounded");
+    }
+
     // 6b. CUDA/HIP PPO math accelerator parity when available.
     if (torch::cuda::is_available()) {
       auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
