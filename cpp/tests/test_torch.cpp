@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <vector>
 #include <iostream>
@@ -345,6 +347,30 @@ int main() {
           torch::zeros({2, gc_cfg.goal_dim}));
       if (goal_score.sizes() != torch::IntArrayRef({2})) {
         throw std::runtime_error("goal critic output shape mismatch");
+      }
+    }
+
+    // Near-zero goal embeddings should not amplify GCRL gradients by the old
+    // hard normalization floor.
+    {
+      pulsar::GoalCritic critic(8, 4, 64, 32, gc_cfg.goal_dim);
+      {
+        torch::NoGradGuard no_grad;
+        for (torch::Tensor& param : critic->parameters()) {
+          param.zero_();
+        }
+      }
+      torch::Tensor embedding = critic->goal_embedding(torch::zeros({4, gc_cfg.goal_dim}));
+      embedding.sum().backward();
+      double max_abs_grad = 0.0;
+      for (const torch::Tensor& param : critic->parameters()) {
+        if (!param.grad().defined()) {
+          continue;
+        }
+        max_abs_grad = std::max(max_abs_grad, param.grad().abs().max().item<double>());
+      }
+      if (!std::isfinite(max_abs_grad) || max_abs_grad > 50.0) {
+        throw std::runtime_error("near-zero goal embedding normalization produced excessive gradient");
       }
     }
 
