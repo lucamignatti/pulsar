@@ -174,7 +174,7 @@ void trim_released_host_memory() noexcept {
 #endif
 }
 
-#ifdef PULSAR_HAS_CUDA
+#if defined(PULSAR_HAS_CUDA) && !defined(USE_ROCM)
 class OptionalCudaAutocastGuard {
  public:
   explicit OptionalCudaAutocastGuard(bool enabled)
@@ -986,6 +986,12 @@ APPOTrainer::APPOTrainer(
       run_output_root_(std::move(run_output_root)),
       log_initialization_(log_initialization) {
   validate_experiment_config(config_);
+  if (config_.ppo.cuda_amp) {
+#ifdef USE_ROCM
+    std::cerr << "AMP requested but disabled on ROCm (unsupported)." << '\n';
+    config_.ppo.cuda_amp = false;
+#endif
+  }
   if (collectors_.empty()) {
     throw std::invalid_argument("APPOTrainer requires at least one collector.");
   }
