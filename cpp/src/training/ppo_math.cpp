@@ -162,15 +162,6 @@ bool can_use_ppo_math_accel(const torch::Tensor& tensor) {
 #endif
 }
 
-bool can_use_action_accel(const torch::Tensor& logits, const torch::Tensor& action_masks) {
-  return can_use_ppo_math_accel(logits) &&
-      action_masks.defined() &&
-      action_masks.is_cuda() &&
-      action_masks.dim() == logits.dim() &&
-      action_masks.size(-1) == logits.size(-1) &&
-      (action_masks.scalar_type() == torch::kBool || action_masks.scalar_type() == torch::kUInt8);
-}
-
 bool env_flag_enabled(const char* name) {
   const char* value = std::getenv(name);
   return value != nullptr &&
@@ -178,6 +169,21 @@ bool env_flag_enabled(const char* name) {
        std::strcmp(value, "true") == 0 ||
        std::strcmp(value, "TRUE") == 0 ||
        std::strcmp(value, "yes") == 0);
+}
+
+bool action_sampling_accel_enabled() {
+  static const bool enabled = env_flag_enabled("PULSAR_ACTION_SAMPLING_ACCEL");
+  return enabled;
+}
+
+bool can_use_action_accel(const torch::Tensor& logits, const torch::Tensor& action_masks) {
+  return action_sampling_accel_enabled() &&
+      can_use_ppo_math_accel(logits) &&
+      action_masks.defined() &&
+      action_masks.is_cuda() &&
+      action_masks.dim() == logits.dim() &&
+      action_masks.size(-1) == logits.size(-1) &&
+      (action_masks.scalar_type() == torch::kBool || action_masks.scalar_type() == torch::kUInt8);
 }
 
 }  // namespace
