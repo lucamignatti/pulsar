@@ -4,6 +4,7 @@
 
 #ifdef PULSAR_HAS_TORCH
 
+#include <cstdint>
 #include <cmath>
 #include <filesystem>
 #include <limits>
@@ -18,6 +19,29 @@
 #include "pulsar/tracing/tracing.hpp"
 
 namespace pulsar {
+
+#ifdef PULSAR_HAS_LORA_CUDA_KERNELS
+torch::Tensor eggroll_lora_perturb_cuda(
+    const torch::Tensor& base_out,
+    const torch::Tensor& x_A,
+    const torch::Tensor& x_A_stack,
+    const torch::Tensor& B,
+    const torch::Tensor& B_stack,
+    float scale,
+    float sigma);
+#endif
+
+#ifdef PULSAR_HAS_LORA_HIP_KERNELS
+torch::Tensor eggroll_lora_perturb_hip(
+    const torch::Tensor& base_out,
+    const torch::Tensor& x_A,
+    const torch::Tensor& x_A_stack,
+    const torch::Tensor& B,
+    const torch::Tensor& B_stack,
+    float scale,
+    float sigma);
+#endif
+
 namespace {
 
 void copy_module_tensors_to(const PPOActor& source, PPOActor& target, const torch::Device&) {
@@ -77,6 +101,58 @@ torch::Tensor normalize_goal_embedding(const torch::Tensor& embedding) {
   return embedding / denom;
 }
 
+bool can_use_eggroll_lora_accel(
+    const torch::Tensor& x,
+    const torch::Tensor& weight,
+    const torch::Tensor& A,
+    const torch::Tensor& B,
+    const torch::Tensor& A_stack,
+    const torch::Tensor& B_stack,
+    int64_t population,
+    int64_t rank) {
+#if defined(PULSAR_HAS_LORA_CUDA_KERNELS) || defined(PULSAR_HAS_LORA_HIP_KERNELS)
+  return x.defined() &&
+      x.is_cuda() &&
+      x.scalar_type() == torch::kFloat32 &&
+      weight.is_cuda() &&
+      weight.scalar_type() == torch::kFloat32 &&
+      A.is_cuda() &&
+      B.is_cuda() &&
+      A_stack.is_cuda() &&
+      B_stack.is_cuda() &&
+      A.scalar_type() == torch::kFloat32 &&
+      B.scalar_type() == torch::kFloat32 &&
+      A_stack.scalar_type() == torch::kFloat32 &&
+      B_stack.scalar_type() == torch::kFloat32 &&
+      x.dim() == 2 &&
+      weight.dim() == 2 &&
+      A.dim() == 2 &&
+      B.dim() == 2 &&
+      A_stack.dim() == 3 &&
+      B_stack.dim() == 3 &&
+      A.size(0) == rank &&
+      B.size(1) == rank &&
+      A_stack.size(0) == population &&
+      A_stack.size(1) == rank &&
+      A_stack.size(2) == x.size(1) &&
+      B_stack.size(0) == population &&
+      B_stack.size(1) == weight.size(0) &&
+      B_stack.size(2) == rank &&
+      B.size(0) == weight.size(0) &&
+      x.size(1) == weight.size(1);
+#else
+  (void)x;
+  (void)weight;
+  (void)A;
+  (void)B;
+  (void)A_stack;
+  (void)B_stack;
+  (void)population;
+  (void)rank;
+  return false;
+#endif
+}
+
 }  // namespace
 
 LoRALinearImpl::LoRALinearImpl(int in_features, int out_features, int rank, float lora_alpha)
@@ -109,6 +185,33 @@ torch::Tensor LoRALinearImpl::forward_eggroll_population(
     throw std::invalid_argument("LoRALinearImpl::forward_eggroll_population received incompatible population dimensions.");
   }
   const auto member_batch = x.size(0) / population;
+  if (can_use_eggroll_lora_accel(x, base->weight, A, B, A_stack, B_stack, population, rank_)) {
+    torch::Tensor x_contig = x.contiguous();
+    torch::Tensor base_out = forward(x_contig);
+    torch::Tensor x_A = torch::matmul(x_contig, A.transpose(0, 1));
+    torch::Tensor x_A_stack = torch::bmm(
+        x_contig.view({population, member_batch, in_features()}),
+        A_stack.transpose(1, 2)).view({x.size(0), rank_});
+#ifdef PULSAR_HAS_LORA_CUDA_KERNELS
+    return eggroll_lora_perturb_cuda(
+        base_out.contiguous(),
+        x_A.contiguous(),
+        x_A_stack.contiguous(),
+        B.contiguous(),
+        B_stack.contiguous(),
+        scale_,
+        sigma);
+#elif defined(PULSAR_HAS_LORA_HIP_KERNELS)
+    return eggroll_lora_perturb_hip(
+        base_out.contiguous(),
+        x_A.contiguous(),
+        x_A_stack.contiguous(),
+        B.contiguous(),
+        B_stack.contiguous(),
+        scale_,
+        sigma);
+#endif
+  }
   torch::Tensor base_out = forward(x).view({population, member_batch, out_features()});
   torch::Tensor x_view = x.view({population, member_batch, in_features()});
 

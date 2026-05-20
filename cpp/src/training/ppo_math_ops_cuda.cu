@@ -15,6 +15,10 @@ namespace {
 constexpr float kAdvantageStdFloor = 1.0F;
 constexpr float kAdvantageAbsCap = 10.0F;
 
+__device__ __forceinline__ float safe_logit_exp(float x) {
+  return expf(fminf(fmaxf(x, -80.0F), 80.0F));
+}
+
 __device__ __forceinline__ std::uint32_t mix_u32(std::uint32_t x) {
   x ^= x >> 16;
   x *= 0x7feb352dU;
@@ -22,6 +26,126 @@ __device__ __forceinline__ std::uint32_t mix_u32(std::uint32_t x) {
   x *= 0x846ca68bU;
   x ^= x >> 16;
   return x;
+}
+
+__device__ __forceinline__ float uniform01_from_u32(std::uint32_t x) {
+  return (static_cast<float>((x >> 8) + 1U)) * (1.0F / 16777217.0F);
+}
+
+__global__ void sample_masked_actions_kernel(
+    const float* __restrict__ logits,
+    const std::uint8_t* __restrict__ masks,
+    int64_t* __restrict__ actions,
+    float* __restrict__ log_probs,
+    int rows,
+    int action_dim,
+    bool deterministic,
+    bool need_log_probs,
+    std::uint32_t seed) {
+  const int row = blockIdx.x * blockDim.x + threadIdx.x;
+  if (row >= rows) return;
+  const int base = row * action_dim;
+
+  float best = -CUDART_INF_F;
+  int best_action = 0;
+  float max_valid_logit = -CUDART_INF_F;
+  int valid_count = 0;
+  for (int a = 0; a < action_dim; ++a) {
+    if (masks[base + a] == 0) continue;
+    const float logit = logits[base + a];
+    ++valid_count;
+    if (logit > max_valid_logit) {
+      max_valid_logit = logit;
+    }
+    float score = logit;
+    if (!deterministic) {
+      const std::uint32_t r = mix_u32(seed ^ static_cast<std::uint32_t>(row * 0x9e3779b9U + a * 0x85ebca6bU));
+      const float u = fminf(fmaxf(uniform01_from_u32(r), 1.0e-6F), 1.0F - 1.0e-6F);
+      score += -logf(-logf(u));
+    }
+    if (score > best) {
+      best = score;
+      best_action = a;
+    }
+  }
+  actions[row] = static_cast<int64_t>(best_action);
+  if (need_log_probs) {
+    if (valid_count <= 0) {
+      log_probs[row] = 0.0F;
+      return;
+    }
+    float sum_exp = 0.0F;
+    for (int a = 0; a < action_dim; ++a) {
+      if (masks[base + a] != 0) {
+        sum_exp += safe_logit_exp(logits[base + a] - max_valid_logit);
+      }
+    }
+    log_probs[row] = logits[base + best_action] - (max_valid_logit + logf(fmaxf(sum_exp, 1.0e-20F)));
+  }
+}
+
+__global__ void masked_action_entropy_kernel(
+    const float* __restrict__ logits,
+    const std::uint8_t* __restrict__ masks,
+    float* __restrict__ entropy,
+    int rows,
+    int action_dim) {
+  const int row = blockIdx.x * blockDim.x + threadIdx.x;
+  if (row >= rows) return;
+  const int base = row * action_dim;
+  int valid_count = 0;
+  float max_logit = -CUDART_INF_F;
+  for (int a = 0; a < action_dim; ++a) {
+    if (masks[base + a] == 0) continue;
+    ++valid_count;
+    max_logit = fmaxf(max_logit, logits[base + a]);
+  }
+  if (valid_count <= 1) {
+    entropy[row] = 0.0F;
+    return;
+  }
+  float sum_exp = 0.0F;
+  float weighted = 0.0F;
+  for (int a = 0; a < action_dim; ++a) {
+    if (masks[base + a] == 0) continue;
+    const float shifted = logits[base + a] - max_logit;
+    const float e = safe_logit_exp(shifted);
+    sum_exp += e;
+    weighted += e * shifted;
+  }
+  const float log_z = logf(fmaxf(sum_exp, 1.0e-20F));
+  const float raw_entropy = log_z - weighted / fmaxf(sum_exp, 1.0e-20F);
+  entropy[row] = raw_entropy / fmaxf(logf(static_cast<float>(valid_count)), 1.0e-6F);
+}
+
+__global__ void clipped_ppo_loss_forward_kernel(
+    const float* __restrict__ current,
+    const float* __restrict__ old,
+    const float* __restrict__ advantages,
+    float* __restrict__ loss,
+    int elements,
+    float clip_range) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= elements) return;
+  const float ratio = expf(fminf(fmaxf(current[i] - old[i], -80.0F), 80.0F));
+  const float clipped = fminf(fmaxf(ratio, 1.0F - clip_range), 1.0F + clip_range);
+  loss[i] = -fminf(ratio * advantages[i], clipped * advantages[i]);
+}
+
+__global__ void clipped_ppo_loss_backward_kernel(
+    const float* __restrict__ current,
+    const float* __restrict__ old,
+    const float* __restrict__ advantages,
+    const float* __restrict__ grad_output,
+    float* __restrict__ grad_current,
+    int elements,
+    float clip_range) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= elements) return;
+  const float ratio = expf(fminf(fmaxf(current[i] - old[i], -80.0F), 80.0F));
+  const float adv = advantages[i];
+  const bool flows = (adv >= 0.0F) ? (ratio <= 1.0F + clip_range) : (ratio >= 1.0F - clip_range);
+  grad_current[i] = flows ? (-adv * ratio * grad_output[i]) : 0.0F;
 }
 
 __global__ void gae_kernel(
@@ -243,6 +367,93 @@ at::Tensor normalize_advantage_cuda(const at::Tensor& advantages, const at::Tens
       partials);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return normalized;
+}
+
+std::vector<at::Tensor> sample_masked_actions_cuda(
+    const at::Tensor& logits,
+    const at::Tensor& action_masks,
+    bool deterministic,
+    bool need_log_probs,
+    std::uint32_t seed) {
+  const c10::cuda::CUDAGuard guard(logits.device());
+  const int rows = static_cast<int>(logits.size(0));
+  const int action_dim = static_cast<int>(logits.size(1));
+  at::Tensor actions = at::empty({rows}, logits.options().dtype(at::kLong));
+  at::Tensor log_probs = need_log_probs ? at::empty({rows}, logits.options()) : at::Tensor{};
+  constexpr int kThreads = 256;
+  sample_masked_actions_kernel<<<blocks_for(rows, kThreads), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+      logits.data_ptr<float>(),
+      reinterpret_cast<const std::uint8_t*>(action_masks.data_ptr()),
+      actions.data_ptr<int64_t>(),
+      need_log_probs ? log_probs.data_ptr<float>() : nullptr,
+      rows,
+      action_dim,
+      deterministic,
+      need_log_probs,
+      seed);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  if (need_log_probs) {
+    return {actions, log_probs};
+  }
+  return {actions};
+}
+
+at::Tensor masked_action_entropy_cuda(const at::Tensor& logits, const at::Tensor& action_masks) {
+  const c10::cuda::CUDAGuard guard(logits.device());
+  const int rows = static_cast<int>(logits.size(0));
+  const int action_dim = static_cast<int>(logits.size(1));
+  at::Tensor entropy = at::empty({rows}, logits.options());
+  constexpr int kThreads = 256;
+  masked_action_entropy_kernel<<<blocks_for(rows, kThreads), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+      logits.data_ptr<float>(),
+      reinterpret_cast<const std::uint8_t*>(action_masks.data_ptr()),
+      entropy.data_ptr<float>(),
+      rows,
+      action_dim);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return entropy;
+}
+
+at::Tensor clipped_ppo_policy_loss_forward_cuda(
+    const at::Tensor& current_log_probs,
+    const at::Tensor& old_log_probs,
+    const at::Tensor& advantages,
+    float clip_range) {
+  const c10::cuda::CUDAGuard guard(current_log_probs.device());
+  at::Tensor loss = at::empty_like(current_log_probs);
+  const int elements = static_cast<int>(current_log_probs.numel());
+  constexpr int kThreads = 256;
+  clipped_ppo_loss_forward_kernel<<<blocks_for(elements, kThreads), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+      current_log_probs.data_ptr<float>(),
+      old_log_probs.data_ptr<float>(),
+      advantages.data_ptr<float>(),
+      loss.data_ptr<float>(),
+      elements,
+      clip_range);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return loss;
+}
+
+at::Tensor clipped_ppo_policy_loss_backward_cuda(
+    const at::Tensor& current_log_probs,
+    const at::Tensor& old_log_probs,
+    const at::Tensor& advantages,
+    const at::Tensor& grad_output,
+    float clip_range) {
+  const c10::cuda::CUDAGuard guard(current_log_probs.device());
+  at::Tensor grad_current = at::empty_like(current_log_probs);
+  const int elements = static_cast<int>(current_log_probs.numel());
+  constexpr int kThreads = 256;
+  clipped_ppo_loss_backward_kernel<<<blocks_for(elements, kThreads), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+      current_log_probs.data_ptr<float>(),
+      old_log_probs.data_ptr<float>(),
+      advantages.data_ptr<float>(),
+      grad_output.data_ptr<float>(),
+      grad_current.data_ptr<float>(),
+      elements,
+      clip_range);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return grad_current;
 }
 
 at::Tensor sample_future_goal_positions_cuda(

@@ -432,6 +432,42 @@ int main() {
       if (torch::allclose(before, actor->policy_lora()->base->weight)) {
         throw std::runtime_error("EGGROLL policy update did not modify base weight");
       }
+
+      if (torch::cuda::is_available()) {
+        pulsar::ESLoraConfig gpu_es_cfg;
+        gpu_es_cfg.rank = rank;
+        pulsar::PPOActor gpu_actor(model_config, gc_cfg, gpu_es_cfg);
+        gpu_actor->to(torch::kCUDA);
+        torch::NoGradGuard no_grad;
+        const auto opts = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+        torch::Tensor x = torch::randn({population * 3, in_features}, opts);
+        torch::Tensor A_gpu = gpu_actor->policy_lora()->A;
+        torch::Tensor B_gpu = gpu_actor->policy_lora()->B;
+        torch::Tensor A_stack_gpu = torch::randn({population, rank, in_features}, opts);
+        torch::Tensor B_stack_gpu = torch::randn({population, out_features, rank}, opts);
+        auto& lora = const_cast<pulsar::LoRALinearImpl&>(*gpu_actor->policy_lora());
+        torch::Tensor actual = lora.forward_eggroll_population(x, A_stack_gpu, B_stack_gpu, 0.01F);
+
+        const int member_batch = static_cast<int>(x.size(0)) / population;
+        torch::Tensor base_out = lora.forward(x).view({population, member_batch, out_features});
+        torch::Tensor x_view = x.view({population, member_batch, in_features});
+        torch::Tensor x_A_stack = torch::bmm(x_view, A_stack_gpu.transpose(1, 2));
+        torch::Tensor cross1 = torch::bmm(
+            x_A_stack,
+            B_gpu.transpose(0, 1).unsqueeze(0).expand({population, -1, -1}));
+        torch::Tensor x_A = torch::bmm(
+            x_view,
+            A_gpu.transpose(0, 1).unsqueeze(0).expand({population, -1, -1}));
+        torch::Tensor cross2 = torch::bmm(x_A, B_stack_gpu.transpose(1, 2));
+        torch::Tensor pert_only = torch::bmm(x_A_stack, B_stack_gpu.transpose(1, 2));
+        const float scale = gpu_actor->policy_lora()->scale();
+        torch::Tensor expected = (
+            base_out + scale * 0.01F * cross1 + scale * 0.01F * cross2 + scale * 0.01F * 0.01F * pert_only)
+            .view({x.size(0), out_features});
+        if (!torch::allclose(actual, expected, 1.0e-4, 1.0e-4)) {
+          throw std::runtime_error("accelerated EGGROLL policy logits diverged from bmm reference");
+        }
+      }
     }
 
     pulsar::ObservationNormalizer normalizer(model_config.observation_dim);

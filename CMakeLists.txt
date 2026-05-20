@@ -138,6 +138,7 @@ if(PULSAR_ENABLE_TORCH)
           PRIVATE
             cpp/src/model/mamba2_ops_cuda.cu
             cpp/src/model/layernorm_ops_cuda.cu
+            cpp/src/model/lora_ops_cuda.cu
             cpp/src/training/ppo_math_ops_cuda.cu
         )
         target_compile_definitions(
@@ -145,11 +146,13 @@ if(PULSAR_ENABLE_TORCH)
           PRIVATE
             PULSAR_HAS_MAMBA2_CUDA_KERNELS=1
             PULSAR_HAS_LAYERNORM_CUDA_KERNELS=1
+            PULSAR_HAS_LORA_CUDA_KERNELS=1
             PULSAR_HAS_PPO_MATH_CUDA_KERNELS=1
         )
         set_source_files_properties(
           cpp/src/model/mamba2_ops_cuda.cu
           cpp/src/model/layernorm_ops_cuda.cu
+          cpp/src/model/lora_ops_cuda.cu
           cpp/src/training/ppo_math_ops_cuda.cu
           PROPERTIES LANGUAGE CUDA
         )
@@ -170,6 +173,7 @@ if(PULSAR_ENABLE_TORCH)
         PRIVATE
           cpp/src/model/mamba2_ops_hip.hip
           cpp/src/model/layernorm_ops_hip.hip
+          cpp/src/model/lora_ops_hip.hip
           cpp/src/training/ppo_math_ops_hip.hip
       )
       target_compile_definitions(
@@ -177,11 +181,13 @@ if(PULSAR_ENABLE_TORCH)
         PRIVATE
           PULSAR_HAS_MAMBA2_HIP_KERNELS=1
           PULSAR_HAS_LAYERNORM_HIP_KERNELS=1
+          PULSAR_HAS_LORA_HIP_KERNELS=1
           PULSAR_HAS_PPO_MATH_HIP_KERNELS=1
       )
       set_source_files_properties(
         cpp/src/model/mamba2_ops_hip.hip
         cpp/src/model/layernorm_ops_hip.hip
+        cpp/src/model/lora_ops_hip.hip
         cpp/src/training/ppo_math_ops_hip.hip
         PROPERTIES LANGUAGE HIP
       )

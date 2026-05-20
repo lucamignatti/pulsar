@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <vector>
 
 #include "pulsar/training/ppo_math.hpp"
 #include "pulsar/tracing/tracing.hpp"
@@ -35,6 +36,28 @@ torch::Tensor compute_gae_cuda(
 
 torch::Tensor normalize_advantage_cuda(const torch::Tensor& advantages, const torch::Tensor& active_mask);
 
+std::vector<torch::Tensor> sample_masked_actions_cuda(
+    const torch::Tensor& logits,
+    const torch::Tensor& action_masks,
+    bool deterministic,
+    bool need_log_probs,
+    std::uint32_t seed);
+
+torch::Tensor masked_action_entropy_cuda(const torch::Tensor& logits, const torch::Tensor& action_masks);
+
+torch::Tensor clipped_ppo_policy_loss_forward_cuda(
+    const torch::Tensor& current_log_probs,
+    const torch::Tensor& old_log_probs,
+    const torch::Tensor& advantages,
+    float clip_range);
+
+torch::Tensor clipped_ppo_policy_loss_backward_cuda(
+    const torch::Tensor& current_log_probs,
+    const torch::Tensor& old_log_probs,
+    const torch::Tensor& advantages,
+    const torch::Tensor& grad_output,
+    float clip_range);
+
 torch::Tensor sample_future_goal_positions_cuda(
     const torch::Tensor& goal_positions,
     const torch::Tensor& dones,
@@ -55,6 +78,28 @@ torch::Tensor compute_gae_hip(
     const torch::Tensor& bootstrap_values);
 
 torch::Tensor normalize_advantage_hip(const torch::Tensor& advantages, const torch::Tensor& active_mask);
+
+std::vector<torch::Tensor> sample_masked_actions_hip(
+    const torch::Tensor& logits,
+    const torch::Tensor& action_masks,
+    bool deterministic,
+    bool need_log_probs,
+    std::uint32_t seed);
+
+torch::Tensor masked_action_entropy_hip(const torch::Tensor& logits, const torch::Tensor& action_masks);
+
+torch::Tensor clipped_ppo_policy_loss_forward_hip(
+    const torch::Tensor& current_log_probs,
+    const torch::Tensor& old_log_probs,
+    const torch::Tensor& advantages,
+    float clip_range);
+
+torch::Tensor clipped_ppo_policy_loss_backward_hip(
+    const torch::Tensor& current_log_probs,
+    const torch::Tensor& old_log_probs,
+    const torch::Tensor& advantages,
+    const torch::Tensor& grad_output,
+    float clip_range);
 
 torch::Tensor sample_future_goal_positions_hip(
     const torch::Tensor& goal_positions,
@@ -116,6 +161,15 @@ bool can_use_ppo_math_accel(const torch::Tensor& tensor) {
 #endif
 }
 
+bool can_use_action_accel(const torch::Tensor& logits, const torch::Tensor& action_masks) {
+  return can_use_ppo_math_accel(logits) &&
+      action_masks.defined() &&
+      action_masks.is_cuda() &&
+      action_masks.dim() == logits.dim() &&
+      action_masks.size(-1) == logits.size(-1) &&
+      (action_masks.scalar_type() == torch::kBool || action_masks.scalar_type() == torch::kUInt8);
+}
+
 }  // namespace
 
 torch::Tensor apply_action_mask_to_logits(const torch::Tensor& logits, const torch::Tensor& action_masks) {
@@ -127,6 +181,33 @@ torch::Tensor sample_masked_actions(
     const torch::Tensor& action_masks,
     bool deterministic,
     torch::Tensor* log_probs) {
+  if (can_use_action_accel(logits, action_masks) && logits.dim() == 2) {
+    const bool need_log_probs = log_probs != nullptr;
+    const std::uint32_t seed = static_cast<std::uint32_t>(std::rand());
+#if defined(PULSAR_HAS_PPO_MATH_CUDA_KERNELS)
+    std::vector<torch::Tensor> result = sample_masked_actions_cuda(
+        logits.contiguous(),
+        action_masks.contiguous(),
+        deterministic,
+        need_log_probs,
+        seed);
+    if (need_log_probs) {
+      *log_probs = result[1];
+    }
+    return result[0];
+#elif defined(PULSAR_HAS_PPO_MATH_HIP_KERNELS)
+    std::vector<torch::Tensor> result = sample_masked_actions_hip(
+        logits.contiguous(),
+        action_masks.contiguous(),
+        deterministic,
+        need_log_probs,
+        seed);
+    if (need_log_probs) {
+      *log_probs = result[1];
+    }
+    return result[0];
+#endif
+  }
   torch::Tensor masked = apply_action_mask_to_logits(logits, action_masks);
   const torch::Tensor actions = deterministic ? masked.argmax(-1) : sample_categorical_from_logits(masked);
   if (log_probs != nullptr) {
@@ -137,6 +218,13 @@ torch::Tensor sample_masked_actions(
 
 torch::Tensor masked_action_entropy(const torch::Tensor& logits, const torch::Tensor& action_masks) {
   PULSAR_TRACE_SCOPE_CAT("ppo_math", "entropy");
+  if (can_use_action_accel(logits, action_masks) && logits.dim() == 2) {
+#if defined(PULSAR_HAS_PPO_MATH_CUDA_KERNELS)
+    return masked_action_entropy_cuda(logits.contiguous(), action_masks.contiguous());
+#elif defined(PULSAR_HAS_PPO_MATH_HIP_KERNELS)
+    return masked_action_entropy_hip(logits.contiguous(), action_masks.contiguous());
+#endif
+  }
   const torch::Tensor masked = apply_action_mask_to_logits(logits, action_masks);
   const torch::Tensor probs = torch::softmax(masked, -1);
   const torch::Tensor valid_counts = action_masks.to(torch::kFloat32).sum(-1);
@@ -212,12 +300,91 @@ torch::Tensor compute_gae(
   return advantages;
 }
 
+namespace {
+
+#if defined(PULSAR_HAS_PPO_MATH_CUDA_KERNELS) || defined(PULSAR_HAS_PPO_MATH_HIP_KERNELS)
+class ClippedPpoPolicyLossAccelFunction
+    : public torch::autograd::Function<ClippedPpoPolicyLossAccelFunction> {
+ public:
+  static torch::Tensor forward(
+      torch::autograd::AutogradContext* ctx,
+      torch::Tensor current_log_probs,
+      torch::Tensor old_log_probs,
+      torch::Tensor advantages,
+      double clip_range) {
+    ctx->save_for_backward({current_log_probs, old_log_probs, advantages});
+    ctx->saved_data["clip_range"] = clip_range;
+#if defined(PULSAR_HAS_PPO_MATH_CUDA_KERNELS)
+    return clipped_ppo_policy_loss_forward_cuda(
+        current_log_probs.contiguous(),
+        old_log_probs.contiguous(),
+        advantages.contiguous(),
+        static_cast<float>(clip_range));
+#elif defined(PULSAR_HAS_PPO_MATH_HIP_KERNELS)
+    return clipped_ppo_policy_loss_forward_hip(
+        current_log_probs.contiguous(),
+        old_log_probs.contiguous(),
+        advantages.contiguous(),
+        static_cast<float>(clip_range));
+#endif
+  }
+
+  static torch::autograd::tensor_list backward(
+      torch::autograd::AutogradContext* ctx,
+      torch::autograd::tensor_list grad_outputs) {
+    const auto saved = ctx->get_saved_variables();
+    const float clip_range = static_cast<float>(ctx->saved_data["clip_range"].toDouble());
+    const torch::Tensor grad_output = grad_outputs[0].contiguous();
+#if defined(PULSAR_HAS_PPO_MATH_CUDA_KERNELS)
+    torch::Tensor grad_current = clipped_ppo_policy_loss_backward_cuda(
+        saved[0].contiguous(),
+        saved[1].contiguous(),
+        saved[2].contiguous(),
+        grad_output,
+        clip_range);
+#elif defined(PULSAR_HAS_PPO_MATH_HIP_KERNELS)
+    torch::Tensor grad_current = clipped_ppo_policy_loss_backward_hip(
+        saved[0].contiguous(),
+        saved[1].contiguous(),
+        saved[2].contiguous(),
+        grad_output,
+        clip_range);
+#endif
+    return {grad_current, torch::Tensor{}, torch::Tensor{}, torch::Tensor{}};
+  }
+};
+#endif
+
+bool can_use_clipped_loss_accel(
+    const torch::Tensor& current_log_probs,
+    const torch::Tensor& old_log_probs,
+    const torch::Tensor& advantages) {
+  return can_use_ppo_math_accel(current_log_probs) &&
+      old_log_probs.is_cuda() &&
+      advantages.is_cuda() &&
+      old_log_probs.scalar_type() == torch::kFloat32 &&
+      advantages.scalar_type() == torch::kFloat32 &&
+      current_log_probs.sizes() == old_log_probs.sizes() &&
+      current_log_probs.sizes() == advantages.sizes();
+}
+
+}  // namespace
+
 torch::Tensor clipped_ppo_policy_loss(
     const torch::Tensor& current_log_probs,
     const torch::Tensor& old_log_probs,
     const torch::Tensor& advantages,
     float clip_range) {
   PULSAR_TRACE_SCOPE_CAT("ppo_math", "clipped_ppo_loss");
+  if (can_use_clipped_loss_accel(current_log_probs, old_log_probs, advantages)) {
+#if defined(PULSAR_HAS_PPO_MATH_CUDA_KERNELS) || defined(PULSAR_HAS_PPO_MATH_HIP_KERNELS)
+    return ClippedPpoPolicyLossAccelFunction::apply(
+        current_log_probs,
+        old_log_probs,
+        advantages,
+        static_cast<double>(clip_range));
+#endif
+  }
   const torch::Tensor ratio = torch::exp(current_log_probs - old_log_probs);
   const torch::Tensor clipped_ratio = torch::clamp(ratio, 1.0 - clip_range, 1.0 + clip_range);
   return -torch::min(ratio * advantages, clipped_ratio * advantages);

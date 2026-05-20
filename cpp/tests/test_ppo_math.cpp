@@ -154,6 +154,30 @@ int main() {
       auto norm_actual = pulsar::normalize_advantage(expected.to(opts), active_cpu.to(opts)).to(torch::kCPU);
       require(torch::allclose(norm_actual, norm_expected, 1.0e-5, 1.0e-5), "accelerated advantage normalization parity");
 
+      auto logits_cpu = torch::tensor({{1.0F, 2.0F, -1.0F}, {0.25F, -0.5F, 0.75F}}, torch::kFloat32);
+      auto masks_cpu = torch::tensor({{true, false, true}, {true, true, true}}, torch::kBool);
+      torch::Tensor expected_log_probs;
+      auto expected_actions = pulsar::sample_masked_actions(logits_cpu, masks_cpu, true, &expected_log_probs);
+      torch::Tensor actual_log_probs;
+      auto actual_actions = pulsar::sample_masked_actions(logits_cpu.to(opts), masks_cpu.to(torch::kCUDA), true, &actual_log_probs).to(torch::kCPU);
+      require(torch::equal(actual_actions, expected_actions), "accelerated deterministic masked action parity");
+      require(torch::allclose(actual_log_probs.to(torch::kCPU), expected_log_probs, 1.0e-5, 1.0e-5), "accelerated masked action log-prob parity");
+
+      auto entropy_expected = pulsar::masked_action_entropy(logits_cpu, masks_cpu);
+      auto entropy_actual = pulsar::masked_action_entropy(logits_cpu.to(opts), masks_cpu.to(torch::kCUDA)).to(torch::kCPU);
+      require(torch::allclose(entropy_actual, entropy_expected, 1.0e-5, 1.0e-5), "accelerated masked entropy parity");
+
+      auto cur_cpu = torch::tensor({std::log(1.1F), std::log(1.4F), std::log(0.7F)}, torch::kFloat32).set_requires_grad(true);
+      auto old_lp_cpu = torch::zeros({3}, torch::kFloat32);
+      auto adv_cpu = torch::tensor({1.0F, 1.0F, -1.0F}, torch::kFloat32);
+      auto loss_cpu = pulsar::clipped_ppo_policy_loss(cur_cpu, old_lp_cpu, adv_cpu, 0.2F).sum();
+      loss_cpu.backward();
+      auto cur_gpu = cur_cpu.detach().to(opts).set_requires_grad(true);
+      auto loss_gpu = pulsar::clipped_ppo_policy_loss(cur_gpu, old_lp_cpu.to(opts), adv_cpu.to(opts), 0.2F).sum();
+      loss_gpu.backward();
+      require(torch::allclose(loss_gpu.detach().to(torch::kCPU), loss_cpu.detach(), 1.0e-5, 1.0e-5), "accelerated clipped PPO loss parity");
+      require(torch::allclose(cur_gpu.grad().to(torch::kCPU), cur_cpu.grad(), 1.0e-5, 1.0e-5), "accelerated clipped PPO grad parity");
+
       auto goals = torch::randn({7, 5, 3}, opts);
       auto future = pulsar::sample_future_goal_positions(goals, dones_cpu.to(opts), boot_cpu.to(opts), 4);
       require(future.sizes() == torch::IntArrayRef({7, 5, 3}), "accelerated future goals shape");
