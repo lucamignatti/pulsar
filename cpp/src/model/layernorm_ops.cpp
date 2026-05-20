@@ -2,8 +2,9 @@
 
 #include <torch/torch.h>
 
+namespace pulsar {
+
 #ifdef PULSAR_HAS_LAYERNORM_CUDA_KERNELS
-#include <c10/cuda/CUDAException.h>
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> fused_layer_norm_forward_cuda(
     const torch::Tensor& input,
     const torch::Tensor& weight,
@@ -20,7 +21,6 @@ std::vector<torch::Tensor> fused_layer_norm_backward_cuda(
 #endif
 
 #ifdef PULSAR_HAS_LAYERNORM_HIP_KERNELS
-#include <ATen/hip/HIPContext.h>
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> fused_layer_norm_forward_hip(
     const torch::Tensor& input,
     const torch::Tensor& weight,
@@ -35,8 +35,6 @@ std::vector<torch::Tensor> fused_layer_norm_backward_hip(
     const torch::Tensor& saved_mean,
     const torch::Tensor& saved_inv_std);
 #endif
-
-namespace pulsar {
 namespace {
 
 #if defined(PULSAR_HAS_LAYERNORM_CUDA_KERNELS)
