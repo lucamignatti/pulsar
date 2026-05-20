@@ -335,6 +335,11 @@ bool appo_grad_diagnostics_enabled() {
   return enabled;
 }
 
+bool appo_grad_boundary_diagnostics_enabled() {
+  static const bool enabled = env_flag_enabled("PULSAR_APPO_GRAD_BOUNDARY_DIAG");
+  return enabled;
+}
+
 int& appo_grad_diagnostics_reports_remaining() {
   static int remaining = [] {
     const char* value = std::getenv("PULSAR_APPO_GRAD_DIAG_LIMIT");
@@ -439,6 +444,25 @@ struct GradStat {
   bool finite = true;
 };
 
+struct BoundaryGradStat {
+  double l2 = 0.0;
+  double max_abs = 0.0;
+  bool finite = true;
+  bool seen = false;
+};
+
+struct BoundaryGradSet {
+  BoundaryGradStat policy_logits;
+  BoundaryGradStat flat_policy_logits;
+  BoundaryGradStat active_logits;
+  BoundaryGradStat value_win_logits;
+  BoundaryGradStat flat_value_win_logits;
+  BoundaryGradStat active_value_win_logits;
+  BoundaryGradStat features;
+  BoundaryGradStat flat_features;
+  BoundaryGradStat active_features;
+};
+
 GradStat compute_grad_stat(const std::string& name, const torch::Tensor& grad) {
   GradStat stat;
   stat.name = name;
@@ -460,6 +484,49 @@ GradStat compute_grad_stat(const std::string& name, const torch::Tensor& grad) {
   const double scaled_sq = scaled.square().sum().item<double>();
   stat.l2 = std::isfinite(scaled_sq) ? stat.max_abs * std::sqrt(scaled_sq) : std::numeric_limits<double>::infinity();
   return stat;
+}
+
+void merge_boundary_grad_stat(BoundaryGradStat& dst, const BoundaryGradStat& src) {
+  if (!src.seen) {
+    return;
+  }
+  dst.seen = true;
+  dst.finite = dst.finite && src.finite;
+  dst.l2 = std::max(dst.l2, src.l2);
+  dst.max_abs = std::max(dst.max_abs, src.max_abs);
+}
+
+void merge_boundary_grad_set(BoundaryGradSet& dst, const BoundaryGradSet& src) {
+  merge_boundary_grad_stat(dst.policy_logits, src.policy_logits);
+  merge_boundary_grad_stat(dst.flat_policy_logits, src.flat_policy_logits);
+  merge_boundary_grad_stat(dst.active_logits, src.active_logits);
+  merge_boundary_grad_stat(dst.value_win_logits, src.value_win_logits);
+  merge_boundary_grad_stat(dst.flat_value_win_logits, src.flat_value_win_logits);
+  merge_boundary_grad_stat(dst.active_value_win_logits, src.active_value_win_logits);
+  merge_boundary_grad_stat(dst.features, src.features);
+  merge_boundary_grad_stat(dst.flat_features, src.flat_features);
+  merge_boundary_grad_stat(dst.active_features, src.active_features);
+}
+
+void print_boundary_grad_stat(const char* name, const BoundaryGradStat& stat) {
+  std::cerr << "  boundary_grad tensor=" << name
+            << " seen=" << (stat.seen ? 1 : 0)
+            << " l2=" << stat.l2
+            << " max_abs=" << stat.max_abs
+            << " finite=" << (stat.finite ? 1 : 0)
+            << '\n';
+}
+
+void print_boundary_grad_set(const BoundaryGradSet& stats) {
+  print_boundary_grad_stat("policy_logits", stats.policy_logits);
+  print_boundary_grad_stat("flat_policy_logits", stats.flat_policy_logits);
+  print_boundary_grad_stat("active_logits", stats.active_logits);
+  print_boundary_grad_stat("value_win_logits", stats.value_win_logits);
+  print_boundary_grad_stat("flat_value_win_logits", stats.flat_value_win_logits);
+  print_boundary_grad_stat("active_value_win_logits", stats.active_value_win_logits);
+  print_boundary_grad_stat("features", stats.features);
+  print_boundary_grad_stat("flat_features", stats.flat_features);
+  print_boundary_grad_stat("active_features", stats.active_features);
 }
 
 bool grad_stat_order(const GradStat& lhs, const GradStat& rhs) {
@@ -1778,11 +1845,21 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   double accumulated_policy_kl_sum = 0.0;
   double accumulated_policy_kl_count = 0.0;
   const bool grad_diagnostics = appo_grad_diagnostics_enabled();
+  const bool boundary_grad_diagnostics = appo_grad_boundary_diagnostics_enabled();
+  const bool split_grad_diagnostics = grad_diagnostics && !boundary_grad_diagnostics;
+  const bool any_grad_diagnostics = grad_diagnostics || boundary_grad_diagnostics;
   std::vector<CapturedGrad> diagnostic_policy_grad_group;
   std::vector<CapturedGrad> diagnostic_value_grad_group;
   std::vector<CapturedGrad> diagnostic_entropy_grad_group;
   std::vector<CapturedGrad> diagnostic_goal_critic_grad_group;
   std::vector<CapturedGrad> diagnostic_goal_actor_grad_group;
+  BoundaryGradSet diagnostic_boundary_grad_set;
+  double diagnostic_max_policy_loss_abs = 0.0;
+  double diagnostic_max_value_loss_abs = 0.0;
+  double diagnostic_max_entropy_abs = 0.0;
+  double diagnostic_max_goal_critic_loss_abs = 0.0;
+  double diagnostic_max_goal_actor_loss_abs = 0.0;
+  double diagnostic_max_task_loss_abs = 0.0;
   double diagnostic_max_value_pred_abs = 0.0;
   double diagnostic_max_value_return_abs = 0.0;
   double diagnostic_max_value_error_abs = 0.0;
@@ -1791,7 +1868,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   double diagnostic_max_advantage_abs = 0.0;
   double diagnostic_min_valid_actions = std::numeric_limits<double>::infinity();
   double diagnostic_max_valid_actions = 0.0;
-  if (grad_diagnostics) {
+  if (boundary_grad_diagnostics) {
+    std::cerr << "APPO boundary gradient diagnostics enabled: normal backward tensor hooks will be captured\n";
+  } else if (grad_diagnostics) {
     std::cerr << "APPO gradient diagnostics enabled: split objective gradients will be captured for attribution\n";
   }
 
@@ -1950,6 +2029,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           std::vector<CapturedGrad> entropy_group;
           std::vector<CapturedGrad> goal_critic_group;
           std::vector<CapturedGrad> goal_actor_group;
+          BoundaryGradSet boundary_grad_set;
           double policy_loss_sum = 0.0;
           double value_loss_sum = 0.0;
           double entropy_sum = 0.0;
@@ -1960,6 +2040,12 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           double goal_score = 0.0;
           double sampled_goal_dist = 0.0;
           double fwd_bwd_seconds = 0.0;
+          double max_policy_loss_abs = 0.0;
+          double max_value_loss_abs = 0.0;
+          double max_entropy_abs = 0.0;
+          double max_goal_critic_loss_abs = 0.0;
+          double max_goal_actor_loss_abs = 0.0;
+          double max_task_loss_abs = 0.0;
           double max_value_pred_abs = 0.0;
           double max_value_return_abs = 0.0;
           double max_value_error_abs = 0.0;
@@ -1983,7 +2069,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         const double mode_total_active_local = mode_total_active;
         const bool mode_all_active_local = mode_all_active;
         const bool use_pcgrad_local = use_pcgrad;
-        const bool grad_diagnostics_local = grad_diagnostics && !use_pcgrad;
+        const bool grad_diagnostics_local = any_grad_diagnostics && !use_pcgrad;
+        const bool split_grad_diagnostics_local = split_grad_diagnostics && !use_pcgrad;
+        const bool boundary_grad_diagnostics_local = boundary_grad_diagnostics && !use_pcgrad;
         const bool use_cuda_amp_local = use_cuda_amp;
         const double cuda_amp_loss_scale_local = cuda_amp_loss_scale;
         const int optimizer_accumulation_steps_local = optimizer_accumulation_steps;
@@ -2010,6 +2098,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             torch::Tensor goal_critic_loss_metric;
             torch::Tensor goal_score_metric;
             torch::Tensor sampled_goal_dist_metric;
+            std::mutex boundary_grad_mutex;
             auto add_metric = [](torch::Tensor& dst, const torch::Tensor& value, double weight) {
               const torch::Tensor term = value.detach().to(torch::kFloat32) * weight;
               dst = dst.defined() ? dst + term : term;
@@ -2029,6 +2118,20 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
               if (std::isfinite(scalar)) {
                 dst = std::min(dst, scalar);
               }
+            };
+            auto observe_boundary_grad = [&](const torch::Tensor& tensor, BoundaryGradStat& stat) {
+              if (!boundary_grad_diagnostics_local || !tensor.requires_grad()) {
+                return;
+              }
+              tensor.register_hook([&stat, &boundary_grad_mutex](const torch::Tensor& grad) {
+                const GradStat grad_stat = compute_grad_stat("", grad);
+                std::lock_guard<std::mutex> lock(boundary_grad_mutex);
+                stat.seen = true;
+                stat.finite = stat.finite && grad_stat.finite;
+                stat.l2 = std::max(stat.l2, grad_stat.l2);
+                stat.max_abs = std::max(stat.max_abs, grad_stat.max_abs);
+                return grad;
+              });
             };
             const auto task_compute_start = std::chrono::steady_clock::now();
 
@@ -2093,6 +2196,12 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 if (active_sample_count == 0) continue;
                 const auto active_samples = static_cast<double>(active_sample_count);
                 result.active_count += active_sample_count;
+                observe_boundary_grad(policy_logits, result.boundary_grad_set.policy_logits);
+                observe_boundary_grad(flat_logits, result.boundary_grad_set.flat_policy_logits);
+                observe_boundary_grad(active_logits, result.boundary_grad_set.active_logits);
+                observe_boundary_grad(features, result.boundary_grad_set.features);
+                observe_boundary_grad(flat_features, result.boundary_grad_set.flat_features);
+                observe_boundary_grad(active_features, result.boundary_grad_set.active_features);
 
                 const torch::Tensor log_probs = torch::log_softmax(apply_action_mask_to_logits(active_logits, active_masks), -1);
                 const torch::Tensor current_log_probs = log_probs.gather(1, active_actions.unsqueeze(1)).squeeze(1);
@@ -2129,8 +2238,12 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
                 torch::Tensor chunk_returns = mode_gpu_returns_mb.narrow(0, chunk_start, loss_steps).reshape({samples});
                 torch::Tensor active_returns = all_active ? chunk_returns.to(torch::kFloat32) : chunk_returns.index({flat_active}).to(torch::kFloat32);
-                torch::Tensor flat_value_win_logits = output.value_win_logits.reshape({samples, 1});
+                torch::Tensor value_win_logits = output.value_win_logits;
+                torch::Tensor flat_value_win_logits = value_win_logits.reshape({samples, 1});
                 torch::Tensor active_value_win_logits = all_active ? flat_value_win_logits.to(torch::kFloat32) : flat_value_win_logits.index({flat_active}).to(torch::kFloat32);
+                observe_boundary_grad(value_win_logits, result.boundary_grad_set.value_win_logits);
+                observe_boundary_grad(flat_value_win_logits, result.boundary_grad_set.flat_value_win_logits);
+                observe_boundary_grad(active_value_win_logits, result.boundary_grad_set.active_value_win_logits);
                 if (grad_diagnostics_local) {
                   update_max(result.max_value_pred_abs, active_value_win_logits.detach().abs().max());
                   update_max(result.max_value_return_abs, active_returns.detach().abs().max());
@@ -2193,6 +2306,14 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
                 const auto sample_weight = active_samples / mode_total_active_local;
                 const torch::Tensor task_loss = policy_loss + config_.ppo.value_coef * value_loss + entropy_floor_loss - effective_entropy_coef * entropy;
+                if (grad_diagnostics_local) {
+                  update_max(result.max_policy_loss_abs, policy_loss.detach().abs());
+                  update_max(result.max_value_loss_abs, value_loss.detach().abs());
+                  update_max(result.max_entropy_abs, entropy.detach().abs());
+                  update_max(result.max_goal_critic_loss_abs, goal_loss.detach().abs());
+                  update_max(result.max_goal_actor_loss_abs, actor_goal_loss.detach().abs());
+                  update_max(result.max_task_loss_abs, task_loss.detach().abs());
+                }
 
                 if (use_pcgrad_local) {
                   const torch::Tensor weighted_task_loss = task_loss * sample_weight;
@@ -2221,7 +2342,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                     accumulate_gradients(*gpu_act, *objective_losses[obj_index].second);
                     result.has_backward = true;
                   }
-                } else if (grad_diagnostics_local) {
+                } else if (split_grad_diagnostics_local) {
                   const torch::Tensor weight = torch::full_like(
                       policy_loss,
                       sample_weight / static_cast<double>(optimizer_accumulation_steps_local));
@@ -2322,7 +2443,13 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           metrics.forward_backward_seconds += task_result.fwd_bwd_seconds;
           accumulated_has_backward = accumulated_has_backward || task_result.has_backward;
           metric_steps += task_result.active_count;
-          if (grad_diagnostics && !use_pcgrad) {
+          if (any_grad_diagnostics && !use_pcgrad) {
+            diagnostic_max_policy_loss_abs = std::max(diagnostic_max_policy_loss_abs, task_result.max_policy_loss_abs);
+            diagnostic_max_value_loss_abs = std::max(diagnostic_max_value_loss_abs, task_result.max_value_loss_abs);
+            diagnostic_max_entropy_abs = std::max(diagnostic_max_entropy_abs, task_result.max_entropy_abs);
+            diagnostic_max_goal_critic_loss_abs = std::max(diagnostic_max_goal_critic_loss_abs, task_result.max_goal_critic_loss_abs);
+            diagnostic_max_goal_actor_loss_abs = std::max(diagnostic_max_goal_actor_loss_abs, task_result.max_goal_actor_loss_abs);
+            diagnostic_max_task_loss_abs = std::max(diagnostic_max_task_loss_abs, task_result.max_task_loss_abs);
             diagnostic_max_value_pred_abs = std::max(diagnostic_max_value_pred_abs, task_result.max_value_pred_abs);
             diagnostic_max_value_return_abs = std::max(diagnostic_max_value_return_abs, task_result.max_value_return_abs);
             diagnostic_max_value_error_abs = std::max(diagnostic_max_value_error_abs, task_result.max_value_error_abs);
@@ -2332,9 +2459,12 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             diagnostic_min_valid_actions = std::min(diagnostic_min_valid_actions, task_result.min_valid_actions);
             diagnostic_max_valid_actions = std::max(diagnostic_max_valid_actions, task_result.max_valid_actions);
           }
+          if (boundary_grad_diagnostics && !use_pcgrad) {
+            merge_boundary_grad_set(diagnostic_boundary_grad_set, task_result.boundary_grad_set);
+          }
         }
 
-        if (grad_diagnostics && !use_pcgrad) {
+        if (split_grad_diagnostics && !use_pcgrad) {
           reduce_captured_gradients(*actor_, diagnostic_policy_grad_group, mode_policy_grad_group, device_);
           reduce_captured_gradients(*actor_, diagnostic_value_grad_group, mode_value_grad_group, device_);
           reduce_captured_gradients(*actor_, diagnostic_entropy_grad_group, mode_entropy_grad_group, device_);
@@ -2422,6 +2552,13 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         diagnostic_entropy_grad_group.clear();
         diagnostic_goal_critic_grad_group.clear();
         diagnostic_goal_actor_grad_group.clear();
+        diagnostic_boundary_grad_set = {};
+        diagnostic_max_policy_loss_abs = 0.0;
+        diagnostic_max_value_loss_abs = 0.0;
+        diagnostic_max_entropy_abs = 0.0;
+        diagnostic_max_goal_critic_loss_abs = 0.0;
+        diagnostic_max_goal_actor_loss_abs = 0.0;
+        diagnostic_max_task_loss_abs = 0.0;
         diagnostic_max_value_pred_abs = 0.0;
         diagnostic_max_value_return_abs = 0.0;
         diagnostic_max_value_error_abs = 0.0;
@@ -2449,6 +2586,13 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         diagnostic_entropy_grad_group.clear();
         diagnostic_goal_critic_grad_group.clear();
         diagnostic_goal_actor_grad_group.clear();
+        diagnostic_boundary_grad_set = {};
+        diagnostic_max_policy_loss_abs = 0.0;
+        diagnostic_max_value_loss_abs = 0.0;
+        diagnostic_max_entropy_abs = 0.0;
+        diagnostic_max_goal_critic_loss_abs = 0.0;
+        diagnostic_max_goal_actor_loss_abs = 0.0;
+        diagnostic_max_task_loss_abs = 0.0;
         diagnostic_max_value_pred_abs = 0.0;
         diagnostic_max_value_return_abs = 0.0;
         diagnostic_max_value_error_abs = 0.0;
@@ -2471,7 +2615,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         continue;
       }
 
-      if (grad_diagnostics && !use_pcgrad) {
+      if (split_grad_diagnostics && !use_pcgrad) {
         zero_existing_gradients(*actor_);
         add_captured_gradients_to_module(diagnostic_policy_grad_group);
         add_captured_gradients_to_module(diagnostic_value_grad_group);
@@ -2482,7 +2626,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
       // Reduce gradients from replica GPU actors into the primary actor before stepping.
       // Skip when using PCGrad: gradients are already captured and combined via CapturedGrad groups.
-      if (num_update_gpus > 1 && !use_pcgrad && !grad_diagnostics) {
+      if (num_update_gpus > 1 && !use_pcgrad && !split_grad_diagnostics) {
         reduce_gradients_from_replicas(actor_, compute_actors_);
       }
 
@@ -2493,7 +2637,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         PULSAR_TRACE_SCOPE_CAT("trainer", "update_optimizer");
         scale_existing_gradients(*actor_, cuda_amp_loss_scale);
         std::vector<GradStat> combined_grad_top;
-        if (grad_diagnostics) {
+        if (any_grad_diagnostics) {
           combined_grad_top = top_module_grad_stats(*actor_, 8);
         }
         grad_norm = clip_existing_gradients(*actor_, config_.ppo.max_grad_norm);
@@ -2512,7 +2656,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         const bool grad_guard_hit =
             config_.ppo.max_preclip_grad_norm > 0.0F &&
             grad_norm > static_cast<double>(config_.ppo.max_preclip_grad_norm);
-        if (grad_diagnostics && (grad_guard_hit || nonfinite_before_sanitize || !std::isfinite(grad_norm))) {
+        if (any_grad_diagnostics && (grad_guard_hit || nonfinite_before_sanitize || !std::isfinite(grad_norm))) {
           int& reports_remaining = appo_grad_diagnostics_reports_remaining();
           if (reports_remaining != 0) {
             if (reports_remaining > 0) {
@@ -2525,6 +2669,12 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                       << " accumulated_minibatches=" << accumulated_minibatches
                       << " accumulated_active=" << accumulated_total_active
                       << " accumulated_policy_kl=" << accumulated_policy_kl
+                      << " max_policy_loss_abs=" << diagnostic_max_policy_loss_abs
+                      << " max_value_loss_abs=" << diagnostic_max_value_loss_abs
+                      << " max_entropy_abs=" << diagnostic_max_entropy_abs
+                      << " max_goal_critic_loss_abs=" << diagnostic_max_goal_critic_loss_abs
+                      << " max_goal_actor_loss_abs=" << diagnostic_max_goal_actor_loss_abs
+                      << " max_task_loss_abs=" << diagnostic_max_task_loss_abs
                       << " max_value_pred_abs=" << diagnostic_max_value_pred_abs
                       << " max_value_return_abs=" << diagnostic_max_value_return_abs
                       << " max_value_error_abs=" << diagnostic_max_value_error_abs
@@ -2536,7 +2686,10 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                       << '\n';
             print_grad_stats("combined", combined_grad_top);
             print_grad_stats("param_value", top_parameter_value_stats(*actor_, 8));
-            if (!use_pcgrad) {
+            if (boundary_grad_diagnostics && !use_pcgrad) {
+              print_boundary_grad_set(diagnostic_boundary_grad_set);
+            }
+            if (split_grad_diagnostics && !use_pcgrad) {
               print_captured_group_diagnostics(*actor_, "policy", diagnostic_policy_grad_group);
               print_captured_group_diagnostics(*actor_, "value", diagnostic_value_grad_group);
               print_captured_group_diagnostics(*actor_, "entropy", diagnostic_entropy_grad_group);
@@ -2566,6 +2719,13 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       diagnostic_entropy_grad_group.clear();
       diagnostic_goal_critic_grad_group.clear();
       diagnostic_goal_actor_grad_group.clear();
+      diagnostic_boundary_grad_set = {};
+      diagnostic_max_policy_loss_abs = 0.0;
+      diagnostic_max_value_loss_abs = 0.0;
+      diagnostic_max_entropy_abs = 0.0;
+      diagnostic_max_goal_critic_loss_abs = 0.0;
+      diagnostic_max_goal_actor_loss_abs = 0.0;
+      diagnostic_max_task_loss_abs = 0.0;
       diagnostic_max_value_pred_abs = 0.0;
       diagnostic_max_value_return_abs = 0.0;
       diagnostic_max_value_error_abs = 0.0;
