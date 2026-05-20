@@ -163,7 +163,6 @@ if(PULSAR_ENABLE_TORCH)
     check_language(HIP)
     if(CMAKE_HIP_COMPILER)
       enable_language(HIP)
-      pulsar_ensure_torch_hip_import_targets()
       set(CMAKE_HIP_STANDARD 17)
       set(CMAKE_HIP_STANDARD_REQUIRED ON)
       target_sources(

@@ -56,72 +56,6 @@ function(_pulsar_prepare_torch_optional_libs)
   endif()
 endfunction()
 
-function(_pulsar_rocm_search_roots out_var)
-  set(_roots "")
-
-  foreach(_var IN ITEMS CMAKE_HIP_COMPILER_ROCM_ROOT ROCM_PATH HIP_PATH)
-    if(DEFINED ${_var} AND NOT "${${_var}}" STREQUAL "")
-      list(APPEND _roots "${${_var}}")
-    endif()
-    if(DEFINED ENV{${_var}} AND NOT "$ENV{${_var}}" STREQUAL "")
-      list(APPEND _roots "$ENV{${_var}}")
-    endif()
-  endforeach()
-
-  list(APPEND _roots /opt/rocm /usr /usr/lib64/rocm)
-  list(REMOVE_DUPLICATES _roots)
-  set(${out_var} "${_roots}" PARENT_SCOPE)
-endfunction()
-
-function(_pulsar_add_imported_rocm_library target_name library_name)
-  if(TARGET "${target_name}")
-    return()
-  endif()
-
-  _pulsar_rocm_search_roots(_rocm_roots)
-  find_library(
-    _pulsar_rocm_library
-    NAMES "${library_name}"
-    PATHS ${_rocm_roots}
-    PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu
-    NO_DEFAULT_PATH
-    NO_CACHE
-  )
-  if(NOT _pulsar_rocm_library)
-    find_library(_pulsar_rocm_library NAMES "${library_name}" NO_CACHE)
-  endif()
-
-  if(_pulsar_rocm_library)
-    add_library("${target_name}" UNKNOWN IMPORTED GLOBAL)
-    set_target_properties(
-      "${target_name}"
-      PROPERTIES IMPORTED_LOCATION "${_pulsar_rocm_library}"
-    )
-  endif()
-endfunction()
-
-function(pulsar_ensure_torch_hip_import_targets)
-  if(NOT TARGET hip::amdhip64)
-    if(TARGET hip-lang::amdhip64)
-      add_library(hip::amdhip64 INTERFACE IMPORTED GLOBAL)
-      set_target_properties(
-        hip::amdhip64
-        PROPERTIES INTERFACE_LINK_LIBRARIES hip-lang::amdhip64
-      )
-    elseif(TARGET amdhip64)
-      add_library(hip::amdhip64 INTERFACE IMPORTED GLOBAL)
-      set_target_properties(
-        hip::amdhip64
-        PROPERTIES INTERFACE_LINK_LIBRARIES amdhip64
-      )
-    else()
-      _pulsar_add_imported_rocm_library(hip::amdhip64 amdhip64)
-    endif()
-  endif()
-
-  _pulsar_add_imported_rocm_library(hiprtc::hiprtc hiprtc)
-endfunction()
-
 function(_pulsar_strip_std_flags_from_list out_var)
   set(_cleaned "")
   foreach(_item IN LISTS ARGN)
@@ -131,6 +65,17 @@ function(_pulsar_strip_std_flags_from_list out_var)
     list(APPEND _cleaned "${_item}")
   endforeach()
   set(${out_var} "${_cleaned}" PARENT_SCOPE)
+endfunction()
+
+function(_pulsar_torch_link_item_has_missing_rocm_target out_var link_item)
+  string(REGEX MATCHALL "(hip|hiprtc|roc)::[A-Za-z0-9_.+-]+" _rocm_targets "${link_item}")
+  foreach(_rocm_target IN LISTS _rocm_targets)
+    if(NOT TARGET "${_rocm_target}")
+      set(${out_var} TRUE PARENT_SCOPE)
+      return()
+    endif()
+  endforeach()
+  set(${out_var} FALSE PARENT_SCOPE)
 endfunction()
 
 function(_pulsar_sanitize_torch_language_standard)
@@ -154,24 +99,15 @@ function(_pulsar_sanitize_torch_language_standard)
     torch_library
   )
     if(TARGET "${_torch_target}")
-      get_target_property(_torch_compile_options "${_torch_target}" INTERFACE_COMPILE_OPTIONS)
-      if(_torch_compile_options)
-        _pulsar_strip_std_flags_from_list(_torch_compile_options_clean ${_torch_compile_options})
-        set_target_properties(
-          "${_torch_target}"
-          PROPERTIES INTERFACE_COMPILE_OPTIONS "${_torch_compile_options_clean}"
-        )
-      endif()
-
       get_target_property(_torch_link_libraries "${_torch_target}" INTERFACE_LINK_LIBRARIES)
       if(_torch_link_libraries)
         set(_torch_link_libraries_clean "")
         foreach(_torch_link_item IN LISTS _torch_link_libraries)
-          set(_torch_link_target "${_torch_link_item}")
-          if(_torch_link_item MATCHES "^\\$<LINK_ONLY:((hip|hiprtc|roc)::[^>]+)>$")
-            set(_torch_link_target "${CMAKE_MATCH_1}")
-          endif()
-          if(_torch_link_target MATCHES "^(hip|hiprtc|roc)::" AND NOT TARGET "${_torch_link_target}")
+          _pulsar_torch_link_item_has_missing_rocm_target(
+            _torch_link_item_has_missing_rocm_target
+            "${_torch_link_item}"
+          )
+          if(_torch_link_item_has_missing_rocm_target)
             continue()
           endif()
           list(APPEND _torch_link_libraries_clean "${_torch_link_item}")
@@ -179,6 +115,15 @@ function(_pulsar_sanitize_torch_language_standard)
         set_target_properties(
           "${_torch_target}"
           PROPERTIES INTERFACE_LINK_LIBRARIES "${_torch_link_libraries_clean}"
+        )
+      endif()
+
+      get_target_property(_torch_compile_options "${_torch_target}" INTERFACE_COMPILE_OPTIONS)
+      if(_torch_compile_options)
+        _pulsar_strip_std_flags_from_list(_torch_compile_options_clean ${_torch_compile_options})
+        set_target_properties(
+          "${_torch_target}"
+          PROPERTIES INTERFACE_COMPILE_OPTIONS "${_torch_compile_options_clean}"
         )
       endif()
 
@@ -210,7 +155,6 @@ function(pulsar_find_torch)
   _pulsar_suppress_external_warnings_end()
 
   if(Torch_FOUND)
-    pulsar_ensure_torch_hip_import_targets()
     _pulsar_sanitize_torch_language_standard()
   endif()
 
