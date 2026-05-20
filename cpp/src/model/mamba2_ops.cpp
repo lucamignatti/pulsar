@@ -2,7 +2,9 @@
 
 #ifdef PULSAR_HAS_TORCH
 
+#include <cstdlib>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <torch/autograd.h>
@@ -10,6 +12,30 @@
 
 namespace pulsar {
 namespace {
+
+bool env_flag_enabled(const char* name) {
+  const char* value = std::getenv(name);
+  if (value == nullptr) {
+    return false;
+  }
+  const std::string text(value);
+  return !text.empty() && text != "0" && text != "false" && text != "FALSE" && text != "off" && text != "OFF";
+}
+
+bool mamba2_all_accel_disabled() {
+  static const bool disabled = env_flag_enabled("PULSAR_MAMBA2_DISABLE_ACCEL");
+  return disabled;
+}
+
+bool mamba2_scan_accel_disabled() {
+  static const bool disabled = env_flag_enabled("PULSAR_MAMBA2_DISABLE_SCAN_ACCEL");
+  return disabled || mamba2_all_accel_disabled();
+}
+
+bool mamba2_conv_accel_disabled() {
+  static const bool disabled = env_flag_enabled("PULSAR_MAMBA2_DISABLE_CONV_ACCEL");
+  return disabled || mamba2_all_accel_disabled();
+}
 
 torch::Tensor fallback_mamba2_scan_mixed(
     const torch::Tensor& projected,
@@ -406,7 +432,8 @@ namespace {
 
 bool can_use_cuda_scan(const torch::Tensor& projected, const torch::Tensor& decay_bias, const torch::Tensor& skip) {
 #if defined(PULSAR_HAS_MAMBA2_CUDA_KERNELS) || defined(PULSAR_HAS_MAMBA2_HIP_KERNELS)
-  return projected.is_cuda() &&
+  return !mamba2_scan_accel_disabled() &&
+      projected.is_cuda() &&
       projected.scalar_type() == torch::kFloat32 &&
       decay_bias.scalar_type() == torch::kFloat32 &&
       skip.scalar_type() == torch::kFloat32;
@@ -420,7 +447,8 @@ bool can_use_cuda_scan(const torch::Tensor& projected, const torch::Tensor& deca
 
 bool can_use_cuda_conv(const torch::Tensor& input, const torch::Tensor& weight, const torch::Tensor& bias) {
 #if defined(PULSAR_HAS_MAMBA2_CUDA_KERNELS) || defined(PULSAR_HAS_MAMBA2_HIP_KERNELS)
-  return input.is_cuda() &&
+  return !mamba2_conv_accel_disabled() &&
+      input.is_cuda() &&
       input.scalar_type() == torch::kFloat32 &&
       weight.is_cuda() &&
       weight.scalar_type() == torch::kFloat32 &&
@@ -438,7 +466,7 @@ bool can_use_cuda_conv(const torch::Tensor& input, const torch::Tensor& weight, 
 
 bool mamba2_accelerator_kernels_available() {
 #if defined(PULSAR_HAS_MAMBA2_CUDA_KERNELS) || defined(PULSAR_HAS_MAMBA2_HIP_KERNELS)
-  return true;
+  return !mamba2_all_accel_disabled();
 #else
   return false;
 #endif
