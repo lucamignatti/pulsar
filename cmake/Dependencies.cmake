@@ -83,6 +83,7 @@ function(_pulsar_sanitize_torch_language_standard)
     c10_cuda
     torch
     torch_cpu
+    torch_hip
     torch_hip_library
     torch_cpu_library
     torch_library
