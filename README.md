@@ -1,11 +1,11 @@
 # Pulsar
 
-Rocket League bot training with **Asyncronous PPO**, **contrastive goal-conditioned auxiliary learning**, **all-mode self-play**, **PCGrad**, and **slow ES-LoRA**.
+Rocket League bot training with **Asyncronous PPO**, **contrastive goal-conditioned auxiliary learning**, **all-mode self-play**, **PCGrad**, and **Evolutionary Sampling**.
 
 The training loop combines three complementary signals:
 
 1. **APPO**: the main local optimizer.
-2. **Contrastive goal-conditioned auxiliary**: self-supervised future-goal encoders (state-action and goal) trained with symmetric InfoNCE. Provides a representation-learning signal that never shapes the environment reward.
+2. **Contrastive goal-conditioned critic**: self-supervised future-goal encoders (state-action and goal) trained with symmetric InfoNCE. Provides a representation-learning signal that never shapes the environment reward.
 3. **Evolutionary Sampling**: periodic global parameter-space search over a LoRA adapter on the final policy layer, driven by rollout reward with KL penalty.
 
 The production setup trains 1v1, 2v2, and 3v3 using curriculum learning. It is able to achieve 188k collection SPS, 155k update SPS and 133K overall SPS on a 7900x+6800xt. 
