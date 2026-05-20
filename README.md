@@ -106,9 +106,9 @@ pulsar-viz \
 
 ## Works Cited
 
-- (Transformers are SSMs: Generalized Models and Efficient Algorithms Through Structured State Space Duality)[https://arxiv.org/abs/2405.21060]
-- (Loss of plasticity in deep continual learning)[https://www.nature.com/articles/s41586-024-07711-7]
-- (Self-Supervised Goal-Reaching Results in Multi-Agent Cooperation and Exploration)[https://arxiv.org/abs/2509.10656v1]
-- (Evolution Strategies at Scale: LLM Fine-Tuning Beyond Reinforcement Learning)[https://arxiv.org/abs/2509.10656v1]
-- (Evolution Strategies at the Hyperscale)[https://arxiv.org/abs/2511.16652]
+- [Transformers are SSMs: Generalized Models and Efficient Algorithms Through Structured State Space Duality](https://arxiv.org/abs/2405.21060)
+- [Loss of plasticity in deep continual learning](https://www.nature.com/articles/s41586-024-07711-7)
+- [Self-Supervised Goal-Reaching Results in Multi-Agent Cooperation and Exploration](https://arxiv.org/abs/2509.10656v1)
+- [Evolution Strategies at Scale: LLM Fine-Tuning Beyond Reinforcement Learning](https://arxiv.org/abs/2509.10656v1)
+- [Evolution Strategies at the Hyperscale](https://arxiv.org/abs/2511.16652)
 
