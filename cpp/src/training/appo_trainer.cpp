@@ -1766,7 +1766,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   double accumulated_policy_kl_sum = 0.0;
   double accumulated_policy_kl_count = 0.0;
   const bool grad_diagnostics = appo_grad_diagnostics_enabled();
-  std::vector<CapturedGrad> diagnostic_task_grad_group;
+  std::vector<CapturedGrad> diagnostic_policy_grad_group;
+  std::vector<CapturedGrad> diagnostic_value_grad_group;
+  std::vector<CapturedGrad> diagnostic_entropy_grad_group;
   std::vector<CapturedGrad> diagnostic_goal_critic_grad_group;
   std::vector<CapturedGrad> diagnostic_goal_actor_grad_group;
   if (grad_diagnostics) {
@@ -1913,6 +1915,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           actor_optimizer_.zero_grad();
         }
         std::vector<CapturedGrad> mode_task_grad_group;
+        std::vector<CapturedGrad> mode_policy_grad_group;
+        std::vector<CapturedGrad> mode_value_grad_group;
+        std::vector<CapturedGrad> mode_entropy_grad_group;
         std::vector<CapturedGrad> mode_goal_critic_grad_group;
         std::vector<CapturedGrad> mode_goal_actor_grad_group;
 
@@ -1920,6 +1925,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         // for its chunk of agents, accumulating GPU-local CapturedGrad groups.
         struct GpuTaskResult {
           std::vector<CapturedGrad> task_group;
+          std::vector<CapturedGrad> policy_group;
+          std::vector<CapturedGrad> value_group;
+          std::vector<CapturedGrad> entropy_group;
           std::vector<CapturedGrad> goal_critic_group;
           std::vector<CapturedGrad> goal_actor_group;
           double policy_loss_sum = 0.0;
@@ -1960,6 +1968,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
               &mode_agent_indices, &effective_entropy_coef, &effective_entropy_floor_coef, this]() mutable -> GpuTaskResult {
             GpuTaskResult result;
             std::vector<CapturedGrad>& gpu_task_group = result.task_group;
+            std::vector<CapturedGrad>& gpu_policy_group = result.policy_group;
+            std::vector<CapturedGrad>& gpu_value_group = result.value_group;
+            std::vector<CapturedGrad>& gpu_entropy_group = result.entropy_group;
             std::vector<CapturedGrad>& gpu_goal_critic_group = result.goal_critic_group;
             std::vector<CapturedGrad>& gpu_goal_actor_group = result.goal_actor_group;
             torch::Tensor policy_loss_metric;
@@ -2112,7 +2123,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                     selected_masks = selected_masks.index({idx});
                     selected_future_goal_pos = selected_future_goal_pos.index({idx});
                   }
-                  torch::Tensor sa_emb = gpu_act->goal_critic()->sa_embedding(selected_features, selected_actions);
+                  torch::Tensor sa_emb = gpu_act->goal_critic()->sa_embedding(selected_features.detach(), selected_actions);
                   torch::Tensor g_emb = gpu_act->goal_critic()->goal_embedding(selected_future_goal_pos);
                   goal_loss = compute_symmetric_infonce_loss(compute_pairwise_negative_l2_logits(sa_emb, g_emb), config_.goal_critic.logsumexp_penalty_coeff);
                   actor_goal_loss = goal_actor_critic_loss(
@@ -2160,16 +2171,21 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                     result.has_backward = true;
                   }
                 } else if (grad_diagnostics_local) {
-                  const torch::Tensor weighted_task_loss =
-                      task_loss * sample_weight / static_cast<double>(optimizer_accumulation_steps_local);
+                  const torch::Tensor weight = torch::full_like(
+                      policy_loss,
+                      sample_weight / static_cast<double>(optimizer_accumulation_steps_local));
+                  const torch::Tensor weighted_policy_loss = policy_loss * weight;
+                  const torch::Tensor weighted_value_loss = config_.ppo.value_coef * value_loss * weight;
+                  const torch::Tensor weighted_entropy_loss =
+                      (entropy_floor_loss - effective_entropy_coef * entropy) * weight;
                   const torch::Tensor weighted_goal_critic_loss =
-                      config_.goal_critic.lambda_Zg * goal_loss * sample_weight /
-                      static_cast<double>(optimizer_accumulation_steps_local);
+                      config_.goal_critic.lambda_Zg * goal_loss * weight;
                   const torch::Tensor weighted_goal_actor_loss =
-                      config_.goal_critic.lambda_goal_actor * actor_goal_loss * sample_weight /
-                      static_cast<double>(optimizer_accumulation_steps_local);
+                      config_.goal_critic.lambda_goal_actor * actor_goal_loss * weight;
                   std::vector<std::pair<torch::Tensor, std::vector<CapturedGrad>*>> objective_losses;
-                  objective_losses.push_back({weighted_task_loss, &gpu_task_group});
+                  objective_losses.push_back({weighted_policy_loss, &gpu_policy_group});
+                  objective_losses.push_back({weighted_value_loss, &gpu_value_group});
+                  objective_losses.push_back({weighted_entropy_loss, &gpu_entropy_group});
                   if (config_.goal_critic.lambda_Zg > 0.0F && weighted_goal_critic_loss.requires_grad()) {
                     objective_losses.push_back({weighted_goal_critic_loss, &gpu_goal_critic_group});
                   }
@@ -2233,6 +2249,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           GpuTaskResult task_result = fut.get();
 
           reduce_captured_gradients(*actor_, mode_task_grad_group, task_result.task_group, device_);
+          reduce_captured_gradients(*actor_, mode_policy_grad_group, task_result.policy_group, device_);
+          reduce_captured_gradients(*actor_, mode_value_grad_group, task_result.value_group, device_);
+          reduce_captured_gradients(*actor_, mode_entropy_grad_group, task_result.entropy_group, device_);
           reduce_captured_gradients(*actor_, mode_goal_critic_grad_group, task_result.goal_critic_group, device_);
           reduce_captured_gradients(*actor_, mode_goal_actor_grad_group, task_result.goal_actor_group, device_);
 
@@ -2255,7 +2274,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         }
 
         if (grad_diagnostics && !use_pcgrad) {
-          reduce_captured_gradients(*actor_, diagnostic_task_grad_group, mode_task_grad_group, device_);
+          reduce_captured_gradients(*actor_, diagnostic_policy_grad_group, mode_policy_grad_group, device_);
+          reduce_captured_gradients(*actor_, diagnostic_value_grad_group, mode_value_grad_group, device_);
+          reduce_captured_gradients(*actor_, diagnostic_entropy_grad_group, mode_entropy_grad_group, device_);
           reduce_captured_gradients(*actor_, diagnostic_goal_critic_grad_group, mode_goal_critic_grad_group, device_);
           reduce_captured_gradients(*actor_, diagnostic_goal_actor_grad_group, mode_goal_actor_grad_group, device_);
         }
@@ -2335,7 +2356,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       }
       if (!accumulated_has_backward) {
         actor_optimizer_.zero_grad();
-        diagnostic_task_grad_group.clear();
+        diagnostic_policy_grad_group.clear();
+        diagnostic_value_grad_group.clear();
+        diagnostic_entropy_grad_group.clear();
         diagnostic_goal_critic_grad_group.clear();
         diagnostic_goal_actor_grad_group.clear();
         accumulated_minibatches = 0;
@@ -2352,7 +2375,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           accumulated_policy_kl > static_cast<double>(config_.ppo.target_kl)) {
         ++metrics.kl_guard_skips;
         actor_optimizer_.zero_grad();
-        diagnostic_task_grad_group.clear();
+        diagnostic_policy_grad_group.clear();
+        diagnostic_value_grad_group.clear();
+        diagnostic_entropy_grad_group.clear();
         diagnostic_goal_critic_grad_group.clear();
         diagnostic_goal_actor_grad_group.clear();
         accumulated_minibatches = 0;
@@ -2371,7 +2396,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
       if (grad_diagnostics && !use_pcgrad) {
         zero_existing_gradients(*actor_);
-        add_captured_gradients_to_module(diagnostic_task_grad_group);
+        add_captured_gradients_to_module(diagnostic_policy_grad_group);
+        add_captured_gradients_to_module(diagnostic_value_grad_group);
+        add_captured_gradients_to_module(diagnostic_entropy_grad_group);
         add_captured_gradients_to_module(diagnostic_goal_critic_grad_group);
         add_captured_gradients_to_module(diagnostic_goal_actor_grad_group);
       }
@@ -2424,7 +2451,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                       << '\n';
             print_grad_stats("combined", combined_grad_top);
             if (!use_pcgrad) {
-              print_captured_group_diagnostics(*actor_, "task", diagnostic_task_grad_group);
+              print_captured_group_diagnostics(*actor_, "policy", diagnostic_policy_grad_group);
+              print_captured_group_diagnostics(*actor_, "value", diagnostic_value_grad_group);
+              print_captured_group_diagnostics(*actor_, "entropy", diagnostic_entropy_grad_group);
               print_captured_group_diagnostics(*actor_, "goal_critic", diagnostic_goal_critic_grad_group);
               print_captured_group_diagnostics(*actor_, "goal_actor", diagnostic_goal_actor_grad_group);
             }
@@ -2446,7 +2475,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         }
       }
       actor_optimizer_.zero_grad();
-      diagnostic_task_grad_group.clear();
+      diagnostic_policy_grad_group.clear();
+      diagnostic_value_grad_group.clear();
+      diagnostic_entropy_grad_group.clear();
       diagnostic_goal_critic_grad_group.clear();
       diagnostic_goal_actor_grad_group.clear();
 
