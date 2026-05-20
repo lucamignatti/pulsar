@@ -415,7 +415,7 @@
     "entropy_low_coef": 0.005,
     "max_policy_log_ratio": 2.0,
     "target_kl": 0.0,
-    "max_preclip_grad_norm": 10.0,
+    "max_preclip_grad_norm": 0.0,
     "plasticity": false,
     "plasticity_interval": 40,
     "plasticity_shrink": 0.999,
