@@ -388,7 +388,7 @@
   "ppo": {
     "num_envs": 3072,
     "collection_workers": 24,
-    "collection_shards": 1,
+    "collection_shards": 4,
     "init_checkpoint": "",
     "rollout_length": 64,
     "minibatch_size": 65536,
