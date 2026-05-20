@@ -112,6 +112,7 @@ struct EnvConfig {
   std::string collision_meshes_path = "collision_meshes";
   int team_size = 2;
   int tick_skip = 8;
+  int half_tick_skip = 4;
   int tick_rate = 120;
   int max_episode_ticks = 2250;
   bool disable_truncation = false;

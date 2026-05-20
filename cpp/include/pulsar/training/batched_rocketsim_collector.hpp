@@ -68,6 +68,7 @@ class BatchedRocketSimCollector {
 
   void step(std::span<const ControllerState> actions, CollectorTimings* timings = nullptr);
   void step(std::span<const std::int64_t> action_indices, CollectorTimings* timings = nullptr);
+  void step_physics_only(int tick_count);
 
   // Fused step output: scalar aggregates avoiding .item() reductions in trainer
   struct StepOutput {

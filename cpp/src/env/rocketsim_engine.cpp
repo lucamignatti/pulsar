@@ -148,17 +148,16 @@ StepResult RocketSimTransitionEngine::step(std::span<const ControllerState> acti
   return result;
 }
 
-void RocketSimTransitionEngine::step_inplace(std::span<const ControllerState> actions) {
+void RocketSimTransitionEngine::apply_controls(std::span<const ControllerState> actions) {
   if (actions.size() != state_.cars.size()) {
     throw std::invalid_argument("Action count must match the number of cars.");
   }
+  state_.goal_scored = false;
 
 #ifdef PULSAR_HAS_ROCKETSIM
   if (arena_ == nullptr) {
     throw std::runtime_error("RocketSim arena is not initialized.");
   }
-
-  state_.goal_scored = false;
   for (std::size_t i = 0; i < actions.size(); ++i) {
     RocketSim::CarControls controls;
     controls.throttle = actions[i].throttle;
@@ -172,15 +171,26 @@ void RocketSimTransitionEngine::step_inplace(std::span<const ControllerState> ac
     controls.ClampFix();
     cars_[i]->controls = controls;
   }
+#endif
+}
 
-  arena_->Step(config_.tick_skip);
-  episode_ticks_ += config_.tick_skip;
+void RocketSimTransitionEngine::step_physics(int tick_count) {
+#ifdef PULSAR_HAS_ROCKETSIM
+  if (arena_ == nullptr) {
+    throw std::runtime_error("RocketSim arena is not initialized.");
+  }
+  arena_->Step(tick_count);
+  episode_ticks_ += tick_count;
   sync_state_from_arena();
 #else
-  apply_placeholder_dynamics(actions);
-  state_.tick += config_.tick_skip;
-  episode_ticks_ += config_.tick_skip;
+  state_.tick += tick_count;
+  episode_ticks_ += tick_count;
 #endif
+}
+
+void RocketSimTransitionEngine::step_inplace(std::span<const ControllerState> actions) {
+  apply_controls(actions);
+  step_physics(config_.tick_skip);
 }
 
 const EnvState& RocketSimTransitionEngine::state() const {

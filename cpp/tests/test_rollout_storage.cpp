@@ -25,7 +25,7 @@ int main() {
 
     // --- Construction with a single head name ---
     std::vector<std::string> head_names = {"extrinsic"};
-    pulsar::RolloutStorage storage(rollout_len, num_agents, obs_dim, action_dim,
+    pulsar::RolloutStorage storage(rollout_len, num_agents, obs_dim, action_dim, 8,
                                    torch::kCPU, head_names);
 
     require(storage.capacity() == rollout_len, "capacity");
@@ -117,7 +117,7 @@ int main() {
     // --- append_slice (offset-based) ---
     const int total_agents = 6;
     const int slice_offset = 0;
-    pulsar::RolloutStorage slice_storage(rollout_len, total_agents, obs_dim, action_dim,
+    pulsar::RolloutStorage slice_storage(rollout_len, total_agents, obs_dim, action_dim, 8,
                                          torch::kCPU, head_names);
 
     auto slice_obs = torch::ones({total_agents, obs_dim});
@@ -153,7 +153,7 @@ int main() {
     // --- append_slice with non-zero offset ---
     const int partial_agents = 3;
     const int partial_offset = 2;
-    pulsar::RolloutStorage partial_storage(rollout_len, total_agents, obs_dim, action_dim,
+    pulsar::RolloutStorage partial_storage(rollout_len, total_agents, obs_dim, action_dim, 8,
                                            torch::kCPU, head_names);
 
     auto partial_obs = torch::full({partial_agents, obs_dim}, 2.0f);

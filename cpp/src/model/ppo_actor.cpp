@@ -467,7 +467,8 @@ PPOActorImpl::PPOActorImpl(
 
 ActorStepOutput PPOActorImpl::forward_step(
     torch::Tensor obs,
-    torch::Tensor goal_values) {
+    torch::Tensor goal_values,
+    bool compute_value) {
   PULSAR_TRACE_SCOPE_CAT("actor", "forward_step");
   torch::Tensor encoded = mamba2_encoder_->forward(obs);
 
@@ -481,7 +482,7 @@ ActorStepOutput PPOActorImpl::forward_step(
   return {
       policy_logits,
       encoded,
-      value_head_win_->forward(encoded),
+      compute_value ? value_head_win_->forward(encoded) : torch::Tensor{},
       encoded,
   };
 }
@@ -491,7 +492,8 @@ ActorStepOutput PPOActorImpl::forward_step_stateful(
     torch::Tensor state,
     torch::Tensor episode_starts,
     torch::Tensor* next_state,
-    torch::Tensor goal_values) {
+    torch::Tensor goal_values,
+    bool compute_value) {
   PULSAR_TRACE_SCOPE_CAT("actor", "forward_step_stateful");
   torch::Tensor encoded = mamba2_encoder_->forward_step(obs, state, episode_starts, next_state);
 
@@ -505,15 +507,20 @@ ActorStepOutput PPOActorImpl::forward_step_stateful(
   return {
       policy_logits,
       encoded,
-      value_head_win_->forward(encoded),
+      compute_value ? value_head_win_->forward(encoded) : torch::Tensor{},
       encoded,
   };
+}
+
+torch::Tensor PPOActorImpl::value_head_forward(const torch::Tensor& encoded) {
+  return value_head_win_->forward(encoded);
 }
 
 ActorSequenceOutput PPOActorImpl::forward_sequence(
     torch::Tensor obs_seq,
     torch::Tensor goal_values,
-    torch::Tensor episode_starts) {
+    torch::Tensor episode_starts,
+    bool compute_value) {
   PULSAR_TRACE_SCOPE_CAT("actor", "forward_sequence");
   const auto time = obs_seq.size(0);
   const auto batch = obs_seq.size(1);
@@ -530,7 +537,7 @@ ActorSequenceOutput PPOActorImpl::forward_sequence(
   return {
       policy_logits.reshape({time, batch, config_.action_dim}),
       encoded_seq,
-      value_head_win_->forward(encoded).reshape({time, batch, 1}),
+      compute_value ? value_head_win_->forward(encoded).reshape({time, batch, 1}) : torch::Tensor{},
       encoded_seq,
   };
 }

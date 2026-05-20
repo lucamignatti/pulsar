@@ -20,6 +20,12 @@ class TransitionEngine {
   virtual void reset(std::uint64_t seed) = 0;
   virtual StepResult step(std::span<const ControllerState> actions) = 0;
   virtual void step_inplace(std::span<const ControllerState> actions);
+  virtual void apply_controls(std::span<const ControllerState> actions) {}
+  virtual void step_physics(int tick_count) {
+    for (int i = 0; i < tick_count; ++i) {
+      step_inplace(std::span<const ControllerState>{});
+    }
+  }
   virtual const EnvState& state() const = 0;
   virtual std::size_t num_agents() const = 0;
 };

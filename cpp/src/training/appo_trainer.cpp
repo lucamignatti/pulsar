@@ -285,6 +285,7 @@ RolloutStorage make_rollout_storage(
       num_agents,
       config.model.observation_dim,
       action_dim,
+      config.model.encoder_dim,
       torch::Device(torch::kCPU),
       {"extrinsic"},
       pin_memory);
@@ -2618,28 +2619,9 @@ void APPOTrainer::collect_rollout(
     struct PendingShardStep {
       int agent_offset = 0;
       std::size_t shard = 0;
-      torch::Tensor normalized_obs{};
-      torch::Tensor episode_starts_host{};
-      torch::Tensor action_masks_host{};
-      torch::Tensor learner_active_host{};
-      torch::Tensor action_indices_cpu{};
-      torch::Tensor action_log_probs{};
-      torch::Tensor sampled_value{};
-      torch::Tensor next_recurrent_state{};
-      // Post-step tensors captured inside the async task.
-      torch::Tensor dones_host{};
-      torch::Tensor truncated_host{};
-      torch::Tensor bootstrap_truncated_host{};
-      torch::Tensor terminal_labels{};
-      torch::Tensor extrinsic_rewards_host{};
-      torch::Tensor gameplay_r_host{};
-      torch::Tensor mechanic_r_host{};
-      torch::Tensor goal_pos_host{};
-      torch::Tensor terminal_obs_host{};
       CollectorTimings timings{};
       double policy_forward_seconds = 0.0;
       double action_decode_seconds = 0.0;
-      // Done-reset metrics computed inside the async shard task.
       int goals_scored = 0;
       int goals_conceded = 0;
       int completed_episodes = 0;
@@ -2656,6 +2638,13 @@ void APPOTrainer::collect_rollout(
       std::map<std::string, int> mode_touched;
       std::map<std::string, int> mode_multi_touched;
       std::map<std::string, int> mode_scored;
+      double total_reward = 0.0;
+      double total_gameplay_reward = 0.0;
+      double total_mechanic_reward = 0.0;
+      int64_t total_steps = 0;
+      int64_t total_learner_steps = 0;
+      double total_goal_distance = 0.0;
+      double min_goal_distance = 1.0;
     };
 
     // Launch one async task per shard that processes all rollout steps.
@@ -2663,6 +2652,7 @@ void APPOTrainer::collect_rollout(
     struct ShardResult {
       std::size_t shard;
       std::vector<PendingShardStep> steps;
+      torch::Tensor next_recurrent_state;
     };
     std::vector<std::future<ShardResult>> shard_futures;
     shard_futures.reserve(collectors_.size());
@@ -2722,7 +2712,7 @@ void APPOTrainer::collect_rollout(
             normalized_obs = shard_normalizer->normalize(raw_obs);
             const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
             output = shard_actor->forward_step_stateful(
-                normalized_obs, recurrent_state, episode_starts, &recurrent_state, goal_values);
+                normalized_obs, recurrent_state, episode_starts, &recurrent_state, goal_values, false);
             actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
             if (self_play_manager_ && self_play_manager_->has_snapshots()) {
               torch::Tensor opponent_actions;
@@ -2745,11 +2735,11 @@ void APPOTrainer::collect_rollout(
               std::chrono::duration<double>(std::chrono::steady_clock::now() - policy_start).count() + self_play_inference_seconds;
 
           const auto decode_start = std::chrono::steady_clock::now();
-          shard_step.action_indices_cpu = actions.contiguous().to(torch::kCPU);
+          torch::Tensor action_indices_cpu = actions.contiguous().to(torch::kCPU);
           collector.step(
               std::span<const std::int64_t>(
-                  shard_step.action_indices_cpu.data_ptr<std::int64_t>(),
-                  static_cast<std::size_t>(shard_step.action_indices_cpu.numel())),
+                  action_indices_cpu.data_ptr<std::int64_t>(),
+                  static_cast<std::size_t>(action_indices_cpu.numel())),
               &shard_step.timings);
 
           // Done-reset processing inside the shard task.
@@ -2815,27 +2805,54 @@ void APPOTrainer::collect_rollout(
 
           shard_step.action_decode_seconds =
               std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
-          // Capture snapshots of mutable collector buffers. Tensor assignment is
-          // shallow; without clone(), every PendingShardStep would point at the
-          // collector's final reused host buffers after this shard finishes.
-          shard_step.dones_host = dones_host.clone();
-          shard_step.truncated_host = collector.host_truncated().clone();
-          shard_step.bootstrap_truncated_host = collector.host_bootstrap_truncated().clone();
-          shard_step.terminal_labels = terminal_labels.clone();
-          shard_step.extrinsic_rewards_host = collector.host_rewards().clone();
-          shard_step.gameplay_r_host = collector.host_gameplay_rewards().clone();
-          shard_step.mechanic_r_host = collector.host_mechanic_rewards().clone();
-          shard_step.goal_pos_host = collector.host_goal_positions().clone();
-          shard_step.terminal_obs_host = collector.host_terminal_observations().clone();
-          shard_step.normalized_obs = normalized_obs;
-          shard_step.episode_starts_host = episode_starts_host.clone();
-          shard_step.action_masks_host = action_masks_host.clone();
-          shard_step.learner_active_host = learner_active_host.clone();
-          shard_step.action_log_probs = action_log_probs;
-          shard_step.sampled_value = output.value_win_logits.squeeze(-1);
-          shard_step.next_recurrent_state = recurrent_state;
+
+          // Accumulate reward/goal-distance metrics in the shard task.
+          torch::Tensor extrinsic_rewards_host = collector.host_rewards();
+          torch::Tensor gameplay_r_host = collector.host_gameplay_rewards();
+          torch::Tensor mechanic_r_host = collector.host_mechanic_rewards();
+          shard_step.total_reward = (extrinsic_rewards_host * learner_active_host).sum().item<double>();
+          shard_step.total_gameplay_reward = (gameplay_r_host * learner_active_host).sum().item<double>();
+          shard_step.total_mechanic_reward = (mechanic_r_host * learner_active_host).sum().item<double>();
+          shard_step.total_steps = extrinsic_rewards_host.numel();
+          shard_step.total_learner_steps = static_cast<std::int64_t>(learner_active_host.sum().item<float>());
+
+          torch::Tensor goal_pos_host = collector.host_goal_positions();
+          torch::Tensor goal_norms = goal_pos_host.norm(2, 1);
+          float gd_min = goal_norms.min().item<float>();
+          float gd_mean = goal_norms.mean().item<float>();
+          shard_step.total_goal_distance = static_cast<double>(gd_mean) * static_cast<double>(goal_pos_host.size(0));
+          shard_step.min_goal_distance = static_cast<double>(gd_min);
+
+          // Write tensor data directly to rollout storage; values are deferred.
+          std::unordered_map<std::string, torch::Tensor> all_values;
+          std::unordered_map<std::string, torch::Tensor> all_rewards;
+          all_rewards["extrinsic"] = extrinsic_rewards_host;
+
+          dest.append_slice(
+              step,
+              shard_step.agent_offset,
+              normalized_obs,
+              episode_starts_host.to(torch::kBool),
+              action_masks_host,
+              learner_active_host,
+              action_indices_cpu,
+              action_log_probs,
+              all_values,
+              all_rewards,
+              dones_host,
+              truncated_host,
+              collector.host_bootstrap_truncated(),
+              goal_pos_host,
+              terminal_labels,
+              collector.host_terminal_observations(),
+              output.encoded);
+
+          auto& coll = collector;
+          dest.set_mode_ids_slice(step, shard_step.agent_offset, static_cast<int>(coll.total_agents()), coll.mode_id());
+
           result.steps.push_back(std::move(shard_step));
         }
+        result.next_recurrent_state = recurrent_state;
         return result;
       }));
     }
@@ -2846,6 +2863,9 @@ void APPOTrainer::collect_rollout(
       ShardResult shard_result = fut.get();
       metrics.policy_forward_seconds += [&] { double s = 0; for (auto& st : shard_result.steps) s += st.policy_forward_seconds; return s; }();
       metrics.action_decode_seconds += [&] { double s = 0; for (auto& st : shard_result.steps) s += st.action_decode_seconds; return s; }();
+      if (shard_result.next_recurrent_state.defined()) {
+        rollout_recurrent_states[shard_result.shard] = shard_result.next_recurrent_state;
+      }
       all_shard_steps[shard_result.shard] = std::move(shard_result.steps);
     }
 
@@ -2853,12 +2873,19 @@ void APPOTrainer::collect_rollout(
     for (int step = 0; step < config_.ppo.rollout_length; ++step) {
       for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
         PendingShardStep& shard_step = all_shard_steps[shard][step];
-        if (shard_step.next_recurrent_state.defined()) {
-          rollout_recurrent_states[shard] = shard_step.next_recurrent_state;
-        }
         accumulate_timings(collector_timings, shard_step.timings);
 
-        // Aggregate done-reset counts (computed in shard task).
+        total_reward += shard_step.total_reward;
+        total_gameplay_reward += shard_step.total_gameplay_reward;
+        total_mechanic_reward += shard_step.total_mechanic_reward;
+        total_steps += shard_step.total_steps;
+        total_learner_steps += shard_step.total_learner_steps;
+        total_goal_distance += shard_step.total_goal_distance
+            / static_cast<double>(total_agents_);
+        if (shard_step.min_goal_distance < min_goal_distance) {
+          min_goal_distance = shard_step.min_goal_distance;
+        }
+
         total_goals_scored += shard_step.goals_scored;
         total_goals_conceded += shard_step.goals_conceded;
         completed_episodes += shard_step.completed_episodes;
@@ -2876,66 +2903,36 @@ void APPOTrainer::collect_rollout(
         for (const auto& [mode, count] : shard_step.mode_multi_touched) mode_multi_touched[mode] += count;
         for (const auto& [mode, count] : shard_step.mode_scored) mode_scored[mode] += count;
 
-        // Use tensors captured by the async task (not stale collector state).
-        torch::Tensor& dones_host = shard_step.dones_host;
-        torch::Tensor& truncated_host = shard_step.truncated_host;
-        torch::Tensor& bootstrap_truncated_host = shard_step.bootstrap_truncated_host;
-        torch::Tensor& terminal_labels = shard_step.terminal_labels;
-        torch::Tensor& extrinsic_rewards_host = shard_step.extrinsic_rewards_host;
-        torch::Tensor& gameplay_r_host = shard_step.gameplay_r_host;
-        torch::Tensor& mechanic_r_host = shard_step.mechanic_r_host;
-        torch::Tensor& goal_pos_host = shard_step.goal_pos_host;
-        torch::Tensor& terminal_obs_host = shard_step.terminal_obs_host;
-
-        accumulated_sampled_value += shard_step.sampled_value.sum().item<double>();
-        accumulated_value_count += static_cast<int64_t>(shard_step.sampled_value.numel());
-
-        torch::Tensor goal_norms = goal_pos_host.norm(2, 1);
-        float gd_min = goal_norms.min().item<float>();
-        float gd_mean = goal_norms.mean().item<float>();
-        total_goal_distance += static_cast<double>(gd_mean)
-            * static_cast<double>(goal_pos_host.size(0))
-            / static_cast<double>(total_agents_);
-        if (gd_min < min_goal_distance) {
-          min_goal_distance = static_cast<double>(gd_min);
-        }
-
-        const auto learner_step_count = static_cast<std::int64_t>(shard_step.learner_active_host.sum().item<float>());
-        total_reward += (extrinsic_rewards_host * shard_step.learner_active_host).sum().item<double>();
-        total_gameplay_reward += (gameplay_r_host * shard_step.learner_active_host).sum().item<double>();
-        total_mechanic_reward += (mechanic_r_host * shard_step.learner_active_host).sum().item<double>();
-        total_steps += extrinsic_rewards_host.numel();
-        total_learner_steps += learner_step_count;
-
-        std::unordered_map<std::string, torch::Tensor> all_values;
-        all_values["extrinsic"] = shard_step.sampled_value;
-
-        std::unordered_map<std::string, torch::Tensor> all_rewards;
-        all_rewards["extrinsic"] = extrinsic_rewards_host;
-
-        dest.append_slice(
-            step,
-            shard_step.agent_offset,
-            shard_step.normalized_obs,
-            shard_step.episode_starts_host.to(torch::kBool),
-            shard_step.action_masks_host,
-            shard_step.learner_active_host,
-            shard_step.action_indices_cpu,
-            shard_step.action_log_probs,
-            all_values,
-            all_rewards,
-            dones_host,
-            truncated_host,
-            bootstrap_truncated_host,
-            goal_pos_host,
-            terminal_labels,
-            terminal_obs_host);
-        auto& collector = *collectors_[shard];
-        dest.set_mode_ids_slice(step, shard_step.agent_offset, static_cast<int>(collector.total_agents()), collector.mode_id());
-
-        local_collected_steps += learner_step_count;
+        local_collected_steps += shard_step.total_learner_steps;
       }
 
+    }
+    {
+      // Compute deferred value estimates from stored encoded features.
+      PULSAR_TRACE_SCOPE_CAT("trainer", "deferred_value_computation");
+      torch::NoGradGuard no_grad;
+      const int rl_steps = dest.rollout_length();
+      if (rl_steps > 0) {
+        torch::Tensor all_features = dest.encoded_features.narrow(0, 0, rl_steps);
+        auto& values_map = const_cast<std::unordered_map<std::string, torch::Tensor>&>(dest.all_values());
+        for (auto& [name, buf] : values_map) {
+          torch::Tensor features_flat = all_features.reshape({-1, static_cast<int64_t>(config_.model.encoder_dim)});
+          const int max_batch = effective_max_forward_samples(config_.model, device_);
+          for (int offset = 0; offset < features_flat.size(0); offset += max_batch) {
+            int batch = std::min(max_batch, static_cast<int>(features_flat.size(0) - offset));
+            torch::Tensor batch_features = features_flat.slice(0, offset, offset + batch).to(device_);
+            torch::Tensor batch_values = rollout_actor->value_head_forward(batch_features).to(torch::kCPU);
+            buf.reshape({-1}).narrow(0, offset, batch).copy_(batch_values.reshape({-1}));
+          }
+        }
+        accumulated_sampled_value = 0.0;
+        accumulated_value_count = 0;
+        for (const auto& [name, buf] : values_map) {
+          torch::Tensor flat_vals = buf.narrow(0, 0, rl_steps).reshape({-1});
+          accumulated_sampled_value += flat_vals.sum().item<double>();
+          accumulated_value_count += flat_vals.numel();
+        }
+      }
     }
 
     {
@@ -3007,7 +3004,8 @@ void APPOTrainer::collect_rollout(
           rollout_recurrent_states[0],
           episode_starts,
           &rollout_recurrent_states[0],
-          goal_values);
+          goal_values,
+          false);
       actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
     }
     if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
@@ -3029,8 +3027,6 @@ void APPOTrainer::collect_rollout(
           &metrics.policy_forward_seconds);
       actions = torch::where(snapshot_ids >= 0, opponent_actions, actions);
     }
-
-    torch::Tensor sampled_value = output.value_win_logits.squeeze(-1);
 
     const auto decode_start = std::chrono::steady_clock::now();
     torch::Tensor action_indices_cpu;
@@ -3124,9 +3120,6 @@ void APPOTrainer::collect_rollout(
       }
     }
 
-    accumulated_sampled_value += sampled_value.sum().item<double>();
-    accumulated_value_count += static_cast<int64_t>(sampled_value.numel());
-
     torch::Tensor goal_pos_host = collector_->host_goal_positions();
     torch::Tensor goal_norms = goal_pos_host.norm(2, 1);
     float gd_min = goal_norms.min().item<float>();
@@ -3146,7 +3139,6 @@ void APPOTrainer::collect_rollout(
     total_learner_steps += learner_step_count;
 
     std::unordered_map<std::string, torch::Tensor> all_values;
-    all_values["extrinsic"] = sampled_value;
 
     std::unordered_map<std::string, torch::Tensor> all_rewards;
     all_rewards["extrinsic"] = extrinsic_rewards_host;
@@ -3166,10 +3158,38 @@ void APPOTrainer::collect_rollout(
         bootstrap_truncated_host,
         goal_pos_host,
         terminal_labels,
-        terminal_obs_host);
+        terminal_obs_host,
+        output.encoded);
     dest.set_mode_ids_slice(step, 0, collector_->mode_id());
 
     local_collected_steps += learner_step_count;
+    }
+  }
+  {
+    // Compute deferred value estimates from stored encoded features.
+    PULSAR_TRACE_SCOPE_CAT("trainer", "deferred_value_computation");
+    torch::NoGradGuard no_grad;
+    const int rl_steps = dest.rollout_length();
+    if (rl_steps > 0) {
+      torch::Tensor all_features = dest.encoded_features.narrow(0, 0, rl_steps);
+      auto& values_map = const_cast<std::unordered_map<std::string, torch::Tensor>&>(dest.all_values());
+      for (auto& [name, buf] : values_map) {
+        torch::Tensor features_flat = all_features.reshape({-1, static_cast<int64_t>(config_.model.encoder_dim)});
+        const int max_batch = effective_max_forward_samples(config_.model, device_);
+        for (int offset = 0; offset < features_flat.size(0); offset += max_batch) {
+          int batch = std::min(max_batch, static_cast<int>(features_flat.size(0) - offset));
+          torch::Tensor batch_features = features_flat.slice(0, offset, offset + batch).to(device_);
+          torch::Tensor batch_values = rollout_actor->value_head_forward(batch_features).to(torch::kCPU);
+          buf.reshape({-1}).narrow(0, offset, batch).copy_(batch_values.reshape({-1}));
+        }
+      }
+      accumulated_sampled_value = 0.0;
+      accumulated_value_count = 0;
+      for (const auto& [name, buf] : values_map) {
+        torch::Tensor flat_vals = buf.narrow(0, 0, rl_steps).reshape({-1});
+        accumulated_sampled_value += flat_vals.sum().item<double>();
+        accumulated_value_count += flat_vals.numel();
+      }
     }
   }
   {

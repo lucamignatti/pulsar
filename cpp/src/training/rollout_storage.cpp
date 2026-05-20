@@ -14,6 +14,7 @@ RolloutStorage::RolloutStorage(
     int num_agents,
     int obs_dim,
     int action_dim,
+    int encoder_dim,
     torch::Device device,
     std::vector<std::string> head_names,
     bool pin_memory)
@@ -41,6 +42,7 @@ RolloutStorage::RolloutStorage(
       opts.dtype(torch::kInt64));
   terminal_observations = torch::zeros({rollout_length, num_agents, obs_dim}, opts);
   mode_ids = torch::zeros({rollout_length, num_agents}, opts.dtype(torch::kInt8));
+  encoded_features = torch::zeros({rollout_length, num_agents, encoder_dim}, opts);
 
   for (const auto& name : head_names) {
     values_[name] = torch::zeros({rollout_length, num_agents}, opts);
@@ -63,7 +65,8 @@ void RolloutStorage::append(
     const torch::Tensor& bootstrap_truncated_in,
     const torch::Tensor& goal_positions_in,
     const torch::Tensor& terminal_outcome_labels_in,
-    const torch::Tensor& terminal_observations_in) {
+    const torch::Tensor& terminal_observations_in,
+    const torch::Tensor& encoded_in) {
   if (step < 0 || step >= rollout_length_) {
     throw std::out_of_range("RolloutStorage::append step is outside rollout capacity.");
   }
@@ -79,6 +82,9 @@ void RolloutStorage::append(
   goal_positions[step].copy_(goal_positions_in.detach());
   terminal_outcome_labels[step].copy_(terminal_outcome_labels_in.detach());
   terminal_observations[step].copy_(terminal_observations_in.detach());
+  if (encoded_in.defined()) {
+    encoded_features[step].copy_(encoded_in.detach());
+  }
 
   for (const auto& [name, tensor] : values_in) {
     auto it = values_.find(name);
@@ -111,7 +117,8 @@ void RolloutStorage::append_slice(
     const torch::Tensor& bootstrap_truncated_in,
     const torch::Tensor& goal_positions_in,
     const torch::Tensor& terminal_outcome_labels_in,
-    const torch::Tensor& terminal_observations_in) {
+    const torch::Tensor& terminal_observations_in,
+    const torch::Tensor& encoded_in) {
   if (step < 0 || step >= rollout_length_) {
     throw std::out_of_range("RolloutStorage::append_slice step is outside rollout capacity.");
   }
@@ -132,6 +139,9 @@ void RolloutStorage::append_slice(
   goal_positions[step].narrow(0, agent_offset, agent_count).copy_(goal_positions_in.detach());
   terminal_outcome_labels[step].narrow(0, agent_offset, agent_count).copy_(terminal_outcome_labels_in.detach());
   terminal_observations[step].narrow(0, agent_offset, agent_count).copy_(terminal_observations_in.detach());
+  if (encoded_in.defined()) {
+    encoded_features[step].narrow(0, agent_offset, agent_count).copy_(encoded_in.detach());
+  }
 
   for (const auto& [name, tensor] : values_in) {
     auto it = values_.find(name);

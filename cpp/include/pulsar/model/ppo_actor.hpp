@@ -147,23 +147,27 @@ class PPOActorImpl : public torch::nn::Module {
 
   ActorStepOutput forward_step(
       torch::Tensor obs,
-      torch::Tensor goal_values = {});
+      torch::Tensor goal_values = {},
+      bool compute_value = true);
   ActorStepOutput forward_step_stateful(
       torch::Tensor obs,
       torch::Tensor state,
       torch::Tensor episode_starts,
       torch::Tensor* next_state,
-      torch::Tensor goal_values = {});
+      torch::Tensor goal_values = {},
+      bool compute_value = true);
   ActorSequenceOutput forward_sequence(
       torch::Tensor obs_seq,
       torch::Tensor goal_values = {},
-      torch::Tensor episode_starts = {});
+      torch::Tensor episode_starts = {},
+      bool compute_value = true);
   [[nodiscard]] torch::Tensor initial_recurrent_state(int64_t batch, const torch::Device& device) const;
   [[nodiscard]] int feature_dim() const;
   [[nodiscard]] const ModelConfig& config() const;
   [[nodiscard]] const GoalCriticConfig& goal_critic_config() const;
   [[nodiscard]] const ESLoraConfig& es_lora_config() const;
   [[nodiscard]] std::vector<std::string> enabled_critic_heads() const;
+  torch::Tensor value_head_forward(const torch::Tensor& encoded);
 
   [[nodiscard]] std::vector<torch::Tensor> es_lora_parameters() const;
   [[nodiscard]] std::vector<torch::Tensor> es_lora_parameters_flat() const;

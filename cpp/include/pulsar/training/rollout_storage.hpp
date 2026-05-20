@@ -17,6 +17,7 @@ class RolloutStorage {
       int num_agents,
       int obs_dim,
       int action_dim,
+      int encoder_dim,
       torch::Device device,
       std::vector<std::string> head_names = {"extrinsic"},
       bool pin_memory = false);
@@ -36,7 +37,8 @@ class RolloutStorage {
       const torch::Tensor& bootstrap_truncated,
       const torch::Tensor& goal_positions,
       const torch::Tensor& terminal_outcome_labels,
-      const torch::Tensor& terminal_observations);
+      const torch::Tensor& terminal_observations,
+      const torch::Tensor& encoded = {});
   void append_slice(
       int step,
       int agent_offset,
@@ -53,7 +55,8 @@ class RolloutStorage {
       const torch::Tensor& bootstrap_truncated,
       const torch::Tensor& goal_positions,
       const torch::Tensor& terminal_outcome_labels,
-      const torch::Tensor& terminal_observations);
+      const torch::Tensor& terminal_observations,
+      const torch::Tensor& encoded = {});
 
   void set_final_values(const std::unordered_map<std::string, torch::Tensor>& final_values);
   void set_rewards_at(int step, const std::unordered_map<std::string, torch::Tensor>& rewards_in);
@@ -82,6 +85,7 @@ class RolloutStorage {
   torch::Tensor terminal_outcome_labels;
   torch::Tensor terminal_observations;
   torch::Tensor mode_ids;  // int8, [rollout_length, num_agents], 0=unknown 1=1v1 2=2v2 3=3v3
+  torch::Tensor encoded_features;  // float32, [rollout_length, num_agents, encoder_dim]
   std::unordered_map<std::string, torch::Tensor> final_values_;
 
   void set_mode_ids_slice(int step, int agent_offset, int agent_count, std::int8_t mode_id);

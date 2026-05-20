@@ -594,10 +594,19 @@ void BatchedRocketSimCollector::step(std::span<const ControllerState> actions, C
     for (std::size_t env_idx = begin; env_idx < end; ++env_idx) {
       const std::size_t agent_begin = agent_offsets_[env_idx];
       const std::size_t agent_end = agent_offsets_[env_idx + 1];
-      envs_[env_idx].engine->step_inplace(
-          std::span<const ControllerState>(
-              actions.data() + static_cast<std::ptrdiff_t>(agent_begin),
-              agent_end - agent_begin));
+      auto& engine = *envs_[env_idx].engine;
+      const int half = config_.env.half_tick_skip;
+      const int full = config_.env.tick_skip;
+      std::span<const ControllerState> env_actions(
+          actions.data() + static_cast<std::ptrdiff_t>(agent_begin),
+          agent_end - agent_begin);
+      if (half > 0 && half < full) {
+        engine.apply_controls(env_actions);
+        engine.step_physics(half);
+        engine.step_physics(full - half);
+      } else {
+        engine.step_inplace(env_actions);
+      }
     }
   });
   if (timings != nullptr) {
@@ -605,6 +614,14 @@ void BatchedRocketSimCollector::step(std::span<const ControllerState> actions, C
         std::chrono::duration<double>(std::chrono::steady_clock::now() - env_step_start).count();
   }
   finalize_step(timings);
+}
+
+void BatchedRocketSimCollector::step_physics_only(int tick_count) {
+  executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
+    for (std::size_t env_idx = begin; env_idx < end; ++env_idx) {
+      envs_[env_idx].engine->step_physics(tick_count);
+    }
+  });
 }
 
 void BatchedRocketSimCollector::step(std::span<const std::int64_t> action_indices, CollectorTimings* timings) {
@@ -660,7 +677,16 @@ void BatchedRocketSimCollector::step(std::span<const std::int64_t> action_indice
           std::span<const std::int64_t>(
               action_indices.data() + static_cast<std::ptrdiff_t>(agent_begin), count),
           envs_[env_idx].action_scratch);
-      envs_[env_idx].engine->step_inplace(envs_[env_idx].action_scratch);
+      auto& engine = *envs_[env_idx].engine;
+      const int half = config_.env.half_tick_skip;
+      const int full = config_.env.tick_skip;
+      if (half > 0 && half < full) {
+        engine.apply_controls(envs_[env_idx].action_scratch);
+        engine.step_physics(half);
+        engine.step_physics(full - half);
+      } else {
+        engine.step_inplace(envs_[env_idx].action_scratch);
+      }
 
       const EnvState& current_state = envs_[env_idx].engine->state();
 
