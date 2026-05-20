@@ -257,35 +257,10 @@ __global__ void normalize_finish_kernel(
   }
 }
 
-__global__ void compute_future_goal_end_kernel(
-    const float* __restrict__ dones,
-    const float* __restrict__ starts,
-    int* __restrict__ future_end_exclusive,
-    int steps,
-    int agents,
-    bool has_dones,
-    bool has_starts) {
-  const int a = blockIdx.x * blockDim.x + threadIdx.x;
-  if (a >= agents) return;
-  int next_done_exclusive = steps;
-  int next_start_index = steps;
-  for (int t = steps - 1; t >= 0; --t) {
-    const int idx = t * agents + a;
-    const int done_exclusive = has_dones && dones[idx] > 0.5F ? (t + 1) : next_done_exclusive;
-    const int end_exclusive = done_exclusive < next_start_index ? done_exclusive : next_start_index;
-    future_end_exclusive[idx] = end_exclusive;
-    if (has_dones && dones[idx] > 0.5F) {
-      next_done_exclusive = t + 1;
-    }
-    if (has_starts && starts[idx] > 0.5F) {
-      next_start_index = t;
-    }
-  }
-}
-
 __global__ void sample_future_goal_kernel(
     const float* __restrict__ goal_positions,
-    const int* __restrict__ future_end_exclusive,
+    const float* __restrict__ dones,
+    const float* __restrict__ starts,
     float* __restrict__ sampled,
     int steps,
     int agents,
@@ -297,7 +272,19 @@ __global__ void sample_future_goal_kernel(
   if (index >= total) return;
   const int t = index / agents;
   const int a = index - t * agents;
-  int max_offset = future_end_exclusive[index] - t - 1;
+  int end = steps;
+  for (int j = t; j < steps; ++j) {
+    const int ja = j * agents + a;
+    if (dones != nullptr && dones[ja] > 0.5F) {
+      end = j + 1;
+      break;
+    }
+    if (starts != nullptr && starts[ja] > 0.5F && j > t) {
+      end = j;
+      break;
+    }
+  }
+  int max_offset = end - t - 1;
   if (max_offset < 0) max_offset = 0;
   if (max_offset > horizon) max_offset = horizon;
   int chosen = t;
@@ -495,20 +482,11 @@ at::Tensor sample_future_goal_positions_hip(
   const int agents = static_cast<int>(goal_positions.size(1));
   const int dim = static_cast<int>(goal_positions.size(2));
   at::Tensor sampled = at::empty_like(goal_positions);
-  at::Tensor future_end_exclusive = at::empty({steps, agents}, goal_positions.options().dtype(at::kInt));
   constexpr int kThreads = 256;
-  compute_future_goal_end_kernel<<<blocks_for(agents, kThreads), kThreads, 0, at::hip::getCurrentHIPStream()>>>(
-      dones.defined() ? dones.data_ptr<float>() : nullptr,
-      episode_starts.defined() ? episode_starts.data_ptr<float>() : nullptr,
-      future_end_exclusive.data_ptr<int>(),
-      steps,
-      agents,
-      dones.defined(),
-      episode_starts.defined());
-  check_hip_launch();
   sample_future_goal_kernel<<<blocks_for(steps * agents, kThreads), kThreads, 0, at::hip::getCurrentHIPStream()>>>(
       goal_positions.data_ptr<float>(),
-      future_end_exclusive.data_ptr<int>(),
+      dones.defined() ? dones.data_ptr<float>() : nullptr,
+      episode_starts.defined() ? episode_starts.data_ptr<float>() : nullptr,
       sampled.data_ptr<float>(),
       steps,
       agents,

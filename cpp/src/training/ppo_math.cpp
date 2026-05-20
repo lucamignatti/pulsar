@@ -166,8 +166,6 @@ bool can_use_action_accel(const torch::Tensor& logits, const torch::Tensor& acti
   return can_use_ppo_math_accel(logits) &&
       action_masks.defined() &&
       action_masks.is_cuda() &&
-      logits.dim() == 2 &&
-      logits.numel() >= 8192 &&
       action_masks.dim() == logits.dim() &&
       action_masks.size(-1) == logits.size(-1) &&
       (action_masks.scalar_type() == torch::kBool || action_masks.scalar_type() == torch::kUInt8);
@@ -193,7 +191,7 @@ torch::Tensor sample_masked_actions(
     const torch::Tensor& action_masks,
     bool deterministic,
     torch::Tensor* log_probs) {
-  if (can_use_action_accel(logits, action_masks)) {
+  if (can_use_action_accel(logits, action_masks) && logits.dim() == 2) {
     const bool need_log_probs = log_probs != nullptr;
     const std::uint32_t seed = static_cast<std::uint32_t>(std::rand());
 #if defined(PULSAR_HAS_PPO_MATH_CUDA_KERNELS)

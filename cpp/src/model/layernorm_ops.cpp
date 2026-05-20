@@ -130,14 +130,6 @@ class FusedLayerNormHipFunction : public torch::autograd::Function<FusedLayerNor
 #endif
 
 constexpr float kLayerNormEps = 1.0e-5F;
-constexpr int64_t kLayerNormAccelMinElements = 65536;
-
-bool should_use_fused_layer_norm_accel(const torch::Tensor& input) {
-  return input.is_cuda() &&
-      input.scalar_type() == torch::kFloat32 &&
-      input.numel() >= kLayerNormAccelMinElements &&
-      input.size(-1) >= 64;
-}
 
 torch::Tensor stable_layer_norm_fallback(const torch::Tensor& input, const torch::nn::LayerNorm& norm) {
   const torch::Tensor input_f32 = input.scalar_type() == torch::kFloat32 ? input : input.to(torch::kFloat32);
@@ -172,7 +164,7 @@ torch::Tensor stable_layer_norm_fallback(const torch::Tensor& input, const torch
 
 torch::Tensor fused_layer_norm(const torch::Tensor& input, const torch::nn::LayerNorm& norm) {
 #if defined(PULSAR_HAS_LAYERNORM_CUDA_KERNELS)
-  if (should_use_fused_layer_norm_accel(input)) {
+  if (input.is_cuda()) {
     torch::Tensor input_f32 = input.contiguous().to(torch::kFloat32);
     torch::Tensor weight = norm->weight.defined()
         ? norm->weight
@@ -193,7 +185,7 @@ torch::Tensor fused_layer_norm(const torch::Tensor& input, const torch::nn::Laye
     return FusedLayerNormCudaFunction::apply(input_f32, weight, bias, kLayerNormEps);
   }
 #elif defined(PULSAR_HAS_LAYERNORM_HIP_KERNELS)
-  if (should_use_fused_layer_norm_accel(input)) {
+  if (input.is_cuda()) {
     torch::Tensor input_f32 = input.contiguous().to(torch::kFloat32);
     torch::Tensor weight = norm->weight.defined()
         ? norm->weight
