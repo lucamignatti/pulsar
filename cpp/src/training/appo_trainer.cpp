@@ -5,13 +5,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <iostream>
 #include <limits>
-#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -321,40 +319,6 @@ struct CapturedGrad {
   torch::Tensor grad;
 };
 
-bool env_flag_enabled(const char* name) {
-  const char* value = std::getenv(name);
-  if (value == nullptr) {
-    return false;
-  }
-  const std::string text(value);
-  return !text.empty() && text != "0" && text != "false" && text != "FALSE" && text != "off" && text != "OFF";
-}
-
-bool appo_grad_diagnostics_enabled() {
-  static const bool enabled = env_flag_enabled("PULSAR_APPO_GRAD_DIAG");
-  return enabled;
-}
-
-bool appo_grad_boundary_diagnostics_enabled() {
-  static const bool enabled = env_flag_enabled("PULSAR_APPO_GRAD_BOUNDARY_DIAG");
-  return enabled;
-}
-
-int& appo_grad_diagnostics_reports_remaining() {
-  static int remaining = [] {
-    const char* value = std::getenv("PULSAR_APPO_GRAD_DIAG_LIMIT");
-    if (value == nullptr || *value == '\0') {
-      return 12;
-    }
-    try {
-      return std::stoi(value);
-    } catch (const std::exception&) {
-      return 12;
-    }
-  }();
-  return remaining;
-}
-
 void accumulate_gradients(torch::nn::Module& module, std::vector<CapturedGrad>& accumulated) {
   if (accumulated.empty()) {
     for (auto& p : module.parameters()) {
@@ -403,21 +367,6 @@ void reduce_captured_gradients(
   }
 }
 
-void add_captured_gradients_to_module(std::vector<CapturedGrad>& group) {
-  for (CapturedGrad& captured : group) {
-    if (!captured.grad.defined()) {
-      continue;
-    }
-    torch::Tensor grad = captured.param.mutable_grad();
-    const torch::Tensor value = captured.grad.to(captured.param.device()).to(captured.param.scalar_type());
-    if (grad.defined()) {
-      grad.add_(value);
-    } else {
-      captured.param.mutable_grad() = value.clone();
-    }
-  }
-}
-
 void zero_existing_gradients(torch::nn::Module& module) {
   for (auto& p : module.parameters()) {
     torch::Tensor grad = p.mutable_grad();
@@ -435,238 +384,6 @@ bool gradients_are_finite(const torch::nn::Module& module) {
     }
   }
   return true;
-}
-
-struct GradStat {
-  std::string name;
-  double l2 = 0.0;
-  double max_abs = 0.0;
-  bool finite = true;
-};
-
-struct BoundaryGradStat {
-  double l2 = 0.0;
-  double max_abs = 0.0;
-  bool finite = true;
-  bool seen = false;
-};
-
-struct BoundaryGradSet {
-  BoundaryGradStat encoded;
-  BoundaryGradStat policy_logits;
-  BoundaryGradStat flat_policy_logits;
-  BoundaryGradStat active_logits;
-  BoundaryGradStat value_win_logits;
-  BoundaryGradStat flat_value_win_logits;
-  BoundaryGradStat active_value_win_logits;
-  BoundaryGradStat features;
-  BoundaryGradStat flat_features;
-  BoundaryGradStat active_features;
-};
-
-GradStat compute_grad_stat(const std::string& name, const torch::Tensor& grad) {
-  GradStat stat;
-  stat.name = name;
-  if (!grad.defined()) {
-    return stat;
-  }
-  const torch::Tensor detached = grad.detach();
-  const torch::Tensor finite_mask = torch::isfinite(detached);
-  stat.finite = finite_mask.all().item<bool>();
-  const torch::Tensor clean = stat.finite ? detached : detached.masked_fill(finite_mask.logical_not(), 0.0);
-  if (clean.numel() == 0) {
-    return stat;
-  }
-  stat.max_abs = clean.abs().max().item<double>();
-  if (stat.max_abs <= 0.0 || !std::isfinite(stat.max_abs)) {
-    return stat;
-  }
-  const torch::Tensor scaled = clean.to(torch::kFloat32) / stat.max_abs;
-  const double scaled_sq = scaled.square().sum().item<double>();
-  stat.l2 = std::isfinite(scaled_sq) ? stat.max_abs * std::sqrt(scaled_sq) : std::numeric_limits<double>::infinity();
-  return stat;
-}
-
-void merge_boundary_grad_stat(BoundaryGradStat& dst, const BoundaryGradStat& src) {
-  if (!src.seen) {
-    return;
-  }
-  dst.seen = true;
-  dst.finite = dst.finite && src.finite;
-  dst.l2 = std::max(dst.l2, src.l2);
-  dst.max_abs = std::max(dst.max_abs, src.max_abs);
-}
-
-void merge_boundary_grad_set(BoundaryGradSet& dst, const BoundaryGradSet& src) {
-  merge_boundary_grad_stat(dst.encoded, src.encoded);
-  merge_boundary_grad_stat(dst.policy_logits, src.policy_logits);
-  merge_boundary_grad_stat(dst.flat_policy_logits, src.flat_policy_logits);
-  merge_boundary_grad_stat(dst.active_logits, src.active_logits);
-  merge_boundary_grad_stat(dst.value_win_logits, src.value_win_logits);
-  merge_boundary_grad_stat(dst.flat_value_win_logits, src.flat_value_win_logits);
-  merge_boundary_grad_stat(dst.active_value_win_logits, src.active_value_win_logits);
-  merge_boundary_grad_stat(dst.features, src.features);
-  merge_boundary_grad_stat(dst.flat_features, src.flat_features);
-  merge_boundary_grad_stat(dst.active_features, src.active_features);
-}
-
-void print_boundary_grad_stat(const char* name, const BoundaryGradStat& stat) {
-  std::cerr << "  boundary_grad tensor=" << name
-            << " seen=" << (stat.seen ? 1 : 0)
-            << " l2=" << stat.l2
-            << " max_abs=" << stat.max_abs
-            << " finite=" << (stat.finite ? 1 : 0)
-            << '\n';
-}
-
-void print_boundary_grad_set(const BoundaryGradSet& stats) {
-  print_boundary_grad_stat("encoded", stats.encoded);
-  print_boundary_grad_stat("policy_logits", stats.policy_logits);
-  print_boundary_grad_stat("flat_policy_logits", stats.flat_policy_logits);
-  print_boundary_grad_stat("active_logits", stats.active_logits);
-  print_boundary_grad_stat("value_win_logits", stats.value_win_logits);
-  print_boundary_grad_stat("flat_value_win_logits", stats.flat_value_win_logits);
-  print_boundary_grad_stat("active_value_win_logits", stats.active_value_win_logits);
-  print_boundary_grad_stat("features", stats.features);
-  print_boundary_grad_stat("flat_features", stats.flat_features);
-  print_boundary_grad_stat("active_features", stats.active_features);
-}
-
-bool grad_stat_order(const GradStat& lhs, const GradStat& rhs) {
-  if (lhs.finite != rhs.finite) {
-    return !lhs.finite;
-  }
-  return lhs.l2 > rhs.l2;
-}
-
-std::vector<GradStat> top_module_grad_stats(torch::nn::Module& module, std::size_t limit) {
-  std::vector<GradStat> stats;
-  for (auto& item : module.named_parameters(true)) {
-    torch::Tensor grad = item.value().grad();
-    if (grad.defined()) {
-      stats.push_back(compute_grad_stat(item.key(), grad));
-    }
-  }
-  std::sort(stats.begin(), stats.end(), grad_stat_order);
-  if (stats.size() > limit) {
-    stats.resize(limit);
-  }
-  return stats;
-}
-
-std::vector<GradStat> top_captured_grad_stats(
-    torch::nn::Module& module,
-    const std::vector<CapturedGrad>& group,
-    std::size_t limit) {
-  std::vector<GradStat> stats;
-  std::size_t index = 0;
-  for (auto& item : module.named_parameters(true)) {
-    if (index < group.size() && group[index].grad.defined()) {
-      stats.push_back(compute_grad_stat(item.key(), group[index].grad));
-    }
-    ++index;
-  }
-  std::sort(stats.begin(), stats.end(), grad_stat_order);
-  if (stats.size() > limit) {
-    stats.resize(limit);
-  }
-  return stats;
-}
-
-double captured_grad_norm(const std::vector<CapturedGrad>& group, bool* finite) {
-  double max_abs = 0.0;
-  bool all_finite = true;
-  for (const CapturedGrad& captured : group) {
-    if (!captured.grad.defined()) {
-      continue;
-    }
-    const torch::Tensor detached = captured.grad.detach();
-    const torch::Tensor finite_mask = torch::isfinite(detached);
-    const bool tensor_finite = finite_mask.all().item<bool>();
-    all_finite = all_finite && tensor_finite;
-    const torch::Tensor clean = tensor_finite ? detached : detached.masked_fill(finite_mask.logical_not(), 0.0);
-    if (clean.numel() == 0) {
-      continue;
-    }
-    const double tensor_max = clean.abs().max().item<double>();
-    if (std::isfinite(tensor_max)) {
-      max_abs = std::max(max_abs, tensor_max);
-    } else {
-      all_finite = false;
-    }
-  }
-  if (finite != nullptr) {
-    *finite = all_finite;
-  }
-  if (max_abs == 0.0) {
-    return 0.0;
-  }
-  double scaled_sq_sum = 0.0;
-  for (const CapturedGrad& captured : group) {
-    if (!captured.grad.defined()) {
-      continue;
-    }
-    const torch::Tensor detached = captured.grad.detach();
-    const torch::Tensor finite_mask = torch::isfinite(detached);
-    const bool tensor_finite = finite_mask.all().item<bool>();
-    const torch::Tensor clean = tensor_finite ? detached : detached.masked_fill(finite_mask.logical_not(), 0.0);
-    const double tensor_scaled_sq = (clean.to(torch::kFloat32) / max_abs).square().sum().item<double>();
-    if (!std::isfinite(tensor_scaled_sq)) {
-      if (finite != nullptr) {
-        *finite = false;
-      }
-      return std::numeric_limits<double>::infinity();
-    }
-    scaled_sq_sum += tensor_scaled_sq;
-  }
-  return max_abs * std::sqrt(scaled_sq_sum);
-}
-
-void print_grad_stats(const char* label, const std::vector<GradStat>& stats) {
-  for (const GradStat& stat : stats) {
-    std::cerr << "  " << label
-              << " param=" << stat.name
-              << " l2=" << stat.l2
-              << " max_abs=" << stat.max_abs
-              << " finite=" << (stat.finite ? 1 : 0)
-              << '\n';
-  }
-}
-
-std::vector<GradStat> top_parameter_value_stats(torch::nn::Module& module, std::size_t limit) {
-  std::vector<GradStat> stats;
-  for (auto& item : module.named_parameters(true)) {
-    stats.push_back(compute_grad_stat(item.key(), item.value()));
-  }
-  std::sort(stats.begin(), stats.end(), grad_stat_order);
-  if (stats.size() > limit) {
-    stats.resize(limit);
-  }
-  return stats;
-}
-
-void print_captured_group_diagnostics(
-    torch::nn::Module& module,
-    const char* objective,
-    const std::vector<CapturedGrad>& group) {
-  bool has_grad = false;
-  for (const CapturedGrad& captured : group) {
-    if (captured.grad.defined()) {
-      has_grad = true;
-      break;
-    }
-  }
-  if (!has_grad) {
-    std::cerr << "  objective=" << objective << " has_grad=0\n";
-    return;
-  }
-  bool finite = true;
-  const double norm = captured_grad_norm(group, &finite);
-  std::cerr << "  objective=" << objective
-            << " norm=" << norm
-            << " finite=" << (finite ? 1 : 0)
-            << '\n';
-  print_grad_stats(objective, top_captured_grad_stats(module, group, 8));
 }
 
 struct GradientSanitizeResult {
@@ -1847,35 +1564,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   double accumulated_total_active = 0.0;
   double accumulated_policy_kl_sum = 0.0;
   double accumulated_policy_kl_count = 0.0;
-  const bool grad_diagnostics = appo_grad_diagnostics_enabled();
-  const bool boundary_grad_diagnostics = appo_grad_boundary_diagnostics_enabled();
-  const bool split_grad_diagnostics = grad_diagnostics && !boundary_grad_diagnostics;
-  const bool any_grad_diagnostics = grad_diagnostics || boundary_grad_diagnostics;
-  std::vector<CapturedGrad> diagnostic_policy_grad_group;
-  std::vector<CapturedGrad> diagnostic_value_grad_group;
-  std::vector<CapturedGrad> diagnostic_entropy_grad_group;
-  std::vector<CapturedGrad> diagnostic_goal_critic_grad_group;
-  std::vector<CapturedGrad> diagnostic_goal_actor_grad_group;
-  BoundaryGradSet diagnostic_boundary_grad_set;
-  double diagnostic_max_policy_loss_abs = 0.0;
-  double diagnostic_max_value_loss_abs = 0.0;
-  double diagnostic_max_entropy_abs = 0.0;
-  double diagnostic_max_goal_critic_loss_abs = 0.0;
-  double diagnostic_max_goal_actor_loss_abs = 0.0;
-  double diagnostic_max_task_loss_abs = 0.0;
-  double diagnostic_max_value_pred_abs = 0.0;
-  double diagnostic_max_value_return_abs = 0.0;
-  double diagnostic_max_value_error_abs = 0.0;
-  double diagnostic_max_feature_abs = 0.0;
-  double diagnostic_max_logit_abs = 0.0;
-  double diagnostic_max_advantage_abs = 0.0;
-  double diagnostic_min_valid_actions = std::numeric_limits<double>::infinity();
-  double diagnostic_max_valid_actions = 0.0;
-  if (boundary_grad_diagnostics) {
-    std::cerr << "APPO boundary gradient diagnostics enabled: normal backward tensor hooks will be captured\n";
-  } else if (grad_diagnostics) {
-    std::cerr << "APPO gradient diagnostics enabled: split objective gradients will be captured for attribution\n";
-  }
 
   const auto& all_values = rollout.all_values();
   const auto& all_rewards = rollout.all_rewards();
@@ -2017,9 +1705,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           actor_optimizer_.zero_grad();
         }
         std::vector<CapturedGrad> mode_task_grad_group;
-        std::vector<CapturedGrad> mode_policy_grad_group;
-        std::vector<CapturedGrad> mode_value_grad_group;
-        std::vector<CapturedGrad> mode_entropy_grad_group;
         std::vector<CapturedGrad> mode_goal_critic_grad_group;
         std::vector<CapturedGrad> mode_goal_actor_grad_group;
 
@@ -2027,12 +1712,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         // for its chunk of agents, accumulating GPU-local CapturedGrad groups.
         struct GpuTaskResult {
           std::vector<CapturedGrad> task_group;
-          std::vector<CapturedGrad> policy_group;
-          std::vector<CapturedGrad> value_group;
-          std::vector<CapturedGrad> entropy_group;
           std::vector<CapturedGrad> goal_critic_group;
           std::vector<CapturedGrad> goal_actor_group;
-          BoundaryGradSet boundary_grad_set;
           double policy_loss_sum = 0.0;
           double value_loss_sum = 0.0;
           double entropy_sum = 0.0;
@@ -2043,22 +1724,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           double goal_score = 0.0;
           double sampled_goal_dist = 0.0;
           double fwd_bwd_seconds = 0.0;
-          double max_policy_loss_abs = 0.0;
-          double max_value_loss_abs = 0.0;
-          double max_entropy_abs = 0.0;
-          double max_goal_critic_loss_abs = 0.0;
-          double max_goal_actor_loss_abs = 0.0;
-          double max_task_loss_abs = 0.0;
-          double max_value_pred_abs = 0.0;
-          double max_value_return_abs = 0.0;
-          double max_value_error_abs = 0.0;
-          double max_feature_abs = 0.0;
-          double max_logit_abs = 0.0;
-          double max_advantage_abs = 0.0;
-          double min_valid_actions = std::numeric_limits<double>::infinity();
-          double max_valid_actions = 0.0;
-          int nonfinite_skips = 0;
-          int nonfinite_grad_skips = 0;
           bool has_backward = false;
           std::int64_t active_count = 0;
         };
@@ -2072,9 +1737,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         const double mode_total_active_local = mode_total_active;
         const bool mode_all_active_local = mode_all_active;
         const bool use_pcgrad_local = use_pcgrad;
-        const bool grad_diagnostics_local = any_grad_diagnostics && !use_pcgrad;
-        const bool split_grad_diagnostics_local = split_grad_diagnostics && !use_pcgrad;
-        const bool boundary_grad_diagnostics_local = boundary_grad_diagnostics && !use_pcgrad;
         const bool use_cuda_amp_local = use_cuda_amp;
         const double cuda_amp_loss_scale_local = cuda_amp_loss_scale;
         const int optimizer_accumulation_steps_local = optimizer_accumulation_steps;
@@ -2087,9 +1749,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
               &mode_agent_indices, &effective_entropy_coef, &effective_entropy_floor_coef, this]() mutable -> GpuTaskResult {
             GpuTaskResult result;
             std::vector<CapturedGrad>& gpu_task_group = result.task_group;
-            std::vector<CapturedGrad>& gpu_policy_group = result.policy_group;
-            std::vector<CapturedGrad>& gpu_value_group = result.value_group;
-            std::vector<CapturedGrad>& gpu_entropy_group = result.entropy_group;
             std::vector<CapturedGrad>& gpu_goal_critic_group = result.goal_critic_group;
             std::vector<CapturedGrad>& gpu_goal_actor_group = result.goal_actor_group;
             torch::Tensor policy_loss_metric;
@@ -2101,7 +1760,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             torch::Tensor goal_critic_loss_metric;
             torch::Tensor goal_score_metric;
             torch::Tensor sampled_goal_dist_metric;
-            std::mutex boundary_grad_mutex;
             auto add_metric = [](torch::Tensor& dst, const torch::Tensor& value, double weight) {
               const torch::Tensor term = value.detach().to(torch::kFloat32) * weight;
               dst = dst.defined() ? dst + term : term;
@@ -2109,32 +1767,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             auto max_metric = [](torch::Tensor& dst, const torch::Tensor& value) {
               const torch::Tensor term = value.detach().to(torch::kFloat32);
               dst = dst.defined() ? torch::maximum(dst, term) : term;
-            };
-            auto update_max = [](double& dst, const torch::Tensor& value) {
-              const double scalar = value.detach().to(torch::kFloat32).item<double>();
-              if (std::isfinite(scalar)) {
-                dst = std::max(dst, scalar);
-              }
-            };
-            auto update_min = [](double& dst, const torch::Tensor& value) {
-              const double scalar = value.detach().to(torch::kFloat32).item<double>();
-              if (std::isfinite(scalar)) {
-                dst = std::min(dst, scalar);
-              }
-            };
-            auto observe_boundary_grad = [&](const torch::Tensor& tensor, BoundaryGradStat& stat) {
-              if (!boundary_grad_diagnostics_local || !tensor.requires_grad()) {
-                return;
-              }
-              tensor.register_hook([&stat, &boundary_grad_mutex](const torch::Tensor& grad) {
-                const GradStat grad_stat = compute_grad_stat("", grad);
-                std::lock_guard<std::mutex> lock(boundary_grad_mutex);
-                stat.seen = true;
-                stat.finite = stat.finite && grad_stat.finite;
-                stat.l2 = std::max(stat.l2, grad_stat.l2);
-                stat.max_abs = std::max(stat.max_abs, grad_stat.max_abs);
-                return grad;
-              });
             };
             const auto task_compute_start = std::chrono::steady_clock::now();
 
@@ -2200,13 +1832,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 if (active_sample_count == 0) continue;
                 const auto active_samples = static_cast<double>(active_sample_count);
                 result.active_count += active_sample_count;
-                observe_boundary_grad(encoded, result.boundary_grad_set.encoded);
-                observe_boundary_grad(policy_logits, result.boundary_grad_set.policy_logits);
-                observe_boundary_grad(flat_logits, result.boundary_grad_set.flat_policy_logits);
-                observe_boundary_grad(active_logits, result.boundary_grad_set.active_logits);
-                observe_boundary_grad(features, result.boundary_grad_set.features);
-                observe_boundary_grad(flat_features, result.boundary_grad_set.flat_features);
-                observe_boundary_grad(active_features, result.boundary_grad_set.active_features);
 
                 const torch::Tensor log_probs = torch::log_softmax(apply_action_mask_to_logits(active_logits, active_masks), -1);
                 const torch::Tensor current_log_probs = log_probs.gather(1, active_actions.unsqueeze(1)).squeeze(1);
@@ -2246,20 +1871,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 torch::Tensor value_win_logits = output.value_win_logits;
                 torch::Tensor flat_value_win_logits = value_win_logits.reshape({samples, 1});
                 torch::Tensor active_value_win_logits = all_active ? flat_value_win_logits.to(torch::kFloat32) : flat_value_win_logits.index({flat_active}).to(torch::kFloat32);
-                observe_boundary_grad(value_win_logits, result.boundary_grad_set.value_win_logits);
-                observe_boundary_grad(flat_value_win_logits, result.boundary_grad_set.flat_value_win_logits);
-                observe_boundary_grad(active_value_win_logits, result.boundary_grad_set.active_value_win_logits);
-                if (grad_diagnostics_local) {
-                  update_max(result.max_value_pred_abs, active_value_win_logits.detach().abs().max());
-                  update_max(result.max_value_return_abs, active_returns.detach().abs().max());
-                  update_max(result.max_value_error_abs, (active_value_win_logits.squeeze(-1) - active_returns).detach().abs().max());
-                  update_max(result.max_feature_abs, active_features.detach().abs().max());
-                  update_max(result.max_logit_abs, active_logits.detach().abs().max());
-                  update_max(result.max_advantage_abs, active_advantages.detach().abs().max());
-                  const torch::Tensor valid_counts = active_masks.to(torch::kFloat32).sum(-1);
-                  update_min(result.min_valid_actions, valid_counts.min());
-                  update_max(result.max_valid_actions, valid_counts.max());
-                }
                 torch::Tensor value_loss = smooth_l1_value_loss(active_value_win_logits.squeeze(-1), active_returns, config_.ppo.value_loss_delta);
 
                 torch::Tensor goal_loss = torch::zeros({}, active_advantages.options());
@@ -2311,14 +1922,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
                 const auto sample_weight = active_samples / mode_total_active_local;
                 const torch::Tensor task_loss = policy_loss + config_.ppo.value_coef * value_loss + entropy_floor_loss - effective_entropy_coef * entropy;
-                if (grad_diagnostics_local) {
-                  update_max(result.max_policy_loss_abs, policy_loss.detach().abs());
-                  update_max(result.max_value_loss_abs, value_loss.detach().abs());
-                  update_max(result.max_entropy_abs, entropy.detach().abs());
-                  update_max(result.max_goal_critic_loss_abs, goal_loss.detach().abs());
-                  update_max(result.max_goal_actor_loss_abs, actor_goal_loss.detach().abs());
-                  update_max(result.max_task_loss_abs, task_loss.detach().abs());
-                }
 
                 if (use_pcgrad_local) {
                   const torch::Tensor weighted_task_loss = task_loss * sample_weight;
@@ -2347,36 +1950,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                     accumulate_gradients(*gpu_act, *objective_losses[obj_index].second);
                     result.has_backward = true;
                   }
-                } else if (split_grad_diagnostics_local) {
-                  const torch::Tensor weight = torch::full_like(
-                      policy_loss,
-                      sample_weight / static_cast<double>(optimizer_accumulation_steps_local));
-                  const torch::Tensor weighted_policy_loss = policy_loss * weight;
-                  const torch::Tensor weighted_value_loss = config_.ppo.value_coef * value_loss * weight;
-                  const torch::Tensor weighted_entropy_loss =
-                      (entropy_floor_loss - effective_entropy_coef * entropy) * weight;
-                  const torch::Tensor weighted_goal_critic_loss =
-                      config_.goal_critic.lambda_Zg * goal_loss * weight;
-                  const torch::Tensor weighted_goal_actor_loss =
-                      config_.goal_critic.lambda_goal_actor * actor_goal_loss * weight;
-                  std::vector<std::pair<torch::Tensor, std::vector<CapturedGrad>*>> objective_losses;
-                  objective_losses.push_back({weighted_policy_loss, &gpu_policy_group});
-                  objective_losses.push_back({weighted_value_loss, &gpu_value_group});
-                  objective_losses.push_back({weighted_entropy_loss, &gpu_entropy_group});
-                  if (config_.goal_critic.lambda_Zg > 0.0F && weighted_goal_critic_loss.requires_grad()) {
-                    objective_losses.push_back({weighted_goal_critic_loss, &gpu_goal_critic_group});
-                  }
-                  if (config_.goal_critic.lambda_goal_actor > 0.0F && weighted_goal_actor_loss.requires_grad()) {
-                    objective_losses.push_back({weighted_goal_actor_loss, &gpu_goal_actor_group});
-                  }
-                  for (int obj_index = 0; obj_index < static_cast<int>(objective_losses.size()); ++obj_index) {
-                    zero_existing_gradients(*gpu_act);
-                    const bool retain_graph = obj_index + 1 < static_cast<int>(objective_losses.size());
-                    (objective_losses[obj_index].first * cuda_amp_loss_scale_local).backward({}, retain_graph);
-                    accumulate_gradients(*gpu_act, *objective_losses[obj_index].second);
-                    result.has_backward = true;
-                  }
-                  zero_existing_gradients(*gpu_act);
                 } else {
                   const torch::Tensor loss =
                       task_loss + config_.goal_critic.lambda_Zg * goal_loss + config_.goal_critic.lambda_goal_actor * actor_goal_loss;
@@ -2426,9 +1999,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           GpuTaskResult task_result = fut.get();
 
           reduce_captured_gradients(*actor_, mode_task_grad_group, task_result.task_group, device_);
-          reduce_captured_gradients(*actor_, mode_policy_grad_group, task_result.policy_group, device_);
-          reduce_captured_gradients(*actor_, mode_value_grad_group, task_result.value_group, device_);
-          reduce_captured_gradients(*actor_, mode_entropy_grad_group, task_result.entropy_group, device_);
           reduce_captured_gradients(*actor_, mode_goal_critic_grad_group, task_result.goal_critic_group, device_);
           reduce_captured_gradients(*actor_, mode_goal_actor_grad_group, task_result.goal_actor_group, device_);
 
@@ -2443,38 +2013,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           goal_critic_loss_sum = goal_critic_loss_sum + task_result.goal_critic_loss;
           goal_score_sum = goal_score_sum + task_result.goal_score;
           sampled_goal_distance_sum = sampled_goal_distance_sum + task_result.sampled_goal_dist;
-          metrics.nonfinite_loss_skips += task_result.nonfinite_skips;
-          metrics.nonfinite_grad_norm_skips += task_result.nonfinite_grad_skips;
           metrics.forward_backward_seconds += task_result.fwd_bwd_seconds;
           accumulated_has_backward = accumulated_has_backward || task_result.has_backward;
           metric_steps += task_result.active_count;
-          if (any_grad_diagnostics && !use_pcgrad) {
-            diagnostic_max_policy_loss_abs = std::max(diagnostic_max_policy_loss_abs, task_result.max_policy_loss_abs);
-            diagnostic_max_value_loss_abs = std::max(diagnostic_max_value_loss_abs, task_result.max_value_loss_abs);
-            diagnostic_max_entropy_abs = std::max(diagnostic_max_entropy_abs, task_result.max_entropy_abs);
-            diagnostic_max_goal_critic_loss_abs = std::max(diagnostic_max_goal_critic_loss_abs, task_result.max_goal_critic_loss_abs);
-            diagnostic_max_goal_actor_loss_abs = std::max(diagnostic_max_goal_actor_loss_abs, task_result.max_goal_actor_loss_abs);
-            diagnostic_max_task_loss_abs = std::max(diagnostic_max_task_loss_abs, task_result.max_task_loss_abs);
-            diagnostic_max_value_pred_abs = std::max(diagnostic_max_value_pred_abs, task_result.max_value_pred_abs);
-            diagnostic_max_value_return_abs = std::max(diagnostic_max_value_return_abs, task_result.max_value_return_abs);
-            diagnostic_max_value_error_abs = std::max(diagnostic_max_value_error_abs, task_result.max_value_error_abs);
-            diagnostic_max_feature_abs = std::max(diagnostic_max_feature_abs, task_result.max_feature_abs);
-            diagnostic_max_logit_abs = std::max(diagnostic_max_logit_abs, task_result.max_logit_abs);
-            diagnostic_max_advantage_abs = std::max(diagnostic_max_advantage_abs, task_result.max_advantage_abs);
-            diagnostic_min_valid_actions = std::min(diagnostic_min_valid_actions, task_result.min_valid_actions);
-            diagnostic_max_valid_actions = std::max(diagnostic_max_valid_actions, task_result.max_valid_actions);
-          }
-          if (boundary_grad_diagnostics && !use_pcgrad) {
-            merge_boundary_grad_set(diagnostic_boundary_grad_set, task_result.boundary_grad_set);
-          }
-        }
-
-        if (split_grad_diagnostics && !use_pcgrad) {
-          reduce_captured_gradients(*actor_, diagnostic_policy_grad_group, mode_policy_grad_group, device_);
-          reduce_captured_gradients(*actor_, diagnostic_value_grad_group, mode_value_grad_group, device_);
-          reduce_captured_gradients(*actor_, diagnostic_entropy_grad_group, mode_entropy_grad_group, device_);
-          reduce_captured_gradients(*actor_, diagnostic_goal_critic_grad_group, mode_goal_critic_grad_group, device_);
-          reduce_captured_gradients(*actor_, diagnostic_goal_actor_grad_group, mode_goal_actor_grad_group, device_);
         }
 
         if (use_pcgrad) {
@@ -2552,26 +2093,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       }
       if (!accumulated_has_backward) {
         actor_optimizer_.zero_grad();
-        diagnostic_policy_grad_group.clear();
-        diagnostic_value_grad_group.clear();
-        diagnostic_entropy_grad_group.clear();
-        diagnostic_goal_critic_grad_group.clear();
-        diagnostic_goal_actor_grad_group.clear();
-        diagnostic_boundary_grad_set = {};
-        diagnostic_max_policy_loss_abs = 0.0;
-        diagnostic_max_value_loss_abs = 0.0;
-        diagnostic_max_entropy_abs = 0.0;
-        diagnostic_max_goal_critic_loss_abs = 0.0;
-        diagnostic_max_goal_actor_loss_abs = 0.0;
-        diagnostic_max_task_loss_abs = 0.0;
-        diagnostic_max_value_pred_abs = 0.0;
-        diagnostic_max_value_return_abs = 0.0;
-        diagnostic_max_value_error_abs = 0.0;
-        diagnostic_max_feature_abs = 0.0;
-        diagnostic_max_logit_abs = 0.0;
-        diagnostic_max_advantage_abs = 0.0;
-        diagnostic_min_valid_actions = std::numeric_limits<double>::infinity();
-        diagnostic_max_valid_actions = 0.0;
         accumulated_minibatches = 0;
         accumulated_total_active = 0.0;
         accumulated_policy_kl_sum = 0.0;
@@ -2586,26 +2107,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           accumulated_policy_kl > static_cast<double>(config_.ppo.target_kl)) {
         ++metrics.kl_guard_skips;
         actor_optimizer_.zero_grad();
-        diagnostic_policy_grad_group.clear();
-        diagnostic_value_grad_group.clear();
-        diagnostic_entropy_grad_group.clear();
-        diagnostic_goal_critic_grad_group.clear();
-        diagnostic_goal_actor_grad_group.clear();
-        diagnostic_boundary_grad_set = {};
-        diagnostic_max_policy_loss_abs = 0.0;
-        diagnostic_max_value_loss_abs = 0.0;
-        diagnostic_max_entropy_abs = 0.0;
-        diagnostic_max_goal_critic_loss_abs = 0.0;
-        diagnostic_max_goal_actor_loss_abs = 0.0;
-        diagnostic_max_task_loss_abs = 0.0;
-        diagnostic_max_value_pred_abs = 0.0;
-        diagnostic_max_value_return_abs = 0.0;
-        diagnostic_max_value_error_abs = 0.0;
-        diagnostic_max_feature_abs = 0.0;
-        diagnostic_max_logit_abs = 0.0;
-        diagnostic_max_advantage_abs = 0.0;
-        diagnostic_min_valid_actions = std::numeric_limits<double>::infinity();
-        diagnostic_max_valid_actions = 0.0;
         accumulated_minibatches = 0;
         accumulated_has_backward = false;
         accumulated_total_active = 0.0;
@@ -2620,18 +2121,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         continue;
       }
 
-      if (split_grad_diagnostics && !use_pcgrad) {
-        zero_existing_gradients(*actor_);
-        add_captured_gradients_to_module(diagnostic_policy_grad_group);
-        add_captured_gradients_to_module(diagnostic_value_grad_group);
-        add_captured_gradients_to_module(diagnostic_entropy_grad_group);
-        add_captured_gradients_to_module(diagnostic_goal_critic_grad_group);
-        add_captured_gradients_to_module(diagnostic_goal_actor_grad_group);
-      }
-
       // Reduce gradients from replica GPU actors into the primary actor before stepping.
       // Skip when using PCGrad: gradients are already captured and combined via CapturedGrad groups.
-      if (num_update_gpus > 1 && !use_pcgrad && !split_grad_diagnostics) {
+      if (num_update_gpus > 1 && !use_pcgrad) {
         reduce_gradients_from_replicas(actor_, compute_actors_);
       }
 
@@ -2641,10 +2133,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       {
         PULSAR_TRACE_SCOPE_CAT("trainer", "update_optimizer");
         scale_existing_gradients(*actor_, cuda_amp_loss_scale);
-        std::vector<GradStat> combined_grad_top;
-        if (any_grad_diagnostics) {
-          combined_grad_top = top_module_grad_stats(*actor_, 8);
-        }
         grad_norm = clip_existing_gradients(*actor_, config_.ppo.max_grad_norm);
         const bool nonfinite_before_sanitize = !std::isfinite(grad_norm);
         if (!std::isfinite(grad_norm)) {
@@ -2661,48 +2149,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         const bool grad_guard_hit =
             config_.ppo.max_preclip_grad_norm > 0.0F &&
             grad_norm > static_cast<double>(config_.ppo.max_preclip_grad_norm);
-        if (any_grad_diagnostics && (grad_guard_hit || nonfinite_before_sanitize || !std::isfinite(grad_norm))) {
-          int& reports_remaining = appo_grad_diagnostics_reports_remaining();
-          if (reports_remaining != 0) {
-            if (reports_remaining > 0) {
-              --reports_remaining;
-            }
-            std::cerr << "APPO gradient diagnostics"
-                      << " reason=" << (grad_guard_hit ? "grad_guard" : "nonfinite_grad")
-                      << " preclip_grad_norm=" << grad_norm
-                      << " max_preclip_grad_norm=" << config_.ppo.max_preclip_grad_norm
-                      << " accumulated_minibatches=" << accumulated_minibatches
-                      << " accumulated_active=" << accumulated_total_active
-                      << " accumulated_policy_kl=" << accumulated_policy_kl
-                      << " max_policy_loss_abs=" << diagnostic_max_policy_loss_abs
-                      << " max_value_loss_abs=" << diagnostic_max_value_loss_abs
-                      << " max_entropy_abs=" << diagnostic_max_entropy_abs
-                      << " max_goal_critic_loss_abs=" << diagnostic_max_goal_critic_loss_abs
-                      << " max_goal_actor_loss_abs=" << diagnostic_max_goal_actor_loss_abs
-                      << " max_task_loss_abs=" << diagnostic_max_task_loss_abs
-                      << " max_value_pred_abs=" << diagnostic_max_value_pred_abs
-                      << " max_value_return_abs=" << diagnostic_max_value_return_abs
-                      << " max_value_error_abs=" << diagnostic_max_value_error_abs
-                      << " max_feature_abs=" << diagnostic_max_feature_abs
-                      << " max_logit_abs=" << diagnostic_max_logit_abs
-                      << " max_advantage_abs=" << diagnostic_max_advantage_abs
-                      << " min_valid_actions=" << (std::isfinite(diagnostic_min_valid_actions) ? diagnostic_min_valid_actions : -1.0)
-                      << " max_valid_actions=" << diagnostic_max_valid_actions
-                      << '\n';
-            print_grad_stats("combined", combined_grad_top);
-            print_grad_stats("param_value", top_parameter_value_stats(*actor_, 8));
-            if (boundary_grad_diagnostics && !use_pcgrad) {
-              print_boundary_grad_set(diagnostic_boundary_grad_set);
-            }
-            if (split_grad_diagnostics && !use_pcgrad) {
-              print_captured_group_diagnostics(*actor_, "policy", diagnostic_policy_grad_group);
-              print_captured_group_diagnostics(*actor_, "value", diagnostic_value_grad_group);
-              print_captured_group_diagnostics(*actor_, "entropy", diagnostic_entropy_grad_group);
-              print_captured_group_diagnostics(*actor_, "goal_critic", diagnostic_goal_critic_grad_group);
-              print_captured_group_diagnostics(*actor_, "goal_actor", diagnostic_goal_actor_grad_group);
-            }
-          }
-        }
         if (std::isfinite(grad_norm) && !grad_guard_hit) {
           grad_norm_sum = grad_norm_sum + grad_norm * accumulated_total_active;
           actor_optimizer_.step();
@@ -2719,26 +2165,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         }
       }
       actor_optimizer_.zero_grad();
-      diagnostic_policy_grad_group.clear();
-      diagnostic_value_grad_group.clear();
-      diagnostic_entropy_grad_group.clear();
-      diagnostic_goal_critic_grad_group.clear();
-      diagnostic_goal_actor_grad_group.clear();
-      diagnostic_boundary_grad_set = {};
-      diagnostic_max_policy_loss_abs = 0.0;
-      diagnostic_max_value_loss_abs = 0.0;
-      diagnostic_max_entropy_abs = 0.0;
-      diagnostic_max_goal_critic_loss_abs = 0.0;
-      diagnostic_max_goal_actor_loss_abs = 0.0;
-      diagnostic_max_task_loss_abs = 0.0;
-      diagnostic_max_value_pred_abs = 0.0;
-      diagnostic_max_value_return_abs = 0.0;
-      diagnostic_max_value_error_abs = 0.0;
-      diagnostic_max_feature_abs = 0.0;
-      diagnostic_max_logit_abs = 0.0;
-      diagnostic_max_advantage_abs = 0.0;
-      diagnostic_min_valid_actions = std::numeric_limits<double>::infinity();
-      diagnostic_max_valid_actions = 0.0;
 
       // Sync updated primary weights back to all replica GPU actors.
       if (num_update_gpus > 1) {

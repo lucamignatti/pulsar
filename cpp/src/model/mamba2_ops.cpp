@@ -22,19 +22,14 @@ bool env_flag_enabled(const char* name) {
   return !text.empty() && text != "0" && text != "false" && text != "FALSE" && text != "off" && text != "OFF";
 }
 
-bool mamba2_all_accel_disabled() {
-  static const bool disabled = env_flag_enabled("PULSAR_MAMBA2_DISABLE_ACCEL");
-  return disabled;
-}
-
 bool mamba2_scan_accel_disabled() {
   static const bool disabled = env_flag_enabled("PULSAR_MAMBA2_DISABLE_SCAN_ACCEL");
-  return disabled || mamba2_all_accel_disabled();
+  return disabled;
 }
 
 bool mamba2_conv_accel_disabled() {
   static const bool disabled = env_flag_enabled("PULSAR_MAMBA2_DISABLE_CONV_ACCEL");
-  return disabled || mamba2_all_accel_disabled();
+  return disabled;
 }
 
 torch::Tensor fallback_mamba2_scan_mixed(
@@ -466,7 +461,7 @@ bool can_use_cuda_conv(const torch::Tensor& input, const torch::Tensor& weight, 
 
 bool mamba2_accelerator_kernels_available() {
 #if defined(PULSAR_HAS_MAMBA2_CUDA_KERNELS) || defined(PULSAR_HAS_MAMBA2_HIP_KERNELS)
-  return !mamba2_all_accel_disabled();
+  return true;
 #else
   return false;
 #endif
