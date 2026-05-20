@@ -2243,116 +2243,255 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
     const int agents_per_env = team_size * 2;
     const int member_agents = eval_envs * agents_per_env;
 
-    std::vector<int> episode_counts(static_cast<std::size_t>(pop), 0);
-    std::vector<int> win_counts(static_cast<std::size_t>(pop), 0);
+    struct EsShardSpec {
+      int member_start = 0;
+      int member_count = 0;
+      int worker_count = 1;
+      torch::Device device{torch::kCPU};
+    };
+    struct EsShardResult {
+      int member_start = 0;
+      std::vector<float> reward_sum;
+      std::vector<float> reward_count;
+      std::vector<float> kl_sum;
+      std::vector<float> kl_count;
+      std::vector<int> episode_counts;
+      std::vector<int> win_counts;
+    };
 
-    torch::Tensor reward_sum = torch::zeros({pop}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-    torch::Tensor reward_count = torch::zeros({pop}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-    torch::Tensor kl_sum = torch::zeros({pop}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-    torch::Tensor kl_count = torch::zeros({pop}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-
-    std::vector<std::uint8_t> controlled_host(static_cast<std::size_t>(total_envs * agents_per_env), 0);
-    for (int env_idx = 0; env_idx < total_envs; ++env_idx) {
-      const int local_env = env_idx % eval_envs;
-      const bool perturb_blue = (local_env % 2) == 0;
-      for (int local_agent = 0; local_agent < agents_per_env; ++local_agent) {
-        const bool is_blue = local_agent < team_size;
-        controlled_host[static_cast<std::size_t>(env_idx * agents_per_env + local_agent)] =
-            (is_blue == perturb_blue) ? 1 : 0;
-      }
+    const int requested_shards = std::max(1, std::min<int>({
+        pop,
+        std::max<int>(1, config_.ppo.collection_shards),
+        std::max<int>(1, static_cast<int>(compute_devices_.empty() ? 1 : compute_devices_.size())) *
+            std::max<int>(1, config_.ppo.collection_shards)}));
+    std::vector<EsShardSpec> shard_specs;
+    shard_specs.reserve(static_cast<std::size_t>(requested_shards));
+    for (int shard = 0; shard < requested_shards; ++shard) {
+      const int base_members = pop / requested_shards;
+      const int extra_members = shard < (pop % requested_shards) ? 1 : 0;
+      const int member_count = base_members + extra_members;
+      if (member_count <= 0) continue;
+      const int member_start = shard * base_members + std::min(shard, pop % requested_shards);
+      const int total_workers = config_.ppo.collection_workers;
+      const int base_workers = total_workers > 0 ? total_workers / requested_shards : 0;
+      const int extra_workers = total_workers > 0 && shard < (total_workers % requested_shards) ? 1 : 0;
+      shard_specs.push_back({
+          .member_start = member_start,
+          .member_count = member_count,
+          .worker_count = total_workers > 0 ? std::max(1, base_workers + extra_workers) : 0,
+          .device = compute_devices_.empty()
+              ? device_
+              : compute_devices_[static_cast<std::size_t>(shard) % compute_devices_.size()],
+      });
     }
-    const torch::Tensor controlled_mask = torch::from_blob(
-        controlled_host.data(),
-        {static_cast<long>(controlled_host.size())},
-        torch::TensorOptions().dtype(torch::kUInt8))
-        .clone()
-        .to(device_)
-        .to(torch::kBool);
-    const torch::Tensor controlled_float = controlled_mask.to(torch::kFloat32).view({pop, member_agents});
 
-    auto eval_collector = make_es_eval_collector(
-        mode_config, total_envs, eval_envs, update_index, 0, use_pinned_host_buffers_);
-    if (curriculum_.enabled()) {
-      eval_collector->update_unlocked_mechanics(curriculum_.unlocked_mechanics());
-    }
+    std::vector<std::future<EsShardResult>> shard_futures;
+    shard_futures.reserve(shard_specs.size());
+    const int physics_prefix_ticks =
+        config_.env.half_tick_skip > 0 && config_.env.half_tick_skip < config_.env.tick_skip
+            ? config_.env.half_tick_skip
+            : 0;
 
-    for (int ep = 0; ep < es_cfg.eval_episodes_per_member; ++ep) {
-      eval_collector->reset_es_episode(update_index, ep, eval_envs);
-      torch::Tensor recurrent_state = actor_->initial_recurrent_state(
-          static_cast<int64_t>(total_envs * agents_per_env),
-          device_);
+    for (std::size_t shard_idx = 0; shard_idx < shard_specs.size(); ++shard_idx) {
+      const EsShardSpec spec = shard_specs[shard_idx];
+      shard_futures.push_back(std::async(std::launch::async,
+          [&, mode_config, spec, shard_idx]() -> EsShardResult {
+        EsShardResult shard_result;
+        shard_result.member_start = spec.member_start;
+        shard_result.reward_sum.assign(static_cast<std::size_t>(spec.member_count), 0.0F);
+        shard_result.reward_count.assign(static_cast<std::size_t>(spec.member_count), 0.0F);
+        shard_result.kl_sum.assign(static_cast<std::size_t>(spec.member_count), 0.0F);
+        shard_result.kl_count.assign(static_cast<std::size_t>(spec.member_count), 0.0F);
+        shard_result.episode_counts.assign(static_cast<std::size_t>(spec.member_count), 0);
+        shard_result.win_counts.assign(static_cast<std::size_t>(spec.member_count), 0);
 
-      for (int step = 0; step < es_cfg.eval_rollout_length; ++step) {
-        torch::Tensor raw_obs = eval_collector->host_observations().to(device_, use_pinned_host_buffers_);
-        torch::Tensor episode_starts = eval_collector->host_episode_starts().to(device_, use_pinned_host_buffers_);
-        torch::Tensor action_masks = eval_collector->host_action_masks().to(device_, use_pinned_host_buffers_).to(torch::kBool);
-        torch::Tensor normalized_obs = actor_normalizer_.normalize(raw_obs);
+        ExperimentConfig shard_config = mode_config;
+        shard_config.ppo.collection_workers = spec.worker_count;
+        const int shard_envs = spec.member_count * eval_envs;
+        auto eval_collector = make_es_eval_collector(
+            shard_config, shard_envs, eval_envs, update_index, 0, use_pinned_host_buffers_);
+        if (curriculum_.enabled()) {
+          eval_collector->update_unlocked_mechanics(curriculum_.unlocked_mechanics());
+        }
 
-        const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
-        ActorStepOutput output = actor_->forward_step_stateful(
-            normalized_obs,
-            recurrent_state,
-            episode_starts,
-            &recurrent_state,
-            goal_values);
-        torch::Tensor perturbed_logits = actor_->policy_eggroll_logits(
-            output.features, A_stack, B_stack, es_cfg.sigma_ES, goal_values);
+        PPOActor shard_actor = clone_ppo_actor(actor_, spec.device);
+        shard_actor->eval();
+        ObservationNormalizer shard_normalizer = actor_normalizer_.clone();
+        shard_normalizer.to(spec.device);
+        torch::Tensor A_shard = A_stack.narrow(0, spec.member_start, spec.member_count).to(spec.device);
+        torch::Tensor B_shard = B_stack.narrow(0, spec.member_start, spec.member_count).to(spec.device);
 
-        torch::Tensor base_actions = sample_masked_actions(output.policy_logits, action_masks, true, nullptr);
-        torch::Tensor perturbed_actions = sample_masked_actions(perturbed_logits, action_masks, true, nullptr);
-        torch::Tensor actions = torch::where(controlled_mask, perturbed_actions, base_actions);
-
-        const torch::Tensor base_masked = apply_action_mask_to_logits(output.policy_logits, action_masks);
-        const torch::Tensor perturbed_masked = apply_action_mask_to_logits(perturbed_logits, action_masks);
-        const torch::Tensor base_probs = torch::softmax(base_masked, -1);
-        const torch::Tensor perturbed_probs = torch::softmax(perturbed_masked, -1);
-        const torch::Tensor kl_values = (
-            perturbed_probs * (torch::log(perturbed_probs + 1.0e-8) - torch::log(base_probs + 1.0e-8)))
-            .sum(-1)
-            .view({pop, member_agents});
-        kl_sum += (kl_values * controlled_float).sum(1);
-        kl_count += controlled_float.sum(1);
-
-        const torch::Tensor action_indices_cpu = actions.contiguous().to(torch::kCPU);
-        eval_collector->step(std::span<const std::int64_t>(
-            action_indices_cpu.data_ptr<std::int64_t>(),
-            static_cast<std::size_t>(action_indices_cpu.numel())));
-
-        const torch::Tensor rewards = eval_collector->host_rewards()
-            .to(device_, use_pinned_host_buffers_)
-            .view({pop, member_agents});
-        reward_sum += (rewards * controlled_float).sum(1);
-        reward_count += controlled_float.sum(1);
-
-        torch::Tensor dones_cpu = eval_collector->host_dones();
-        torch::Tensor labels_cpu = eval_collector->host_terminal_outcome_labels();
-        const auto* dones_ptr = dones_cpu.data_ptr<float>();
-        const auto* labels_ptr = labels_cpu.data_ptr<std::int64_t>();
-        for (std::size_t i = 0; i < controlled_host.size(); ++i) {
-          if (controlled_host[i] == 0 || dones_ptr[i] <= 0.5F) {
-            continue;
+#ifdef PULSAR_HAS_CUDA
+        std::optional<c10::cuda::CUDAGuard> shard_device_guard;
+        if (spec.device.is_cuda()) {
+          shard_device_guard.emplace(spec.device);
+        }
+        std::optional<c10::cuda::CUDAStream> shard_stream;
+        if (spec.device.is_cuda()) {
+          if (shard_idx < shard_collection_streams_.size()) {
+            shard_stream = shard_collection_streams_[shard_idx];
+          } else {
+            shard_stream = at::cuda::getStreamFromPool(false, spec.device.index());
           }
-          const int env_idx = static_cast<int>(i / static_cast<std::size_t>(agents_per_env));
-          const int member = env_idx / eval_envs;
-          episode_counts[static_cast<std::size_t>(member)] += 1;
-          if (labels_ptr[i] == 0) {
-            win_counts[static_cast<std::size_t>(member)] += 1;
+          c10::cuda::setCurrentCUDAStream(*shard_stream);
+        }
+#endif
+
+        std::vector<std::uint8_t> controlled_host(static_cast<std::size_t>(shard_envs * agents_per_env), 0);
+        for (int env_idx = 0; env_idx < shard_envs; ++env_idx) {
+          const int local_env = env_idx % eval_envs;
+          const bool perturb_blue = (local_env % 2) == 0;
+          for (int local_agent = 0; local_agent < agents_per_env; ++local_agent) {
+            const bool is_blue = local_agent < team_size;
+            controlled_host[static_cast<std::size_t>(env_idx * agents_per_env + local_agent)] =
+                (is_blue == perturb_blue) ? 1 : 0;
           }
         }
+        const torch::Tensor controlled_mask = torch::from_blob(
+            controlled_host.data(),
+            {static_cast<long>(controlled_host.size())},
+            torch::TensorOptions().dtype(torch::kUInt8))
+            .clone()
+            .to(spec.device)
+            .to(torch::kBool);
+        const torch::Tensor controlled_float =
+            controlled_mask.to(torch::kFloat32).view({spec.member_count, member_agents});
+        const torch::Tensor controlled_count = controlled_float.sum(1);
+        torch::Tensor reward_sum_tensor = torch::zeros({spec.member_count}, controlled_float.options());
+        torch::Tensor reward_count_tensor = torch::zeros({spec.member_count}, controlled_float.options());
+        torch::Tensor kl_sum_tensor = torch::zeros({spec.member_count}, controlled_float.options());
+        torch::Tensor kl_count_tensor = torch::zeros({spec.member_count}, controlled_float.options());
+
+        for (int ep = 0; ep < es_cfg.eval_episodes_per_member; ++ep) {
+          eval_collector->reset_es_episode(update_index, ep, eval_envs);
+          torch::Tensor recurrent_state = shard_actor->initial_recurrent_state(
+              static_cast<int64_t>(shard_envs * agents_per_env),
+              spec.device);
+
+          for (int step = 0; step < es_cfg.eval_rollout_length; ++step) {
+            torch::Tensor raw_obs_host = eval_collector->host_observations();
+            torch::Tensor episode_starts_host = eval_collector->host_episode_starts();
+            torch::Tensor action_masks_host = eval_collector->host_action_masks();
+            std::future<void> physics_prefix_future;
+            CollectorTimings step_timings{};
+            if (physics_prefix_ticks > 0) {
+              physics_prefix_future = std::async(std::launch::async, [&]() {
+                eval_collector->step_physics_only(physics_prefix_ticks, &step_timings);
+              });
+            }
+
+            torch::Tensor raw_obs = raw_obs_host.to(spec.device, use_pinned_host_buffers_);
+            torch::Tensor episode_starts = episode_starts_host.to(spec.device, use_pinned_host_buffers_);
+            torch::Tensor action_masks = action_masks_host.to(spec.device, use_pinned_host_buffers_).to(torch::kBool);
+            torch::Tensor normalized_obs = shard_normalizer.normalize(raw_obs);
+
+            const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
+            ActorStepOutput output = shard_actor->forward_step_stateful(
+                normalized_obs,
+                recurrent_state,
+                episode_starts,
+                &recurrent_state,
+                goal_values);
+            torch::Tensor perturbed_logits = shard_actor->policy_eggroll_logits(
+                output.features, A_shard, B_shard, es_cfg.sigma_ES, goal_values);
+
+            torch::Tensor base_actions = sample_masked_actions(output.policy_logits, action_masks, true, nullptr);
+            torch::Tensor perturbed_actions = sample_masked_actions(perturbed_logits, action_masks, true, nullptr);
+            torch::Tensor actions = torch::where(controlled_mask, perturbed_actions, base_actions);
+
+            const torch::Tensor base_masked = apply_action_mask_to_logits(output.policy_logits, action_masks);
+            const torch::Tensor perturbed_masked = apply_action_mask_to_logits(perturbed_logits, action_masks);
+            const torch::Tensor base_probs = torch::softmax(base_masked, -1);
+            const torch::Tensor perturbed_probs = torch::softmax(perturbed_masked, -1);
+            const torch::Tensor kl_values = (
+                perturbed_probs * (torch::log(perturbed_probs + 1.0e-8) - torch::log(base_probs + 1.0e-8)))
+                .sum(-1)
+                .view({spec.member_count, member_agents});
+            kl_sum_tensor += (kl_values * controlled_float).sum(1);
+            kl_count_tensor += controlled_count;
+
+            const torch::Tensor action_indices_cpu = actions.contiguous().to(torch::kCPU);
+            if (physics_prefix_future.valid()) {
+              physics_prefix_future.get();
+            }
+            eval_collector->step_after_physics_prefix(
+                std::span<const std::int64_t>(
+                    action_indices_cpu.data_ptr<std::int64_t>(),
+                    static_cast<std::size_t>(action_indices_cpu.numel())),
+                physics_prefix_ticks,
+                &step_timings);
+
+            const torch::Tensor rewards = eval_collector->host_rewards()
+                .to(spec.device, use_pinned_host_buffers_)
+                .view({spec.member_count, member_agents});
+            reward_sum_tensor += (rewards * controlled_float).sum(1);
+            reward_count_tensor += controlled_count;
+
+            torch::Tensor dones_cpu = eval_collector->host_dones();
+            torch::Tensor labels_cpu = eval_collector->host_terminal_outcome_labels();
+            const auto* dones_ptr = dones_cpu.data_ptr<float>();
+            const auto* labels_ptr = labels_cpu.data_ptr<std::int64_t>();
+            for (std::size_t i = 0; i < controlled_host.size(); ++i) {
+              if (controlled_host[i] == 0 || dones_ptr[i] <= 0.5F) {
+                continue;
+              }
+              const int env_idx = static_cast<int>(i / static_cast<std::size_t>(agents_per_env));
+              const int member = env_idx / eval_envs;
+              shard_result.episode_counts[static_cast<std::size_t>(member)] += 1;
+              if (labels_ptr[i] == 0) {
+                shard_result.win_counts[static_cast<std::size_t>(member)] += 1;
+              }
+            }
+          }
+        }
+        torch::Tensor reward_sum_cpu = reward_sum_tensor.to(torch::kCPU);
+        torch::Tensor reward_count_cpu = reward_count_tensor.to(torch::kCPU);
+        torch::Tensor kl_sum_cpu = kl_sum_tensor.to(torch::kCPU);
+        torch::Tensor kl_count_cpu = kl_count_tensor.to(torch::kCPU);
+        const auto* reward_sum_ptr = reward_sum_cpu.data_ptr<float>();
+        const auto* reward_count_ptr = reward_count_cpu.data_ptr<float>();
+        const auto* kl_sum_ptr = kl_sum_cpu.data_ptr<float>();
+        const auto* kl_count_ptr = kl_count_cpu.data_ptr<float>();
+        for (int member = 0; member < spec.member_count; ++member) {
+          shard_result.reward_sum[static_cast<std::size_t>(member)] = reward_sum_ptr[member];
+          shard_result.reward_count[static_cast<std::size_t>(member)] = reward_count_ptr[member];
+          shard_result.kl_sum[static_cast<std::size_t>(member)] = kl_sum_ptr[member];
+          shard_result.kl_count[static_cast<std::size_t>(member)] = kl_count_ptr[member];
+        }
+        return shard_result;
+      }));
+    }
+
+    std::vector<float> reward_sum(static_cast<std::size_t>(pop), 0.0F);
+    std::vector<float> reward_count(static_cast<std::size_t>(pop), 0.0F);
+    std::vector<float> kl_sum(static_cast<std::size_t>(pop), 0.0F);
+    std::vector<float> kl_count(static_cast<std::size_t>(pop), 0.0F);
+    std::vector<int> episode_counts(static_cast<std::size_t>(pop), 0);
+    std::vector<int> win_counts(static_cast<std::size_t>(pop), 0);
+    for (auto& future : shard_futures) {
+      EsShardResult shard_result = future.get();
+      for (std::size_t local = 0; local < shard_result.reward_sum.size(); ++local) {
+        const std::size_t global = static_cast<std::size_t>(shard_result.member_start) + local;
+        reward_sum[global] += shard_result.reward_sum[local];
+        reward_count[global] += shard_result.reward_count[local];
+        kl_sum[global] += shard_result.kl_sum[local];
+        kl_count[global] += shard_result.kl_count[local];
+        episode_counts[global] += shard_result.episode_counts[local];
+        win_counts[global] += shard_result.win_counts[local];
       }
     }
 
-    torch::Tensor reward_mean = (reward_sum / reward_count.clamp_min(1.0F)).to(torch::kCPU);
-    torch::Tensor kl_mean = (kl_sum / kl_count.clamp_min(1.0F)).to(torch::kCPU);
-    const auto* reward_ptr = reward_mean.data_ptr<float>();
-    const auto* kl_ptr = kl_mean.data_ptr<float>();
     for (int i = 0; i < pop; ++i) {
       const int denom = std::max(episode_counts[static_cast<std::size_t>(i)], 1);
       const float mode_winrate =
           static_cast<float>(win_counts[static_cast<std::size_t>(i)]) / static_cast<float>(denom);
-      result.reward[static_cast<std::size_t>(i)] += mode_weight * reward_ptr[i];
+      const float reward_mean = reward_sum[static_cast<std::size_t>(i)] /
+          std::max(reward_count[static_cast<std::size_t>(i)], 1.0F);
+      const float kl_mean = kl_sum[static_cast<std::size_t>(i)] /
+          std::max(kl_count[static_cast<std::size_t>(i)], 1.0F);
+      result.reward[static_cast<std::size_t>(i)] += mode_weight * reward_mean;
       result.winrate[static_cast<std::size_t>(i)] += mode_weight * mode_winrate;
-      result.kl[static_cast<std::size_t>(i)] += mode_weight * kl_ptr[i];
+      result.kl[static_cast<std::size_t>(i)] += mode_weight * kl_mean;
     }
   }
 

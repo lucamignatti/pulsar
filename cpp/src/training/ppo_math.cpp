@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -170,6 +171,15 @@ bool can_use_action_accel(const torch::Tensor& logits, const torch::Tensor& acti
       (action_masks.scalar_type() == torch::kBool || action_masks.scalar_type() == torch::kUInt8);
 }
 
+bool env_flag_enabled(const char* name) {
+  const char* value = std::getenv(name);
+  return value != nullptr &&
+      (std::strcmp(value, "1") == 0 ||
+       std::strcmp(value, "true") == 0 ||
+       std::strcmp(value, "TRUE") == 0 ||
+       std::strcmp(value, "yes") == 0);
+}
+
 }  // namespace
 
 torch::Tensor apply_action_mask_to_logits(const torch::Tensor& logits, const torch::Tensor& action_masks) {
@@ -218,7 +228,7 @@ torch::Tensor sample_masked_actions(
 
 torch::Tensor masked_action_entropy(const torch::Tensor& logits, const torch::Tensor& action_masks) {
   PULSAR_TRACE_SCOPE_CAT("ppo_math", "entropy");
-  if (can_use_action_accel(logits, action_masks) && logits.dim() == 2) {
+  if (!logits.requires_grad() && can_use_action_accel(logits, action_masks) && logits.dim() == 2) {
 #if defined(PULSAR_HAS_PPO_MATH_CUDA_KERNELS)
     return masked_action_entropy_cuda(logits.contiguous(), action_masks.contiguous());
 #elif defined(PULSAR_HAS_PPO_MATH_HIP_KERNELS)
@@ -359,7 +369,8 @@ bool can_use_clipped_loss_accel(
     const torch::Tensor& current_log_probs,
     const torch::Tensor& old_log_probs,
     const torch::Tensor& advantages) {
-  return can_use_ppo_math_accel(current_log_probs) &&
+  return env_flag_enabled("PULSAR_PPO_LOSS_ACCEL") &&
+      can_use_ppo_math_accel(current_log_probs) &&
       old_log_probs.is_cuda() &&
       advantages.is_cuda() &&
       old_log_probs.scalar_type() == torch::kFloat32 &&
