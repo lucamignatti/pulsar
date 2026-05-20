@@ -111,4 +111,5 @@ pulsar-viz \
 - [Self-Supervised Goal-Reaching Results in Multi-Agent Cooperation and Exploration](https://arxiv.org/abs/2509.10656v1)
 - [Evolution Strategies at Scale: LLM Fine-Tuning Beyond Reinforcement Learning](https://arxiv.org/abs/2509.10656v1)
 - [Evolution Strategies at the Hyperscale](https://arxiv.org/abs/2511.16652)
+- [Gradient Surgery for Multi-Task Learning](https://arxiv.org/abs/2001.06782)
 
