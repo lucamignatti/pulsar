@@ -516,6 +516,13 @@ torch::Tensor PPOActorImpl::value_head_forward(const torch::Tensor& encoded) {
   return value_head_win_->forward(encoded);
 }
 
+torch::Tensor PPOActorImpl::policy_head_forward(const torch::Tensor& features) {
+  if (!policy_hidden_.is_empty()) {
+    return policy_lora_->forward(policy_hidden_->forward(features));
+  }
+  return policy_lora_->forward(features);
+}
+
 ActorSequenceOutput PPOActorImpl::forward_sequence(
     torch::Tensor obs_seq,
     torch::Tensor goal_values,

@@ -2634,6 +2634,8 @@ void APPOTrainer::collect_rollout(
       int multi_touched_episodes = 0;
       std::int64_t ball_prox_steps = 0;
       std::int64_t ball_prox_denom = 0;
+      double sampled_value_sum = 0.0;
+      std::int64_t sampled_value_count = 0;
       std::map<std::string, int> mode_completed;
       std::map<std::string, int> mode_touched;
       std::map<std::string, int> mode_multi_touched;
@@ -2712,7 +2714,7 @@ void APPOTrainer::collect_rollout(
             normalized_obs = shard_normalizer->normalize(raw_obs);
             const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
             output = shard_actor->forward_step_stateful(
-                normalized_obs, recurrent_state, episode_starts, &recurrent_state, goal_values, false);
+                normalized_obs, recurrent_state, episode_starts, &recurrent_state, goal_values);
             actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
             if (self_play_manager_ && self_play_manager_->has_snapshots()) {
               torch::Tensor opponent_actions;
@@ -2723,6 +2725,7 @@ void APPOTrainer::collect_rollout(
                   action_masks,
                   episode_starts,
                   snapshot_ids,
+                  output.encoded,
                   &opponent_actions,
                   &self_play_inference_seconds);
               actions = torch::where(snapshot_ids >= 0, opponent_actions, actions);
@@ -2823,8 +2826,13 @@ void APPOTrainer::collect_rollout(
           shard_step.total_goal_distance = static_cast<double>(gd_mean) * static_cast<double>(goal_pos_host.size(0));
           shard_step.min_goal_distance = static_cast<double>(gd_min);
 
-          // Write tensor data directly to rollout storage; values are deferred.
+          // Write tensor data directly to rollout storage.
+          torch::Tensor sampled_value = output.value_win_logits.squeeze(-1);
+          shard_step.sampled_value_sum = sampled_value.sum().item<double>();
+          shard_step.sampled_value_count = sampled_value.numel();
           std::unordered_map<std::string, torch::Tensor> all_values;
+          all_values["extrinsic"] = sampled_value;
+          all_values["extrinsic"] = sampled_value;
           std::unordered_map<std::string, torch::Tensor> all_rewards;
           all_rewards["extrinsic"] = extrinsic_rewards_host;
 
@@ -2844,8 +2852,7 @@ void APPOTrainer::collect_rollout(
               collector.host_bootstrap_truncated(),
               goal_pos_host,
               terminal_labels,
-              collector.host_terminal_observations(),
-              output.encoded);
+              collector.host_terminal_observations());
 
           auto& coll = collector;
           dest.set_mode_ids_slice(step, shard_step.agent_offset, static_cast<int>(coll.total_agents()), coll.mode_id());
@@ -2903,36 +2910,12 @@ void APPOTrainer::collect_rollout(
         for (const auto& [mode, count] : shard_step.mode_multi_touched) mode_multi_touched[mode] += count;
         for (const auto& [mode, count] : shard_step.mode_scored) mode_scored[mode] += count;
 
+        accumulated_sampled_value += shard_step.sampled_value_sum;
+        accumulated_value_count += shard_step.sampled_value_count;
+
         local_collected_steps += shard_step.total_learner_steps;
       }
 
-    }
-    {
-      // Compute deferred value estimates from stored encoded features.
-      PULSAR_TRACE_SCOPE_CAT("trainer", "deferred_value_computation");
-      torch::NoGradGuard no_grad;
-      const int rl_steps = dest.rollout_length();
-      if (rl_steps > 0) {
-        torch::Tensor all_features = dest.encoded_features.narrow(0, 0, rl_steps);
-        auto& values_map = const_cast<std::unordered_map<std::string, torch::Tensor>&>(dest.all_values());
-        for (auto& [name, buf] : values_map) {
-          torch::Tensor features_flat = all_features.reshape({-1, static_cast<int64_t>(config_.model.encoder_dim)});
-          const int max_batch = effective_max_forward_samples(config_.model, device_);
-          for (int offset = 0; offset < features_flat.size(0); offset += max_batch) {
-            int batch = std::min(max_batch, static_cast<int>(features_flat.size(0) - offset));
-            torch::Tensor batch_features = features_flat.slice(0, offset, offset + batch).to(device_);
-            torch::Tensor batch_values = rollout_actor->value_head_forward(batch_features).to(torch::kCPU);
-            buf.reshape({-1}).narrow(0, offset, batch).copy_(batch_values.reshape({-1}));
-          }
-        }
-        accumulated_sampled_value = 0.0;
-        accumulated_value_count = 0;
-        for (const auto& [name, buf] : values_map) {
-          torch::Tensor flat_vals = buf.narrow(0, 0, rl_steps).reshape({-1});
-          accumulated_sampled_value += flat_vals.sum().item<double>();
-          accumulated_value_count += flat_vals.numel();
-        }
-      }
     }
 
     {
@@ -3004,8 +2987,7 @@ void APPOTrainer::collect_rollout(
           rollout_recurrent_states[0],
           episode_starts,
           &rollout_recurrent_states[0],
-          goal_values,
-          false);
+          goal_values);
       actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
     }
     if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
@@ -3023,6 +3005,7 @@ void APPOTrainer::collect_rollout(
           action_masks,
           episode_starts,
           snapshot_ids,
+          output.encoded,
           &opponent_actions,
           &metrics.policy_forward_seconds);
       actions = torch::where(snapshot_ids >= 0, opponent_actions, actions);
@@ -3158,38 +3141,10 @@ void APPOTrainer::collect_rollout(
         bootstrap_truncated_host,
         goal_pos_host,
         terminal_labels,
-        terminal_obs_host,
-        output.encoded);
+        terminal_obs_host);
     dest.set_mode_ids_slice(step, 0, collector_->mode_id());
 
     local_collected_steps += learner_step_count;
-    }
-  }
-  {
-    // Compute deferred value estimates from stored encoded features.
-    PULSAR_TRACE_SCOPE_CAT("trainer", "deferred_value_computation");
-    torch::NoGradGuard no_grad;
-    const int rl_steps = dest.rollout_length();
-    if (rl_steps > 0) {
-      torch::Tensor all_features = dest.encoded_features.narrow(0, 0, rl_steps);
-      auto& values_map = const_cast<std::unordered_map<std::string, torch::Tensor>&>(dest.all_values());
-      for (auto& [name, buf] : values_map) {
-        torch::Tensor features_flat = all_features.reshape({-1, static_cast<int64_t>(config_.model.encoder_dim)});
-        const int max_batch = effective_max_forward_samples(config_.model, device_);
-        for (int offset = 0; offset < features_flat.size(0); offset += max_batch) {
-          int batch = std::min(max_batch, static_cast<int>(features_flat.size(0) - offset));
-          torch::Tensor batch_features = features_flat.slice(0, offset, offset + batch).to(device_);
-          torch::Tensor batch_values = rollout_actor->value_head_forward(batch_features).to(torch::kCPU);
-          buf.reshape({-1}).narrow(0, offset, batch).copy_(batch_values.reshape({-1}));
-        }
-      }
-      accumulated_sampled_value = 0.0;
-      accumulated_value_count = 0;
-      for (const auto& [name, buf] : values_map) {
-        torch::Tensor flat_vals = buf.narrow(0, 0, rl_steps).reshape({-1});
-        accumulated_sampled_value += flat_vals.sum().item<double>();
-        accumulated_value_count += flat_vals.numel();
-      }
     }
   }
   {

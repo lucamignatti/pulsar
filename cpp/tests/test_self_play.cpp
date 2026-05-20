@@ -113,12 +113,14 @@ void test_opponent_inference_and_elo_math() {
     torch::Tensor snapshot_ids = torch::tensor({-1, 0, 0, -1}, torch::kLong);
     torch::Tensor actions;
     double inference_seconds = 0.0;
+    auto encoded = model->forward_step(raw_obs).encoded;
     manager.infer_opponent_actions(
         model,
         raw_obs,
         action_masks,
         episode_starts,
         snapshot_ids,
+        encoded,
         &actions,
         &inference_seconds);
     pulsar::test::require(actions[0].item<std::int64_t>() == 0, "non-opponent slot should remain untouched");

@@ -168,6 +168,7 @@ class PPOActorImpl : public torch::nn::Module {
   [[nodiscard]] const ESLoraConfig& es_lora_config() const;
   [[nodiscard]] std::vector<std::string> enabled_critic_heads() const;
   torch::Tensor value_head_forward(const torch::Tensor& encoded);
+  torch::Tensor policy_head_forward(const torch::Tensor& features);
 
   [[nodiscard]] std::vector<torch::Tensor> es_lora_parameters() const;
   [[nodiscard]] std::vector<torch::Tensor> es_lora_parameters_flat() const;

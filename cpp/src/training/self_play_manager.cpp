@@ -173,6 +173,7 @@ void SelfPlayManager::infer_opponent_actions(
     const torch::Tensor& action_masks,
     const torch::Tensor& episode_starts,
     const torch::Tensor& snapshot_ids,
+    const torch::Tensor& encoded_features,
     torch::Tensor* out_actions,
     double* inference_seconds) {
   PULSAR_TRACE_SCOPE_CAT("self_play", "infer_opponent_actions");
@@ -205,14 +206,11 @@ void SelfPlayManager::infer_opponent_actions(
     const torch::Tensor indices =
         torch::tensor(grouped[snapshot_index], torch::TensorOptions().dtype(torch::kLong).device(raw_obs.device()));
     Snapshot& snapshot = snapshots_[snapshot_index];
-    const torch::Tensor obs = raw_obs.index_select(0, indices);
-    const torch::Tensor masks = action_masks.index_select(0, indices).to(torch::kBool);
-    const torch::Tensor starts = episode_starts.index_select(0, indices);
-    const torch::Tensor normalized_obs = snapshot.normalizer.normalize(obs);
-    const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
-    const ActorStepOutput output = snapshot.model->forward_step(normalized_obs, goal_values);
+    const torch::Tensor features_subset = encoded_features.index_select(0, indices);
+    const torch::Tensor masks_subset = action_masks.index_select(0, indices).to(torch::kBool);
+    const torch::Tensor policy_logits = snapshot.model->policy_head_forward(features_subset);
     const torch::Tensor sampled_actions =
-        deterministic ? masked_argmax(output.policy_logits, masks) : masked_sample(output.policy_logits, masks);
+        deterministic ? masked_argmax(policy_logits, masks_subset) : masked_sample(policy_logits, masks_subset);
     actions.index_copy_(0, indices, sampled_actions);
   }
 

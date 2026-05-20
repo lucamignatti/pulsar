@@ -54,6 +54,7 @@ class SelfPlayManager {
       const torch::Tensor& action_masks,
       const torch::Tensor& episode_starts,
       const torch::Tensor& snapshot_ids,
+      const torch::Tensor& encoded_features,
       torch::Tensor* out_actions,
       double* inference_seconds);
 
