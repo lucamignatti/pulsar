@@ -20,6 +20,7 @@ struct OutcomeConfig {
 
 struct MechanicRewardConfig {
   float kickoff_first_touch = 0.0F;
+  float kickoff_50_50_touch = 0.0F;
   float speed_flip = 0.0F;
   float wavedash = 0.0F;
   float chain_dash_bonus = 0.0F;
@@ -35,7 +36,6 @@ struct MechanicRewardConfig {
   float pogo = 0.0F;
   float pinch = 0.0F;
   float team_pinch = 0.0F;
-  float mechanic_reward_cap_per_episode = 0.10F;
 };
 
 struct DenseRewardConfig {
@@ -69,7 +69,6 @@ struct DenseRewardConfig {
   float possession_face_ball_weight = 0.0F;
   int possession_window_ticks = 180;
   float possession_distance_decay = 1000.0F;
-  float dense_reward_cap_per_episode = 0.0F;
   float flat_touch_weight = 0.0F;
   float team_spirit = 0.0F;
 };

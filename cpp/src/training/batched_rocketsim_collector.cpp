@@ -164,7 +164,8 @@ void BatchedRocketSimCollector::initialize(
 }
 
 void BatchedRocketSimCollector::set_self_play_assignment_fn(AssignmentFn assignment_fn) {
-  assignment_fn_ = std::move(assignment_fn);
+  (void)assignment_fn;
+  assignment_fn_ = {};
   for (std::size_t env_idx = 0; env_idx < envs_.size(); ++env_idx) {
     assign_env(env_idx, envs_[env_idx].reset_seed);
   }
@@ -372,12 +373,8 @@ void BatchedRocketSimCollector::rebuild_host_buffers(HostBuffers& buffers, Colle
 
       for (std::size_t local_idx = 0; local_idx < state.cars.size(); ++local_idx) {
         const std::size_t global_idx = agent_offset + local_idx;
-        const Team team = state.cars[local_idx].team;
-        const bool learner =
-            !envs_[env_idx].assignment.enabled || team == envs_[env_idx].assignment.learner_team;
-        learner_ptr[global_idx] = learner ? 1.0F : 0.0F;
-        snapshot_ptr[global_idx] =
-            learner ? -1 : static_cast<std::int64_t>(envs_[env_idx].assignment.snapshot_index);
+        learner_ptr[global_idx] = 1.0F;
+        snapshot_ptr[global_idx] = -1;
       }
     }
   });
@@ -845,10 +842,8 @@ void BatchedRocketSimCollector::step_after_physics_prefix(
 
       for (std::size_t i = 0; i < count; ++i) {
         const std::size_t gi = agent_begin + i;
-        const Team t = next_state.cars[i].team;
-        const bool learner = !envs_[env_idx].assignment.enabled || t == envs_[env_idx].assignment.learner_team;
-        next_learner_ptr[gi] = learner ? 1.0F : 0.0F;
-        next_snapshot_ptr[gi] = learner ? -1 : static_cast<std::int64_t>(envs_[env_idx].assignment.snapshot_index);
+        next_learner_ptr[gi] = 1.0F;
+        next_snapshot_ptr[gi] = -1;
       }
     }
   });

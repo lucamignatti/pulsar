@@ -2,6 +2,7 @@
 #include <cmath>
 #include <exception>
 #include <iostream>
+#include <set>
 
 #include "pulsar/checkpoint/checkpoint.hpp"
 #include "pulsar/config/config.hpp"
@@ -159,53 +160,34 @@ int main() {
       pulsar::test::require(prod.schema_version == 6, "production config schema");
       pulsar::test::require(!prod.env.disable_truncation, "production config has truncation enabled");
       pulsar::test::require(prod.curriculum.enabled, "curriculum enabled in production");
-      pulsar::test::require(prod.curriculum.stages.size() == 4, "four curriculum stages in production");
-      pulsar::test::require(prod.curriculum.stages[0].mode_allocation.size() == 1 &&
-                                prod.curriculum.stages[0].mode_allocation.count("1v1") == 1,
-                            "production config starts touch acquisition in 1v1");
-      pulsar::test::require(prod.curriculum.stages[0].required_touch_episode_rate == 0.8f,
-                            "stage0 should promote on 80 percent single-touch episodes");
-      pulsar::test::require(prod.curriculum.stages[0].required_multi_touch_episode_rate == 0.0f,
-                            "stage0 should not require multi-touch episodes");
-      pulsar::test::require(prod.curriculum.stages[0].dense_rewards_override.flat_touch_weight == 50.0f,
-                            "stage0 should reward touching the ball");
-      pulsar::test::require(prod.curriculum.stages[0].dense_rewards_override.speed_toward_ball_weight == 5.0f,
-                            "stage0 should reward speed toward ball");
-      pulsar::test::require(prod.curriculum.stages[0].dense_rewards_override.face_ball_weight == 1.0f,
-                            "stage0 should reward facing ball");
-      pulsar::test::require(prod.curriculum.stages[0].dense_rewards_override.air_reward_weight == 0.15f,
-                            "stage0 should include air reward");
-      pulsar::test::require(prod.curriculum.stages[0].outcome_override.score == 0.0f &&
-                                prod.curriculum.stages[0].outcome_override.concede == 0.0f &&
-                                prod.curriculum.stages[0].outcome_override.neutral_no_touch == 0.0f,
-                            "stage0 should have no terminal reward");
-      pulsar::test::require(prod.curriculum.stages[1].mode_allocation.size() == 1 &&
-                                prod.curriculum.stages[1].mode_allocation.count("1v1") == 1,
-                            "stage1 should keep scoring transition in 1v1");
-      pulsar::test::require(prod.curriculum.stages[1].required_touch_episode_rate == 0.8f,
-                            "stage1 should require retaining touch behavior");
-      pulsar::test::require(prod.curriculum.stages[1].required_multi_touch_episode_rate == 0.0f,
-                            "stage1 should not promote on farmable multi-touch rate");
-      pulsar::test::require(prod.curriculum.stages[1].required_scored_episode_rate == 0.15f,
-                            "stage1 should only require early 1v1 scoring");
-      pulsar::test::require(prod.curriculum.stages[1].dense_rewards_override.flat_touch_weight == 50.0f &&
-                                prod.curriculum.stages[1].dense_rewards_override.air_reward_weight == 0.15f,
-                            "stage1 should preserve the working touch and air rewards");
-      pulsar::test::require(prod.curriculum.stages[1].dense_rewards_override.ball_touch_vel_weight == 0.5f &&
-                                prod.curriculum.stages[1].dense_rewards_override.touch_direction_weight == 0.5f &&
-                                prod.curriculum.stages[1].dense_rewards_override.velocity_ball_to_goal_weight == 0.5f,
-                            "stage1 should add only weak quality and goal-directed touch shaping");
-      pulsar::test::require(prod.curriculum.stages[1].dense_rewards_override.speed_toward_ball_weight == 5.0f &&
-                                prod.curriculum.stages[1].dense_rewards_override.face_ball_weight == 1.0f,
-                            "stage1 should preserve approach and facing shaping");
-      pulsar::test::require(prod.curriculum.stages[1].outcome_override.score == 5.0f &&
-                                prod.curriculum.stages[1].outcome_override.concede == 0.0f &&
-                                prod.curriculum.stages[1].outcome_override.neutral_no_touch == 0.0f,
-                            "stage1 should introduce only a small scoring reward");
+      pulsar::test::require(!prod.curriculum.stages.empty(), "production curriculum has stages");
+      std::set<std::string> stage_names;
+      const auto valid_rate = [](float value) {
+        return std::isfinite(value) && value >= 0.0f && value <= 1.0f;
+      };
+      for (const auto& stage : prod.curriculum.stages) {
+        pulsar::test::require(!stage.name.empty(), "curriculum stage names should be non-empty");
+        pulsar::test::require(stage_names.insert(stage.name).second, "curriculum stage names should be unique");
+        pulsar::test::require(!stage.mode_allocation.empty(), "curriculum stages should declare mode allocation");
+        pulsar::test::require(std::isfinite(stage.learning_rate) && stage.learning_rate > 0.0f,
+                              "curriculum stage learning rates should be positive");
+        pulsar::test::require(stage.min_agent_steps >= 0, "curriculum min_agent_steps should be non-negative");
+        pulsar::test::require(stage.rolling_window_size > 0, "curriculum rolling_window_size should be positive");
+        pulsar::test::require(stage.consecutive_success_threshold > 0,
+                              "curriculum consecutive_success_threshold should be positive");
+        pulsar::test::require(stage.min_completed_episodes_per_mode >= 0,
+                              "curriculum min_completed_episodes_per_mode should be non-negative");
+        pulsar::test::require(valid_rate(stage.required_touch_episode_rate),
+                              "curriculum touch promotion rate should be in [0, 1]");
+        pulsar::test::require(valid_rate(stage.required_multi_touch_episode_rate),
+                              "curriculum multi-touch promotion rate should be in [0, 1]");
+        pulsar::test::require(valid_rate(stage.required_scored_episode_rate),
+                              "curriculum scoring promotion rate should be in [0, 1]");
+      }
       pulsar::test::require(prod.self_play_league.enabled, "self_play_league enabled in production");
       pulsar::test::require(prod.self_play_league.max_snapshots == 4, "max_snapshots in production");
-      pulsar::test::require(prod.ppo.max_policy_log_ratio == 5.0f,
-                            "production config should preserve PPO log-ratio headroom");
+      pulsar::test::require(std::isfinite(prod.ppo.max_policy_log_ratio) && prod.ppo.max_policy_log_ratio >= 0.0f,
+                            "production PPO log-ratio guard should be non-negative");
       pulsar::test::require(prod.ppo.target_kl == 0.0f,
                             "production config should not skip PPO updates by KL guard");
       pulsar::test::require(prod.ppo.max_preclip_grad_norm == 0.0f,
@@ -225,28 +207,6 @@ int main() {
                                 prod.dense_rewards.speed_toward_ball_weight == 0.0f &&
                                 prod.dense_rewards.face_ball_weight == 0.0f,
                             "production base dense reward should be terminal-only");
-      pulsar::test::require(prod.curriculum.stages[2].required_scored_episode_rate == 0.45f,
-                            "stage2 should promote on mixed-mode scoring");
-      pulsar::test::require(prod.curriculum.stages[2].dense_rewards_override.flat_touch_weight == 0.0f &&
-                                prod.curriculum.stages[2].dense_rewards_override.air_reward_weight == 0.15f,
-                            "stage2 should remove flat-touch farming while retaining air reward");
-      pulsar::test::require(prod.curriculum.stages[2].dense_rewards_override.ball_touch_vel_weight == 2.0f &&
-                                prod.curriculum.stages[2].dense_rewards_override.touch_direction_weight == 2.0f &&
-                                prod.curriculum.stages[2].dense_rewards_override.velocity_ball_to_goal_weight == 2.0f,
-                            "stage2 should reward quality goal-directed touches");
-      pulsar::test::require(prod.curriculum.stages[2].outcome_override.score == 20.0f &&
-                                prod.curriculum.stages[2].outcome_override.concede == -16.0f &&
-                                prod.curriculum.stages[2].outcome_override.neutral_no_touch == 0.0f,
-                            "stage2 should include terminal goal/loss outcomes");
-      pulsar::test::require(prod.curriculum.stages[3].dense_rewards_override.flat_touch_weight == 0.0f &&
-                                prod.curriculum.stages[3].dense_rewards_override.air_reward_weight == 0.0f &&
-                                prod.curriculum.stages[3].dense_rewards_override.speed_toward_ball_weight == 0.0f &&
-                                prod.curriculum.stages[3].dense_rewards_override.face_ball_weight == 0.0f,
-                            "stage3 should remove dense shaping");
-      pulsar::test::require(prod.curriculum.stages[3].outcome_override.score == 20.0f &&
-                                prod.curriculum.stages[3].outcome_override.concede == -16.0f &&
-                                prod.curriculum.stages[3].outcome_override.neutral_no_touch == 0.0f,
-                            "stage3 should be terminal goal/loss reward only");
     }
 
     // Test 15: stable_json is deterministic

@@ -56,7 +56,6 @@ pulsar::ExperimentConfig make_reward_test_config() {
   cfg.mechanic_rewards.pinch = 0.75f;
   cfg.mechanic_rewards.team_pinch = 0.85f;
   cfg.mechanic_rewards.kickoff_first_touch = 0.95f;
-  cfg.mechanic_rewards.mechanic_reward_cap_per_episode = 0.0f;
   return cfg;
 }
 
@@ -309,7 +308,7 @@ int main() {
     }
 
     // =========================================================================
-    // 13. air_reward - ball below z_min threshold
+    // 13. air_reward - ball position should not matter
     // =========================================================================
     {
       auto cfg = make_reward_test_config();
@@ -322,7 +321,7 @@ int main() {
       agent_state.prev_boost = 0.0f;
       pulsar::EnvRewardState env_state{};
       auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
-      require_close(bd.terms.at("gameplay.air"), 0.0f, "air_reward ball low");
+      require_close(bd.terms.at("gameplay.air"), 0.15f, "air_reward ignores ball height");
     }
 
     // =========================================================================
@@ -382,8 +381,7 @@ int main() {
     }
 
     // =========================================================================
-    // 17. velocity_ball_to_goal - ball moving the wrong way (no reward even
-    //     when the touch gate is satisfied).
+    // 17. velocity_ball_to_goal - ball moving the wrong way (negative reward)
     // =========================================================================
     {
       auto cfg = make_reward_test_config();
@@ -397,7 +395,7 @@ int main() {
       pulsar::AgentRewardState agent_state{};
       pulsar::EnvRewardState env_state{};
       auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
-      require_close(bd.terms.at("gameplay.velocity_ball_to_goal"), 0.0f, "vbtg wrong way");
+      require_close(bd.terms.at("gameplay.velocity_ball_to_goal"), -1.5f, "vbtg wrong way");
     }
 
     // =========================================================================
@@ -674,17 +672,19 @@ int main() {
     }
 
     // =========================================================================
-    // 25. speed_flip - airborne, transition to flipping, boosting
+    // 25. speed_flip - was on ground, now flipping near ground, boosting
     // =========================================================================
     {
       auto cfg = make_reward_test_config();
       pulsar::RewardEngine engine(cfg);
       auto car = make_neutral_car(pulsar::Team::Blue);
-      car.on_ground = false;  // speed flip is an airborne maneuver
+      car.on_ground = false;
+      car.position = {0.0f, 0.0f, 50.0f};  // near ground (kGroundZ=17, threshold 150)
       car.is_flipping = true;
       car.is_boosting = true;
       pulsar::EnvState env{};
       pulsar::AgentRewardState agent_state{};
+      agent_state.prev_on_ground = true;
       agent_state.prev_is_flipping = false;
       pulsar::EnvRewardState env_state{};
       auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
@@ -710,18 +710,20 @@ int main() {
     }
 
     // =========================================================================
-    // 27. wavedash - airborne, transition to flipping, near ground
+    // 27. wavedash - landing after flipping near ground
     // =========================================================================
     {
       auto cfg = make_reward_test_config();
       pulsar::RewardEngine engine(cfg);
       auto car = make_neutral_car(pulsar::Team::Blue);
-      car.on_ground = false;
-      car.position = {0.0f, 0.0f, 37.0f};
-      car.is_flipping = true;
+      car.on_ground = true;  // just landed
+      car.position = {0.0f, 0.0f, 17.0f};
+      car.is_flipping = false;
       pulsar::EnvState env{};
       pulsar::AgentRewardState agent_state{};
-      agent_state.prev_is_flipping = false;
+      agent_state.prev_on_ground = false;  // was airborne
+      agent_state.prev_is_flipping = true;  // was flipping
+      agent_state.prev_car_position_z = 37.0f;  // was near ground (kGroundZ=17, threshold=70)
       pulsar::EnvRewardState env_state{};
       auto bd = engine.compute(100, car, env, 2, agent_state, env_state, false, 0);
       require_close(bd.terms.at("mechanic.wavedash"), 0.3f, "wavedash");
@@ -735,12 +737,14 @@ int main() {
       auto cfg = make_reward_test_config();
       pulsar::RewardEngine engine(cfg);
       auto car = make_neutral_car(pulsar::Team::Blue);
-      car.on_ground = false;
-      car.position = {0.0f, 0.0f, 120.0f};
-      car.is_flipping = true;
+      car.on_ground = true;  // landed
+      car.position = {0.0f, 0.0f, 17.0f};
+      car.is_flipping = false;
       pulsar::EnvState env{};
       pulsar::AgentRewardState agent_state{};
-      agent_state.prev_is_flipping = false;
+      agent_state.prev_on_ground = false;
+      agent_state.prev_is_flipping = true;
+      agent_state.prev_car_position_z = 120.0f;  // too high (above kWavedashZThreshold=70)
       pulsar::EnvRewardState env_state{};
       auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
       require_close(bd.terms.at("mechanic.wavedash"), 0.0f, "wavedash too high");
@@ -753,13 +757,15 @@ int main() {
       auto cfg = make_reward_test_config();
       pulsar::RewardEngine engine(cfg);
       auto car = make_neutral_car(pulsar::Team::Blue);
-      car.on_ground = false;
-      car.position = {0.0f, 0.0f, 37.0f};
-      car.is_flipping = true;
+      car.on_ground = true;  // just landed
+      car.position = {0.0f, 0.0f, 17.0f};
+      car.is_flipping = false;
       pulsar::EnvState env{};
       pulsar::AgentRewardState agent_state{};
-      agent_state.prev_is_flipping = false;
-      agent_state.last_wavedash_tick = 100;
+      agent_state.prev_on_ground = false;
+      agent_state.prev_is_flipping = true;
+      agent_state.prev_car_position_z = 37.0f;
+      agent_state.last_wavedash_tick = 90;  // previous wavedash at tick 90
       pulsar::EnvRewardState env_state{};
       auto bd = engine.compute(110, car, env, 2, agent_state, env_state, false, 0);
       require_close(bd.terms.at("mechanic.wavedash"), 0.3f, "chain_dash wavedash component");
@@ -773,13 +779,15 @@ int main() {
       auto cfg = make_reward_test_config();
       pulsar::RewardEngine engine(cfg);
       auto car = make_neutral_car(pulsar::Team::Blue);
-      car.on_ground = false;
-      car.position = {0.0f, 0.0f, 37.0f};
-      car.is_flipping = true;
+      car.on_ground = true;  // just landed
+      car.position = {0.0f, 0.0f, 17.0f};
+      car.is_flipping = false;
       pulsar::EnvState env{};
       pulsar::AgentRewardState agent_state{};
-      agent_state.prev_is_flipping = false;
-      agent_state.last_wavedash_tick = 50;
+      agent_state.prev_on_ground = false;
+      agent_state.prev_is_flipping = true;
+      agent_state.prev_car_position_z = 37.0f;
+      agent_state.last_wavedash_tick = 50;  // too far back (kChainDashWindowTicks=30)
       pulsar::EnvRewardState env_state{};
       auto bd = engine.compute(110, car, env, 2, agent_state, env_state, false, 0);
       require_close(bd.terms.at("mechanic.chain_dash"), 0.0f, "chain_dash outside window");
@@ -826,18 +834,20 @@ int main() {
     }
 
     // =========================================================================
-    // 33. wall_dash - near wall, airborne flip near ground
+    // 33. wall_dash - landing near wall after flipping near ground
     // =========================================================================
     {
       auto cfg = make_reward_test_config();
       pulsar::RewardEngine engine(cfg);
       auto car = make_neutral_car(pulsar::Team::Blue);
-      car.on_ground = false;
-      car.position = {4050.0f, 0.0f, 37.0f};
-      car.is_flipping = true;
+      car.on_ground = true;
+      car.position = {4050.0f, 0.0f, 17.0f};
+      car.is_flipping = false;
       pulsar::EnvState env{};
       pulsar::AgentRewardState agent_state{};
-      agent_state.prev_is_flipping = false;
+      agent_state.prev_on_ground = false;
+      agent_state.prev_is_flipping = true;
+      agent_state.prev_car_position_z = 37.0f;
       pulsar::EnvRewardState env_state{};
       auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
       require_close(bd.terms.at("mechanic.wall_dash"), 0.35f, "wall_dash near x-wall");
@@ -850,12 +860,14 @@ int main() {
       auto cfg = make_reward_test_config();
       pulsar::RewardEngine engine(cfg);
       auto car = make_neutral_car(pulsar::Team::Blue);
-      car.on_ground = false;
-      car.position = {0.0f, 0.0f, 37.0f};
-      car.is_flipping = true;
+      car.on_ground = true;
+      car.position = {0.0f, 0.0f, 17.0f};
+      car.is_flipping = false;
       pulsar::EnvState env{};
       pulsar::AgentRewardState agent_state{};
-      agent_state.prev_is_flipping = false;
+      agent_state.prev_on_ground = false;
+      agent_state.prev_is_flipping = true;
+      agent_state.prev_car_position_z = 37.0f;
       pulsar::EnvRewardState env_state{};
       auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
       require_close(bd.terms.at("mechanic.wall_dash"), 0.0f, "wall_dash not near wall");
@@ -1227,10 +1239,11 @@ int main() {
     }
 
     // =========================================================================
-    // 53. kickoff_first_touch - both teams touch (contested)
+    // 53. kickoff_50_50_touch - both teams touch at kickoff
     // =========================================================================
     {
       auto cfg = make_reward_test_config();
+      cfg.mechanic_rewards.kickoff_50_50_touch = 0.95f;
       pulsar::RewardEngine engine(cfg);
       auto car = make_neutral_car(pulsar::Team::Blue);
       car.id = 0;
@@ -1244,8 +1257,10 @@ int main() {
       pulsar::AgentRewardState agent_state{};
       pulsar::EnvRewardState env_state{};
       auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
-      require_close(bd.terms.at("mechanic.kickoff_first_touch"), 0.95f, "kickoff contested");
+      require_close(bd.terms.at("mechanic.kickoff_first_touch"), 0.0f, "kickoff contested first touch");
+      require_close(bd.terms.at("mechanic.kickoff_50_50_touch"), 0.95f, "kickoff contested 50/50");
       require(env_state.first_touch_team == 2, "first_touch_team contested");
+      require(env_state.kickoff_reward_given, "kickoff_reward_given set on 50/50");
     }
 
     // =========================================================================
@@ -1295,88 +1310,10 @@ int main() {
     }
 
     // =========================================================================
-    // 56. Per-episode dense reward cap - under cap
+    // 56. Breakdown terms map has all expected keys
     // =========================================================================
     {
       auto cfg = make_reward_test_config();
-      cfg.dense_rewards.dense_reward_cap_per_episode = 10.0f;
-      pulsar::RewardEngine engine(cfg);
-      auto car = make_neutral_car(pulsar::Team::Blue);
-      car.forward = {0.0f, 1.0f, 0.0f};
-      pulsar::EnvState env{};
-      env.ball.position = {0.0f, 300.0f, 17.0f};
-      pulsar::AgentRewardState agent_state{};
-      agent_state.episode_dense_reward = 0.0f;
-      pulsar::EnvRewardState env_state{};
-      auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
-      require_close(bd.gameplay, 0.367879f, "gameplay under cap");
-    }
-
-    // =========================================================================
-    // 57. Per-episode dense reward cap - over cap
-    // =========================================================================
-    {
-      auto cfg = make_reward_test_config();
-      cfg.dense_rewards.dense_reward_cap_per_episode = 10.0f;
-      pulsar::RewardEngine engine(cfg);
-      auto car = make_neutral_car(pulsar::Team::Blue);
-      car.forward = {0.0f, 1.0f, 0.0f};
-      pulsar::EnvState env{};
-      env.ball.position = {0.0f, 300.0f, 17.0f};
-      pulsar::AgentRewardState agent_state{};
-      agent_state.episode_dense_reward = 9.7f;
-      pulsar::EnvRewardState env_state{};
-      auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
-      require_close(bd.gameplay, 0.3f, "gameplay partial cap");
-      require_close(agent_state.episode_dense_reward, 10.0f, "episode_dense_reward capped at limit");
-    }
-
-    // =========================================================================
-    // 58. Per-episode dense reward cap - cap exhausted
-    // =========================================================================
-    {
-      auto cfg = make_reward_test_config();
-      cfg.dense_rewards.dense_reward_cap_per_episode = 10.0f;
-      pulsar::RewardEngine engine(cfg);
-      auto car = make_neutral_car(pulsar::Team::Blue);
-      car.forward = {0.0f, 1.0f, 0.0f};
-      pulsar::EnvState env{};
-      env.ball.position = {0.0f, 300.0f, 17.0f};
-      pulsar::AgentRewardState agent_state{};
-      agent_state.episode_dense_reward = 12.0f;
-      pulsar::EnvRewardState env_state{};
-      auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
-      require_close(bd.gameplay, 0.0f, "gameplay cap exhausted");
-    }
-
-    // =========================================================================
-    // 59. Per-episode mechanic reward cap - over cap
-    // =========================================================================
-    {
-      auto cfg = make_reward_test_config();
-      cfg.mechanic_rewards.mechanic_reward_cap_per_episode = 1.0f;
-      pulsar::RewardEngine engine(cfg);
-      auto car = make_neutral_car(pulsar::Team::Blue);
-      car.on_ground = false;  // speed_flip is airborne
-      car.is_flipping = true;
-      car.is_boosting = true;
-      pulsar::EnvState env{};
-      pulsar::AgentRewardState agent_state{};
-      agent_state.prev_is_flipping = false;
-      agent_state.episode_mechanic_reward = 0.5f;
-      pulsar::EnvRewardState env_state{};
-      auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
-      require_close(bd.mechanic, 0.5f, "mechanic partial cap");
-      require_close(agent_state.episode_mechanic_reward, 1.0f, "episode_mechanic_reward capped");
-    }
-
-    // =========================================================================
-    // 60. Breakdown terms map has all expected keys
-    // =========================================================================
-    {
-      auto cfg = make_reward_test_config();
-      cfg.dense_rewards.dense_reward_cap_per_episode = 0.0f;
-      cfg.mechanic_rewards.mechanic_reward_cap_per_episode = 0.0f;
       pulsar::RewardEngine engine(cfg);
       auto car = make_neutral_car(pulsar::Team::Blue);
       pulsar::EnvState env{};
@@ -1412,32 +1349,33 @@ int main() {
       require(bd.terms.find("mechanic.pinch") != bd.terms.end(), "terms has pinch");
       require(bd.terms.find("mechanic.team_pinch") != bd.terms.end(), "terms has team_pinch");
       require(bd.terms.find("mechanic.kickoff_first_touch") != bd.terms.end(), "terms has kickoff_first_touch");
+      require(bd.terms.find("mechanic.kickoff_50_50_touch") != bd.terms.end(), "terms has kickoff_50_50_touch");
     }
 
     // =========================================================================
-    // 61. Combined reward - gameplay + mechanic + terminal
+    // 57. Combined reward - gameplay + mechanic + terminal
     // =========================================================================
     {
       auto cfg = make_reward_test_config();
-      cfg.dense_rewards.dense_reward_cap_per_episode = 0.0f;
-      cfg.mechanic_rewards.mechanic_reward_cap_per_episode = 0.0f;
       cfg.mechanic_rewards.wavedash = 0.0f;
       pulsar::RewardEngine engine(cfg);
       auto car = make_neutral_car(pulsar::Team::Blue);
       car.forward = {0.0f, 1.0f, 0.0f};
-      car.on_ground = false;  // speed_flip is airborne
+      car.on_ground = false;
+      car.position = {0.0f, 0.0f, 50.0f};  // near ground for speed_flip
       car.is_flipping = true;
       car.is_boosting = true;
       pulsar::EnvState env{};
       env.ball.position = {0.0f, 300.0f, 17.0f};
       pulsar::AgentRewardState agent_state{};
+      agent_state.prev_on_ground = true;
       agent_state.prev_is_flipping = false;
       pulsar::EnvRewardState env_state{};
       auto bd = engine.compute(0, car, env, 2, agent_state, env_state, true, 0);
-      require_close(bd.gameplay, 0.367879f, "combined gameplay");
+      require_close(bd.gameplay, 0.513475f, "combined gameplay");
       require_close(bd.mechanic, 0.5f, "combined mechanic");
       require_close(bd.terminal, 10.0f, "combined terminal");
-      require_close(bd.total, 10.867879f, "combined total");
+      require_close(bd.total, 11.013475f, "combined total");
     }
 
     // =========================================================================

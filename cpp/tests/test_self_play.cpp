@@ -4,13 +4,16 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
 #include "pulsar/checkpoint/checkpoint.hpp"
+#include "pulsar/env/done.hpp"
 #include "pulsar/env/obs_builder.hpp"
 #include "pulsar/model/ppo_actor.hpp"
 #include "pulsar/rl/action_table.hpp"
+#include "pulsar/training/batched_rocketsim_collector.hpp"
 #include "pulsar/training/self_play_manager.hpp"
 #include "test_utils.hpp"
 
@@ -517,6 +520,50 @@ void test_snapshot_mode_is_preserved() {
   safe_remove_all(root);
 }
 
+void test_collection_ignores_snapshot_assignments() {
+  pulsar::ExperimentConfig config = pulsar::test::make_test_config();
+  config.env.collision_meshes_path = pulsar::test::find_repo_collision_meshes().string();
+  config.env.team_size = 1;
+  config.ppo.num_envs = 2;
+  config.ppo.collection_workers = 0;
+
+  auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
+  auto action_parser =
+      std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
+  auto done_condition = std::make_shared<pulsar::SimpleDoneCondition>(config.env);
+  pulsar::BatchedRocketSimCollector collector(
+      config,
+      obs_builder,
+      action_parser,
+      done_condition,
+      false);
+
+  collector.set_self_play_assignment_fn([](std::size_t, std::uint64_t) {
+    return pulsar::SelfPlayAssignment{
+        .enabled = true,
+        .learner_team = pulsar::Team::Blue,
+        .snapshot_index = 42,
+    };
+  });
+
+  const auto require_all_current_policy = [&collector](const std::string& context) {
+    const torch::Tensor learner_active = collector.host_learner_active();
+    const torch::Tensor snapshot_ids = collector.host_snapshot_ids();
+    pulsar::test::require(
+        learner_active.sum().item<float>() == static_cast<float>(learner_active.numel()),
+        context + ": every agent should remain learner-active");
+    pulsar::test::require(
+        (snapshot_ids == -1).all().item<bool>(),
+        context + ": snapshot ids should remain disabled");
+  };
+
+  require_all_current_policy("after assignment hook");
+
+  std::vector<std::int64_t> actions(collector.total_agents(), 0);
+  collector.step(std::span<const std::int64_t>(actions.data(), actions.size()));
+  require_all_current_policy("after environment step");
+}
+
 }  // namespace
 
 int main() {
@@ -534,6 +581,7 @@ int main() {
     test_restore_ratings();
     test_ratings_include_all_curriculum_modes();
     test_snapshot_mode_is_preserved();
+    test_collection_ignores_snapshot_assignments();
     std::cout << "pulsar_self_play_tests passed\n" << std::flush;
     std::_Exit(EXIT_SUCCESS);
   } catch (const std::exception& exc) {

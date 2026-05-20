@@ -13,11 +13,11 @@ namespace pulsar {
 struct AgentRewardState {
   float prev_boost = 0.0F;
   Vec3 prev_ball_velocity{};
-  float episode_dense_reward = 0.0F;
   float episode_boost_pickup_reward = 0.0F;
   float episode_air_touch_reward = 0.0F;
 
   bool prev_on_ground = true;
+  float prev_car_position_z = 0.0F;
   float prev_car_velocity_z = 0.0F;
   bool prev_has_flip = true;
   bool prev_has_flipped = false;
@@ -37,8 +37,6 @@ struct AgentRewardState {
   bool ball_hit_backboard = false;
   int backboard_hit_count = 0;
   int last_toucher_id = -1;
-
-  float episode_mechanic_reward = 0.0F;
 };
 
 struct EnvRewardState {
@@ -142,6 +140,7 @@ class RewardEngine {
   float detect_pinch(const CarState& car, const EnvState& env, AgentRewardState& s) const;
   float detect_team_pinch(const CarState& car, const EnvState& env, AgentRewardState& s, int env_team_size) const;
   float detect_kickoff_first_touch(const CarState& car, const EnvState& env, EnvRewardState& env_state) const;
+  float detect_kickoff_50_50_touch(const CarState& car, const EnvState& env, EnvRewardState& env_state) const;
 };
 
 }  // namespace pulsar

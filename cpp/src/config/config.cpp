@@ -76,6 +76,7 @@ void from_json(const json& j, OutcomeConfig& value) {
 void to_json(json& j, const MechanicRewardConfig& value) {
   j = json{
       {"kickoff_first_touch", value.kickoff_first_touch},
+      {"kickoff_50_50_touch", value.kickoff_50_50_touch},
       {"speed_flip", value.speed_flip},
       {"wavedash", value.wavedash},
       {"chain_dash_bonus", value.chain_dash_bonus},
@@ -91,12 +92,12 @@ void to_json(json& j, const MechanicRewardConfig& value) {
       {"pogo", value.pogo},
       {"pinch", value.pinch},
       {"team_pinch", value.team_pinch},
-      {"mechanic_reward_cap_per_episode", value.mechanic_reward_cap_per_episode},
   };
 }
 
 void from_json(const json& j, MechanicRewardConfig& value) {
   value.kickoff_first_touch = j.value("kickoff_first_touch", 0.0F);
+  value.kickoff_50_50_touch = j.value("kickoff_50_50_touch", 0.0F);
   value.speed_flip = j.value("speed_flip", 0.0F);
   value.wavedash = j.value("wavedash", 0.0F);
   value.chain_dash_bonus = j.value("chain_dash_bonus", 0.0F);
@@ -112,7 +113,6 @@ void from_json(const json& j, MechanicRewardConfig& value) {
   value.pogo = j.value("pogo", 0.0F);
   value.pinch = j.value("pinch", 0.0F);
   value.team_pinch = j.value("team_pinch", 0.0F);
-  value.mechanic_reward_cap_per_episode = j.value("mechanic_reward_cap_per_episode", 0.10F);
 }
 
 void to_json(json& j, const DenseRewardConfig& value) {
@@ -147,7 +147,6 @@ void to_json(json& j, const DenseRewardConfig& value) {
       {"possession_face_ball_weight", value.possession_face_ball_weight},
       {"possession_window_ticks", value.possession_window_ticks},
       {"possession_distance_decay", value.possession_distance_decay},
-      {"dense_reward_cap_per_episode", value.dense_reward_cap_per_episode},
       {"flat_touch_weight", value.flat_touch_weight},
       {"team_spirit", value.team_spirit},
   };
@@ -184,7 +183,6 @@ void from_json(const json& j, DenseRewardConfig& value) {
   value.possession_face_ball_weight = j.value("possession_face_ball_weight", 0.0F);
   value.possession_window_ticks = j.value("possession_window_ticks", 180);
   value.possession_distance_decay = j.value("possession_distance_decay", 1000.0F);
-  value.dense_reward_cap_per_episode = j.value("dense_reward_cap_per_episode", 0.0F);
   value.flat_touch_weight = j.value("flat_touch_weight", 0.0F);
   value.team_spirit = j.value("team_spirit", 0.0F);
 }

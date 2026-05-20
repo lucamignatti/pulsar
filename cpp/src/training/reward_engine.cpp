@@ -67,6 +67,7 @@ bool RewardEngine::has_any_gameplay_reward() const {
 
 bool RewardEngine::has_any_mechanic_reward() const {
   return mechanic_cfg_.kickoff_first_touch > 0.0F ||
+         mechanic_cfg_.kickoff_50_50_touch > 0.0F ||
          mechanic_cfg_.speed_flip > 0.0F ||
          mechanic_cfg_.wavedash > 0.0F ||
          mechanic_cfg_.chain_dash_bonus > 0.0F ||
@@ -288,41 +289,16 @@ RewardBreakdown RewardEngine::compute(
   bd.terms["mechanic.kickoff_first_touch"] = mkft;
   bd.mechanic += mkft;
 
-  // --- apply per-episode caps ---
-  float effective_gameplay = bd.gameplay;
-  {
-    const float cap = dense_cfg_.dense_reward_cap_per_episode;
-    if (cap > 0.0F) {
-      const float remaining = cap - agent_state.episode_dense_reward;
-      if (remaining <= 0.0F) {
-        effective_gameplay = 0.0F;
-      } else if (effective_gameplay > remaining) {
-        effective_gameplay = remaining;
-      }
-    }
-  }
-  agent_state.episode_dense_reward += effective_gameplay;
+  float mkft50 = detect_kickoff_50_50_touch(car, env, env_state);
+  bd.terms["mechanic.kickoff_50_50_touch"] = mkft50;
+  bd.mechanic += mkft50;
 
-  float effective_mechanic = bd.mechanic;
-  {
-    const float cap = mechanic_cfg_.mechanic_reward_cap_per_episode;
-    if (cap > 0.0F) {
-      const float remaining = cap - agent_state.episode_mechanic_reward;
-      if (remaining <= 0.0F) {
-        effective_mechanic = 0.0F;
-      } else if (effective_mechanic > remaining) {
-        effective_mechanic = remaining;
-      }
-    }
-  }
-  agent_state.episode_mechanic_reward += effective_mechanic;
-
-  bd.gameplay = effective_gameplay;
-  bd.mechanic = effective_mechanic;
-  bd.total = bd.terminal + effective_gameplay + effective_mechanic;
+  // --- compute total ---
+  bd.total = bd.terminal + bd.gameplay + bd.mechanic;
 
   // --- state bookkeeping ---
   agent_state.prev_on_ground = car.on_ground;
+  agent_state.prev_car_position_z = car.position.z;
   agent_state.prev_car_velocity_z = car.velocity.z;
   agent_state.prev_has_flip = car.has_flip;
   agent_state.prev_has_flipped = car.has_flipped;
@@ -435,8 +411,8 @@ float RewardEngine::face_ball(
 
 float RewardEngine::air_reward(
     const CarState& car, const EnvState& env) const {
+  (void)env;
   if (dense_cfg_.air_reward_weight <= 0.0F) return 0.0F;
-  if (env.ball.position.z < dense_cfg_.air_reward_ball_z_min) return 0.0F;
   if (car.on_ground) return 0.0F;
 
   return dense_cfg_.air_reward_weight;
@@ -446,16 +422,9 @@ float RewardEngine::velocity_ball_to_goal(
     const CarState& car, const EnvState& env) const {
   if (dense_cfg_.velocity_ball_to_goal_weight <= 0.0F) return 0.0F;
 
-  // Only credit the agent who last touched the ball, and only within a
-  // recency window.  Without this gate the reward fires passively every tick
-  // from ball state the agent had no part in creating, exhausting the dense
-  // cap in a few steps and incentivising a single hit-and-coast strategy.
-  if (env.last_touch_agent != car.id) return 0.0F;
-  if ((env.tick - env.last_touch_tick) > kVbtgTouchWindowTicks) return 0.0F;
-
   const float team_sign = (car.team == Team::Blue) ? 1.0F : -1.0F;
   const float vel_toward = env.ball.velocity.y * team_sign;
-  const float frac = clamp(vel_toward / std::max(dense_cfg_.max_ball_speed, 1.0F), 0.0F, 1.0F);
+  const float frac = clamp(vel_toward / std::max(dense_cfg_.max_ball_speed, 1.0F), -1.0F, 1.0F);
 
   return frac * dense_cfg_.velocity_ball_to_goal_weight;
 }
@@ -512,21 +481,7 @@ float RewardEngine::boost_used(const CarState& car, AgentRewardState& s) const {
   const float boost_delta = s.prev_boost - car.boost;
   if (boost_delta <= 0.0F) return 0.0F;
 
-  const float goal_dir = (car.team == Team::Blue) ? 1.0F : -1.0F;
-  const float car_speed = std::max(vec3_magnitude(car.velocity), 1.0F);
-  const Vec3 vel_norm{
-      car.velocity.x / car_speed,
-      car.velocity.y / car_speed,
-      car.velocity.z / car_speed,
-  };
-  const float toward_goal = vel_norm.y * goal_dir;
-
-  // reward when boosting in a generally forward/goal-ward direction
-  if (toward_goal > 0.1F || car_speed > kSupersonicSpeed) {
-    return clamp(boost_delta / 33.0F, 0.0F, 1.0F) * dense_cfg_.boost_used_weight;
-  }
-
-  return 0.0F;
+  return clamp(boost_delta / 33.0F, 0.0F, 1.0F) * dense_cfg_.boost_used_weight;
 }
 
 float RewardEngine::defensive_positioning(const CarState& car, const EnvState& env) const {
@@ -699,8 +654,13 @@ float RewardEngine::possession_chain(
 float RewardEngine::detect_speed_flip(const CarState& car, AgentRewardState& s) const {
   if (!is_mechanic_unlocked("speed_flip")) return 0.0F;
   if (mechanic_cfg_.speed_flip <= 0.0F) return 0.0F;
-  if (!car.on_ground && !s.prev_is_flipping && car.is_flipping && car.is_boosting) {
-    return mechanic_cfg_.speed_flip;
+  // Speed flip: flip starts from ground, car stays low and boosts.
+  // Requiring prev_on_ground and low altitude filters out aerial flips.
+  if (s.prev_on_ground && !s.prev_is_flipping && car.is_flipping && car.is_boosting) {
+    const float z_above_ground = car.position.z - kGroundZ;
+    if (z_above_ground < 150.0F) {
+      return mechanic_cfg_.speed_flip;
+    }
   }
   return 0.0F;
 }
@@ -708,9 +668,13 @@ float RewardEngine::detect_speed_flip(const CarState& car, AgentRewardState& s) 
 float RewardEngine::detect_wavedash(int tick, const CarState& car, AgentRewardState& s) const {
   if (!is_mechanic_unlocked("wavedash")) return 0.0F;
   if (mechanic_cfg_.wavedash <= 0.0F) return 0.0F;
-  if (!car.on_ground && !s.prev_is_flipping && car.is_flipping) {
-    const float z_above_ground = car.position.z - kGroundZ;
-    if (z_above_ground < kWavedashZThreshold) {
+  // Wavedash: car was flipping close to ground, then lands (ground cancels
+  // the flip, converting flip momentum into forward speed).
+  // Detecting on landing prevents exploiting by just jumping + flipping near
+  // the ground without actually making ground contact.
+  if (car.on_ground && !s.prev_on_ground && s.prev_is_flipping) {
+    const float prev_z_above_ground = s.prev_car_position_z - kGroundZ;
+    if (prev_z_above_ground < kWavedashZThreshold) {
       s.last_wavedash_tick = tick;
       return mechanic_cfg_.wavedash;
     }
@@ -756,9 +720,11 @@ float RewardEngine::detect_half_flip(const CarState& car, AgentRewardState& s) c
 float RewardEngine::detect_wall_dash(int tick, const CarState& car, AgentRewardState& s) const {
   if (!is_mechanic_unlocked("wall_dash")) return 0.0F;
   if (mechanic_cfg_.wall_dash <= 0.0F) return 0.0F;
-  if (!car.on_ground && !s.prev_is_flipping && car.is_flipping) {
-    const float z_above_ground = car.position.z - kGroundZ;
-    if (z_above_ground < kWavedashZThreshold) {
+  // Same landing-gated detection as wavedash, but requires previous position
+  // to be near an arena wall.
+  if (car.on_ground && !s.prev_on_ground && s.prev_is_flipping) {
+    const float prev_z_above_ground = s.prev_car_position_z - kGroundZ;
+    if (prev_z_above_ground < kWavedashZThreshold) {
       const bool near_wall =
           std::abs(car.position.x) > (kArenaExtentX - kWallDashDist) ||
           std::abs(car.position.y) > (kArenaExtentY - kWallDashDist);
@@ -925,7 +891,7 @@ float RewardEngine::detect_pogo(const CarState& car, AgentRewardState& s) const 
   if (mechanic_cfg_.pogo <= 0.0F) return 0.0F;
 
   if (!s.prev_on_ground && car.on_ground) {
-    if (!car.is_jumping && !car.has_jumped) {
+    if (!car.is_jumping) {
       // Use the z-velocity from the PREVIOUS tick (before the landing
       // collision zeroes it out).  s.prev_car_velocity_z is saved in
       // compute() after all reward functions run.
@@ -1031,12 +997,40 @@ float RewardEngine::detect_kickoff_first_touch(const CarState& car, const EnvSta
 
   if (opponent_touching) {
     env_state.first_touch_team = 2;
-  } else {
-    env_state.first_touch_team = team_int;
+    // 50/50 — do not award kickoff_first_touch; kickoff_50_50_touch handles this.
+    return 0.0F;
   }
-    env_state.kickoff_reward_given = true;
 
-    return mechanic_cfg_.kickoff_first_touch;
+  env_state.first_touch_team = team_int;
+  env_state.kickoff_reward_given = true;
+  return mechanic_cfg_.kickoff_first_touch;
+}
+
+float RewardEngine::detect_kickoff_50_50_touch(const CarState& car, const EnvState& env,
+                                                EnvRewardState& env_state) const {
+  if (!is_mechanic_unlocked("kickoff_50_50_touch")) return 0.0F;
+  if (mechanic_cfg_.kickoff_50_50_touch <= 0.0F) return 0.0F;
+  if (!car.ball_touched) return 0.0F;
+  // No kickoff_reward_given gate — each agent in a 50/50 earns this independently.
+  // The check below (both teams touching simultaneously) is self-limiting.
+
+  const int team_int = static_cast<int>(car.team);
+
+  bool opponent_touching = false;
+  for (const auto& other_car : env.cars) {
+    if (other_car.id == car.id) continue;
+    if (other_car.ball_touched && static_cast<int>(other_car.team) != team_int) {
+      opponent_touching = true;
+      break;
+    }
   }
+
+  if (opponent_touching) {
+    env_state.kickoff_reward_given = true;
+    return mechanic_cfg_.kickoff_50_50_touch;
+  }
+
+  return 0.0F;
+}
 
 }  // namespace pulsar

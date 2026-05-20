@@ -1086,20 +1086,6 @@ APPOTrainer::APPOTrainer(
     agent_offset += shard_agents;
   }
 
-  if (self_play_manager_ && self_play_manager_->enabled()) {
-    std::size_t env_offset = 0;
-    for (auto& collector : collectors_) {
-      const std::size_t shard_env_offset = env_offset;
-      collector->set_self_play_assignment_fn(
-          [this, shard_env_offset](std::size_t env_idx, std::uint64_t seed) {
-            if (curriculum_.enabled() && curriculum_.stage_index() < kSelfPlayMinStage) {
-              return SelfPlayAssignment{};
-            }
-            return self_play_manager_->sample_assignment(shard_env_offset + env_idx, seed);
-          });
-      env_offset += collector->num_envs();
-    }
-  }
   if (log_initialization_) {
     std::cout << "compute_devices=" << join_device_list(compute_devices_)
               << " collection_shards=" << collectors_.size()
@@ -1209,10 +1195,6 @@ void APPOTrainer::rebuild_collectors() {
     }
   }
 
-  // save self-play state before rebuild
-  const bool self_play_was_enabled = self_play_manager_ && self_play_manager_->enabled();
-  const auto self_play_rng = self_play_was_enabled ? self_play_manager_->rng_state() : std::string{};
-
   // destroy old collectors
   collectors_.clear();
 
@@ -1305,26 +1287,6 @@ void APPOTrainer::rebuild_collectors() {
     }
     shard_action_buffers_cpu_.push_back(
         torch::zeros({static_cast<long>(collector->total_agents())}, opts));
-  }
-
-  // rebuild self-play assignments
-  if (self_play_manager_ && self_play_was_enabled) {
-    self_play_manager_->restore_rng_state(self_play_rng);
-    std::size_t env_offset = 0;
-    for (auto& collector : collectors_) {
-      if (!collector) continue;
-      const std::size_t shard_env_offset = env_offset;
-      const std::string collector_mode = collector->mode();
-      collector->set_self_play_assignment_fn(
-          [this, shard_env_offset, collector_mode](std::size_t env_idx, std::uint64_t seed) {
-            if (curriculum_.enabled() && curriculum_.stage_index() < kSelfPlayMinStage) {
-              return SelfPlayAssignment{};
-            }
-            self_play_manager_->set_current_mode(collector_mode);
-            return self_play_manager_->sample_assignment(shard_env_offset + env_idx, seed);
-          });
-      env_offset += collector->num_envs();
-    }
   }
 
   // re-apply curriculum
@@ -2715,7 +2677,6 @@ void APPOTrainer::collect_rollout(
           torch::Tensor actions;
           torch::Tensor action_log_probs;
           ActorStepOutput output;
-          double self_play_inference_seconds = 0.0;
           const auto policy_start = std::chrono::steady_clock::now();
           {
             torch::NoGradGuard no_grad;
@@ -2726,26 +2687,12 @@ void APPOTrainer::collect_rollout(
             output = shard_actor->forward_step_stateful(
                 normalized_obs, recurrent_state, episode_starts, &recurrent_state, goal_values);
             actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
-            if (self_play_manager_ && self_play_manager_->has_snapshots()) {
-              torch::Tensor opponent_actions;
-              torch::Tensor snapshot_ids = collector.host_snapshot_ids().to(shard_device, use_pinned_host_buffers_);
-              self_play_manager_->infer_opponent_actions(
-                  shard_actor,
-                  raw_obs,
-                  action_masks,
-                  episode_starts,
-                  snapshot_ids,
-                  output.encoded,
-                  &opponent_actions,
-                  &self_play_inference_seconds);
-              actions = torch::where(snapshot_ids >= 0, opponent_actions, actions);
-            }
           }
           if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
             torch::cuda::synchronize();
           }
           shard_step.policy_forward_seconds =
-              std::chrono::duration<double>(std::chrono::steady_clock::now() - policy_start).count() + self_play_inference_seconds;
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - policy_start).count();
 
           const auto decode_start = std::chrono::steady_clock::now();
           torch::Tensor action_indices_cpu = actions.contiguous().to(torch::kCPU);
@@ -3015,21 +2962,6 @@ void APPOTrainer::collect_rollout(
     }
     metrics.policy_forward_seconds +=
         std::chrono::duration<double>(std::chrono::steady_clock::now() - policy_start).count();
-
-    if (self_play_manager_ && self_play_manager_->has_snapshots()) {
-      torch::Tensor opponent_actions;
-      torch::Tensor snapshot_ids = collector_->host_snapshot_ids().to(device_, use_pinned_host_buffers_);
-      self_play_manager_->infer_opponent_actions(
-          rollout_actor,
-          raw_obs,
-          action_masks,
-          episode_starts,
-          snapshot_ids,
-          output.encoded,
-          &opponent_actions,
-          &metrics.policy_forward_seconds);
-      actions = torch::where(snapshot_ids >= 0, opponent_actions, actions);
-    }
 
     const auto decode_start = std::chrono::steady_clock::now();
     torch::Tensor action_indices_cpu;
