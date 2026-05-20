@@ -170,19 +170,21 @@ __global__ void layernorm_backward_params_stage1_kernel(
   const int row_lane = threadIdx.y;
   const int d = blockIdx.x * Cols + col_lane;
   const int chunk = blockIdx.y;
-  if (chunk >= chunks || d >= D) return;
+  const bool valid_col = chunk < chunks && d < D;
 
   const int row_begin = chunk * RowsPerBlock;
   const int row_end = row_begin + RowsPerBlock < N ? row_begin + RowsPerBlock : N;
   float w_sum = 0.0F;
   float b_sum = 0.0F;
-  for (int row = row_begin + row_lane; row < row_end; row += Rows) {
-    const int offset = row * D + d;
-    const float dy = grad_output[offset];
-    b_sum += dy;
-    if (partial_weight != nullptr) {
-      const float x_hat = (input[offset] - saved_mean[row]) * saved_inv_std[row];
-      w_sum += dy * x_hat;
+  if (valid_col) {
+    for (int row = row_begin + row_lane; row < row_end; row += Rows) {
+      const int offset = row * D + d;
+      const float dy = grad_output[offset];
+      b_sum += dy;
+      if (partial_weight != nullptr) {
+        const float x_hat = (input[offset] - saved_mean[row]) * saved_inv_std[row];
+        w_sum += dy * x_hat;
+      }
     }
   }
 
@@ -198,7 +200,7 @@ __global__ void layernorm_backward_params_stage1_kernel(
     __syncthreads();
   }
 
-  if (row_lane == 0) {
+  if (row_lane == 0 && valid_col) {
     const int partial_offset = chunk * D + d;
     if (partial_weight != nullptr) partial_weight[partial_offset] = weight_sums[0][col_lane];
     if (partial_bias != nullptr) partial_bias[partial_offset] = bias_sums[0][col_lane];

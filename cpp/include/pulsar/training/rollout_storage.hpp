@@ -60,6 +60,7 @@ class RolloutStorage {
 
   void set_final_values(const std::unordered_map<std::string, torch::Tensor>& final_values);
   void set_rewards_at(int step, const std::unordered_map<std::string, torch::Tensor>& rewards_in);
+  void mark_step_filled(int step);
   [[nodiscard]] const std::unordered_map<std::string, torch::Tensor>& final_values() const;
   void clear();
 

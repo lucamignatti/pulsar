@@ -155,7 +155,6 @@ void RolloutStorage::append_slice(
       it->second[step].narrow(0, agent_offset, agent_count).copy_(tensor.detach());
     }
   }
-  filled_length_ = std::max(filled_length_, step + 1);
 }
 
 void RolloutStorage::set_mode_ids_slice(int step, int agent_offset, int agent_count, std::int8_t mode_id) {
@@ -182,6 +181,13 @@ void RolloutStorage::set_final_values(
 
 const std::unordered_map<std::string, torch::Tensor>& RolloutStorage::final_values() const {
   return final_values_;
+}
+
+void RolloutStorage::mark_step_filled(int step) {
+  if (step < 0 || step >= rollout_length_) {
+    throw std::out_of_range("RolloutStorage::mark_step_filled step is outside rollout capacity.");
+  }
+  filled_length_ = std::max(filled_length_, step + 1);
 }
 
 void RolloutStorage::clear() {

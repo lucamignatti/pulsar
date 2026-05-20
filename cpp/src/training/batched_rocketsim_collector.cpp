@@ -584,10 +584,19 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
 }
 
 void BatchedRocketSimCollector::step(std::span<const ControllerState> actions, CollectorTimings* timings) {
+  step_after_physics_prefix(actions, 0, timings);
+}
+
+void BatchedRocketSimCollector::step_after_physics_prefix(
+    std::span<const ControllerState> actions,
+    int prefix_tick_count,
+    CollectorTimings* timings) {
   PULSAR_TRACE_SCOPE_CAT("collector", "step_controller");
   if (actions.size() != total_agents_) {
     throw std::invalid_argument("BatchedRocketSimCollector::step action span has incorrect size.");
   }
+  const int prefix_ticks = bounded_physics_prefix_ticks(prefix_tick_count);
+  const int remaining_ticks = config_.env.tick_skip - prefix_ticks;
 
   const auto env_step_start = std::chrono::steady_clock::now();
   executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
@@ -595,16 +604,13 @@ void BatchedRocketSimCollector::step(std::span<const ControllerState> actions, C
       const std::size_t agent_begin = agent_offsets_[env_idx];
       const std::size_t agent_end = agent_offsets_[env_idx + 1];
       auto& engine = *envs_[env_idx].engine;
-      const int half = config_.env.half_tick_skip;
-      const int full = config_.env.tick_skip;
       std::span<const ControllerState> env_actions(
           actions.data() + static_cast<std::ptrdiff_t>(agent_begin),
           agent_end - agent_begin);
-      if (half > 0 && half < full) {
+      if (remaining_ticks > 0) {
         engine.apply_controls(env_actions);
-        engine.step_physics(half);
-        engine.step_physics(full - half);
-      } else {
+        engine.step_physics(remaining_ticks);
+      } else if (prefix_ticks == 0) {
         engine.step_inplace(env_actions);
       }
     }
@@ -616,19 +622,37 @@ void BatchedRocketSimCollector::step(std::span<const ControllerState> actions, C
   finalize_step(timings);
 }
 
-void BatchedRocketSimCollector::step_physics_only(int tick_count) {
+void BatchedRocketSimCollector::step_physics_only(int tick_count, CollectorTimings* timings) {
+  if (tick_count <= 0) {
+    return;
+  }
+  const auto env_step_start = std::chrono::steady_clock::now();
   executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
     for (std::size_t env_idx = begin; env_idx < end; ++env_idx) {
+      envs_[env_idx].engine->apply_controls(envs_[env_idx].action_scratch);
       envs_[env_idx].engine->step_physics(tick_count);
     }
   });
+  if (timings != nullptr) {
+    timings->env_step_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - env_step_start).count();
+  }
 }
 
 void BatchedRocketSimCollector::step(std::span<const std::int64_t> action_indices, CollectorTimings* timings) {
+  step_after_physics_prefix(action_indices, 0, timings);
+}
+
+void BatchedRocketSimCollector::step_after_physics_prefix(
+    std::span<const std::int64_t> action_indices,
+    int prefix_tick_count,
+    CollectorTimings* timings) {
   PULSAR_TRACE_SCOPE_CAT("collector", "step_discrete_fused");
   if (action_indices.size() != total_agents_) {
     throw std::invalid_argument("BatchedRocketSimCollector::step action span has incorrect size.");
   }
+  const int prefix_ticks = bounded_physics_prefix_ticks(prefix_tick_count);
+  const int remaining_ticks = config_.env.tick_skip - prefix_ticks;
 
   const auto step_start = std::chrono::steady_clock::now();
 
@@ -678,13 +702,10 @@ void BatchedRocketSimCollector::step(std::span<const std::int64_t> action_indice
               action_indices.data() + static_cast<std::ptrdiff_t>(agent_begin), count),
           envs_[env_idx].action_scratch);
       auto& engine = *envs_[env_idx].engine;
-      const int half = config_.env.half_tick_skip;
-      const int full = config_.env.tick_skip;
-      if (half > 0 && half < full) {
+      if (remaining_ticks > 0) {
         engine.apply_controls(envs_[env_idx].action_scratch);
-        engine.step_physics(half);
-        engine.step_physics(full - half);
-      } else {
+        engine.step_physics(remaining_ticks);
+      } else if (prefix_ticks == 0) {
         engine.step_inplace(envs_[env_idx].action_scratch);
       }
 
@@ -893,6 +914,13 @@ void BatchedRocketSimCollector::step(std::span<const std::int64_t> action_indice
     timings->mask_build_seconds += s * 0.03;
     timings->done_reset_seconds += s * 0.02;
   }
+}
+
+int BatchedRocketSimCollector::bounded_physics_prefix_ticks(int prefix_tick_count) const {
+  if (prefix_tick_count <= 0 || config_.env.tick_skip <= 0) {
+    return 0;
+  }
+  return std::min(prefix_tick_count, config_.env.tick_skip);
 }
 
 const BatchedRocketSimCollector::StepOutput& BatchedRocketSimCollector::last_step_output() const {

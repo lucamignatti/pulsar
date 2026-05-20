@@ -2613,6 +2613,10 @@ void APPOTrainer::collect_rollout(
     rollout_recurrent_states.push_back(
         rollout_actors.back()->initial_recurrent_state(static_cast<int64_t>(collector_ptr->total_agents()), shard_device));
   }
+  const int physics_prefix_ticks =
+      config_.env.half_tick_skip > 0 && config_.env.half_tick_skip < config_.env.tick_skip
+          ? config_.env.half_tick_skip
+          : 0;
 
   if (collectors_.size() > 1) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "collect_loop_sharded");
@@ -2697,6 +2701,12 @@ void APPOTrainer::collect_rollout(
           torch::Tensor episode_starts_host = collector.host_episode_starts();
           torch::Tensor action_masks_host = collector.host_action_masks();
           torch::Tensor learner_active_host = collector.host_learner_active();
+          std::future<void> physics_prefix_future;
+          if (physics_prefix_ticks > 0) {
+            physics_prefix_future = std::async(std::launch::async, [&collector, &shard_step, physics_prefix_ticks]() {
+              collector.step_physics_only(physics_prefix_ticks, &shard_step.timings);
+            });
+          }
           torch::Tensor raw_obs = raw_obs_host.to(shard_device, use_pinned_host_buffers_);
           torch::Tensor episode_starts = episode_starts_host.to(shard_device, use_pinned_host_buffers_);
           torch::Tensor action_masks = action_masks_host.to(shard_device, use_pinned_host_buffers_);  // uint8, sample_masked_actions handles it
@@ -2739,10 +2749,14 @@ void APPOTrainer::collect_rollout(
 
           const auto decode_start = std::chrono::steady_clock::now();
           torch::Tensor action_indices_cpu = actions.contiguous().to(torch::kCPU);
-          collector.step(
+          if (physics_prefix_future.valid()) {
+            physics_prefix_future.get();
+          }
+          collector.step_after_physics_prefix(
               std::span<const std::int64_t>(
                   action_indices_cpu.data_ptr<std::int64_t>(),
                   static_cast<std::size_t>(action_indices_cpu.numel())),
+              physics_prefix_ticks,
               &shard_step.timings);
 
           // Done-reset processing inside the shard task.
@@ -2832,7 +2846,6 @@ void APPOTrainer::collect_rollout(
           shard_step.sampled_value_count = sampled_value.numel();
           std::unordered_map<std::string, torch::Tensor> all_values;
           all_values["extrinsic"] = sampled_value;
-          all_values["extrinsic"] = sampled_value;
           std::unordered_map<std::string, torch::Tensor> all_rewards;
           all_rewards["extrinsic"] = extrinsic_rewards_host;
 
@@ -2915,6 +2928,7 @@ void APPOTrainer::collect_rollout(
 
         local_collected_steps += shard_step.total_learner_steps;
       }
+      dest.mark_step_filled(step);
 
     }
 
@@ -2967,6 +2981,12 @@ void APPOTrainer::collect_rollout(
     torch::Tensor episode_starts_host = collector_->host_episode_starts();
     torch::Tensor action_masks_host = collector_->host_action_masks();
     torch::Tensor learner_active_host = collector_->host_learner_active();
+    std::future<void> physics_prefix_future;
+    if (physics_prefix_ticks > 0) {
+      physics_prefix_future = std::async(std::launch::async, [&]() {
+        collector_->step_physics_only(physics_prefix_ticks, &collector_timings);
+      });
+    }
     torch::Tensor raw_obs = raw_obs_host.to(device_, use_pinned_host_buffers_);
     torch::Tensor episode_starts = episode_starts_host.to(device_, use_pinned_host_buffers_);
     torch::Tensor action_masks = action_masks_host.to(device_, use_pinned_host_buffers_);  // uint8
@@ -3016,10 +3036,14 @@ void APPOTrainer::collect_rollout(
     {
       PULSAR_TRACE_SCOPE_CAT("trainer", "action_decode");
       action_indices_cpu = actions.contiguous().to(torch::kCPU);
-      collector_->step(
+      if (physics_prefix_future.valid()) {
+        physics_prefix_future.get();
+      }
+      collector_->step_after_physics_prefix(
           std::span<const std::int64_t>(
               action_indices_cpu.data_ptr<std::int64_t>(),
               static_cast<std::size_t>(action_indices_cpu.numel())),
+          physics_prefix_ticks,
           &collector_timings);
     }
     metrics.action_decode_seconds +=
@@ -3122,6 +3146,10 @@ void APPOTrainer::collect_rollout(
     total_learner_steps += learner_step_count;
 
     std::unordered_map<std::string, torch::Tensor> all_values;
+    torch::Tensor sampled_value = output.value_win_logits.squeeze(-1);
+    all_values["extrinsic"] = sampled_value;
+    accumulated_sampled_value += sampled_value.sum().item<double>();
+    accumulated_value_count += sampled_value.numel();
 
     std::unordered_map<std::string, torch::Tensor> all_rewards;
     all_rewards["extrinsic"] = extrinsic_rewards_host;

@@ -68,7 +68,15 @@ class BatchedRocketSimCollector {
 
   void step(std::span<const ControllerState> actions, CollectorTimings* timings = nullptr);
   void step(std::span<const std::int64_t> action_indices, CollectorTimings* timings = nullptr);
-  void step_physics_only(int tick_count);
+  void step_after_physics_prefix(
+      std::span<const ControllerState> actions,
+      int prefix_tick_count,
+      CollectorTimings* timings = nullptr);
+  void step_after_physics_prefix(
+      std::span<const std::int64_t> action_indices,
+      int prefix_tick_count,
+      CollectorTimings* timings = nullptr);
+  void step_physics_only(int tick_count, CollectorTimings* timings = nullptr);
 
   // Fused step output: scalar aggregates avoiding .item() reductions in trainer
   struct StepOutput {
@@ -139,6 +147,7 @@ class BatchedRocketSimCollector {
   void initialize(std::vector<TransitionEnginePtr> engines, bool pin_host_memory);
   void rebuild_host_buffers(HostBuffers& buffers, CollectorTimings* timings);
   void rebuild_next_buffers(CollectorTimings* timings);
+  [[nodiscard]] int bounded_physics_prefix_ticks(int prefix_tick_count) const;
 
   ExperimentConfig config_{};
   ObsBuilderPtr obs_builder_{};

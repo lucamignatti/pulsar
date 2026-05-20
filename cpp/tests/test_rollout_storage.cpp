@@ -143,6 +143,7 @@ int main() {
                                  slice_acts, slice_lps, slice_vals, slice_rewards,
                                  slice_dones, slice_truncated, slice_bootstrap,
                                  slice_goal_pos, slice_labels, slice_term_obs);
+      slice_storage.mark_step_filled(step);
     }
 
     auto slice_retrieved = slice_storage.reward("extrinsic");
@@ -178,6 +179,7 @@ int main() {
                                    slice_goal_pos.narrow(0, 0, partial_agents),
                                    slice_labels.narrow(0, 0, partial_agents),
                                    slice_term_obs.narrow(0, 0, partial_agents));
+      partial_storage.mark_step_filled(step);
     }
 
     auto partial_retrieved = partial_storage.reward("extrinsic");
