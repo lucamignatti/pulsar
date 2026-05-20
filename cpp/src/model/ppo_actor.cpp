@@ -486,7 +486,8 @@ ActorSequenceOutput PPOActorImpl::forward_sequence(
   PULSAR_TRACE_SCOPE_CAT("actor", "forward_sequence");
   const auto time = obs_seq.size(0);
   const auto batch = obs_seq.size(1);
-  torch::Tensor encoded = mamba2_encoder_->forward_sequence(obs_seq, episode_starts).reshape({time * batch, config_.encoder_dim});
+  torch::Tensor encoded_seq = mamba2_encoder_->forward_sequence(obs_seq, episode_starts);
+  torch::Tensor encoded = encoded_seq.reshape({time * batch, config_.encoder_dim});
 
   torch::Tensor policy_logits;
   if (!policy_hidden_.is_empty()) {
@@ -497,9 +498,9 @@ ActorSequenceOutput PPOActorImpl::forward_sequence(
 
   return {
       policy_logits.reshape({time, batch, config_.action_dim}),
-      encoded.reshape({time, batch, config_.encoder_dim}),
+      encoded_seq,
       value_head_win_->forward(encoded).reshape({time, batch, 1}),
-      encoded.reshape({time, batch, config_.encoder_dim}),
+      encoded_seq,
   };
 }
 

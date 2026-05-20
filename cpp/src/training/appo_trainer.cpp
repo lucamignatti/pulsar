@@ -452,6 +452,7 @@ struct BoundaryGradStat {
 };
 
 struct BoundaryGradSet {
+  BoundaryGradStat encoded;
   BoundaryGradStat policy_logits;
   BoundaryGradStat flat_policy_logits;
   BoundaryGradStat active_logits;
@@ -497,6 +498,7 @@ void merge_boundary_grad_stat(BoundaryGradStat& dst, const BoundaryGradStat& src
 }
 
 void merge_boundary_grad_set(BoundaryGradSet& dst, const BoundaryGradSet& src) {
+  merge_boundary_grad_stat(dst.encoded, src.encoded);
   merge_boundary_grad_stat(dst.policy_logits, src.policy_logits);
   merge_boundary_grad_stat(dst.flat_policy_logits, src.flat_policy_logits);
   merge_boundary_grad_stat(dst.active_logits, src.active_logits);
@@ -518,6 +520,7 @@ void print_boundary_grad_stat(const char* name, const BoundaryGradStat& stat) {
 }
 
 void print_boundary_grad_set(const BoundaryGradSet& stats) {
+  print_boundary_grad_stat("encoded", stats.encoded);
   print_boundary_grad_stat("policy_logits", stats.policy_logits);
   print_boundary_grad_stat("flat_policy_logits", stats.flat_policy_logits);
   print_boundary_grad_stat("active_logits", stats.active_logits);
@@ -2168,6 +2171,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                   output = gpu_act->forward_sequence(obs, goal_values, episode_starts);
                 }
 
+                torch::Tensor encoded = output.encoded;
                 torch::Tensor policy_logits = output.policy_logits;
                 torch::Tensor features = output.features;
                 const torch::Tensor action_masks = mode_gpu_action_masks_mb.narrow(0, chunk_start, loss_steps).to(torch::kBool);
@@ -2196,6 +2200,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 if (active_sample_count == 0) continue;
                 const auto active_samples = static_cast<double>(active_sample_count);
                 result.active_count += active_sample_count;
+                observe_boundary_grad(encoded, result.boundary_grad_set.encoded);
                 observe_boundary_grad(policy_logits, result.boundary_grad_set.policy_logits);
                 observe_boundary_grad(flat_logits, result.boundary_grad_set.flat_policy_logits);
                 observe_boundary_grad(active_logits, result.boundary_grad_set.active_logits);
