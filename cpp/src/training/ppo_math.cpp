@@ -166,6 +166,8 @@ bool can_use_action_accel(const torch::Tensor& logits, const torch::Tensor& acti
   return can_use_ppo_math_accel(logits) &&
       action_masks.defined() &&
       action_masks.is_cuda() &&
+      logits.dim() == 2 &&
+      logits.numel() >= 8192 &&
       action_masks.dim() == logits.dim() &&
       action_masks.size(-1) == logits.size(-1) &&
       (action_masks.scalar_type() == torch::kBool || action_masks.scalar_type() == torch::kUInt8);
@@ -191,7 +193,7 @@ torch::Tensor sample_masked_actions(
     const torch::Tensor& action_masks,
     bool deterministic,
     torch::Tensor* log_probs) {
-  if (can_use_action_accel(logits, action_masks) && logits.dim() == 2) {
+  if (can_use_action_accel(logits, action_masks)) {
     const bool need_log_probs = log_probs != nullptr;
     const std::uint32_t seed = static_cast<std::uint32_t>(std::rand());
 #if defined(PULSAR_HAS_PPO_MATH_CUDA_KERNELS)
@@ -480,33 +482,28 @@ torch::Tensor sample_future_goal_positions(
   const float* dones_ptr = dones_cpu.defined() ? dones_cpu.data_ptr<float>() : nullptr;
   const float* starts_ptr = starts_cpu.defined() ? starts_cpu.data_ptr<float>() : nullptr;
 
-  for (int64_t t = 0; t < steps; ++t) {
-    for (int64_t a = 0; a < agents; ++a) {
-      int64_t end_idx = steps;
-      for (int64_t j = t; j < steps; ++j) {
-        const int64_t ja = j * agents + a;
-        if (dones_ptr != nullptr && dones_ptr[ja] > 0.5F) {
-          end_idx = j + 1;
-          break;
-        }
-        if (starts_ptr != nullptr && starts_ptr[ja] > 0.5F && j > t) {
-          end_idx = j;
-          break;
-        }
-      }
-
-      const int64_t max_offset = std::min<int64_t>(end_idx - t - 1, horizon);
-      if (max_offset <= 0) {
-        for (int64_t d = 0; d < dim; ++d) {
-          sampled_cpu[t][a][d] = goal_cpu[t][a][d];
-        }
-        continue;
-      }
-
-      const int64_t chosen_offset = std::rand() % max_offset;
-      const int64_t chosen = t + 1 + chosen_offset;
+  for (int64_t a = 0; a < agents; ++a) {
+    int64_t next_done_exclusive = steps;
+    int64_t next_start_index = steps;
+    for (int64_t t = steps - 1; t >= 0; --t) {
+      const int64_t idx = t * agents + a;
+      const int64_t done_exclusive = (dones_ptr != nullptr && dones_ptr[idx] > 0.5F)
+          ? (t + 1)
+          : next_done_exclusive;
+      const int64_t end_exclusive = std::min(done_exclusive, next_start_index);
+      const int64_t max_offset = std::min<int64_t>(end_exclusive - t - 1, horizon);
+      const int64_t chosen = (max_offset > 0)
+          ? (t + 1 + (std::rand() % max_offset))
+          : t;
       for (int64_t d = 0; d < dim; ++d) {
         sampled_cpu[t][a][d] = goal_cpu[chosen][a][d];
+      }
+
+      if (dones_ptr != nullptr && dones_ptr[idx] > 0.5F) {
+        next_done_exclusive = t + 1;
+      }
+      if (starts_ptr != nullptr && starts_ptr[idx] > 0.5F) {
+        next_start_index = t;
       }
     }
   }

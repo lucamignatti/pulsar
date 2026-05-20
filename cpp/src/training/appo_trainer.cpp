@@ -1841,7 +1841,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 torch::Tensor actor_goal_loss = torch::zeros({}, active_advantages.options());
                 torch::Tensor chunk_goal_score = torch::zeros({}, active_advantages.options());
                 torch::Tensor chunk_sampled_goal_norm = torch::zeros({}, active_advantages.options());
-                {
+                const bool compute_goal_critic_loss = config_.goal_critic.lambda_Zg > 0.0F;
+                const bool compute_goal_actor_loss = config_.goal_critic.lambda_goal_actor > 0.0F;
+                if (compute_goal_critic_loss || compute_goal_actor_loss) {
                   torch::Tensor chunk_goal_pos =
                       rollout.goal_positions.narrow(0, chunk_start, loss_steps).index_select(1, gpu_micro_indices).to(gpu_dev);
                   torch::Tensor chunk_dones =
@@ -1867,21 +1869,25 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                     selected_masks = selected_masks.index({idx});
                     selected_future_goal_pos = selected_future_goal_pos.index({idx});
                   }
-                  torch::Tensor sa_emb = gpu_act->goal_critic()->sa_embedding(selected_features.detach(), selected_actions);
-                  torch::Tensor g_emb = gpu_act->goal_critic()->goal_embedding(selected_future_goal_pos);
-                  goal_loss = compute_symmetric_infonce_loss(compute_pairwise_negative_l2_logits(sa_emb, g_emb), config_.goal_critic.logsumexp_penalty_coeff);
-                  actor_goal_loss = goal_actor_critic_loss(
-                      gpu_act->goal_critic(),
-                      active_features,
-                      active_logits,
-                      active_masks,
-                      active_future_goal_pos,
-                      config_.goal_critic.contrastive_batch_size);
-                  chunk_goal_score = -((sa_emb.detach() - g_emb.detach()).square().sum(-1).clamp_min(1.0e-8F)).mean();
-                  chunk_sampled_goal_norm = active_future_goal_pos.norm(2, -1).mean();
-                  add_metric(sampled_goal_dist_metric, chunk_sampled_goal_norm, active_samples);
-                  add_metric(goal_critic_loss_metric, goal_loss, active_samples);
-                  add_metric(goal_score_metric, chunk_goal_score, active_samples);
+                  if (compute_goal_critic_loss) {
+                    torch::Tensor sa_emb = gpu_act->goal_critic()->sa_embedding(selected_features.detach(), selected_actions);
+                    torch::Tensor g_emb = gpu_act->goal_critic()->goal_embedding(selected_future_goal_pos);
+                    goal_loss = compute_symmetric_infonce_loss(compute_pairwise_negative_l2_logits(sa_emb, g_emb), config_.goal_critic.logsumexp_penalty_coeff);
+                    chunk_goal_score = -((sa_emb.detach() - g_emb.detach()).square().sum(-1).clamp_min(1.0e-8F)).mean();
+                    add_metric(goal_critic_loss_metric, goal_loss, active_samples);
+                    add_metric(goal_score_metric, chunk_goal_score, active_samples);
+                  }
+                  if (compute_goal_actor_loss) {
+                    actor_goal_loss = goal_actor_critic_loss(
+                        gpu_act->goal_critic(),
+                        active_features,
+                        active_logits,
+                        active_masks,
+                        active_future_goal_pos,
+                        config_.goal_critic.contrastive_batch_size);
+                    chunk_sampled_goal_norm = active_future_goal_pos.norm(2, -1).mean();
+                    add_metric(sampled_goal_dist_metric, chunk_sampled_goal_norm, active_samples);
+                  }
                 }
 
                 const auto sample_weight = active_samples / mode_total_active_local;

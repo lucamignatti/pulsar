@@ -230,6 +230,31 @@ int main() {
 
       require(future_goals.sizes() == torch::IntArrayRef({steps, agents, goal_dim}), "future goals shape");
       require_finite(future_goals, "future goals finite");
+
+      auto boundary_goal_pos = torch::tensor(
+          {
+              {{1.0F, 2.0F}},
+              {{11.0F, 12.0F}},
+              {{21.0F, 22.0F}},
+          },
+          torch::kFloat32);
+      auto boundary_dones = torch::tensor({{0.0F}, {1.0F}, {0.0F}}, torch::kFloat32);
+      auto boundary_starts = torch::zeros({3, 1}, torch::kFloat32);
+      auto boundary_future = pulsar::sample_future_goal_positions(boundary_goal_pos, boundary_dones, boundary_starts, 64);
+      require_close(boundary_future[0][0][0].item<float>(), 11.0F, "future goal boundary should pick the only valid next sample");
+      require_close(boundary_future[0][0][1].item<float>(), 12.0F, "future goal boundary should pick the only valid next sample");
+      require_close(boundary_future[1][0][0].item<float>(), 11.0F, "future goal terminal step should keep current goal");
+      require_close(boundary_future[2][0][0].item<float>(), 21.0F, "future goal final step should keep current goal");
+
+      if (torch::cuda::is_available()) {
+        auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+        auto boundary_future_cuda = pulsar::sample_future_goal_positions(
+            boundary_goal_pos.to(opts),
+            boundary_dones.to(opts),
+            boundary_starts.to(opts),
+            64).to(torch::kCPU);
+        require(torch::allclose(boundary_future_cuda, boundary_future, 1.0e-5, 1.0e-5), "future goal CUDA parity");
+      }
     }
 
     // 9. Contrastive loss

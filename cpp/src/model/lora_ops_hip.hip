@@ -54,8 +54,12 @@ inline int blocks_for(int elements, int threads) {
 inline void set_hip_device_for(const at::Tensor& tensor) {
   const int device_index = tensor.get_device();
   if (device_index >= 0) {
-    const hipError_t error = hipSetDevice(device_index);
-    TORCH_CHECK(error == hipSuccess, "LoRA HIP set device failed: ", hipGetErrorString(error));
+    static thread_local int current_device = -2;
+    if (current_device != device_index) {
+      const hipError_t error = hipSetDevice(device_index);
+      TORCH_CHECK(error == hipSuccess, "LoRA HIP set device failed: ", hipGetErrorString(error));
+      current_device = device_index;
+    }
   }
 }
 

@@ -430,6 +430,8 @@ bool can_use_cuda_scan(const torch::Tensor& projected, const torch::Tensor& deca
   return !mamba2_scan_accel_disabled() &&
       projected.is_cuda() &&
       projected.scalar_type() == torch::kFloat32 &&
+      projected.numel() >= 65536 &&
+      projected.size(1) >= 4 &&
       decay_bias.scalar_type() == torch::kFloat32 &&
       skip.scalar_type() == torch::kFloat32;
 #else
@@ -445,6 +447,7 @@ bool can_use_cuda_conv(const torch::Tensor& input, const torch::Tensor& weight, 
   return !mamba2_conv_accel_disabled() &&
       input.is_cuda() &&
       input.scalar_type() == torch::kFloat32 &&
+      input.numel() >= 65536 &&
       weight.is_cuda() &&
       weight.scalar_type() == torch::kFloat32 &&
       bias.is_cuda() &&
