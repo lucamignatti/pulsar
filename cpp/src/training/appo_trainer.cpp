@@ -748,6 +748,7 @@ void append_metrics_line(
       {"entropy", metrics.entropy},
       {"grad_norm", metrics.grad_norm},
       {"policy_approx_kl", metrics.policy_approx_kl},
+      {"kl_divergence", metrics.policy_approx_kl},
       {"policy_clip_fraction", metrics.policy_clip_fraction},
       {"policy_log_ratio_abs_max", metrics.policy_log_ratio_abs_max},
       {"nonfinite_loss_skips", metrics.nonfinite_loss_skips},
@@ -3716,6 +3717,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       add_metric("Optimization", "entropy", coll_metrics.entropy);
       add_metric("Optimization", "grad_norm", coll_metrics.grad_norm);
       add_metric("Optimization", "policy_approx_kl", coll_metrics.policy_approx_kl);
+      add_metric("Optimization", "kl_divergence", coll_metrics.policy_approx_kl);
       add_metric("Optimization", "policy_clip_fraction", coll_metrics.policy_clip_fraction);
       add_metric("Optimization", "policy_log_ratio_abs_max", coll_metrics.policy_log_ratio_abs_max);
       add_metric("Optimization", "nonfinite_loss_skips", coll_metrics.nonfinite_loss_skips);
