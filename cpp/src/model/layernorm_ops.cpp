@@ -11,6 +11,12 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> fused_layer_norm_forward
     const torch::Tensor& bias,
     float eps);
 
+torch::Tensor fused_layer_norm_inference_cuda(
+    const torch::Tensor& input,
+    const torch::Tensor& weight,
+    const torch::Tensor& bias,
+    float eps);
+
 std::vector<torch::Tensor> fused_layer_norm_backward_cuda(
     const torch::Tensor& grad_output,
     const torch::Tensor& input,
@@ -22,6 +28,12 @@ std::vector<torch::Tensor> fused_layer_norm_backward_cuda(
 
 #ifdef PULSAR_HAS_LAYERNORM_HIP_KERNELS
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> fused_layer_norm_forward_hip(
+    const torch::Tensor& input,
+    const torch::Tensor& weight,
+    const torch::Tensor& bias,
+    float eps);
+
+torch::Tensor fused_layer_norm_inference_hip(
     const torch::Tensor& input,
     const torch::Tensor& weight,
     const torch::Tensor& bias,
@@ -153,23 +165,45 @@ torch::Tensor stable_layer_norm_fallback(const torch::Tensor& input, const torch
 torch::Tensor fused_layer_norm(const torch::Tensor& input, const torch::nn::LayerNorm& norm) {
 #if defined(PULSAR_HAS_LAYERNORM_CUDA_KERNELS)
   if (input.is_cuda()) {
+    torch::Tensor input_f32 = input.contiguous().to(torch::kFloat32);
     torch::Tensor weight = norm->weight.defined()
         ? norm->weight
         : torch::Tensor{};
     torch::Tensor bias = norm->bias.defined()
         ? norm->bias
         : torch::Tensor{};
-    return FusedLayerNormCudaFunction::apply(input, weight, bias, kLayerNormEps);
+    weight = weight.defined() ? weight.contiguous().to(torch::kFloat32) : weight;
+    bias = bias.defined() ? bias.contiguous().to(torch::kFloat32) : bias;
+    const bool needs_grad =
+        input.requires_grad() ||
+        (weight.defined() && weight.requires_grad()) ||
+        (bias.defined() && bias.requires_grad());
+    if (!torch::GradMode::is_enabled() || !needs_grad) {
+      torch::Tensor output = fused_layer_norm_inference_cuda(input_f32, weight, bias, kLayerNormEps);
+      return input.scalar_type() == torch::kFloat32 ? output : output.to(input.scalar_type());
+    }
+    return FusedLayerNormCudaFunction::apply(input_f32, weight, bias, kLayerNormEps);
   }
 #elif defined(PULSAR_HAS_LAYERNORM_HIP_KERNELS)
   if (input.is_cuda()) {
+    torch::Tensor input_f32 = input.contiguous().to(torch::kFloat32);
     torch::Tensor weight = norm->weight.defined()
         ? norm->weight
         : torch::Tensor{};
     torch::Tensor bias = norm->bias.defined()
         ? norm->bias
         : torch::Tensor{};
-    return FusedLayerNormHipFunction::apply(input, weight, bias, kLayerNormEps);
+    weight = weight.defined() ? weight.contiguous().to(torch::kFloat32) : weight;
+    bias = bias.defined() ? bias.contiguous().to(torch::kFloat32) : bias;
+    const bool needs_grad =
+        input.requires_grad() ||
+        (weight.defined() && weight.requires_grad()) ||
+        (bias.defined() && bias.requires_grad());
+    if (!torch::GradMode::is_enabled() || !needs_grad) {
+      torch::Tensor output = fused_layer_norm_inference_hip(input_f32, weight, bias, kLayerNormEps);
+      return input.scalar_type() == torch::kFloat32 ? output : output.to(input.scalar_type());
+    }
+    return FusedLayerNormHipFunction::apply(input_f32, weight, bias, kLayerNormEps);
   }
 #endif
   return stable_layer_norm_fallback(input, norm);
