@@ -21,29 +21,6 @@ function(pulsar_link_torch_whole_core target_name)
   )
 endfunction()
 
-function(pulsar_ensure_hip_runtime_target_compat)
-  if(TARGET hip::amdhip64)
-    return()
-  endif()
-
-  if(TARGET hip-lang::amdhip64)
-    add_library(hip::amdhip64 INTERFACE IMPORTED GLOBAL)
-    set_target_properties(
-      hip::amdhip64
-      PROPERTIES INTERFACE_LINK_LIBRARIES hip-lang::amdhip64
-    )
-    return()
-  endif()
-
-  if(TARGET amdhip64)
-    add_library(hip::amdhip64 INTERFACE IMPORTED GLOBAL)
-    set_target_properties(
-      hip::amdhip64
-      PROPERTIES INTERFACE_LINK_LIBRARIES amdhip64
-    )
-  endif()
-endfunction()
-
 if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
 endif()
@@ -186,7 +163,7 @@ if(PULSAR_ENABLE_TORCH)
     check_language(HIP)
     if(CMAKE_HIP_COMPILER)
       enable_language(HIP)
-      pulsar_ensure_hip_runtime_target_compat()
+      pulsar_ensure_torch_hip_import_targets()
       set(CMAKE_HIP_STANDARD 17)
       set(CMAKE_HIP_STANDARD_REQUIRED ON)
       target_sources(
