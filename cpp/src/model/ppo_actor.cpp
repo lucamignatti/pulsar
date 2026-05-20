@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -72,6 +73,36 @@ torch::Tensor normalize_goal_embedding(const torch::Tensor& embedding) {
   constexpr float kNormEps = 0.1F;
   const torch::Tensor denom = (embedding.square().sum(-1, true) + kNormEps * kNormEps).sqrt();
   return embedding / denom;
+}
+
+torch::Tensor stable_layer_norm(const torch::Tensor& input, const torch::nn::LayerNorm& norm) {
+  constexpr float kLayerNormEps = 1.0e-5F;
+  const torch::Tensor input_f32 = input.scalar_type() == torch::kFloat32 ? input : input.to(torch::kFloat32);
+  const int64_t normalized_dims = norm->weight.defined() ? norm->weight.dim() : 1;
+  std::vector<int64_t> reduce_dims;
+  reduce_dims.reserve(static_cast<std::size_t>(normalized_dims));
+  for (int64_t dim = input_f32.dim() - normalized_dims; dim < input_f32.dim(); ++dim) {
+    reduce_dims.push_back(dim);
+  }
+
+  const torch::Tensor mean = input_f32.mean(reduce_dims, /*keepdim=*/true);
+  const torch::Tensor centered = input_f32 - mean;
+  const torch::Tensor inv_std = (centered.square().mean(reduce_dims, /*keepdim=*/true) + kLayerNormEps).rsqrt();
+  torch::Tensor output = centered * inv_std;
+
+  if (norm->weight.defined()) {
+    std::vector<int64_t> affine_shape(static_cast<std::size_t>(input_f32.dim()), 1);
+    const auto weight_sizes = norm->weight.sizes();
+    for (int64_t dim = 0; dim < normalized_dims; ++dim) {
+      affine_shape[static_cast<std::size_t>(input_f32.dim() - normalized_dims + dim)] = weight_sizes[dim];
+    }
+    output = output * norm->weight.view(affine_shape);
+    if (norm->bias.defined()) {
+      output = output + norm->bias.view(affine_shape);
+    }
+  }
+
+  return input.scalar_type() == torch::kFloat32 ? output : output.to(input.scalar_type());
 }
 
 }  // namespace
@@ -192,7 +223,7 @@ torch::Tensor Mamba2BlockImpl::forward(const torch::Tensor& tokens, const torch:
   PULSAR_TRACE_SCOPE_CAT("actor", "mamba2_block");
   const auto batch = tokens.size(0);
   const auto sequence = tokens.size(1);
-  torch::Tensor block_input = use_layer_norm_ ? input_norm_->forward(tokens) : tokens;
+  torch::Tensor block_input = use_layer_norm_ ? stable_layer_norm(tokens, input_norm_) : tokens;
 
   const torch::Tensor reset = reset_mask.defined()
       ? reset_mask.to(tokens.device()).to(tokens.scalar_type())
@@ -212,7 +243,7 @@ torch::Tensor Mamba2BlockImpl::forward(const torch::Tensor& tokens, const torch:
   const torch::Tensor projected = input_projection_->forward(conv_out);
   torch::Tensor mixed = mamba2_scan_mixed(projected, decay_bias_, skip_, reset);
   if (use_layer_norm_) {
-    mixed = output_norm_->forward(mixed);
+    mixed = stable_layer_norm(mixed, output_norm_);
   }
   return tokens + output_projection_->forward(mixed);
 }
@@ -226,7 +257,7 @@ torch::Tensor Mamba2BlockImpl::forward_step(
     torch::Tensor* next_conv_1,
     torch::Tensor* next_scan) {
   PULSAR_TRACE_SCOPE_CAT("actor", "mamba2_block_step");
-  torch::Tensor block_input = use_layer_norm_ ? input_norm_->forward(token) : token;
+  torch::Tensor block_input = use_layer_norm_ ? stable_layer_norm(token, input_norm_) : token;
   const torch::Tensor weight = causal_conv_->weight.squeeze(1);
   torch::Tensor conv_out =
       previous_conv_2 * weight.select(1, 0).view({1, embed_dim_})
@@ -240,7 +271,7 @@ torch::Tensor Mamba2BlockImpl::forward_step(
   const torch::Tensor projected = input_projection_->forward(conv_out);
   auto [mixed, scan] = mamba2_step_mixed(projected, previous_scan, decay_bias_, skip_);
   if (use_layer_norm_) {
-    mixed = output_norm_->forward(mixed);
+    mixed = stable_layer_norm(mixed, output_norm_);
   }
 
   if (next_conv_2 != nullptr) {
@@ -276,7 +307,7 @@ torch::Tensor Mamba2EncoderImpl::forward(const torch::Tensor& obs) {
     tokens = block->forward(tokens);
     tokens = torch::clamp(tokens, -100.0, 100.0);
   }
-  tokens = output_norm_->forward(tokens);
+  tokens = stable_layer_norm(tokens, output_norm_);
   return tokens.squeeze(1);
 }
 
@@ -294,7 +325,7 @@ torch::Tensor Mamba2EncoderImpl::forward_sequence(const torch::Tensor& obs_seq, 
     tokens = block->forward(tokens, reset_mask);
     tokens = torch::clamp(tokens, -100.0, 100.0);
   }
-  tokens = output_norm_->forward(tokens);
+  tokens = stable_layer_norm(tokens, output_norm_);
   return tokens.transpose(0, 1);
 }
 
@@ -353,7 +384,7 @@ torch::Tensor Mamba2EncoderImpl::forward_step(
   if (next_state != nullptr) {
     *next_state = next_state_tensor.detach();
   }
-  return output_norm_->forward(token);
+  return stable_layer_norm(token, output_norm_);
 }
 
 GoalCriticImpl::GoalCriticImpl(int feature_dim, int action_dim, int embedding_dim, int hidden_dim, int goal_dim)
