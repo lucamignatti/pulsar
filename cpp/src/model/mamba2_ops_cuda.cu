@@ -394,20 +394,12 @@ void check_cuda_inputs(const at::Tensor& projected, const at::Tensor& decay_bias
   TORCH_CHECK(skip.scalar_type() == at::kFloat, "Mamba2 CUDA kernel currently supports float32 skip tensors.");
 }
 
-inline bool use_direct_grad_reduce(int batch) {
-  static const int mode = [] {
+inline bool use_direct_grad_reduce() {
+  static const bool direct_reduce = [] {
     const char* value = std::getenv("PULSAR_MAMBA2_GRAD_REDUCE");
-    if (value != nullptr && std::strcmp(value, "direct") == 0) {
-      return 1;
-    }
-    if (value != nullptr && std::strcmp(value, "pair") == 0) {
-      return 2;
-    }
-    return 0;
+    return value == nullptr || std::strcmp(value, "pair") != 0;
   }();
-  if (mode == 1) return true;
-  if (mode == 2) return false;
-  return batch <= 16;
+  return direct_reduce;
 }
 
 }  // namespace
@@ -474,7 +466,7 @@ std::vector<at::Tensor> mamba2_scan_backward_cuda(
   const bool has_reset = reset_mask.defined();
 
   at::Tensor grad_projected = at::empty_like(projected);
-  const bool direct_reduce = use_direct_grad_reduce(batch);
+  const bool direct_reduce = use_direct_grad_reduce();
   at::Tensor grad_decay_bias = at::empty_like(decay_bias);
   at::Tensor grad_skip = at::empty_like(skip);
   at::Tensor grad_decay_partial = direct_reduce ? at::Tensor{} : at::empty({batch, embed_dim}, projected.options());
