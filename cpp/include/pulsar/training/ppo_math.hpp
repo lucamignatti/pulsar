@@ -61,7 +61,8 @@ torch::Tensor sample_future_goal_positions(
 
 torch::Tensor compute_pairwise_negative_l2_logits(
     const torch::Tensor& lhs_embeddings,
-    const torch::Tensor& rhs_embeddings);
+    const torch::Tensor& rhs_embeddings,
+    float temperature = 1.0F);
 
 torch::Tensor compute_symmetric_infonce_loss(
     const torch::Tensor& logits,

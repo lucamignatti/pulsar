@@ -446,13 +446,13 @@ GoalCriticImpl::GoalCriticImpl(int feature_dim, int action_dim, int embedding_di
     : action_dim_(action_dim), hidden_dim_(hidden_dim), embedding_dim_(embedding_dim), goal_dim_(goal_dim) {
   sa_encoder_ = torch::nn::Sequential();
   sa_encoder_->push_back(torch::nn::Linear(feature_dim + action_dim, hidden_dim));
-  sa_encoder_->push_back(torch::nn::Functional(torch::relu));
+  sa_encoder_->push_back(torch::nn::Functional(torch::silu));
   sa_encoder_->push_back(torch::nn::Linear(hidden_dim, embedding_dim));
   register_module("sa_encoder", sa_encoder_);
 
   goal_encoder_ = torch::nn::Sequential();
   goal_encoder_->push_back(torch::nn::Linear(goal_dim, hidden_dim));
-  goal_encoder_->push_back(torch::nn::Functional(torch::relu));
+  goal_encoder_->push_back(torch::nn::Functional(torch::silu));
   goal_encoder_->push_back(torch::nn::Linear(hidden_dim, embedding_dim));
   register_module("goal_encoder", goal_encoder_);
 }
@@ -478,14 +478,6 @@ torch::Tensor GoalCriticImpl::goal_embedding(const torch::Tensor& goal_values) {
   return normalize_goal_embedding(goal_encoder_->forward(goal_values.to(torch::kFloat32)));
 }
 
-torch::nn::Sequential PPOActorImpl::make_value_win_head(int input_dim) const {
-  torch::nn::Sequential head = torch::nn::Sequential();
-  head->push_back(torch::nn::Linear(input_dim, config_.value_hidden_dim));
-  head->push_back(torch::nn::Functional(torch::relu));
-  head->push_back(torch::nn::Linear(config_.value_hidden_dim, 1));
-  return head;
-}
-
 PPOActorImpl::PPOActorImpl(
     ModelConfig config,
     const GoalCriticConfig& goal_critic_config,
@@ -506,7 +498,7 @@ PPOActorImpl::PPOActorImpl(
   if (config_.policy_hidden_dim > 0) {
     policy_hidden_ = torch::nn::Sequential();
     policy_hidden_->push_back(torch::nn::Linear(feature_dim_, config_.policy_hidden_dim));
-    policy_hidden_->push_back(torch::nn::Functional(torch::relu));
+    policy_hidden_->push_back(torch::nn::Functional(torch::silu));
     register_module("policy_hidden", policy_hidden_);
     policy_lora_ = LoRALinear(
         config_.policy_hidden_dim, config_.action_dim, es_lora_config_.rank, es_lora_config_.lora_alpha);
@@ -515,13 +507,10 @@ PPOActorImpl::PPOActorImpl(
   }
   register_module("policy_lora", policy_lora_);
 
-  value_head_win_ = make_value_win_head(feature_dim_);
-  register_module("value_head_win", value_head_win_);
-
   q_head_ = register_module("q_head",
       torch::nn::Sequential(
           torch::nn::Linear(feature_dim_, vrpo_config_.q_critic_hidden_dim),
-          torch::nn::ReLU(),
+          torch::nn::SiLU(),
           torch::nn::Linear(vrpo_config_.q_critic_hidden_dim, config_.action_dim)
       ));
 
@@ -543,12 +532,19 @@ ActorStepOutput PPOActorImpl::forward_step(
     policy_logits = policy_lora_->forward(encoded);
   }
 
+  torch::Tensor q_values = compute_value ? q_head_->forward(encoded) : torch::Tensor{};
+  torch::Tensor expected_value;
+  if (compute_value) {
+    torch::Tensor policy_probs = torch::softmax(policy_logits, -1);
+    expected_value = (policy_probs * q_values).sum(-1, true);
+  }
+
   return {
       policy_logits,
       encoded,
-      compute_value ? value_head_win_->forward(encoded) : torch::Tensor{},
+      expected_value,
       encoded,
-      compute_value ? q_head_->forward(encoded) : torch::Tensor{},
+      q_values,
   };
 }
 
@@ -569,17 +565,27 @@ ActorStepOutput PPOActorImpl::forward_step_stateful(
     policy_logits = policy_lora_->forward(encoded);
   }
 
+  torch::Tensor q_values = compute_value ? q_head_->forward(encoded) : torch::Tensor{};
+  torch::Tensor expected_value;
+  if (compute_value) {
+    torch::Tensor policy_probs = torch::softmax(policy_logits, -1);
+    expected_value = (policy_probs * q_values).sum(-1, true);
+  }
+
   return {
       policy_logits,
       encoded,
-      compute_value ? value_head_win_->forward(encoded) : torch::Tensor{},
+      expected_value,
       encoded,
-      compute_value ? q_head_->forward(encoded) : torch::Tensor{},
+      q_values,
   };
 }
 
 torch::Tensor PPOActorImpl::value_head_forward(const torch::Tensor& encoded) {
-  return value_head_win_->forward(encoded);
+  auto policy_logits = policy_head_forward(encoded);
+  auto q_values = q_head_forward(encoded);
+  auto policy_probs = torch::softmax(policy_logits, -1);
+  return (policy_probs * q_values).sum(-1, true);
 }
 
 torch::Tensor PPOActorImpl::q_head_forward(const torch::Tensor& encoded) {
@@ -611,12 +617,19 @@ ActorSequenceOutput PPOActorImpl::forward_sequence(
     policy_logits = policy_lora_->forward(encoded);
   }
 
+  torch::Tensor q_values = compute_value ? q_head_->forward(encoded) : torch::Tensor{};
+  torch::Tensor expected_value;
+  if (compute_value) {
+    torch::Tensor policy_probs = torch::softmax(policy_logits, -1);
+    expected_value = (policy_probs * q_values).sum(-1, true).reshape({time, batch, 1});
+  }
+
   return {
       policy_logits.reshape({time, batch, config_.action_dim}),
       encoded_seq,
-      compute_value ? value_head_win_->forward(encoded).reshape({time, batch, 1}) : torch::Tensor{},
+      expected_value,
       encoded_seq,
-      compute_value ? q_head_->forward(encoded).reshape({time, batch, config_.action_dim}) : torch::Tensor{},
+      compute_value ? q_values.reshape({time, batch, config_.action_dim}) : torch::Tensor{},
   };
 }
 
@@ -691,11 +704,7 @@ GoalCritic& PPOActorImpl::goal_critic() {
 }
 
 std::vector<std::string> PPOActorImpl::enabled_critic_heads() const {
-  std::vector<std::string> heads = {"extrinsic"};
-  if (vrpo_config_.enabled) {
-    heads.push_back("q_critic");
-  }
-  return heads;
+  return {"extrinsic", "q_critic"};
 }
 
 PPOActor load_ppo_actor(const std::string& checkpoint_path, const std::string& device) {

@@ -189,9 +189,6 @@ class PPOActorImpl : public torch::nn::Module {
   [[nodiscard]] const LoRALinear& policy_lora() const;
   [[nodiscard]] GoalCritic& goal_critic();
 
- private:
-  [[nodiscard]] torch::nn::Sequential make_value_win_head(int input_dim) const;
-
   ModelConfig config_{};
   GoalCriticConfig goal_critic_config_{};
   ESLoraConfig es_lora_config_{};
@@ -202,7 +199,6 @@ class PPOActorImpl : public torch::nn::Module {
   torch::nn::Sequential policy_hidden_{nullptr};
   LoRALinear policy_lora_{nullptr};
 
-  torch::nn::Sequential value_head_win_{nullptr};
   torch::nn::Sequential q_head_{nullptr};
   GoalCritic goal_critic_{nullptr};
 };

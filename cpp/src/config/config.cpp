@@ -374,6 +374,7 @@ void to_json(json& j, const GoalCriticConfig& value) {
       {"lambda_goal_actor", value.lambda_goal_actor},
       {"contrastive_batch_size", value.contrastive_batch_size},
       {"max_future_horizon", value.max_future_horizon},
+      {"temperature", value.temperature},
   };
 }
 
@@ -386,18 +387,17 @@ void from_json(const json& j, GoalCriticConfig& value) {
   value.lambda_goal_actor = j.value("lambda_goal_actor", 0.1F);
   value.contrastive_batch_size = j.value("contrastive_batch_size", 2048);
   value.max_future_horizon = j.value("max_future_horizon", 256);
+  value.temperature = j.value("temperature", 0.1F);
 }
 
 void to_json(json& j, const VRPOConfig& value) {
   j = json{
-      {"enabled", value.enabled},
       {"q_critic_hidden_dim", value.q_critic_hidden_dim},
       {"q_critic_coef", value.q_critic_coef},
   };
 }
 
 void from_json(const json& j, VRPOConfig& value) {
-  value.enabled = j.value("enabled", false);
   value.q_critic_hidden_dim = j.value("q_critic_hidden_dim", 384);
   value.q_critic_coef = j.value("q_critic_coef", 0.5F);
 }
@@ -491,12 +491,14 @@ void to_json(json& j, const PPOConfig& value) {
       {"max_policy_log_ratio", value.max_policy_log_ratio},
       {"target_kl", value.target_kl},
       {"max_preclip_grad_norm", value.max_preclip_grad_norm},
-      {"plasticity", value.plasticity},
-      {"plasticity_interval", value.plasticity_interval},
-      {"plasticity_shrink", value.plasticity_shrink},
-      {"plasticity_noise", value.plasticity_noise},
       {"pcgrad", value.pcgrad},
       {"overlap_collection_update", value.overlap_collection_update},
+      {"value_clipping", value.value_clipping},
+      {"value_clip_range", value.value_clip_range},
+      {"weight_decay", value.weight_decay},
+      {"popart_enabled", value.popart_enabled},
+      {"popart_beta", value.popart_beta},
+      {"popart_epsilon", value.popart_epsilon},
   };
 }
 
@@ -531,12 +533,14 @@ void from_json(const json& j, PPOConfig& value) {
   value.max_policy_log_ratio = j.value("max_policy_log_ratio", 5.0F);
   value.target_kl = j.value("target_kl", 0.0F);
   value.max_preclip_grad_norm = j.value("max_preclip_grad_norm", 0.0F);
-  value.plasticity = j.value("plasticity", false);
-  value.plasticity_interval = j.value("plasticity_interval", 40);
-  value.plasticity_shrink = j.value("plasticity_shrink", 0.999F);
-  value.plasticity_noise = j.value("plasticity_noise", 1.0e-4F);
   value.pcgrad = j.value("pcgrad", false);
   value.overlap_collection_update = j.value("overlap_collection_update", false);
+  value.value_clipping = j.value("value_clipping", false);
+  value.value_clip_range = j.value("value_clip_range", 0.2F);
+  value.weight_decay = j.value("weight_decay", 0.0F);
+  value.popart_enabled = j.value("popart_enabled", false);
+  value.popart_beta = j.value("popart_beta", 0.0001);
+  value.popart_epsilon = j.value("popart_epsilon", 1e-4);
 }
 
 void to_json(json& j, const SelfPlayLeagueConfig& value) {
@@ -552,6 +556,8 @@ void to_json(json& j, const SelfPlayLeagueConfig& value) {
       {"eval_policy", value.eval_policy},
       {"elo_initial", value.elo_initial},
       {"elo_k", value.elo_k},
+      {"pfsp_enabled", value.pfsp_enabled},
+      {"pfsp_sigma", value.pfsp_sigma},
   };
 }
 
@@ -567,6 +573,8 @@ void from_json(const json& j, SelfPlayLeagueConfig& value) {
   value.eval_policy = j.value("eval_policy", std::string{"deterministic"});
   value.elo_initial = j.value("elo_initial", 1000.0F);
   value.elo_k = j.value("elo_k", 32.0F);
+  value.pfsp_enabled = j.value("pfsp_enabled", false);
+  value.pfsp_sigma = j.value("pfsp_sigma", 200.0F);
 }
 
 void to_json(json& j, const WandbConfig& value) {
@@ -825,6 +833,24 @@ void validate_experiment_config(const ExperimentConfig& config) {
   }
   if (config.ppo.value_loss_delta < 0.0F) {
     throw std::invalid_argument("ppo.value_loss_delta must be non-negative.");
+  }
+  if (config.ppo.value_clip_range <= 0.0F) {
+    throw std::invalid_argument("ppo.value_clip_range must be positive.");
+  }
+  if (config.ppo.weight_decay < 0.0F) {
+    throw std::invalid_argument("ppo.weight_decay must be non-negative.");
+  }
+  if (config.ppo.popart_beta <= 0.0) {
+    throw std::invalid_argument("ppo.popart_beta must be positive.");
+  }
+  if (config.ppo.popart_epsilon <= 0.0) {
+    throw std::invalid_argument("ppo.popart_epsilon must be positive.");
+  }
+  if (config.goal_critic.temperature <= 0.0F) {
+    throw std::invalid_argument("goal_critic.temperature must be positive.");
+  }
+  if (config.self_play_league.pfsp_sigma <= 0.0F) {
+    throw std::invalid_argument("self_play_league.pfsp_sigma must be positive.");
   }
   if (config.vrpo.q_critic_hidden_dim <= 0) {
     throw std::invalid_argument("vrpo.q_critic_hidden_dim must be positive.");

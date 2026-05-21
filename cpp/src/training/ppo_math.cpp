@@ -611,7 +611,8 @@ torch::Tensor sample_future_goal_positions(
 
 torch::Tensor compute_pairwise_negative_l2_logits(
     const torch::Tensor& lhs_embeddings,
-    const torch::Tensor& rhs_embeddings) {
+    const torch::Tensor& rhs_embeddings,
+    float temperature) {
   PULSAR_TRACE_SCOPE_CAT("ppo_math", "infonce_logits");
   constexpr float kMaxSquaredDistance = 1.0e6F;
   const torch::Tensor lhs = lhs_embeddings.to(torch::kFloat32);
@@ -620,7 +621,7 @@ torch::Tensor compute_pairwise_negative_l2_logits(
   const torch::Tensor rhs_norm = rhs.square().sum(-1, true).transpose(0, 1);
   const torch::Tensor distances = (lhs_norm + rhs_norm - 2.0F * torch::matmul(lhs, rhs.transpose(0, 1)))
       .clamp(1.0e-8F, kMaxSquaredDistance);
-  return -distances;
+  return -distances / std::max(temperature, 1.0e-4F);
 }
 
 torch::Tensor compute_symmetric_infonce_loss(

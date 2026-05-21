@@ -503,6 +503,75 @@ int main() {
       }
     }
 
+    // PopArtNormalizer unit tests
+    {
+      pulsar::PopArtNormalizer normalizer(0.1, 1e-4);
+      
+      // 1. Check inverse property
+      torch::Tensor x = torch::randn({10, 5});
+      torch::Tensor normalized = normalizer.normalize(x);
+      torch::Tensor denormalized = normalizer.denormalize(normalized);
+      if (!torch::allclose(x, denormalized, 1e-6, 1e-6)) {
+        throw std::runtime_error("PopArtNormalizer inverse property check failed");
+      }
+
+      // 2. Check scale preservation invariant
+      torch::nn::Linear linear(torch::nn::LinearOptions(5, 3));
+      torch::Tensor input = torch::randn({4, 5});
+      
+      // Compute original forward and denormalize it
+      torch::Tensor orig_pred = linear->forward(input);
+      torch::Tensor orig_denorm = normalizer.denormalize(orig_pred);
+
+      // Perform statistics update
+      torch::Tensor targets = torch::randn({100}) * 5.0 + 10.0;
+      normalizer.update(targets, *linear);
+
+      // Compute updated forward and denormalize with updated statistics
+      torch::Tensor updated_pred = linear->forward(input);
+      torch::Tensor updated_denorm = normalizer.denormalize(updated_pred);
+
+      if (!torch::allclose(orig_denorm, updated_denorm, 1e-6, 1e-6)) {
+        throw std::runtime_error("PopArtNormalizer scale preservation invariant failed");
+      }
+    }
+
+    // Element-wise Smooth L1 Loss unit tests
+    {
+      auto local_elementwise_smooth_l1_loss = [](
+          const torch::Tensor& prediction,
+          const torch::Tensor& target,
+          float delta) {
+        if (delta <= 0.0F) {
+          return (prediction - target).square();
+        }
+        const torch::Tensor error = prediction - target;
+        const torch::Tensor abs_error = error.abs();
+        const torch::Tensor delta_tensor = torch::full_like(abs_error, delta);
+        const torch::Tensor quadratic = 0.5F * error.square() / delta;
+        const torch::Tensor linear = abs_error - 0.5F * delta;
+        return torch::where(abs_error < delta_tensor, quadratic, linear);
+      };
+
+      torch::Tensor prediction = torch::tensor({0.5F, 1.5F, -2.0F, 3.0F});
+      torch::Tensor target = torch::tensor({0.0F, 1.0F, -1.0F, 5.0F});
+      float delta = 1.0F;
+
+      torch::Tensor loss = local_elementwise_smooth_l1_loss(prediction, target, delta);
+      // Prediction - target = [0.5, 0.5, -1.0, -2.0]
+      // Abs error = [0.5, 0.5, 1.0, 2.0]
+      // For abs_error <= 1.0 (delta): quadratic = 0.5 * error^2 / 1.0 = 0.5 * error^2
+      // For 0.5: 0.5 * 0.25 = 0.125
+      // For 1.0: 0.5 * 1.0 = 0.5
+      // For abs_error > 1.0: linear = abs_error - 0.5 * 1.0 = abs_error - 0.5
+      // For 2.0: 2.0 - 0.5 = 1.5
+      // Expected element-wise loss: [0.125, 0.125, 0.5, 1.5]
+      torch::Tensor expected = torch::tensor({0.125F, 0.125F, 0.5F, 1.5F});
+      if (!torch::allclose(loss, expected, 1e-6, 1e-6)) {
+        throw std::runtime_error("element-wise smooth L1 loss values check failed");
+      }
+    }
+
     std::cout << "pulsar_torch_tests passed\n";
     return EXIT_SUCCESS;
   } catch (const std::exception& exc) {

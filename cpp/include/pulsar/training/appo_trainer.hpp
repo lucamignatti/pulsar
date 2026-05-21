@@ -215,7 +215,8 @@ class APPOTrainer {
   PPOActor actor_snapshot_{nullptr};
   std::vector<PPOActor> compute_actors_;
   ObservationNormalizer actor_normalizer_;
-  torch::optim::Adam actor_optimizer_;
+  torch::optim::AdamW actor_optimizer_;
+  PopArtNormalizer q_normalizer_{};
   torch::Device device_{torch::kCPU};
   std::vector<torch::Device> compute_devices_{};
   std::vector<torch::Device> shard_devices_{};

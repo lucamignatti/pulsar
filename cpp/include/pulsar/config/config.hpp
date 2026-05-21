@@ -147,10 +147,10 @@ struct GoalCriticConfig {
   float lambda_goal_actor = 0.1F;
   int contrastive_batch_size = 2048;
   int max_future_horizon = 256;
+  float temperature = 0.1F;
 };
 
 struct VRPOConfig {
-  bool enabled = false;
   int q_critic_hidden_dim = 384;
   float q_critic_coef = 0.5F;
 };
@@ -209,12 +209,14 @@ struct PPOConfig {
   float max_policy_log_ratio = 5.0F;
   float target_kl = 0.0F;
   float max_preclip_grad_norm = 0.0F;
-  bool plasticity = false;
-  int plasticity_interval = 40;
-  float plasticity_shrink = 0.999F;
-  float plasticity_noise = 1.0e-4F;
   bool pcgrad = false;
   bool overlap_collection_update = false;
+  bool value_clipping = false;
+  float value_clip_range = 0.2F;
+  float weight_decay = 0.0F;
+  bool popart_enabled = false;
+  double popart_beta = 0.0001;
+  double popart_epsilon = 1e-4;
 };
 
 struct SelfPlayLeagueConfig {
@@ -229,6 +231,8 @@ struct SelfPlayLeagueConfig {
   std::string eval_policy = "deterministic";
   float elo_initial = 1000.0F;
   float elo_k = 32.0F;
+  bool pfsp_enabled = false;
+  float pfsp_sigma = 200.0F;
 };
 
 struct WandbConfig {

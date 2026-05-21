@@ -138,11 +138,36 @@ SelfPlayAssignment SelfPlayManager::sample_assignment(std::size_t, std::uint64_t
 
   if (matching_indices.empty()) return assignment;
 
-  std::uniform_int_distribution<int> snapshot_dist(0, static_cast<int>(matching_indices.size()) - 1);
   std::uniform_int_distribution<int> team_dist(0, 1);
   assignment.enabled = true;
-  assignment.snapshot_index = matching_indices[static_cast<std::size_t>(snapshot_dist(rng_))];
   assignment.learner_team = team_dist(rng_) == 0 ? Team::Blue : Team::Orange;
+
+  if (config_.self_play_league.pfsp_enabled) {
+    double r_current = config_.self_play_league.elo_initial;
+    auto it = current_ratings_.find(current_mode_);
+    if (it != current_ratings_.end()) {
+      r_current = it->second;
+    }
+    const float sigma = std::max(config_.self_play_league.pfsp_sigma, 1.0F);
+
+    std::vector<double> weights;
+    weights.reserve(matching_indices.size());
+    for (int idx : matching_indices) {
+      double r_i = config_.self_play_league.elo_initial;
+      auto sit = snapshots_[idx].ratings.find(current_mode_);
+      if (sit != snapshots_[idx].ratings.end()) {
+        r_i = sit->second;
+      }
+      double diff = r_current - r_i;
+      double w = std::exp(- (diff * diff) / (2.0 * sigma * sigma));
+      weights.push_back(std::max(w, 1e-6));
+    }
+    std::discrete_distribution<std::size_t> dist(weights.begin(), weights.end());
+    assignment.snapshot_index = matching_indices[dist(rng_)];
+  } else {
+    std::uniform_int_distribution<int> snapshot_dist(0, static_cast<int>(matching_indices.size()) - 1);
+    assignment.snapshot_index = matching_indices[static_cast<std::size_t>(snapshot_dist(rng_))];
+  }
   return assignment;
 }
 
