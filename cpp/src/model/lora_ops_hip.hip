@@ -68,7 +68,7 @@ at::Tensor eggroll_lora_perturb_hip(
   const int population = static_cast<int>(B_stack.size(0));
   const int member_batch = static_cast<int>(base_out.size(0) / population);
   const int out_features = static_cast<int>(base_out.size(1));
-  const int rank = static_cast<int>(x_A.size(1));
+  const int rank = static_cast<int>(x_A_stack.size(1));
   at::Tensor out = at::empty_like(base_out);
   constexpr int kThreads = 256;
   const int total = static_cast<int>(base_out.numel());
