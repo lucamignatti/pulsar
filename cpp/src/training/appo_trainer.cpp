@@ -281,6 +281,11 @@ RolloutStorage make_rollout_storage(
     int num_agents,
     int action_dim,
     bool pin_memory) {
+  std::vector<std::string> heads = {"extrinsic"};
+  if (config.vrpo.enabled) {
+    heads.push_back("q_taken");
+    heads.push_back("v_from_q");
+  }
   return RolloutStorage(
       config.ppo.rollout_length,
       num_agents,
@@ -288,7 +293,7 @@ RolloutStorage make_rollout_storage(
       action_dim,
       config.model.encoder_dim,
       torch::Device(torch::kCPU),
-      {"extrinsic"},
+      heads,
       pin_memory);
 }
 
@@ -819,6 +824,8 @@ void append_metrics_line(
       {"multi_touch_episode_rate", metrics.multi_touch_episode_rate},
       {"effective_entropy_coef", metrics.effective_entropy_coef},
       {"self_play_snapshot_count", metrics.self_play_snapshot_count},
+      {"q_critic_loss", metrics.q_critic_loss},
+      {"advantage_std", metrics.advantage_std},
   };
   for (const auto& [mode, rate] : metrics.mode_touch_rates) {
     line["mode_" + mode + "_touch_episode_rate"] = rate;
@@ -1527,6 +1534,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   torch::Tensor policy_approx_kl_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
   torch::Tensor policy_clip_fraction_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
   torch::Tensor goal_critic_loss_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+  torch::Tensor q_critic_loss_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
   torch::Tensor goal_score_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
   torch::Tensor sampled_goal_distance_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
   double policy_log_ratio_abs_max = 0.0;
@@ -1557,6 +1565,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       std::cout << "bench_update_gae_start\n" << std::flush;
     }
     torch::Tensor terminal_values;
+    torch::Tensor terminal_v_from_q;
     if (rollout_bootstrap_truncated.any().item<bool>()) {
       torch::NoGradGuard no_grad;
       torch::Tensor term_obs = rollout.terminal_observations.narrow(0, 0, rollout_steps);
@@ -1564,30 +1573,66 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       const int total_term_samples = rollout_steps * total_agents;
       const int max_term_batch = effective_max_forward_samples(config_.model, device_);
       std::vector<torch::Tensor> term_value_chunks;
+      std::vector<torch::Tensor> term_v_from_q_chunks;
       for (int offset = 0; offset < total_term_samples; offset += max_term_batch) {
         int batch = std::min(max_term_batch, total_term_samples - offset);
         auto chunk = actor_normalizer_.normalize(term_flat.slice(0, offset, offset + batch).to(device_));
         auto chunk_goal = policy_goal_values_like(chunk, config_.goal_critic.goal_dim);
-        auto chunk_out = actor_->forward_step(chunk, chunk_goal).value_win_logits.squeeze(-1);
-        term_value_chunks.push_back(chunk_out);
+        auto chunk_out = actor_->forward_step(chunk, chunk_goal);
+        term_value_chunks.push_back(chunk_out.value_win_logits.squeeze(-1));
+        if (config_.vrpo.enabled) {
+          auto term_logits = chunk_out.policy_logits;
+          auto term_q = chunk_out.q_values;
+          auto term_probs = torch::softmax(term_logits, -1);
+          auto term_v = (term_probs * term_q).sum(-1);
+          term_v_from_q_chunks.push_back(term_v);
+        }
       }
       auto term_values_flat = torch::cat(term_value_chunks, 0);
       terminal_values = term_values_flat.reshape({rollout_steps, total_agents});
+      if (config_.vrpo.enabled) {
+        auto term_v_from_q_flat = torch::cat(term_v_from_q_chunks, 0);
+        terminal_v_from_q = term_v_from_q_flat.reshape({rollout_steps, total_agents});
+      }
     }
     auto final_values_map = rollout.final_values();
     torch::Tensor final_extrinsic_values = final_values_map.count("extrinsic") && final_values_map.at("extrinsic").defined()
         ? final_values_map.at("extrinsic").to(device_)
         : torch::Tensor{};
-    sparse_advantages = compute_gae(
-      extrinsic_values,
-      extrinsic_rewards,
-      rollout_dones,
-      config_.ppo.gamma,
-      config_.ppo.gae_lambda,
-      final_extrinsic_values,
-      rollout_bootstrap_truncated,
-      terminal_values);
+    torch::Tensor final_v_from_q = config_.vrpo.enabled && final_values_map.count("v_from_q") && final_values_map.at("v_from_q").defined()
+        ? final_values_map.at("v_from_q").to(device_)
+        : torch::Tensor{};
+
+    if (config_.vrpo.enabled) {
+      const auto q_taken = all_values.at("q_taken").narrow(0, 0, rollout_steps).to(device_);
+      const auto v_from_q = all_values.at("v_from_q").narrow(0, 0, rollout_steps).to(device_);
+      sparse_advantages = compute_q_boosted_gae(
+          q_taken,
+          v_from_q,
+          extrinsic_rewards,
+          rollout_dones,
+          config_.ppo.gamma,
+          config_.ppo.gae_lambda,
+          final_v_from_q,
+          rollout_bootstrap_truncated,
+          terminal_v_from_q);
+    } else {
+      sparse_advantages = compute_gae(
+          extrinsic_values,
+          extrinsic_rewards,
+          rollout_dones,
+          config_.ppo.gamma,
+          config_.ppo.gae_lambda,
+          final_extrinsic_values,
+          rollout_bootstrap_truncated,
+          terminal_values);
+    }
     normalized_advantages = normalize_advantage(sparse_advantages, active_mask);
+    if (active_mask.any().item<bool>()) {
+      metrics.advantage_std = sparse_advantages.index({active_mask}).std().item<double>();
+    } else {
+      metrics.advantage_std = 0.0;
+    }
     if (benchmark_progress_) {
       const double gae_seconds =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - gae_start).count();
@@ -1595,6 +1640,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
     }
   }
   torch::Tensor sparse_returns = sparse_advantages + extrinsic_values.detach();
+  torch::Tensor q_returns = config_.vrpo.enabled
+      ? (sparse_advantages + all_values.at("v_from_q").narrow(0, 0, rollout_steps).to(device_).detach())
+      : torch::Tensor{};
 
   int completed_minibatches = 0;
   const size_t num_update_gpus = compute_devices_.size();
@@ -1694,6 +1742,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           double goal_critic_loss = 0.0;
           double goal_score = 0.0;
           double sampled_goal_dist = 0.0;
+          double q_critic_loss_sum = 0.0;
           double fwd_bwd_seconds = 0.0;
           bool has_backward = false;
           std::int64_t active_count = 0;
@@ -1716,7 +1765,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           const torch::Device gpu_dev = compute_devices_[g];
           PPOActor gpu_act = (g == 0) ? actor_ : compute_actors_[g - 1];
 
-          gpu_futures.push_back(std::async(std::launch::async, [=, &rollout, &normalized_advantages, &sparse_returns,
+          gpu_futures.push_back(std::async(std::launch::async, [=, &rollout, &normalized_advantages, &sparse_returns, &q_returns,
               &mode_agent_indices, &effective_entropy_coef, &effective_entropy_floor_coef, this]() mutable -> GpuTaskResult {
             GpuTaskResult result;
             std::vector<CapturedGrad>& gpu_task_group = result.task_group;
@@ -1731,6 +1780,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             torch::Tensor goal_critic_loss_metric;
             torch::Tensor goal_score_metric;
             torch::Tensor sampled_goal_dist_metric;
+            torch::Tensor q_critic_loss_metric;
             auto add_metric = [](torch::Tensor& dst, const torch::Tensor& value, double weight) {
               const torch::Tensor term = value.detach().to(torch::kFloat32) * weight;
               dst = dst.defined() ? dst + term : term;
@@ -1758,6 +1808,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
               torch::Tensor mode_gpu_action_log_probs_mb = rollout.action_log_probs.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices).to(gpu_dev);
               torch::Tensor mode_gpu_advantages_mb = normalized_advantages.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices.to(device_)).to(gpu_dev);
               torch::Tensor mode_gpu_returns_mb = sparse_returns.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices.to(device_)).to(gpu_dev);
+              torch::Tensor mode_gpu_q_returns_mb = config_.vrpo.enabled
+                  ? q_returns.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices.to(device_)).to(gpu_dev)
+                  : torch::Tensor{};
 
               for (int seq_start = 0; seq_start < rollout_steps_local; seq_start += seq_len_local) {
                 const int chunk_start = seq_start;
@@ -1844,6 +1897,19 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 torch::Tensor active_value_win_logits = all_active ? flat_value_win_logits.to(torch::kFloat32) : flat_value_win_logits.index({flat_active}).to(torch::kFloat32);
                 torch::Tensor value_loss = smooth_l1_value_loss(active_value_win_logits.squeeze(-1), active_returns, config_.ppo.value_loss_delta);
 
+                torch::Tensor q_loss = torch::zeros({}, active_advantages.options());
+                if (config_.vrpo.enabled) {
+                  torch::Tensor chunk_q_returns = mode_gpu_q_returns_mb.narrow(0, chunk_start, loss_steps).reshape({samples});
+                  torch::Tensor active_q_returns = all_active ? chunk_q_returns.to(torch::kFloat32) : chunk_q_returns.index({flat_active}).to(torch::kFloat32);
+
+                  torch::Tensor q_all_new = output.q_values.reshape({samples, config_.model.action_dim});
+                  torch::Tensor active_q_all = all_active ? q_all_new.to(torch::kFloat32) : q_all_new.index({flat_active}).to(torch::kFloat32);
+                  torch::Tensor active_q_taken = active_q_all.gather(1, active_actions.unsqueeze(1)).squeeze(1);
+
+                  q_loss = smooth_l1_value_loss(active_q_taken, active_q_returns, config_.ppo.value_loss_delta);
+                  add_metric(q_critic_loss_metric, q_loss, active_samples);
+                }
+
                 torch::Tensor goal_loss = torch::zeros({}, active_advantages.options());
                 torch::Tensor actor_goal_loss = torch::zeros({}, active_advantages.options());
                 torch::Tensor chunk_goal_score = torch::zeros({}, active_advantages.options());
@@ -1898,7 +1964,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 }
 
                 const auto sample_weight = active_samples / mode_total_active_local;
-                const torch::Tensor task_loss = policy_loss + config_.ppo.value_coef * value_loss + entropy_floor_loss - effective_entropy_coef * entropy;
+                const torch::Tensor task_loss = policy_loss + config_.ppo.value_coef * value_loss + entropy_floor_loss - effective_entropy_coef * entropy
+                    + (config_.vrpo.enabled ? config_.vrpo.q_critic_coef * q_loss : torch::zeros({}, active_advantages.options()));
 
                 if (use_pcgrad_local) {
                   const torch::Tensor weighted_task_loss = task_loss * sample_weight;
@@ -1954,6 +2021,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 scalar_or_zero(goal_critic_loss_metric),
                 scalar_or_zero(goal_score_metric),
                 scalar_or_zero(sampled_goal_dist_metric),
+                scalar_or_zero(q_critic_loss_metric),
             }).to(torch::kCPU);
             const float* metric_data = packed_metrics.data_ptr<float>();
             result.policy_loss_sum = metric_data[0];
@@ -1965,6 +2033,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             result.goal_critic_loss = metric_data[6];
             result.goal_score = metric_data[7];
             result.sampled_goal_dist = metric_data[8];
+            result.q_critic_loss_sum = metric_data[9];
             result.fwd_bwd_seconds =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - task_compute_start).count();
             return result;
@@ -1990,6 +2059,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           goal_critic_loss_sum = goal_critic_loss_sum + task_result.goal_critic_loss;
           goal_score_sum = goal_score_sum + task_result.goal_score;
           sampled_goal_distance_sum = sampled_goal_distance_sum + task_result.sampled_goal_dist;
+          q_critic_loss_sum = q_critic_loss_sum + task_result.q_critic_loss_sum;
           metrics.forward_backward_seconds += task_result.fwd_bwd_seconds;
           accumulated_has_backward = accumulated_has_backward || task_result.has_backward;
           metric_steps += task_result.active_count;
@@ -2190,6 +2260,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
     metrics.goal_critic_loss = (goal_critic_loss_sum / denom).item<double>();
     metrics.mean_goal_score = (goal_score_sum / denom).item<double>();
     metrics.mean_sampled_goal_distance = (sampled_goal_distance_sum / denom).item<double>();
+    if (config_.vrpo.enabled) {
+      metrics.q_critic_loss = (q_critic_loss_sum / denom).item<double>();
+    }
   }
   metrics.effective_entropy_coef = static_cast<double>(effective_entropy_coef);
   metrics.update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count();
@@ -3023,6 +3096,16 @@ void APPOTrainer::collect_rollout(
           shard_step.sampled_value_count = sampled_value.numel();
           std::unordered_map<std::string, torch::Tensor> all_values;
           all_values["extrinsic"] = sampled_value;
+          if (config_.vrpo.enabled) {
+            torch::Tensor q_all = output.q_values;
+            torch::Tensor q_taken = q_all.gather(1, actions.unsqueeze(1)).squeeze(1);
+            torch::Tensor policy_probs = torch::softmax(
+                apply_action_mask_to_logits(output.policy_logits, action_masks), -1);
+            torch::Tensor v_from_q = (policy_probs * q_all).sum(-1);
+
+            all_values["q_taken"] = q_taken.to(torch::kCPU);
+            all_values["v_from_q"] = v_from_q.to(torch::kCPU);
+          }
           std::unordered_map<std::string, torch::Tensor> all_rewards;
           all_rewards["extrinsic"] = extrinsic_rewards_host;
 
@@ -3114,6 +3197,10 @@ void APPOTrainer::collect_rollout(
       torch::NoGradGuard no_grad;
       std::vector<torch::Tensor> final_values;
       final_values.reserve(collectors_.size());
+      std::vector<torch::Tensor> final_v_from_q;
+      if (config_.vrpo.enabled) {
+        final_v_from_q.reserve(collectors_.size());
+      }
       for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
         auto& collector = *collectors_[shard];
         PPOActor& shard_actor = rollout_actors[shard];
@@ -3139,9 +3226,20 @@ void APPOTrainer::collect_rollout(
             nullptr,
             final_goal_values);
         final_values.push_back(final_output.value_win_logits.squeeze(-1).to(device_));
+        if (config_.vrpo.enabled) {
+          torch::Tensor final_masks = collector.host_action_masks().to(shard_device, use_pinned_host_buffers_);
+          torch::Tensor q_all = final_output.q_values;
+          torch::Tensor policy_probs = torch::softmax(
+              apply_action_mask_to_logits(final_output.policy_logits, final_masks), -1);
+          torch::Tensor v_from_q = (policy_probs * q_all).sum(-1);
+          final_v_from_q.push_back(v_from_q.to(device_));
+        }
       }
       std::unordered_map<std::string, torch::Tensor> bootstrap_values;
       bootstrap_values["extrinsic"] = torch::cat(final_values, 0);
+      if (config_.vrpo.enabled) {
+        bootstrap_values["v_from_q"] = torch::cat(final_v_from_q, 0);
+      }
       dest.set_final_values(bootstrap_values);
     }
   } else {
@@ -3310,6 +3408,16 @@ void APPOTrainer::collect_rollout(
     std::unordered_map<std::string, torch::Tensor> all_values;
     torch::Tensor sampled_value = output.value_win_logits.squeeze(-1);
     all_values["extrinsic"] = sampled_value;
+    if (config_.vrpo.enabled) {
+      torch::Tensor q_all = output.q_values;
+      torch::Tensor q_taken = q_all.gather(1, actions.unsqueeze(1)).squeeze(1);
+      torch::Tensor policy_probs = torch::softmax(
+          apply_action_mask_to_logits(output.policy_logits, action_masks), -1);
+      torch::Tensor v_from_q = (policy_probs * q_all).sum(-1);
+
+      all_values["q_taken"] = q_taken.to(torch::kCPU);
+      all_values["v_from_q"] = v_from_q.to(torch::kCPU);
+    }
     accumulated_sampled_value += sampled_value.sum().item<double>();
     accumulated_value_count += sampled_value.numel();
 
@@ -3353,6 +3461,14 @@ void APPOTrainer::collect_rollout(
 
     std::unordered_map<std::string, torch::Tensor> bootstrap_values;
     bootstrap_values["extrinsic"] = final_output.value_win_logits.squeeze(-1);
+    if (config_.vrpo.enabled) {
+      torch::Tensor final_masks = collector_->host_action_masks().to(device_, use_pinned_host_buffers_);
+      torch::Tensor q_all = final_output.q_values;
+      torch::Tensor policy_probs = torch::softmax(
+          apply_action_mask_to_logits(final_output.policy_logits, final_masks), -1);
+      torch::Tensor v_from_q = (policy_probs * q_all).sum(-1);
+      bootstrap_values["v_from_q"] = v_from_q;
+    }
     dest.set_final_values(bootstrap_values);
     }
   }
@@ -3881,6 +3997,8 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     coll_metrics.goal_critic_loss = train_metrics.goal_critic_loss;
     coll_metrics.mean_goal_score = train_metrics.mean_goal_score;
     coll_metrics.mean_sampled_goal_distance = train_metrics.mean_sampled_goal_distance;
+    coll_metrics.q_critic_loss = train_metrics.q_critic_loss;
+    coll_metrics.advantage_std = train_metrics.advantage_std;
     coll_metrics.update_agent_steps_per_second =
         next_coll_steps > 0 ? static_cast<double>(next_coll_steps) / std::max(train_metrics.update_seconds, 1.0e-9) : 0.0;
 
@@ -3988,6 +4106,10 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       add_metric("Optimization", "rollout_steps", coll_metrics.rollout_steps);
       add_metric("Optimization", "effective_entropy_coef", coll_metrics.effective_entropy_coef);
       add_metric("Optimization", "self_play_snapshot_count", coll_metrics.self_play_snapshot_count);
+      if (config_.vrpo.enabled) {
+        add_metric("Optimization", "q_critic_loss", coll_metrics.q_critic_loss);
+        add_metric("Optimization", "advantage_std", coll_metrics.advantage_std);
+      }
       add_metric("Optimization", "curriculum_stage", curriculum_.state().stage_index);
       add_metric("Optimization", "curriculum_agent_steps", curriculum_.state().agent_steps_in_stage);
       add_metric("Optimization", "curriculum_promotion_counter", curriculum_.state().promotion_counter);

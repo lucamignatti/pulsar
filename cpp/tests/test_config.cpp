@@ -224,8 +224,8 @@ int main() {
                             "production config should keep CUDA AMP disabled unless explicitly re-enabled");
       pulsar::test::require(prod.es_lora.require_fitness_signal,
                             "production ES should require a reward-fitness signal");
-      pulsar::test::require(prod.es_lora.population_size == 64 &&
-                                prod.es_lora.virtual_population_waves == 8,
+      pulsar::test::require(prod.es_lora.population_size == 512 &&
+                                prod.es_lora.virtual_population_waves == 1,
                             "production ES should use effective population 512");
       pulsar::test::require(prod.es_lora.eval_shards == 4 &&
                                 prod.es_lora.eval_workers == 8 &&

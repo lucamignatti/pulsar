@@ -30,6 +30,16 @@ torch::Tensor compute_gae(
     const torch::Tensor& next_values = {},
     const torch::Tensor& bootstrap_mask = {},
     const torch::Tensor& bootstrap_values = {});
+torch::Tensor compute_q_boosted_gae(
+    const torch::Tensor& q_values_taken,
+    const torch::Tensor& v_from_q,
+    const torch::Tensor& rewards,
+    const torch::Tensor& dones,
+    float gamma,
+    float gae_lambda,
+    const torch::Tensor& next_v_from_q = {},
+    const torch::Tensor& bootstrap_mask = {},
+    const torch::Tensor& bootstrap_v_from_q = {});
 torch::Tensor clipped_ppo_policy_loss(
     const torch::Tensor& current_log_probs,
     const torch::Tensor& old_log_probs,

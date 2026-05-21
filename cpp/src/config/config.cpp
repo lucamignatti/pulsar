@@ -388,6 +388,20 @@ void from_json(const json& j, GoalCriticConfig& value) {
   value.max_future_horizon = j.value("max_future_horizon", 256);
 }
 
+void to_json(json& j, const VRPOConfig& value) {
+  j = json{
+      {"enabled", value.enabled},
+      {"q_critic_hidden_dim", value.q_critic_hidden_dim},
+      {"q_critic_coef", value.q_critic_coef},
+  };
+}
+
+void from_json(const json& j, VRPOConfig& value) {
+  value.enabled = j.value("enabled", false);
+  value.q_critic_hidden_dim = j.value("q_critic_hidden_dim", 384);
+  value.q_critic_coef = j.value("q_critic_coef", 0.5F);
+}
+
 void to_json(json& j, const ESLoraConfig& value) {
   j = json{
       {"rank", value.rank},
@@ -603,6 +617,7 @@ void to_json(json& j, const ExperimentConfig& value) {
       {"ppo", value.ppo},
       {"goal_mapping", value.goal_mapping},
       {"goal_critic", value.goal_critic},
+      {"vrpo", value.vrpo},
       {"es_lora", value.es_lora},
       {"self_play_league", value.self_play_league},
       {"wandb", value.wandb},
@@ -640,6 +655,7 @@ void from_json(const json& j, ExperimentConfig& value) {
   value.ppo = j.value("ppo", PPOConfig{});
   value.goal_mapping = j.value("goal_mapping", GoalMappingConfig{});
   value.goal_critic = j.value("goal_critic", GoalCriticConfig{});
+  value.vrpo = j.value("vrpo", VRPOConfig{});
   value.es_lora = j.value("es_lora", ESLoraConfig{});
   value.self_play_league = j.value("self_play_league", SelfPlayLeagueConfig{});
   value.wandb = j.value("wandb", WandbConfig{});
@@ -809,6 +825,12 @@ void validate_experiment_config(const ExperimentConfig& config) {
   }
   if (config.ppo.value_loss_delta < 0.0F) {
     throw std::invalid_argument("ppo.value_loss_delta must be non-negative.");
+  }
+  if (config.vrpo.q_critic_hidden_dim <= 0) {
+    throw std::invalid_argument("vrpo.q_critic_hidden_dim must be positive.");
+  }
+  if (config.vrpo.q_critic_coef < 0.0F) {
+    throw std::invalid_argument("vrpo.q_critic_coef must be non-negative.");
   }
   if (config.env.team_size <= 0 || config.env.team_size > 4) {
     throw std::invalid_argument("env.team_size must be between 1 and 4.");

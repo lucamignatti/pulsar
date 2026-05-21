@@ -489,10 +489,12 @@ torch::nn::Sequential PPOActorImpl::make_value_win_head(int input_dim) const {
 PPOActorImpl::PPOActorImpl(
     ModelConfig config,
     const GoalCriticConfig& goal_critic_config,
-    const ESLoraConfig& es_lora_config)
+    const ESLoraConfig& es_lora_config,
+    const VRPOConfig& vrpo_config)
     : config_(std::move(config)),
       goal_critic_config_(goal_critic_config),
-      es_lora_config_(es_lora_config) {
+      es_lora_config_(es_lora_config),
+      vrpo_config_(vrpo_config) {
   validate_model_config(config_);
   validate_es_lora_config(es_lora_config_);
 
@@ -515,6 +517,13 @@ PPOActorImpl::PPOActorImpl(
 
   value_head_win_ = make_value_win_head(feature_dim_);
   register_module("value_head_win", value_head_win_);
+
+  q_head_ = register_module("q_head",
+      torch::nn::Sequential(
+          torch::nn::Linear(feature_dim_, vrpo_config_.q_critic_hidden_dim),
+          torch::nn::ReLU(),
+          torch::nn::Linear(vrpo_config_.q_critic_hidden_dim, config_.action_dim)
+      ));
 
   goal_critic_ = GoalCritic(feature_dim_, config_.action_dim, goal_critic_config_.embedding_dim, goal_critic_config_.hidden_dim, goal_critic_config_.goal_dim);
   register_module("goal_critic", goal_critic_);
@@ -539,6 +548,7 @@ ActorStepOutput PPOActorImpl::forward_step(
       encoded,
       compute_value ? value_head_win_->forward(encoded) : torch::Tensor{},
       encoded,
+      compute_value ? q_head_->forward(encoded) : torch::Tensor{},
   };
 }
 
@@ -564,11 +574,16 @@ ActorStepOutput PPOActorImpl::forward_step_stateful(
       encoded,
       compute_value ? value_head_win_->forward(encoded) : torch::Tensor{},
       encoded,
+      compute_value ? q_head_->forward(encoded) : torch::Tensor{},
   };
 }
 
 torch::Tensor PPOActorImpl::value_head_forward(const torch::Tensor& encoded) {
   return value_head_win_->forward(encoded);
+}
+
+torch::Tensor PPOActorImpl::q_head_forward(const torch::Tensor& encoded) {
+  return q_head_->forward(encoded);
 }
 
 torch::Tensor PPOActorImpl::policy_head_forward(const torch::Tensor& features) {
@@ -601,6 +616,7 @@ ActorSequenceOutput PPOActorImpl::forward_sequence(
       encoded_seq,
       compute_value ? value_head_win_->forward(encoded).reshape({time, batch, 1}) : torch::Tensor{},
       encoded_seq,
+      compute_value ? q_head_->forward(encoded).reshape({time, batch, config_.action_dim}) : torch::Tensor{},
   };
 }
 
@@ -622,6 +638,10 @@ const GoalCriticConfig& PPOActorImpl::goal_critic_config() const {
 
 const ESLoraConfig& PPOActorImpl::es_lora_config() const {
   return es_lora_config_;
+}
+
+const VRPOConfig& PPOActorImpl::vrpo_config() const {
+  return vrpo_config_;
 }
 
 std::vector<torch::Tensor> PPOActorImpl::es_lora_parameters() const {
@@ -671,7 +691,11 @@ GoalCritic& PPOActorImpl::goal_critic() {
 }
 
 std::vector<std::string> PPOActorImpl::enabled_critic_heads() const {
-  return {"extrinsic"};
+  std::vector<std::string> heads = {"extrinsic"};
+  if (vrpo_config_.enabled) {
+    heads.push_back("q_critic");
+  }
+  return heads;
 }
 
 PPOActor load_ppo_actor(const std::string& checkpoint_path, const std::string& device) {
@@ -682,7 +706,7 @@ PPOActor load_ppo_actor(const std::string& checkpoint_path, const std::string& d
   validate_inference_checkpoint_metadata(metadata, config);
 
   torch::Device torch_device(device);
-  auto model = PPOActor(config.model, config.goal_critic, config.es_lora);
+  auto model = PPOActor(config.model, config.goal_critic, config.es_lora, config.vrpo);
   const fs::path state_path = base / "state.pt";
   if (fs::exists(state_path)) {
     torch::serialize::InputArchive archive;
@@ -702,7 +726,7 @@ PPOActor clone_ppo_actor(const PPOActor& source, const torch::Device& device) {
   if (!source) {
     return nullptr;
   }
-  auto clone = PPOActor(source->config(), source->goal_critic_config(), source->es_lora_config());
+  auto clone = PPOActor(source->config(), source->goal_critic_config(), source->es_lora_config(), source->vrpo_config());
   clone->to(device);
   copy_module_tensors_to(source, clone, device);
   return clone;

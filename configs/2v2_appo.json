@@ -366,6 +366,11 @@
     "contrastive_batch_size": 2048,
     "max_future_horizon": 256
   },
+  "vrpo": {
+    "enabled": true,
+    "q_critic_hidden_dim": 384,
+    "q_critic_coef": 0.5
+  },
   "es_lora": {
     "rank": 4,
     "lora_alpha": 4.0,

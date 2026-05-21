@@ -106,6 +106,22 @@ int main() {
       require_close(advantages[1].item<float>(), 1.0F, "GAE terminal mask step 1");
       require_close(advantages[2].item<float>(), 1.0F, "GAE terminal mask step 2");
     }
+ 
+    // 5b. Q-boosted GAE numerical validation
+    {
+      const auto q_taken = torch::tensor({1.5F, 2.5F, 3.5F}, torch::kFloat32).unsqueeze(1);
+      const auto v_from_q = torch::tensor({1.0F, 2.0F, 3.0F}, torch::kFloat32).unsqueeze(1);
+      const auto rewards = torch::tensor({0.5F, 1.0F, 1.5F}, torch::kFloat32).unsqueeze(1);
+      const auto dones = torch::tensor({0.0F, 0.0F, 1.0F}, torch::kFloat32).unsqueeze(1);
+      const auto next_v_from_q = torch::tensor({4.0F}, torch::kFloat32);
+
+      const auto advantages = pulsar::compute_q_boosted_gae(
+          q_taken, v_from_q, rewards, dones, 0.9F, 0.95F, next_v_from_q);
+
+      require_close(advantages[2].item<float>(), -1.5F, "Q-boosted GAE step 2");
+      require_close(advantages[1].item<float>(), -0.01F, "Q-boosted GAE step 1");
+      require_close(advantages[0].item<float>(), 0.86395F, "Q-boosted GAE step 0");
+    }
 
     // 6. One-sample advantage normalization
     {
@@ -147,6 +163,31 @@ int main() {
           boot_cpu.to(opts),
           boot_values_cpu.to(opts)).to(torch::kCPU);
       require(torch::allclose(actual, expected, 1.0e-5, 1.0e-5), "accelerated GAE parity");
+
+      auto q_cpu = torch::randn({7, 5}, torch::kFloat32);
+      auto v_from_q_cpu = torch::randn({7, 5}, torch::kFloat32);
+      auto next_v_from_q_cpu = torch::randn({5}, torch::kFloat32);
+      auto expected_q_boosted = pulsar::compute_q_boosted_gae(
+          q_cpu,
+          v_from_q_cpu,
+          rewards_cpu,
+          dones_cpu,
+          0.97F,
+          0.91F,
+          next_v_from_q_cpu,
+          boot_cpu,
+          boot_values_cpu);
+      auto actual_q_boosted = pulsar::compute_q_boosted_gae(
+          q_cpu.to(opts),
+          v_from_q_cpu.to(opts),
+          rewards_cpu.to(opts),
+          dones_cpu.to(opts),
+          0.97F,
+          0.91F,
+          next_v_from_q_cpu.to(opts),
+          boot_cpu.to(opts),
+          boot_values_cpu.to(opts)).to(torch::kCPU);
+      require(torch::allclose(actual_q_boosted, expected_q_boosted, 1.0e-5, 1.0e-5), "accelerated Q-boosted GAE parity");
 
       auto active_cpu = torch::ones({7, 5}, torch::kFloat32);
       active_cpu[0][0] = 0.0F;

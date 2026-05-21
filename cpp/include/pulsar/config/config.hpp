@@ -149,6 +149,12 @@ struct GoalCriticConfig {
   int max_future_horizon = 256;
 };
 
+struct VRPOConfig {
+  bool enabled = false;
+  int q_critic_hidden_dim = 384;
+  float q_critic_coef = 0.5F;
+};
+
 struct ESLoraConfig {
   int rank = 4;
   float lora_alpha = 4.0F;
@@ -254,6 +260,7 @@ struct ExperimentConfig {
   PPOConfig ppo{};
   GoalMappingConfig goal_mapping{};
   GoalCriticConfig goal_critic{};
+  VRPOConfig vrpo{};
   ESLoraConfig es_lora{};
   SelfPlayLeagueConfig self_play_league{};
   WandbConfig wandb{};
@@ -295,6 +302,8 @@ void to_json(nlohmann::json& j, const GoalMappingConfig& value);
 void from_json(const nlohmann::json& j, GoalMappingConfig& value);
 void to_json(nlohmann::json& j, const GoalCriticConfig& value);
 void from_json(const nlohmann::json& j, GoalCriticConfig& value);
+void to_json(nlohmann::json& j, const VRPOConfig& value);
+void from_json(const nlohmann::json& j, VRPOConfig& value);
 void to_json(nlohmann::json& j, const ESLoraConfig& value);
 void from_json(const nlohmann::json& j, ESLoraConfig& value);
 void to_json(nlohmann::json& j, const PPOConfig& value);

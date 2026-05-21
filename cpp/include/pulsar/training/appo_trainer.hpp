@@ -112,6 +112,9 @@ struct TrainerMetrics {
   double effective_entropy_coef = 0.0;
   int self_play_snapshot_count = 0;
 
+  double q_critic_loss = 0.0;
+  double advantage_std = 0.0;
+
   std::map<std::string, double> elo_ratings{};
   std::map<std::string, double> mode_touch_rates{};
   std::map<std::string, double> mode_multi_touch_rates{};

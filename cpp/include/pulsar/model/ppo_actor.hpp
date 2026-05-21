@@ -20,6 +20,7 @@ struct ActorStepOutput {
   torch::Tensor encoded;
   torch::Tensor value_win_logits;
   torch::Tensor features;
+  torch::Tensor q_values;
 };
 
 struct ActorSequenceOutput {
@@ -27,6 +28,7 @@ struct ActorSequenceOutput {
   torch::Tensor encoded;
   torch::Tensor value_win_logits;
   torch::Tensor features;
+  torch::Tensor q_values;
 };
 
 class LoRALinearImpl : public torch::nn::Module {
@@ -143,7 +145,8 @@ class PPOActorImpl : public torch::nn::Module {
   explicit PPOActorImpl(
       ModelConfig config,
       const GoalCriticConfig& goal_critic_config = {},
-      const ESLoraConfig& es_lora_config = {});
+      const ESLoraConfig& es_lora_config = {},
+      const VRPOConfig& vrpo_config = {});
 
   ActorStepOutput forward_step(
       torch::Tensor obs,
@@ -166,8 +169,10 @@ class PPOActorImpl : public torch::nn::Module {
   [[nodiscard]] const ModelConfig& config() const;
   [[nodiscard]] const GoalCriticConfig& goal_critic_config() const;
   [[nodiscard]] const ESLoraConfig& es_lora_config() const;
+  [[nodiscard]] const VRPOConfig& vrpo_config() const;
   [[nodiscard]] std::vector<std::string> enabled_critic_heads() const;
   torch::Tensor value_head_forward(const torch::Tensor& encoded);
+  torch::Tensor q_head_forward(const torch::Tensor& encoded);
   torch::Tensor policy_head_forward(const torch::Tensor& features);
 
   [[nodiscard]] std::vector<torch::Tensor> es_lora_parameters() const;
@@ -190,6 +195,7 @@ class PPOActorImpl : public torch::nn::Module {
   ModelConfig config_{};
   GoalCriticConfig goal_critic_config_{};
   ESLoraConfig es_lora_config_{};
+  VRPOConfig vrpo_config_{};
   int feature_dim_ = 0;
   Mamba2Encoder mamba2_encoder_{nullptr};
 
@@ -197,6 +203,7 @@ class PPOActorImpl : public torch::nn::Module {
   LoRALinear policy_lora_{nullptr};
 
   torch::nn::Sequential value_head_win_{nullptr};
+  torch::nn::Sequential q_head_{nullptr};
   GoalCritic goal_critic_{nullptr};
 };
 
