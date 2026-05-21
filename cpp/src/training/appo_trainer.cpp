@@ -10,6 +10,7 @@
 #include <future>
 #include <iostream>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -803,6 +804,12 @@ void append_metrics_line(
       {"es_lora_a_norm", metrics.es_lora_a_norm},
       {"es_lora_b_norm", metrics.es_lora_b_norm},
       {"es_seconds", metrics.es_seconds},
+      {"es_eval_seconds", metrics.es_eval_seconds},
+      {"es_agent_steps_per_second", metrics.es_agent_steps_per_second},
+      {"es_effective_population", metrics.es_effective_population},
+      {"es_virtual_population_waves", metrics.es_virtual_population_waves},
+      {"es_eval_shards", metrics.es_eval_shards},
+      {"es_policy_update_norm", metrics.es_policy_update_norm},
       {"scored_episode_rate", metrics.scored_episode_rate},
       {"conceded_episode_rate", metrics.conceded_episode_rate},
       {"neutral_episode_rate", metrics.neutral_episode_rate},
@@ -2197,7 +2204,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
     const torch::Tensor& A_stack,
     const torch::Tensor& B_stack,
-    int update_index) {
+    int update_index,
+    int wave_index) {
   PULSAR_TRACE_SCOPE_CAT("trainer", "es_evaluate");
   torch::NoGradGuard no_grad_guard;
   const auto& es_cfg = config_.es_lora;
@@ -2244,10 +2252,14 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
       mode_config.dense_rewards = curriculum_.dense_rewards();
     }
 
-    const int total_envs = pop * eval_envs;
     const int team_size = mode_config.env.team_size;
     const int agents_per_env = team_size * 2;
     const int member_agents = eval_envs * agents_per_env;
+    result.agent_steps += static_cast<std::int64_t>(pop) *
+        static_cast<std::int64_t>(eval_envs) *
+        static_cast<std::int64_t>(agents_per_env) *
+        static_cast<std::int64_t>(es_cfg.eval_episodes_per_member) *
+        static_cast<std::int64_t>(es_cfg.eval_rollout_length);
 
     struct EsShardSpec {
       int member_start = 0;
@@ -2265,11 +2277,12 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
       std::vector<int> win_counts;
     };
 
-    const int requested_shards = std::max(1, std::min<int>({
+    const int device_count = std::max<int>(
+        1,
+        static_cast<int>(compute_devices_.empty() ? 1 : compute_devices_.size()));
+    const int requested_shards = std::max(1, std::min(
         pop,
-        std::max<int>(1, config_.ppo.collection_shards),
-        std::max<int>(1, static_cast<int>(compute_devices_.empty() ? 1 : compute_devices_.size())) *
-            std::max<int>(1, config_.ppo.collection_shards)}));
+        es_cfg.eval_shards > 0 ? es_cfg.eval_shards : device_count));
     std::vector<EsShardSpec> shard_specs;
     shard_specs.reserve(static_cast<std::size_t>(requested_shards));
     for (int shard = 0; shard < requested_shards; ++shard) {
@@ -2278,7 +2291,7 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
       const int member_count = base_members + extra_members;
       if (member_count <= 0) continue;
       const int member_start = shard * base_members + std::min(shard, pop % requested_shards);
-      const int total_workers = config_.ppo.collection_workers;
+      const int total_workers = es_cfg.eval_workers;
       const int base_workers = total_workers > 0 ? total_workers / requested_shards : 0;
       const int extra_workers = total_workers > 0 && shard < (total_workers % requested_shards) ? 1 : 0;
       shard_specs.push_back({
@@ -2315,7 +2328,7 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
         shard_config.ppo.collection_workers = spec.worker_count;
         const int shard_envs = spec.member_count * eval_envs;
         auto eval_collector = make_es_eval_collector(
-            shard_config, shard_envs, eval_envs, update_index, 0, use_pinned_host_buffers_);
+            shard_config, shard_envs, eval_envs, update_index, wave_index, use_pinned_host_buffers_);
         if (curriculum_.enabled()) {
           eval_collector->update_unlocked_mechanics(curriculum_.unlocked_mechanics());
         }
@@ -2369,7 +2382,10 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
         torch::Tensor kl_count_tensor = torch::zeros({spec.member_count}, controlled_float.options());
 
         for (int ep = 0; ep < es_cfg.eval_episodes_per_member; ++ep) {
-          eval_collector->reset_es_episode(update_index, ep, eval_envs);
+          eval_collector->reset_es_episode(
+              update_index,
+              wave_index * es_cfg.eval_episodes_per_member + ep,
+              eval_envs);
           torch::Tensor recurrent_state = shard_actor->initial_recurrent_state(
               static_cast<int64_t>(shard_envs * agents_per_env),
               spec.device);
@@ -2405,16 +2421,18 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
             torch::Tensor perturbed_actions = sample_masked_actions(perturbed_logits, action_masks, true, nullptr);
             torch::Tensor actions = torch::where(controlled_mask, perturbed_actions, base_actions);
 
-            const torch::Tensor base_masked = apply_action_mask_to_logits(output.policy_logits, action_masks);
-            const torch::Tensor perturbed_masked = apply_action_mask_to_logits(perturbed_logits, action_masks);
-            const torch::Tensor base_probs = torch::softmax(base_masked, -1);
-            const torch::Tensor perturbed_probs = torch::softmax(perturbed_masked, -1);
-            const torch::Tensor kl_values = (
-                perturbed_probs * (torch::log(perturbed_probs + 1.0e-8) - torch::log(base_probs + 1.0e-8)))
-                .sum(-1)
-                .view({spec.member_count, member_agents});
-            kl_sum_tensor += (kl_values * controlled_float).sum(1);
-            kl_count_tensor += controlled_count;
+            if ((step % es_cfg.kl_eval_stride) == 0) {
+              const torch::Tensor base_masked = apply_action_mask_to_logits(output.policy_logits, action_masks);
+              const torch::Tensor perturbed_masked = apply_action_mask_to_logits(perturbed_logits, action_masks);
+              const torch::Tensor base_probs = torch::softmax(base_masked, -1);
+              const torch::Tensor perturbed_probs = torch::softmax(perturbed_masked, -1);
+              const torch::Tensor kl_values = (
+                  perturbed_probs * (torch::log(perturbed_probs + 1.0e-8) - torch::log(base_probs + 1.0e-8)))
+                  .sum(-1)
+                  .view({spec.member_count, member_agents});
+              kl_sum_tensor += (kl_values * controlled_float).sum(1);
+              kl_count_tensor += controlled_count;
+            }
 
             const torch::Tensor action_indices_cpu = actions.contiguous().to(torch::kCPU);
             if (physics_prefix_future.valid()) {
@@ -2514,26 +2532,52 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
   const auto es_start = std::chrono::steady_clock::now();
   const auto& es_cfg = config_.es_lora;
   const int pop = es_cfg.population_size;
+  const int waves = es_cfg.virtual_population_waves;
   const int rank = es_cfg.rank;
   const int in_features = actor_->policy_lora()->in_features();
   const int out_features = actor_->policy_lora()->out_features();
+  const int64_t effective_population = static_cast<int64_t>(pop) * static_cast<int64_t>(waves);
+  const int device_count = std::max<int>(
+      1,
+      static_cast<int>(compute_devices_.empty() ? 1 : compute_devices_.size()));
+  const int actual_eval_shards = std::max(1, std::min(
+      pop,
+      es_cfg.eval_shards > 0 ? es_cfg.eval_shards : device_count));
 
   const auto tensor_options = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
-  torch::Tensor A_stack;
-  torch::Tensor B_stack;
-  if (es_cfg.antithetic_sampling) {
-    const int half_pop = pop / 2;
-    torch::Tensor A_half = torch::randn({half_pop, rank, in_features}, tensor_options);
-    torch::Tensor B_half = torch::randn({half_pop, out_features, rank}, tensor_options);
-    A_stack = torch::cat({A_half, -A_half}, 0);
-    B_stack = torch::cat({B_half, -B_half}, 0);
-  } else {
-    A_stack = torch::randn({pop, rank, in_features}, tensor_options);
-    B_stack = torch::randn({pop, out_features, rank}, tensor_options);
-  }
-
   const auto es_eval_start = std::chrono::steady_clock::now();
-  ESPopulationFitness population = evaluate_es_population(A_stack, B_stack, update_index);
+  std::vector<torch::Tensor> A_waves;
+  std::vector<torch::Tensor> B_waves;
+  A_waves.reserve(static_cast<std::size_t>(waves));
+  B_waves.reserve(static_cast<std::size_t>(waves));
+  ESPopulationFitness population;
+  population.fitness.reserve(static_cast<std::size_t>(effective_population));
+  population.reward.reserve(static_cast<std::size_t>(effective_population));
+  population.winrate.reserve(static_cast<std::size_t>(effective_population));
+  population.kl.reserve(static_cast<std::size_t>(effective_population));
+
+  for (int wave = 0; wave < waves; ++wave) {
+    torch::Tensor A_stack;
+    torch::Tensor B_stack;
+    if (es_cfg.antithetic_sampling) {
+      const int half_pop = pop / 2;
+      torch::Tensor A_half = torch::randn({half_pop, rank, in_features}, tensor_options);
+      torch::Tensor B_half = torch::randn({half_pop, out_features, rank}, tensor_options);
+      A_stack = torch::cat({A_half, -A_half}, 0);
+      B_stack = torch::cat({B_half, B_half}, 0);
+    } else {
+      A_stack = torch::randn({pop, rank, in_features}, tensor_options);
+      B_stack = torch::randn({pop, out_features, rank}, tensor_options);
+    }
+    ESPopulationFitness wave_population = evaluate_es_population(A_stack, B_stack, update_index, wave);
+    population.fitness.insert(population.fitness.end(), wave_population.fitness.begin(), wave_population.fitness.end());
+    population.reward.insert(population.reward.end(), wave_population.reward.begin(), wave_population.reward.end());
+    population.winrate.insert(population.winrate.end(), wave_population.winrate.begin(), wave_population.winrate.end());
+    population.kl.insert(population.kl.end(), wave_population.kl.begin(), wave_population.kl.end());
+    population.agent_steps += wave_population.agent_steps;
+    A_waves.push_back(A_stack);
+    B_waves.push_back(B_stack);
+  }
   metrics.es_eval_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - es_eval_start).count();
   std::vector<float>& fitnesses = population.fitness;
   const uint64_t total_members = fitnesses.size();
@@ -2549,9 +2593,41 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
   }
   sigma = std::sqrt(sigma / static_cast<float>(total_members));
 
-  std::vector<float> normalized_f;
-  for (float f : fitnesses) {
-    normalized_f.push_back((f - mu) / (sigma + 1.0e-8F));
+  std::vector<float> normalized_f(total_members, 0.0F);
+  if (es_cfg.rank_transform && total_members > 1 && sigma > 0.0F) {
+    std::vector<std::size_t> order(total_members);
+    std::iota(order.begin(), order.end(), 0);
+    std::stable_sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) {
+      return fitnesses[lhs] < fitnesses[rhs];
+    });
+    std::size_t begin = 0;
+    while (begin < order.size()) {
+      std::size_t end = begin + 1;
+      while (end < order.size() && fitnesses[order[end]] == fitnesses[order[begin]]) {
+        ++end;
+      }
+      const float average_rank = 0.5F * static_cast<float>(begin + end - 1);
+      const float rank_value =
+          2.0F * average_rank / static_cast<float>(total_members - 1) - 1.0F;
+      for (std::size_t index = begin; index < end; ++index) {
+        normalized_f[order[index]] = rank_value;
+      }
+      begin = end;
+    }
+    float rank_sigma = 0.0F;
+    for (float value : normalized_f) {
+      rank_sigma += value * value;
+    }
+    rank_sigma = std::sqrt(rank_sigma / static_cast<float>(total_members));
+    if (rank_sigma > 0.0F) {
+      for (float& value : normalized_f) {
+        value /= rank_sigma;
+      }
+    }
+  } else {
+    for (uint64_t i = 0; i < total_members; ++i) {
+      normalized_f[static_cast<std::size_t>(i)] = (fitnesses[static_cast<std::size_t>(i)] - mu) / (sigma + 1.0e-8F);
+    }
   }
 
   double winrate_mean = 0.0;
@@ -2575,6 +2651,13 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
     metrics.es_reward_mean = reward_mean;
     metrics.es_winrate_mean = winrate_mean;
     metrics.es_kl_mean = kl_mean;
+    metrics.es_effective_population = static_cast<double>(effective_population);
+    metrics.es_virtual_population_waves = static_cast<double>(waves);
+    metrics.es_eval_shards = static_cast<double>(actual_eval_shards);
+    metrics.es_agent_steps_per_second = metrics.es_eval_seconds > 0.0
+        ? static_cast<double>(population.agent_steps) / metrics.es_eval_seconds
+        : 0.0;
+    metrics.es_policy_update_norm = 0.0;
 
     auto lora_params = actor_->es_lora_parameters();
     metrics.es_lora_a_norm = static_cast<double>(lora_params[0].norm().item<float>());
@@ -2589,20 +2672,18 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
       torch::TensorOptions().dtype(torch::kFloat32))
       .clone()
       .to(device_);
-  torch::Tensor grad_A =
-      (A_stack * fitness_weights.view({static_cast<long>(total_members), 1, 1})).sum(0) /
-      static_cast<float>(total_members);
-  torch::Tensor grad_B =
-      (B_stack * fitness_weights.view({static_cast<long>(total_members), 1, 1})).sum(0) /
-      static_cast<float>(total_members);
+  torch::Tensor delta_weight = torch::zeros({out_features, in_features}, tensor_options);
+  const float perturb_scale = 1.0F / std::sqrt(static_cast<float>(rank));
+  for (int wave = 0; wave < waves; ++wave) {
+    const torch::Tensor weights = fitness_weights.narrow(0, static_cast<int64_t>(wave) * pop, pop);
+    const torch::Tensor weighted_updates =
+        torch::bmm(B_waves[static_cast<std::size_t>(wave)], A_waves[static_cast<std::size_t>(wave)]) *
+        weights.view({pop, 1, 1});
+    delta_weight += weighted_updates.sum(0);
+  }
+  delta_weight *= (es_cfg.eta_ES / es_cfg.sigma_ES) * perturb_scale / static_cast<float>(total_members);
 
-  const float step = es_cfg.eta_ES / es_cfg.sigma_ES;
-  torch::Tensor delta_A = grad_A * step;
-  torch::Tensor delta_B = grad_B * step;
-
-  double update_norm = std::sqrt(
-      std::pow(static_cast<double>(delta_A.norm().item<float>()), 2) +
-      std::pow(static_cast<double>(delta_B.norm().item<float>()), 2));
+  double update_norm = static_cast<double>(delta_weight.norm().item<float>());
   double update_scale = 1.0;
   if (es_cfg.max_kl_mean > 0.0F && kl_mean > static_cast<double>(es_cfg.max_kl_mean)) {
     update_scale = std::min(update_scale, static_cast<double>(es_cfg.max_kl_mean) / std::max(kl_mean, 1.0e-12));
@@ -2611,19 +2692,15 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
     update_scale = std::min(update_scale, static_cast<double>(es_cfg.max_update_norm) / std::max(update_norm, 1.0e-12));
   }
   if (update_scale < 1.0) {
-    delta_A.mul_(update_scale);
-    delta_B.mul_(update_scale);
+    delta_weight.mul_(update_scale);
     update_norm *= update_scale;
   }
 
   {
     torch::NoGradGuard no_grad;
-    auto lora_params = actor_->es_lora_parameters();
-    lora_params[0].add_(delta_A);
-    lora_params[1].add_(delta_B);
-    for (auto& param : lora_params) {
-      actor_optimizer_.state().erase(param.unsafeGetTensorImpl());
-    }
+    actor_->apply_policy_eggroll_update(delta_weight);
+    torch::Tensor policy_weight = actor_->policy_lora()->base->weight;
+    actor_optimizer_.state().erase(policy_weight.unsafeGetTensorImpl());
   }
 
   metrics.es_fitness_mean = mu;
@@ -2633,6 +2710,13 @@ void APPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
   metrics.es_reward_mean = reward_mean;
   metrics.es_winrate_mean = winrate_mean;
   metrics.es_kl_mean = kl_mean;
+  metrics.es_effective_population = static_cast<double>(effective_population);
+  metrics.es_virtual_population_waves = static_cast<double>(waves);
+  metrics.es_eval_shards = static_cast<double>(actual_eval_shards);
+  metrics.es_agent_steps_per_second = metrics.es_eval_seconds > 0.0
+      ? static_cast<double>(population.agent_steps) / metrics.es_eval_seconds
+      : 0.0;
+  metrics.es_policy_update_norm = update_norm;
 
   auto lora_params = actor_->es_lora_parameters();
   metrics.es_lora_a_norm = static_cast<double>(lora_params[0].norm().item<float>());
@@ -3518,12 +3602,30 @@ TrainerBenchmarkMetrics APPOTrainer::benchmark(int updates) {
       if (compute_actors_.size() > 0) {
         sync_actor_to_replicas(actor_, compute_actors_);
       }
+      synchronize_cuda_if_needed(device_, "benchmark ES snapshot clone");
+      actor_snapshot_ = clone_ppo_actor(actor_, device_);
+      actor_snapshot_->eval();
+      for (size_t i = 0; i < collection_actors_.size(); ++i) {
+        if (collection_actors_[i] && shard_devices_[i] == device_) {
+          collection_actors_[i] = actor_snapshot_;
+        } else if (collection_actors_[i]) {
+          collection_actors_[i] = clone_ppo_actor(actor_snapshot_, shard_devices_[i]);
+          collection_actors_[i]->eval();
+        }
+      }
       result.es_updates += 1;
       result.es_seconds += es_metrics.es_seconds;
       result.es_eval_seconds += es_metrics.es_eval_seconds;
+      result.es_agent_steps_per_second += es_metrics.es_agent_steps_per_second;
+      result.es_effective_population += es_metrics.es_effective_population;
+      result.es_virtual_population_waves += es_metrics.es_virtual_population_waves;
+      result.es_eval_shards += es_metrics.es_eval_shards;
+      result.es_policy_update_norm += es_metrics.es_policy_update_norm;
       std::cout << "bench_es_update_done update=" << update_index
                 << " es_seconds=" << es_metrics.es_seconds
                 << " es_eval_seconds=" << es_metrics.es_eval_seconds
+                << " es_agent_steps_per_second=" << es_metrics.es_agent_steps_per_second
+                << " es_policy_update_norm=" << es_metrics.es_policy_update_norm
                 << '\n' << std::flush;
     }
 
@@ -3537,6 +3639,14 @@ TrainerBenchmarkMetrics APPOTrainer::benchmark(int updates) {
   result.value_loss /= denom;
   result.entropy /= denom;
   result.grad_norm /= denom;
+  if (result.es_updates > 0) {
+    const double es_denom = static_cast<double>(result.es_updates);
+    result.es_agent_steps_per_second /= es_denom;
+    result.es_effective_population /= es_denom;
+    result.es_virtual_population_waves /= es_denom;
+    result.es_eval_shards /= es_denom;
+    result.es_policy_update_norm /= es_denom;
+  }
   benchmark_progress_ = previous_progress;
   return result;
 }
@@ -3854,6 +3964,12 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       register_metric("ES-LoRA", "es_update_norm");
       register_metric("ES-LoRA", "es_lora_a_norm");
       register_metric("ES-LoRA", "es_lora_b_norm");
+      register_metric("ES-LoRA", "es_eval_seconds");
+      register_metric("ES-LoRA", "es_agent_steps_per_second");
+      register_metric("ES-LoRA", "es_effective_population");
+      register_metric("ES-LoRA", "es_virtual_population_waves");
+      register_metric("ES-LoRA", "es_eval_shards");
+      register_metric("ES-LoRA", "es_policy_update_norm");
 
       add_metric("Optimization", "update", update_index);
       add_metric("Optimization", "global_step", global_step);
@@ -3933,6 +4049,12 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
         add_metric("ES-LoRA", "es_update_norm", coll_metrics.es_update_norm);
         add_metric("ES-LoRA", "es_lora_a_norm", coll_metrics.es_lora_a_norm);
         add_metric("ES-LoRA", "es_lora_b_norm", coll_metrics.es_lora_b_norm);
+        add_metric("ES-LoRA", "es_eval_seconds", coll_metrics.es_eval_seconds);
+        add_metric("ES-LoRA", "es_agent_steps_per_second", coll_metrics.es_agent_steps_per_second);
+        add_metric("ES-LoRA", "es_effective_population", coll_metrics.es_effective_population);
+        add_metric("ES-LoRA", "es_virtual_population_waves", coll_metrics.es_virtual_population_waves);
+        add_metric("ES-LoRA", "es_eval_shards", coll_metrics.es_eval_shards);
+        add_metric("ES-LoRA", "es_policy_update_norm", coll_metrics.es_policy_update_norm);
       }
       for (const auto& [mode, rating] : coll_metrics.elo_ratings) {
         add_metric(mode, "elo_" + mode, rating);

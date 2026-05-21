@@ -97,6 +97,11 @@ struct TrainerMetrics {
   double es_lora_b_norm = 0.0;
   double es_seconds = 0.0;
   double es_eval_seconds = 0.0;
+  double es_agent_steps_per_second = 0.0;
+  double es_effective_population = 0.0;
+  double es_virtual_population_waves = 0.0;
+  double es_eval_shards = 0.0;
+  double es_policy_update_norm = 0.0;
   double scored_episode_rate = 0.0;
   double conceded_episode_rate = 0.0;
   double neutral_episode_rate = 0.0;
@@ -135,6 +140,11 @@ struct TrainerBenchmarkMetrics {
   int es_updates = 0;
   double es_seconds = 0.0;
   double es_eval_seconds = 0.0;
+  double es_agent_steps_per_second = 0.0;
+  double es_effective_population = 0.0;
+  double es_virtual_population_waves = 0.0;
+  double es_eval_shards = 0.0;
+  double es_policy_update_norm = 0.0;
 };
 
 class APPOTrainer {
@@ -184,12 +194,14 @@ class APPOTrainer {
     std::vector<float> reward{};
     std::vector<float> winrate{};
     std::vector<float> kl{};
+    std::int64_t agent_steps = 0;
   };
 
   ESPopulationFitness evaluate_es_population(
       const torch::Tensor& A_stack,
       const torch::Tensor& B_stack,
-      int update_index);
+      int update_index,
+      int wave_index);
 
   ExperimentConfig config_{};
   std::vector<std::unique_ptr<BatchedRocketSimCollector>> collectors_{};

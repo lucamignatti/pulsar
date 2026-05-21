@@ -414,23 +414,43 @@ int main() {
 
     // Policy-head EGGROLL helper smoke test
     {
-      
-      auto out = actor->forward_step(torch::randn({4, model_config.observation_dim}));
       const int population = 2;
       const int rank = 4;
       const int in_features = actor->policy_lora()->in_features();
       const int out_features = actor->policy_lora()->out_features();
+      auto out = actor->forward_step(torch::randn({population * 3, model_config.observation_dim}));
       torch::Tensor A_stack = torch::randn({population, rank, in_features});
       torch::Tensor B_stack = torch::randn({population, out_features, rank});
-      torch::Tensor logits = actor->policy_eggroll_logits(out.features, A_stack, B_stack, 0.01F);
-      if (logits.sizes() != torch::IntArrayRef({4, model_config.action_dim})) {
+      const float sigma = 0.01F;
+      torch::Tensor logits = actor->policy_eggroll_logits(out.features, A_stack, B_stack, sigma);
+      if (logits.sizes() != torch::IntArrayRef({population * 3, model_config.action_dim})) {
         throw std::runtime_error("EGGROLL policy logits shape mismatch");
+      }
+      const int member_batch = static_cast<int>(out.features.size(0)) / population;
+      auto& policy_lora = const_cast<pulsar::LoRALinearImpl&>(*actor->policy_lora());
+      torch::Tensor base_out = policy_lora.forward(out.features).view({population, member_batch, out_features});
+      torch::Tensor x_view = out.features.view({population, member_batch, in_features});
+      torch::Tensor expected = (
+          base_out +
+          (sigma / std::sqrt(static_cast<float>(rank))) *
+              torch::bmm(torch::bmm(x_view, A_stack.transpose(1, 2)), B_stack.transpose(1, 2)))
+          .view({out.features.size(0), out_features});
+      if (!torch::allclose(logits, expected, 1.0e-5, 1.0e-5)) {
+        throw std::runtime_error("EGGROLL policy logits should match dense low-rank perturbation");
       }
 
       torch::Tensor before = actor->policy_lora()->base->weight.detach().clone();
+      auto lora_before = actor->es_lora_parameters();
+      for (auto& p : lora_before) { p = p.detach().clone(); }
       actor->apply_policy_eggroll_update(torch::ones_like(before) * 0.001F);
       if (torch::allclose(before, actor->policy_lora()->base->weight)) {
         throw std::runtime_error("EGGROLL policy update did not modify base weight");
+      }
+      auto lora_after = actor->es_lora_parameters();
+      for (std::size_t i = 0; i < lora_before.size(); ++i) {
+        if (!torch::allclose(lora_before[i], lora_after[i])) {
+          throw std::runtime_error("policy-head EGGROLL update should not mutate LoRA factors");
+        }
       }
 
       if (torch::cuda::is_available()) {
@@ -441,28 +461,18 @@ int main() {
         torch::NoGradGuard no_grad;
         const auto opts = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
         torch::Tensor x = torch::randn({population * 3, in_features}, opts);
-        torch::Tensor A_gpu = gpu_actor->policy_lora()->A;
-        torch::Tensor B_gpu = gpu_actor->policy_lora()->B;
         torch::Tensor A_stack_gpu = torch::randn({population, rank, in_features}, opts);
         torch::Tensor B_stack_gpu = torch::randn({population, out_features, rank}, opts);
         auto& lora = const_cast<pulsar::LoRALinearImpl&>(*gpu_actor->policy_lora());
-        torch::Tensor actual = lora.forward_eggroll_population(x, A_stack_gpu, B_stack_gpu, 0.01F);
+        torch::Tensor actual = lora.forward_eggroll_population(x, A_stack_gpu, B_stack_gpu, sigma);
 
-        const int member_batch = static_cast<int>(x.size(0)) / population;
-        torch::Tensor base_out = lora.forward(x).view({population, member_batch, out_features});
-        torch::Tensor x_view = x.view({population, member_batch, in_features});
+        const int gpu_member_batch = static_cast<int>(x.size(0)) / population;
+        torch::Tensor base_out = lora.forward(x).view({population, gpu_member_batch, out_features});
+        torch::Tensor x_view = x.view({population, gpu_member_batch, in_features});
         torch::Tensor x_A_stack = torch::bmm(x_view, A_stack_gpu.transpose(1, 2));
-        torch::Tensor cross1 = torch::bmm(
-            x_A_stack,
-            B_gpu.transpose(0, 1).unsqueeze(0).expand({population, -1, -1}));
-        torch::Tensor x_A = torch::bmm(
-            x_view,
-            A_gpu.transpose(0, 1).unsqueeze(0).expand({population, -1, -1}));
-        torch::Tensor cross2 = torch::bmm(x_A, B_stack_gpu.transpose(1, 2));
-        torch::Tensor pert_only = torch::bmm(x_A_stack, B_stack_gpu.transpose(1, 2));
-        const float scale = gpu_actor->policy_lora()->scale();
         torch::Tensor expected = (
-            base_out + scale * 0.01F * cross1 + scale * 0.01F * cross2 + scale * 0.01F * 0.01F * pert_only)
+            base_out + (sigma / std::sqrt(static_cast<float>(rank))) *
+            torch::bmm(x_A_stack, B_stack_gpu.transpose(1, 2)))
             .view({x.size(0), out_features});
         if (!torch::allclose(actual, expected, 1.0e-4, 1.0e-4)) {
           throw std::runtime_error("accelerated EGGROLL policy logits diverged from bmm reference");

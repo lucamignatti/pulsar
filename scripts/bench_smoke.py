@@ -72,6 +72,11 @@ def main() -> int:
         "es_updates",
         "es_seconds",
         "es_eval_seconds",
+        "es_agent_steps_per_second",
+        "es_effective_population",
+        "es_virtual_population_waves",
+        "es_eval_shards",
+        "es_policy_update_norm",
     }
     missing = sorted(required - metrics.keys())
     if missing:

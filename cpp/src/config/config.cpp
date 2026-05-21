@@ -393,13 +393,18 @@ void to_json(json& j, const ESLoraConfig& value) {
       {"rank", value.rank},
       {"lora_alpha", value.lora_alpha},
       {"population_size", value.population_size},
+      {"virtual_population_waves", value.virtual_population_waves},
       {"sigma_ES", value.sigma_ES},
       {"eta_ES", value.eta_ES},
       {"es_interval", value.es_interval},
+      {"eval_shards", value.eval_shards},
+      {"eval_workers", value.eval_workers},
       {"eval_episodes_per_member", value.eval_episodes_per_member},
       {"eval_num_envs", value.eval_num_envs},
       {"eval_rollout_length", value.eval_rollout_length},
+      {"kl_eval_stride", value.kl_eval_stride},
       {"beta_KL", value.beta_KL},
+      {"rank_transform", value.rank_transform},
       {"antithetic_sampling", value.antithetic_sampling},
       {"update_norm_clip", value.update_norm_clip},
       {"max_update_norm", value.max_update_norm},
@@ -416,13 +421,18 @@ void from_json(const json& j, ESLoraConfig& value) {
   value.rank = j.value("rank", 4);
   value.lora_alpha = j.value("lora_alpha", 4.0F);
   value.population_size = j.value("population_size", 8);
+  value.virtual_population_waves = j.value("virtual_population_waves", 1);
   value.sigma_ES = j.value("sigma_ES", 0.05F);
   value.eta_ES = j.value("eta_ES", 0.003F);
   value.es_interval = j.value("es_interval", 25);
+  value.eval_shards = j.value("eval_shards", 0);
+  value.eval_workers = j.value("eval_workers", 0);
   value.eval_episodes_per_member = j.value("eval_episodes_per_member", 2);
   value.eval_num_envs = j.value("eval_num_envs", 8);
   value.eval_rollout_length = j.value("eval_rollout_length", 450);
+  value.kl_eval_stride = j.value("kl_eval_stride", 1);
   value.beta_KL = j.value("beta_KL", 0.01F);
+  value.rank_transform = j.value("rank_transform", false);
   value.antithetic_sampling = j.value("antithetic_sampling", true);
   value.update_norm_clip = j.value("update_norm_clip", true);
   value.max_update_norm = j.value("max_update_norm", 0.002F);
@@ -722,6 +732,9 @@ void validate_experiment_config(const ExperimentConfig& config) {
   if (config.es_lora.population_size <= 0) {
     throw std::invalid_argument("es_lora.population_size must be positive.");
   }
+  if (config.es_lora.virtual_population_waves <= 0) {
+    throw std::invalid_argument("es_lora.virtual_population_waves must be positive.");
+  }
   if (config.es_lora.antithetic_sampling && (config.es_lora.population_size % 2) != 0) {
     throw std::invalid_argument("es_lora.population_size must be even when antithetic_sampling is enabled.");
   }
@@ -740,6 +753,12 @@ void validate_experiment_config(const ExperimentConfig& config) {
   if (config.es_lora.min_fitness_std < 0.0F) {
     throw std::invalid_argument("es_lora.min_fitness_std must be non-negative.");
   }
+  if (config.es_lora.eval_shards < 0) {
+    throw std::invalid_argument("es_lora.eval_shards must be non-negative.");
+  }
+  if (config.es_lora.eval_workers < 0) {
+    throw std::invalid_argument("es_lora.eval_workers must be non-negative.");
+  }
   if (config.es_lora.eval_episodes_per_member <= 0) {
     throw std::invalid_argument("es_lora.eval_episodes_per_member must be positive.");
   }
@@ -748,6 +767,9 @@ void validate_experiment_config(const ExperimentConfig& config) {
   }
   if (config.es_lora.eval_rollout_length <= 0) {
     throw std::invalid_argument("es_lora.eval_rollout_length must be positive.");
+  }
+  if (config.es_lora.kl_eval_stride <= 0) {
+    throw std::invalid_argument("es_lora.kl_eval_stride must be positive.");
   }
   if (config.goal_critic.max_future_horizon <= 0) {
     throw std::invalid_argument("goal_critic.max_future_horizon must be positive.");

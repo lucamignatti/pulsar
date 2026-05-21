@@ -23,23 +23,17 @@ namespace pulsar {
 #ifdef PULSAR_HAS_LORA_CUDA_KERNELS
 torch::Tensor eggroll_lora_perturb_cuda(
     const torch::Tensor& base_out,
-    const torch::Tensor& x_A,
     const torch::Tensor& x_A_stack,
-    const torch::Tensor& B,
     const torch::Tensor& B_stack,
-    float scale,
-    float sigma);
+    float perturb_scale);
 #endif
 
 #ifdef PULSAR_HAS_LORA_HIP_KERNELS
 torch::Tensor eggroll_lora_perturb_hip(
     const torch::Tensor& base_out,
-    const torch::Tensor& x_A,
     const torch::Tensor& x_A_stack,
-    const torch::Tensor& B,
     const torch::Tensor& B_stack,
-    float scale,
-    float sigma);
+    float perturb_scale);
 #endif
 
 namespace {
@@ -188,45 +182,31 @@ torch::Tensor LoRALinearImpl::forward_eggroll_population(
   if (can_use_eggroll_lora_accel(x, base->weight, A, B, A_stack, B_stack, population, rank_)) {
     torch::Tensor x_contig = x.contiguous();
     torch::Tensor base_out = forward(x_contig);
-    torch::Tensor x_A = torch::matmul(x_contig, A.transpose(0, 1));
     torch::Tensor x_A_stack = torch::bmm(
         x_contig.view({population, member_batch, in_features()}),
         A_stack.transpose(1, 2)).view({x.size(0), rank_});
+    const float perturb_scale = sigma / std::sqrt(static_cast<float>(rank_));
 #ifdef PULSAR_HAS_LORA_CUDA_KERNELS
     return eggroll_lora_perturb_cuda(
         base_out.contiguous(),
-        x_A.contiguous(),
         x_A_stack.contiguous(),
-        B.contiguous(),
         B_stack.contiguous(),
-        scale_,
-        sigma);
+        perturb_scale);
 #elif defined(PULSAR_HAS_LORA_HIP_KERNELS)
     return eggroll_lora_perturb_hip(
         base_out.contiguous(),
-        x_A.contiguous(),
         x_A_stack.contiguous(),
-        B.contiguous(),
         B_stack.contiguous(),
-        scale_,
-        sigma);
+        perturb_scale);
 #endif
   }
   torch::Tensor base_out = forward(x).view({population, member_batch, out_features()});
   torch::Tensor x_view = x.view({population, member_batch, in_features()});
 
   torch::Tensor x_A_stack = torch::bmm(x_view, A_stack.transpose(1, 2));
-  torch::Tensor B_T_expanded = B.transpose(0, 1).unsqueeze(0).expand({population, -1, -1});
-  torch::Tensor cross1 = torch::bmm(x_A_stack, B_T_expanded);
-
-  torch::Tensor A_T_expanded = A.transpose(0, 1).unsqueeze(0).expand({population, -1, -1});
-  torch::Tensor x_A = torch::bmm(x_view, A_T_expanded);
-  torch::Tensor cross2 = torch::bmm(x_A, B_stack.transpose(1, 2));
-
-  torch::Tensor pert_only = torch::bmm(x_A_stack, B_stack.transpose(1, 2));
-
-  float s = scale_;
-  return (base_out + s * sigma * cross1 + s * sigma * cross2 + s * sigma * sigma * pert_only)
+  torch::Tensor perturbation = torch::bmm(x_A_stack, B_stack.transpose(1, 2));
+  const float perturb_scale = sigma / std::sqrt(static_cast<float>(rank_));
+  return (base_out + perturb_scale * perturbation)
       .view({x.size(0), out_features()});
 }
 

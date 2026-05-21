@@ -143,6 +143,34 @@ int main() {
     catch (const std::invalid_argument&) { caught = true; }
     pulsar::test::require(caught, "odd population_size with antithetic should throw");
 
+    bad = config;
+    bad.es_lora.virtual_population_waves = 0;
+    caught = false;
+    try { pulsar::validate_experiment_config(bad); }
+    catch (const std::invalid_argument&) { caught = true; }
+    pulsar::test::require(caught, "non-positive virtual_population_waves should throw");
+
+    bad = config;
+    bad.es_lora.eval_shards = -1;
+    caught = false;
+    try { pulsar::validate_experiment_config(bad); }
+    catch (const std::invalid_argument&) { caught = true; }
+    pulsar::test::require(caught, "negative eval_shards should throw");
+
+    bad = config;
+    bad.es_lora.eval_workers = -1;
+    caught = false;
+    try { pulsar::validate_experiment_config(bad); }
+    catch (const std::invalid_argument&) { caught = true; }
+    pulsar::test::require(caught, "negative eval_workers should throw");
+
+    bad = config;
+    bad.es_lora.kl_eval_stride = 0;
+    caught = false;
+    try { pulsar::validate_experiment_config(bad); }
+    catch (const std::invalid_argument&) { caught = true; }
+    pulsar::test::require(caught, "non-positive kl_eval_stride should throw");
+
     // Test 14: reject collection_shards > num_envs
     bad = config;
     bad.ppo.num_envs = 4;
@@ -196,6 +224,14 @@ int main() {
                             "production config should keep CUDA AMP disabled unless explicitly re-enabled");
       pulsar::test::require(prod.es_lora.require_fitness_signal,
                             "production ES should require a reward-fitness signal");
+      pulsar::test::require(prod.es_lora.population_size == 64 &&
+                                prod.es_lora.virtual_population_waves == 8,
+                            "production ES should use effective population 512");
+      pulsar::test::require(prod.es_lora.eval_shards == 4 &&
+                                prod.es_lora.eval_workers == 8 &&
+                                prod.es_lora.kl_eval_stride == 4 &&
+                                prod.es_lora.rank_transform,
+                            "production ES should use EGGROLL speed/scaling knobs");
       pulsar::test::require(prod.ppo.overlap_collection_update,
                             "production config should overlap collection/update");
       pulsar::test::require(prod.outcome.score == 20.0f &&

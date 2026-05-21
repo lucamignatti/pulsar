@@ -75,6 +75,24 @@ void apply_benchmark_override(pulsar::ExperimentConfig& config, const std::strin
     config.ppo.pcgrad = parse_bool_override(value);
   } else if (key == "es_interval") {
     config.es_lora.es_interval = std::stoi(value);
+  } else if (key == "es_population_size") {
+    config.es_lora.population_size = std::stoi(value);
+  } else if (key == "es_virtual_population_waves") {
+    config.es_lora.virtual_population_waves = std::stoi(value);
+  } else if (key == "es_eval_shards") {
+    config.es_lora.eval_shards = std::stoi(value);
+  } else if (key == "es_eval_workers") {
+    config.es_lora.eval_workers = std::stoi(value);
+  } else if (key == "es_eval_num_envs") {
+    config.es_lora.eval_num_envs = std::stoi(value);
+  } else if (key == "es_eval_rollout_length") {
+    config.es_lora.eval_rollout_length = std::stoi(value);
+  } else if (key == "es_eval_episodes_per_member") {
+    config.es_lora.eval_episodes_per_member = std::stoi(value);
+  } else if (key == "es_kl_eval_stride") {
+    config.es_lora.kl_eval_stride = std::stoi(value);
+  } else if (key == "es_rank_transform") {
+    config.es_lora.rank_transform = parse_bool_override(value);
   } else {
     throw std::invalid_argument("unknown benchmark override: " + key);
   }
@@ -183,6 +201,11 @@ int main(int argc, char** argv) {
     std::cout << "es_updates=" << metrics.es_updates << '\n';
     std::cout << "es_seconds=" << metrics.es_seconds << '\n';
     std::cout << "es_eval_seconds=" << metrics.es_eval_seconds << '\n';
+    std::cout << "es_agent_steps_per_second=" << metrics.es_agent_steps_per_second << '\n';
+    std::cout << "es_effective_population=" << metrics.es_effective_population << '\n';
+    std::cout << "es_virtual_population_waves=" << metrics.es_virtual_population_waves << '\n';
+    std::cout << "es_eval_shards=" << metrics.es_eval_shards << '\n';
+    std::cout << "es_policy_update_norm=" << metrics.es_policy_update_norm << '\n';
     return EXIT_SUCCESS;
   } catch (const std::exception& exc) {
     std::cerr << "pulsar_bench failed: " << exc.what() << '\n';
