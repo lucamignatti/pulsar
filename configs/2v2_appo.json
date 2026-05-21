@@ -280,7 +280,7 @@
           "save_boost_weight": 35.0,
           "boost_efficiency_weight": 0.0,
           "boost_used_weight": 0.0,
-          "defensive_positioning_weight": 15.0,
+          "defensive_positioning_weight": 0.0,
           "defensive_positioning_decay": 1000.0,
           "shot_accuracy_weight": 25.0,
           "boost_pickup_big_weight": 0.0,
