@@ -199,13 +199,13 @@ bool can_use_ppo_math_accel(const torch::Tensor& tensor) {
 #endif
 }
 
-bool env_flag_enabled(const char* name) {
+bool env_flag_disabled(const char* name) {
   const char* value = std::getenv(name);
   return value != nullptr &&
-      (std::strcmp(value, "1") == 0 ||
-       std::strcmp(value, "true") == 0 ||
-       std::strcmp(value, "TRUE") == 0 ||
-       std::strcmp(value, "yes") == 0);
+      (std::strcmp(value, "0") == 0 ||
+       std::strcmp(value, "false") == 0 ||
+       std::strcmp(value, "FALSE") == 0 ||
+       std::strcmp(value, "no") == 0);
 }
 
 bool can_use_action_accel(const torch::Tensor& logits, const torch::Tensor& action_masks) {
@@ -477,7 +477,7 @@ bool can_use_clipped_loss_accel(
     const torch::Tensor& current_log_probs,
     const torch::Tensor& old_log_probs,
     const torch::Tensor& advantages) {
-  return env_flag_enabled("PULSAR_PPO_LOSS_ACCEL") &&
+  return !env_flag_disabled("PULSAR_PPO_LOSS_ACCEL") &&
       can_use_ppo_math_accel(current_log_probs) &&
       old_log_probs.is_cuda() &&
       advantages.is_cuda() &&

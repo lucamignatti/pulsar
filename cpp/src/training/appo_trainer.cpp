@@ -748,6 +748,45 @@ int effective_max_forward_samples(const ModelConfig& config, const torch::Device
       : std::max(1, std::min(std::max(1, config.max_forward_samples), cap));
 }
 
+std::int64_t cuda_total_memory_bytes(const torch::Device& device) noexcept {
+#ifdef PULSAR_HAS_CUDA
+  if (!device.is_cuda()) {
+    return 0;
+  }
+  try {
+    const int device_index = device.has_index() ? device.index() : 0;
+    const auto [free_bytes, total_bytes] = c10::cuda::CUDACachingAllocator::get()->getMemoryInfo(device_index);
+    (void)free_bytes;
+    return static_cast<std::int64_t>(total_bytes);
+  } catch (const std::exception&) {
+    return 0;
+  }
+#else
+  (void)device;
+  return 0;
+#endif
+}
+
+int effective_update_forward_samples(
+    const ModelConfig& config,
+    const torch::Device& device,
+    bool overlap_collection_update,
+    std::size_t num_update_gpus) {
+  int samples = effective_max_forward_samples(config, device);
+  if (!device.is_cuda() || !overlap_collection_update || num_update_gpus != 1) {
+    return samples;
+  }
+
+  constexpr std::int64_t kGiB = 1024LL * 1024LL * 1024LL;
+  const std::int64_t total_memory = cuda_total_memory_bytes(device);
+  if (total_memory > 0 && total_memory <= 20LL * kGiB) {
+    samples = std::min(samples, 16384);
+  } else if (total_memory > 0 && total_memory <= 24LL * kGiB) {
+    samples = std::min(samples, 24576);
+  }
+  return std::max(1, samples);
+}
+
 void append_metrics_line(
     const std::filesystem::path& checkpoint_dir,
     int update_index,
@@ -1515,7 +1554,12 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   }
 
   const int seq_len = std::max(1, config_.ppo.rollout_length);
-  const int max_forward_samples = effective_max_forward_samples(config_.model, device_);
+  const size_t num_update_gpus = compute_devices_.size();
+  const int max_forward_samples = effective_update_forward_samples(
+      config_.model,
+      device_,
+      config_.ppo.overlap_collection_update,
+      num_update_gpus);
   const int agents_per_forward = std::max(1, max_forward_samples / seq_len);
   const int requested_logical_agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
   const int total_agents = rollout.num_agents();
@@ -1653,7 +1697,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   torch::Tensor q_returns = sparse_advantages + all_values.at("v_from_q").narrow(0, 0, rollout_steps).to(device_).detach();
 
   int completed_minibatches = 0;
-  const size_t num_update_gpus = compute_devices_.size();
   for (int epoch = 0; epoch < config_.ppo.update_epochs; ++epoch) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "update_epoch");
     const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
@@ -1923,10 +1966,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 const torch::Tensor log_probs = torch::log_softmax(apply_action_mask_to_logits(active_logits, active_masks), -1);
                 const torch::Tensor current_log_probs = log_probs.gather(1, active_actions.unsqueeze(1)).squeeze(1);
                 torch::Tensor bounded_current_log_probs = current_log_probs;
-                const torch::Tensor raw_log_ratio = current_log_probs - active_old_log_probs;
-                if (config_.ppo.max_policy_log_ratio > 0.0F) {
-                  bounded_current_log_probs = active_old_log_probs + raw_log_ratio.clamp(-config_.ppo.max_policy_log_ratio, config_.ppo.max_policy_log_ratio);
-                }
+                torch::Tensor raw_log_ratio = current_log_probs - active_old_log_probs;
                 {
                   const torch::Tensor metric_log_ratio = raw_log_ratio.detach().to(torch::kFloat32).clamp(-20.0F, 20.0F);
                   const torch::Tensor approx_kl = ((torch::exp(metric_log_ratio) - 1.0F) - metric_log_ratio).mean();
@@ -1934,6 +1974,10 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                   add_metric(policy_approx_kl_metric, approx_kl, active_samples);
                   add_metric(policy_clip_frac_metric, clip_fraction, active_samples);
                   max_metric(policy_log_ratio_max_metric, raw_log_ratio.detach().abs().max());
+                }
+                if (config_.ppo.max_policy_log_ratio > 0.0F) {
+                  raw_log_ratio.clamp_(-config_.ppo.max_policy_log_ratio, config_.ppo.max_policy_log_ratio);
+                  bounded_current_log_probs = active_old_log_probs + raw_log_ratio;
                 }
 
                 torch::Tensor policy_loss = clipped_ppo_policy_loss(
