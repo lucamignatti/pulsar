@@ -1619,24 +1619,18 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
       channel_positive_sums[i] = torch::zeros({}, torch::TensorOptions().device(device_).dtype(torch::kFloat64));
     }
 
-    // The predictor encoder runs under NoGrad, so no activation storage is
-    // needed. Use a larger batch than the gradient-limited max_forward_samples
-    // to reduce the number of expensive encoder forward_sequence calls.
-    const int predictor_agents_per_batch = std::min(
-        total_agents,
-        std::max(1, 4 * max_forward_samples / std::max(1, rollout_steps)));
+    const int predictor_agents_per_batch = total_agents;
     for (int agent_offset = 0; agent_offset < total_agents; agent_offset += predictor_agents_per_batch) {
       const int count = std::min(predictor_agents_per_batch, total_agents - agent_offset);
-      torch::Tensor obs = rollout.obs.narrow(0, 0, rollout_steps).narrow(1, agent_offset, count).to(device_);
-      torch::Tensor normalized_obs = actor_normalizer_.normalize(obs);
-      torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
-      torch::Tensor episode_starts = rollout.episode_starts.narrow(0, 0, rollout_steps).narrow(1, agent_offset, count).to(device_);
 
       torch::Tensor flat_features;
       {
         torch::NoGradGuard no_grad;
-        auto output = actor_->forward_sequence(normalized_obs, goal_values, episode_starts);
-        flat_features = output.features.detach().reshape({rollout_steps * count, -1});
+        flat_features = rollout.encoded_features
+            .narrow(0, 0, rollout_steps)
+            .narrow(1, agent_offset, count)
+            .to(device_)
+            .reshape({rollout_steps * count, -1});
       }
 
       const double samples = static_cast<double>(rollout_steps * count);
@@ -3521,7 +3515,8 @@ void APPOTrainer::collect_rollout(
               collector.host_bootstrap_truncated(),
               goal_pos_host,
               terminal_labels,
-              collector.host_terminal_observations());
+              collector.host_terminal_observations(),
+              output.encoded);
           dest.set_sparse_events_slice(step, shard_step.agent_offset, collector.host_sparse_events());
 
           auto& coll = collector;
@@ -3861,7 +3856,8 @@ void APPOTrainer::collect_rollout(
         bootstrap_truncated_host,
         goal_pos_host,
         terminal_labels,
-        terminal_obs_host);
+        terminal_obs_host,
+        output.encoded);
     dest.set_sparse_events_slice(step, 0, collector_->host_sparse_events());
     dest.set_mode_ids_slice(step, 0, collector_->mode_id());
 
