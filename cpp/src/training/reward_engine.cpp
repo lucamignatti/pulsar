@@ -165,7 +165,7 @@ RewardBreakdown RewardEngine::compute(
   bd.terms["gameplay.air"] = ar;
   bd.gameplay += ar;
 
-  float vbtg = velocity_ball_to_goal(car, env);
+  float vbtg = velocity_ball_to_goal(global_tick, car, env);
   bd.terms["gameplay.velocity_ball_to_goal"] = vbtg;
   bd.gameplay += vbtg;
 
@@ -419,8 +419,13 @@ float RewardEngine::air_reward(
 }
 
 float RewardEngine::velocity_ball_to_goal(
-    const CarState& car, const EnvState& env) const {
+    int global_tick,
+    const CarState& car,
+    const EnvState& env) const {
   if (dense_cfg_.velocity_ball_to_goal_weight <= 0.0F) return 0.0F;
+  if (env.last_touch_agent != car.id) return 0.0F;
+  const int ticks_since_touch = global_tick - env.last_touch_tick;
+  if (ticks_since_touch < 0 || ticks_since_touch > kVbtgTouchWindowTicks) return 0.0F;
 
   const float team_sign = (car.team == Team::Blue) ? 1.0F : -1.0F;
   const float vel_toward = env.ball.velocity.y * team_sign;

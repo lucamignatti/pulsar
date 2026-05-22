@@ -114,7 +114,7 @@ class RewardEngine {
   float speed_toward_ball(const CarState& car, const EnvState& env) const;
   float face_ball(const CarState& car, const EnvState& env) const;
   float air_reward(const CarState& car, const EnvState& env) const;
-  float velocity_ball_to_goal(const CarState& car, const EnvState& env) const;
+  float velocity_ball_to_goal(int global_tick, const CarState& car, const EnvState& env) const;
   float air_touch(const CarState& car, const EnvState& env, float vel_delta_frac) const;
   float save_boost(const CarState& car) const;
   float boost_efficiency(const CarState& car, const EnvState& env) const;

@@ -399,6 +399,28 @@ int main() {
     }
 
     // =========================================================================
+    // 17b. velocity_ball_to_goal - no credit without recent ownership
+    // =========================================================================
+    {
+      auto cfg = make_reward_test_config();
+      pulsar::RewardEngine engine(cfg);
+      auto car = make_neutral_car(pulsar::Team::Blue);
+      pulsar::EnvState env{};
+      env.ball.velocity = {0.0f, 3000.0f, 0.0f};
+      env.last_touch_agent = 99;
+      env.last_touch_tick = 0;
+      pulsar::AgentRewardState agent_state{};
+      pulsar::EnvRewardState env_state{};
+      auto bd = engine.compute(0, car, env, 2, agent_state, env_state, false, 0);
+      require_close(bd.terms.at("gameplay.velocity_ball_to_goal"), 0.0f, "vbtg no ownership");
+
+      env.last_touch_agent = car.id;
+      env.last_touch_tick = 0;
+      bd = engine.compute(121, car, env, 2, agent_state, env_state, false, 0);
+      require_close(bd.terms.at("gameplay.velocity_ball_to_goal"), 0.0f, "vbtg stale ownership");
+    }
+
+    // =========================================================================
     // 18. air_touch - airborne + touching ball
     // =========================================================================
     {
