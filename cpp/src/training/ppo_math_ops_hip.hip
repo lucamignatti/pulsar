@@ -337,6 +337,35 @@ __global__ void sample_future_goal_kernel(
   }
 }
 
+__global__ void sparse_event_soon_targets_kernel(
+    const std::uint8_t* __restrict__ events,
+    const float* __restrict__ dones,
+    const int* __restrict__ horizons,
+    int64_t* __restrict__ targets,
+    int steps,
+    int agents,
+    int channels) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  const int elements = steps * agents * channels;
+  if (i >= elements) return;
+  const int c = i % channels;
+  const int n = (i / channels) % agents;
+  const int t = i / (agents * channels);
+  targets[i] = 0;
+  const int horizon = horizons[c] > 1 ? horizons[c] : 1;
+  for (int k = 0; k < horizon; ++k) {
+    const int look = t + k;
+    if (look >= steps) break;
+    if (events[(look * agents + n) * channels + c] != 0) {
+      targets[i] = 1;
+      break;
+    }
+    if (dones[look * agents + n] > 0.5F) {
+      break;
+    }
+  }
+}
+
 inline int blocks_for(int elements, int threads) {
   return (elements + threads - 1) / threads;
 }
@@ -568,6 +597,28 @@ at::Tensor sample_future_goal_positions_hip(
       seed);
   check_hip_launch();
   return sampled;
+}
+
+at::Tensor compute_sparse_event_soon_targets_hip(
+    const at::Tensor& sparse_events,
+    const at::Tensor& dones,
+    const at::Tensor& horizons) {
+  const c10::hip::HIPGuard guard(sparse_events.device());
+  const int steps = static_cast<int>(sparse_events.size(0));
+  const int agents = static_cast<int>(sparse_events.size(1));
+  const int channels = static_cast<int>(sparse_events.size(2));
+  at::Tensor targets = at::zeros({steps, agents, channels}, sparse_events.options().dtype(at::kLong));
+  constexpr int kThreads = 256;
+  sparse_event_soon_targets_kernel<<<blocks_for(steps * agents * channels, kThreads), kThreads, 0, at::hip::getCurrentHIPStream()>>>(
+      reinterpret_cast<const std::uint8_t*>(sparse_events.data_ptr()),
+      dones.data_ptr<float>(),
+      horizons.data_ptr<int>(),
+      targets.data_ptr<int64_t>(),
+      steps,
+      agents,
+      channels);
+  check_hip_launch();
+  return targets;
 }
 
 }  // namespace pulsar

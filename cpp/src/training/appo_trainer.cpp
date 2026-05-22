@@ -33,7 +33,6 @@
 #include "pulsar/env/obs_builder.hpp"
 #include "pulsar/env/rocketsim_engine.hpp"
 #include "pulsar/training/cuda_utils.hpp"
-#include "pulsar/training/curriculum.hpp"
 #include "pulsar/training/ppo_math.hpp"
 #include "pulsar/tracing/tracing.hpp"
 
@@ -84,6 +83,47 @@ double current_process_peak_rss_mb() {
 #else
   return 0.0;
 #endif
+}
+
+std::vector<torch::Tensor> actor_policy_parameters(const PPOActor& actor) {
+  std::vector<torch::Tensor> parameters;
+  for (const auto& named_param : actor->named_parameters(/*recurse=*/true)) {
+    const std::string& name = named_param.key();
+    if (name.rfind("predictor_", 0) == 0) {
+      continue;
+    }
+    parameters.push_back(named_param.value());
+  }
+  return parameters;
+}
+
+struct PredictorUpdateStats {
+  double loss_sum = 0.0;
+  double samples = 0.0;
+  double positive_sum = 0.0;
+
+  [[nodiscard]] double mean_loss() const {
+    return samples > 0.0 ? loss_sum / samples : 0.0;
+  }
+
+  [[nodiscard]] double positive_rate() const {
+    return samples > 0.0 ? positive_sum / samples : 0.0;
+  }
+};
+
+void write_scalar(torch::serialize::OutputArchive& archive, const std::string& key, float value) {
+  archive.write(key, torch::tensor({value}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU)));
+}
+
+bool read_scalar(torch::serialize::InputArchive& archive, const std::string& key, float& value) {
+  try {
+    torch::Tensor tensor;
+    archive.read(key, tensor);
+    value = tensor.to(torch::kCPU).to(torch::kFloat32).flatten()[0].item<float>();
+    return true;
+  } catch (...) {
+    return false;
+  }
 }
 
 struct CgroupMemoryStats {
@@ -281,7 +321,7 @@ RolloutStorage make_rollout_storage(
     int num_agents,
     int action_dim,
     bool pin_memory) {
-  std::vector<std::string> heads = {"extrinsic", "q_taken", "v_from_q"};
+  std::vector<std::string> heads = {"extrinsic", "q_taken", "v_from_q", "gameplay", "mechanic"};
   return RolloutStorage(
       config.ppo.rollout_length,
       num_agents,
@@ -852,6 +892,18 @@ void append_metrics_line(
       {"q_critic_loss", metrics.q_critic_loss},
       {"advantage_std", metrics.advantage_std},
   };
+  for (const auto& [channel, value] : metrics.predictor_loss) {
+    line["predictor_loss_" + channel] = value;
+  }
+  for (const auto& [channel, value] : metrics.predictor_delta) {
+    line["predictor_delta_" + channel] = value;
+  }
+  for (const auto& [channel, value] : metrics.predictor_positive) {
+    line["predictor_positive_" + channel] = value;
+  }
+  for (const auto& [channel, value] : metrics.predictor_active) {
+    line["predictor_active_" + channel] = value;
+  }
   for (const auto& [mode, rate] : metrics.mode_touch_rates) {
     line["mode_" + mode + "_touch_episode_rate"] = rate;
   }
@@ -909,18 +961,7 @@ void add_wandb_metric(
 
 std::vector<std::string> configured_wandb_modes(const ExperimentConfig& config) {
   std::vector<std::string> modes;
-  const auto add_mode = [&modes](const std::string& mode) {
-    if (!mode.empty() && std::find(modes.begin(), modes.end(), mode) == modes.end()) {
-      modes.push_back(mode);
-    }
-  };
-  add_mode(std::to_string(config.env.team_size) + "v" + std::to_string(config.env.team_size));
-  for (const auto& stage : config.curriculum.stages) {
-    add_mode(stage.mode);
-    for (const auto& [mode, _] : stage.mode_allocation) {
-      add_mode(mode);
-    }
-  }
+  modes.push_back(std::to_string(config.env.team_size) + "v" + std::to_string(config.env.team_size));
   return modes;
 }
 
@@ -1032,11 +1073,10 @@ APPOTrainer::APPOTrainer(
     : config_(std::move(config)),
       collectors_(std::move(collectors)),
       self_play_manager_(std::move(self_play_manager)),
-      curriculum_(config_.curriculum),
       action_table_(config_.action_table),
       actor_(PPOActor(config_.model, config_.goal_critic, config_.es_lora, config_.vrpo)),
       actor_normalizer_(config_.model.observation_dim),
-      actor_optimizer_(actor_->parameters(), torch::optim::AdamWOptions(config_.ppo.learning_rate).eps(1.0e-5F).weight_decay(config_.ppo.weight_decay)),
+      actor_optimizer_(actor_policy_parameters(actor_), torch::optim::AdamWOptions(config_.ppo.learning_rate).eps(1.0e-5F).weight_decay(config_.ppo.weight_decay)),
       q_normalizer_(config_.ppo.popart_beta, config_.ppo.popart_epsilon),
       device_(resolve_runtime_device(config_.ppo.device)),
       compute_devices_(resolve_runtime_devices(config_.ppo.device)),
@@ -1133,6 +1173,27 @@ APPOTrainer::APPOTrainer(
               << " collection_workers=" << config_.ppo.collection_workers
               << '\n';
   }
+  if (config_.predictor.enabled) {
+    predictor_optimizers_.clear();
+    predictor_optimizers_.resize(kSparseEventChannelCount);
+    predictor_ema_loss_.assign(kSparseEventChannelCount, -1.0F);
+    predictor_delta_.assign(kSparseEventChannelCount, 1.0F);
+    std::vector<std::int32_t> horizons(kSparseEventChannelCount, 1);
+    for (std::size_t i = 0; i < kSparseEventChannelCount; ++i) {
+      const std::string name(kSparseEventChannels[i].name);
+      const auto& channel = config_.predictor.channels.at(name);
+      horizons[i] = static_cast<std::int32_t>(std::max(1, channel.horizon));
+      if (channel.enabled) {
+        predictor_optimizers_[i] = std::make_unique<torch::optim::Adam>(
+            actor_->predictor_head(i)->parameters(),
+            torch::optim::AdamOptions(channel.learning_rate).weight_decay(1.0e-4));
+      }
+    }
+    predictor_horizons_device_ = torch::tensor(
+        horizons,
+        torch::TensorOptions().dtype(torch::kInt32).device(device_));
+  }
+
   sync_self_play_assignments_to_collectors();
 }
 
@@ -1146,25 +1207,6 @@ std::int64_t APPOTrainer::model_parameter_count() const {
     total += param.numel();
   }
   return total;
-}
-
-void APPOTrainer::apply_curriculum_to_collectors() {
-  if (!curriculum_.enabled()) return;
-  auto cfg = config_;
-  cfg.outcome = curriculum_.outcome();
-  cfg.mechanic_rewards = curriculum_.mechanic_rewards();
-  cfg.dense_rewards = curriculum_.dense_rewards();
-  for (auto& collector : collectors_) {
-    if (collector) {
-      collector->update_reward_config(cfg);
-      collector->update_unlocked_mechanics(curriculum_.unlocked_mechanics());
-    }
-  }
-  if (self_play_manager_) {
-    self_play_manager_->set_curriculum_stage(curriculum_.stage_index());
-    self_play_manager_->set_current_mode(curriculum_.primary_mode());
-  }
-  sync_self_play_assignments_to_collectors();
 }
 
 void APPOTrainer::sync_self_play_assignments_to_collectors() {
@@ -1195,18 +1237,10 @@ int agents_per_env_from_mode(const std::string& mode) {
 }
 
 void APPOTrainer::rebuild_collectors() {
-  const auto& alloc = curriculum_.mode_allocation();
-  if (alloc.empty()) return;
+  std::vector<std::pair<std::string, float>> alloc = {{std::to_string(config_.env.team_size) + "v" + std::to_string(config_.env.team_size), 1.0F}};
 
-  // compute max team size across ALL curriculum stages so the obs builder
-  // produces constant-dimension observations regardless of mode (matches
-  // the global kObsMaxTeamSize in train_main.cpp)
-  int max_team_size = 1;
-  for (const auto& stage : config_.curriculum.stages) {
-    for (const auto& [mode, frac] : stage.mode_allocation) {
-      max_team_size = std::max(max_team_size, team_size_from_mode(mode));
-    }
-  }
+  // compute max team size
+  int max_team_size = config_.env.team_size;
 
   // create obs builder with max team size so obs_dim is constant across modes
   auto obs_builder_cfg = config_.env;
@@ -1364,8 +1398,8 @@ void APPOTrainer::rebuild_collectors() {
         torch::zeros({static_cast<long>(collector->total_agents())}, opts));
   }
 
-  // re-apply curriculum
-  apply_curriculum_to_collectors();
+  // re-apply self-play assignments
+  sync_self_play_assignments_to_collectors();
 
   std::cout << "rebuilt_collectors collectors=" << collectors_.size()
             << " modes=" << mode_envs.size()
@@ -1374,13 +1408,6 @@ void APPOTrainer::rebuild_collectors() {
             << " nominal_envs=" << nominal_envs
             << " devices=" << join_device_list(shard_devices_)
             << " rollout_length=" << config_.ppo.rollout_length << '\n';
-}
-
-void APPOTrainer::apply_curriculum_lr() {
-  float lr = curriculum_.learning_rate();
-  for (auto& opt_group : actor_optimizer_.param_groups()) {
-    opt_group.options().set_lr(lr);
-  }
 }
 
 void APPOTrainer::maybe_initialize_from_checkpoint() {
@@ -1450,18 +1477,16 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
     if (std::filesystem::exists(base / "actor_optimizer.pt")) {
       torch::serialize::InputArchive optimizer_archive;
       optimizer_archive.load_from((base / "actor_optimizer.pt").string(), device_);
-      actor_optimizer_.load(optimizer_archive);
+      try {
+        actor_optimizer_.load(optimizer_archive);
+      } catch (const std::exception& e) {
+        std::cerr << "Warning: could not load actor optimizer state: " << e.what() << "\n";
+      }
     }
     resumed_global_step_ = metadata.global_step;
     resumed_update_index_ = metadata.update_index;
   }
 
-  if (metadata.extra.contains("recent_scored_rates")) {
-    recent_scored_rates_.clear();
-    for (const auto& v : metadata.extra["recent_scored_rates"]) {
-      recent_scored_rates_.push_back(v.get<double>());
-    }
-  }
   if (self_play_manager_ && self_play_manager_->enabled()) {
     if (metadata.extra.contains("self_play_rng_state")) {
       self_play_manager_->restore_rng_state(metadata.extra["self_play_rng_state"].get<std::string>());
@@ -1474,58 +1499,13 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
       self_play_manager_->restore_ratings(ratings);
     }
   }
-  if (metadata.extra.contains("curriculum_stage") && curriculum_.enabled()) {
-    CurriculumState restored;
-    restored.stage_index = metadata.extra["curriculum_stage"].get<int>();
-    restored.previous_stage_index = metadata.extra.value("curriculum_previous_stage", -1);
-    restored.agent_steps_in_stage = metadata.extra.value("curriculum_agent_steps", 0LL);
-    restored.promotion_counter = metadata.extra.value("curriculum_promotion_counter", 0);
-    restored.current_mode = metadata.extra.value("curriculum_current_mode", std::string{"1v1"});
-    if (metadata.extra.contains("curriculum_mode_touch_rates")) {
-      for (const auto& [mode, arr] : metadata.extra["curriculum_mode_touch_rates"].items()) {
-        std::deque<double> deq;
-        for (const auto& v : arr) deq.push_back(v.get<double>());
-        restored.mode_touch_rates[mode] = deq;
-      }
-    }
-    if (metadata.extra.contains("curriculum_mode_multi_touch_rates")) {
-      for (const auto& [mode, arr] : metadata.extra["curriculum_mode_multi_touch_rates"].items()) {
-        std::deque<double> deq;
-        for (const auto& v : arr) deq.push_back(v.get<double>());
-        restored.mode_multi_touch_rates[mode] = deq;
-      }
-    }
-    if (metadata.extra.contains("curriculum_mode_scored_rates")) {
-      for (const auto& [mode, arr] : metadata.extra["curriculum_mode_scored_rates"].items()) {
-        std::deque<double> deq;
-        for (const auto& v : arr) deq.push_back(v.get<double>());
-        restored.mode_scored_rates[mode] = deq;
-      }
-    }
-    // backward compat: old single-mode deques
-    if (metadata.extra.contains("curriculum_touch_rates") && restored.mode_touch_rates.empty()) {
-      const auto& arr = metadata.extra["curriculum_touch_rates"];
-      std::deque<double> deq;
-      for (const auto& v : arr) deq.push_back(v.get<double>());
-      restored.mode_touch_rates[restored.current_mode] = deq;
-    }
-    if (metadata.extra.contains("curriculum_scored_rates") && restored.mode_scored_rates.empty()) {
-      const auto& arr = metadata.extra["curriculum_scored_rates"];
-      std::deque<double> deq;
-      for (const auto& v : arr) deq.push_back(v.get<double>());
-      restored.mode_scored_rates[restored.current_mode] = deq;
-    }
-    curriculum_.restore_state(restored);
-    std::cout << "restored_curriculum stage=" << restored.stage_index
-              << " mode=" << restored.current_mode
-              << " steps_in_stage=" << restored.agent_steps_in_stage << '\n';
-  }
+
   if (log_initialization_) {
     std::cout << "initialized_from_checkpoint=" << base.string() << '\n';
   }
 }
 
-TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
+TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout, int update_index) {
   PULSAR_TRACE_SCOPE_CAT("trainer", "update_actor");
 #ifdef PULSAR_HAS_CUDA
   std::optional<c10::cuda::CUDAStream> prev_train_stream;
@@ -1537,24 +1517,16 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   const auto update_start = std::chrono::steady_clock::now();
   TrainerMetrics metrics{};
 
+  const int total_agents = rollout.num_agents();
+  const int rollout_steps = rollout.rollout_length();
+  const auto& all_rewards = rollout.all_rewards();
+
   float effective_entropy_coef = config_.ppo.entropy_coef;
   float effective_entropy_floor_coef = config_.ppo.entropy_floor_coef;
-  if (config_.ppo.adaptive_entropy && !recent_scored_rates_.empty()) {
-    double sum = 0.0;
-    for (double v : recent_scored_rates_) sum += v;
-    double recent_score = sum / static_cast<double>(recent_scored_rates_.size());
-    double progress = std::clamp(
-        (recent_score - config_.ppo.entropy_decay_score) /
-            std::max(1.0e-6, 1.0 - config_.ppo.entropy_decay_score),
-        0.0, 1.0);
-    effective_entropy_coef = static_cast<float>(
-        config_.ppo.entropy_coef + progress * (config_.ppo.entropy_low_coef - config_.ppo.entropy_coef));
-    effective_entropy_floor_coef = config_.ppo.entropy_floor_coef * static_cast<float>(1.0 - progress);
-  }
 
   const int seq_len = std::max(1, config_.ppo.rollout_length);
   const size_t num_update_gpus = compute_devices_.size();
-  const int total_agents = rollout.num_agents();
+
   const int max_forward_samples = effective_update_forward_samples(
       config_.model,
       device_,
@@ -1574,7 +1546,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   const int logical_agents_per_batch = std::min(
       total_agents,
       std::max(requested_logical_agents_per_batch, min_agents_for_minibatch_cap));
-  const int rollout_steps = rollout.rollout_length();
   const bool use_cuda_amp = device_.is_cuda() && config_.ppo.cuda_amp;
   const double cuda_amp_loss_scale = 1.0;
   const int optimizer_accumulation_steps = std::max(1, config_.ppo.optimizer_accumulation_steps);
@@ -1621,13 +1592,143 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
   double accumulated_policy_kl_count = 0.0;
 
   const auto& all_values = rollout.all_values();
-  const auto& all_rewards = rollout.all_rewards();
   if (rollout_steps <= 0) {
     metrics.effective_entropy_coef = static_cast<double>(effective_entropy_coef);
     return metrics;
   }
   const torch::Tensor extrinsic_values = all_values.at("extrinsic").narrow(0, 0, rollout_steps).to(device_);
   const torch::Tensor extrinsic_rewards = all_rewards.at("extrinsic").narrow(0, 0, rollout_steps).to(device_);
+
+  torch::Tensor shaped_rewards = extrinsic_rewards.clone();
+  if (config_.predictor.enabled) {
+    PULSAR_TRACE_SCOPE_CAT("trainer", "update_predictors");
+    const torch::Tensor sparse_events_device =
+        rollout.sparse_events.narrow(0, 0, rollout_steps).to(device_, use_pinned_host_buffers_);
+    const torch::Tensor rollout_dones_for_targets =
+        rollout.dones.narrow(0, 0, rollout_steps).to(device_, use_pinned_host_buffers_);
+    const torch::Tensor targets_all = compute_sparse_event_soon_targets(
+        sparse_events_device,
+        rollout_dones_for_targets,
+        predictor_horizons_device_);
+
+    std::vector<PredictorUpdateStats> predictor_stats(kSparseEventChannelCount);
+    const int predictor_agents_per_batch = std::max(1, max_forward_samples / std::max(1, rollout_steps));
+    for (int agent_offset = 0; agent_offset < total_agents; agent_offset += predictor_agents_per_batch) {
+      const int count = std::min(predictor_agents_per_batch, total_agents - agent_offset);
+      torch::Tensor obs = rollout.obs.narrow(0, 0, rollout_steps).narrow(1, agent_offset, count).to(device_);
+      torch::Tensor normalized_obs = actor_normalizer_.normalize(obs);
+      torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
+      torch::Tensor episode_starts = rollout.episode_starts.narrow(0, 0, rollout_steps).narrow(1, agent_offset, count).to(device_);
+
+      torch::Tensor flat_features;
+      {
+        torch::NoGradGuard no_grad;
+        auto output = actor_->forward_sequence(normalized_obs, goal_values, episode_starts);
+        flat_features = output.features.detach().reshape({rollout_steps * count, -1});
+      }
+
+      const double samples = static_cast<double>(rollout_steps * count);
+      for (std::size_t channel_index = 0; channel_index < kSparseEventChannelCount; ++channel_index) {
+        const std::string channel_name(kSparseEventChannels[channel_index].name);
+        const auto& channel = config_.predictor.channels.at(channel_name);
+        if (!channel.enabled || channel_index >= predictor_optimizers_.size() || !predictor_optimizers_[channel_index]) {
+          continue;
+        }
+        auto& optimizer = predictor_optimizers_[channel_index];
+        SparseRewardPredictor& head = actor_->predictor_head(channel_index);
+        optimizer->zero_grad();
+        torch::Tensor targets = targets_all
+            .narrow(1, agent_offset, count)
+            .select(2, static_cast<int64_t>(channel_index))
+            .reshape({rollout_steps * count});
+        torch::Tensor logits = head->forward(flat_features);
+        torch::Tensor loss = torch::nn::functional::cross_entropy(logits, targets);
+        loss.backward();
+        torch::nn::utils::clip_grad_norm_(head->parameters(), 0.1);
+        optimizer->step();
+        optimizer->zero_grad();
+        const double positive = (targets > 0).to(torch::kFloat32).sum().item<double>();
+        predictor_stats[channel_index].loss_sum += loss.item<double>() * samples;
+        predictor_stats[channel_index].samples += samples;
+        predictor_stats[channel_index].positive_sum += positive;
+      }
+
+      {
+        torch::NoGradGuard no_grad;
+        const torch::Tensor shaped_view = shaped_rewards.narrow(1, agent_offset, count);
+        for (std::size_t channel_index = 0; channel_index < kSparseEventChannelCount; ++channel_index) {
+          const std::string channel_name(kSparseEventChannels[channel_index].name);
+          const auto& channel = config_.predictor.channels.at(channel_name);
+          const bool active = channel_index < actor_->predictor_active_.size() &&
+              actor_->predictor_active_[channel_index];
+          if (!channel.enabled || !active || channel.weight <= 0.0F) {
+            continue;
+          }
+          const torch::Tensor probs = torch::softmax(
+              actor_->predictor_head(channel_index)->forward(flat_features), -1);
+          const torch::Tensor p_soon = probs.select(1, 1).reshape({rollout_steps, count});
+          shaped_view.add_(channel.weight * (2.0F * p_soon - 1.0F));
+        }
+      }
+    }
+
+    const auto finish_channel = [&](double mean_loss,
+                                    double positive_rate,
+                                    float& ema_loss,
+                                    float& delta,
+                                    std::uint8_t& active,
+                                    const PredictorChannelConfig& channel,
+                                    const char* channel_name) {
+      if (mean_loss <= 0.0 || !std::isfinite(mean_loss)) {
+        return;
+      }
+      if (ema_loss < 0.0F) {
+        ema_loss = static_cast<float>(mean_loss);
+        delta = std::numeric_limits<float>::infinity();
+      } else {
+        const float next_ema = 0.9F * ema_loss + 0.1F * static_cast<float>(mean_loss);
+        delta = std::abs(next_ema - ema_loss);
+        ema_loss = next_ema;
+      }
+      if (active == 0 &&
+          update_index >= channel.warmup_updates &&
+          positive_rate > 0.0 &&
+          std::isfinite(delta) &&
+          delta <= channel.convergence_threshold) {
+        active = 1;
+        std::cout << "predictor_enabled channel=" << channel_name
+                  << " update=" << update_index
+                  << " ema_loss=" << ema_loss
+                  << " delta=" << delta
+                  << " positive_rate=" << positive_rate
+                  << '\n';
+      }
+    };
+
+    for (std::size_t channel_index = 0; channel_index < kSparseEventChannelCount; ++channel_index) {
+      const std::string channel_name(kSparseEventChannels[channel_index].name);
+      const auto& channel = config_.predictor.channels.at(channel_name);
+      if (channel_index >= actor_->predictor_active_.size()) {
+        actor_->predictor_active_.resize(kSparseEventChannelCount, 0);
+      }
+      const double mean_loss = predictor_stats[channel_index].mean_loss();
+      const double positive_rate = predictor_stats[channel_index].positive_rate();
+      finish_channel(
+          mean_loss,
+          positive_rate,
+          predictor_ema_loss_[channel_index],
+          predictor_delta_[channel_index],
+          actor_->predictor_active_[channel_index],
+          channel,
+          channel_name.c_str());
+      metrics.predictor_loss[channel_name] = mean_loss;
+      metrics.predictor_positive[channel_name] = positive_rate;
+      metrics.predictor_delta[channel_name] =
+          std::isfinite(predictor_delta_[channel_index]) ? predictor_delta_[channel_index] : 0.0;
+      metrics.predictor_active[channel_name] = actor_->predictor_active_[channel_index] != 0 ? 1.0 : 0.0;
+    }
+  }
+
   const torch::Tensor rollout_dones = rollout.dones.narrow(0, 0, rollout_steps).to(device_);
   const torch::Tensor rollout_bootstrap_truncated = rollout.bootstrap_truncated.narrow(0, 0, rollout_steps).to(device_);
 
@@ -1675,7 +1776,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
     sparse_advantages = compute_q_boosted_gae(
         q_taken,
         v_from_q,
-        extrinsic_rewards,
+        shaped_rewards,
         rollout_dones,
         config_.ppo.gamma,
         config_.ppo.gae_lambda,
@@ -2430,13 +2531,6 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
   result.kl.assign(static_cast<std::size_t>(pop), 0.0F);
 
   std::vector<std::pair<std::string, float>> eval_modes;
-  if (curriculum_.enabled() && !config_.curriculum.stages.empty()) {
-    for (const auto& [mode, frac] : curriculum_.mode_allocation()) {
-      if (frac > 0.0F) {
-        eval_modes.emplace_back(mode, frac);
-      }
-    }
-  }
   if (eval_modes.empty()) {
     const std::string mode = std::to_string(config_.env.team_size) + "v" +
         std::to_string(config_.env.team_size);
@@ -2538,11 +2632,6 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
     ExperimentConfig mode_config = config_;
     mode_config.env.team_size = team_size_from_mode(mode);
     mode_config.env.spawn_opponents = true;
-    if (curriculum_.enabled()) {
-      mode_config.outcome = curriculum_.outcome();
-      mode_config.mechanic_rewards = curriculum_.mechanic_rewards();
-      mode_config.dense_rewards = curriculum_.dense_rewards();
-    }
 
     const int team_size = mode_config.env.team_size;
     const int agents_per_env = team_size * 2;
@@ -2630,9 +2719,6 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
         const int shard_envs = spec.member_count * eval_envs;
         auto eval_collector = make_es_eval_collector(
             shard_config, shard_envs, eval_envs, update_index, wave_index, use_pinned_host_buffers_);
-        if (curriculum_.enabled()) {
-          eval_collector->update_unlocked_mechanics(curriculum_.unlocked_mechanics());
-        }
 
         PPOActor shard_actor = clone_ppo_actor(actor_, spec.device);
         shard_actor->eval();
@@ -3363,6 +3449,8 @@ void APPOTrainer::collect_rollout(
           }
           std::unordered_map<std::string, torch::Tensor> all_rewards;
           all_rewards["extrinsic"] = extrinsic_rewards_host;
+          all_rewards["gameplay"] = gameplay_r_host;
+          all_rewards["mechanic"] = mechanic_r_host;
 
           dest.append_slice(
               step,
@@ -3381,6 +3469,7 @@ void APPOTrainer::collect_rollout(
               goal_pos_host,
               terminal_labels,
               collector.host_terminal_observations());
+          dest.set_sparse_events_slice(step, shard_step.agent_offset, collector.host_sparse_events());
 
           auto& coll = collector;
           dest.set_mode_ids_slice(step, shard_step.agent_offset, static_cast<int>(coll.total_agents()), coll.mode_id());
@@ -3701,6 +3790,8 @@ void APPOTrainer::collect_rollout(
 
     std::unordered_map<std::string, torch::Tensor> all_rewards;
     all_rewards["extrinsic"] = extrinsic_rewards_host;
+    all_rewards["gameplay"] = gameplay_r_host;
+    all_rewards["mechanic"] = mechanic_r_host;
 
     dest.append(
         step,
@@ -3718,6 +3809,7 @@ void APPOTrainer::collect_rollout(
         goal_pos_host,
         terminal_labels,
         terminal_obs_host);
+    dest.set_sparse_events_slice(step, 0, collector_->host_sparse_events());
     dest.set_mode_ids_slice(step, 0, collector_->mode_id());
 
     local_collected_steps += learner_step_count;
@@ -3854,37 +3946,7 @@ CheckpointMetadata APPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
       extra["self_play_rng_state"] = rng;
     }
   }
-  extra["curriculum_stage"] = curriculum_.state().stage_index;
-  extra["curriculum_previous_stage"] = curriculum_.state().previous_stage_index;
-  extra["curriculum_agent_steps"] = curriculum_.state().agent_steps_in_stage;
-  extra["curriculum_promotion_counter"] = curriculum_.state().promotion_counter;
-  extra["curriculum_current_mode"] = curriculum_.state().current_mode;
-  nlohmann::json mode_touch_json = nlohmann::json::object();
-  for (const auto& [mode, deq] : curriculum_.state().mode_touch_rates) {
-    nlohmann::json arr = nlohmann::json::array();
-    for (double v : deq) arr.push_back(v);
-    mode_touch_json[mode] = arr;
-  }
-  extra["curriculum_mode_touch_rates"] = mode_touch_json;
-  nlohmann::json mode_multi_touch_json = nlohmann::json::object();
-  for (const auto& [mode, deq] : curriculum_.state().mode_multi_touch_rates) {
-    nlohmann::json arr = nlohmann::json::array();
-    for (double v : deq) arr.push_back(v);
-    mode_multi_touch_json[mode] = arr;
-  }
-  extra["curriculum_mode_multi_touch_rates"] = mode_multi_touch_json;
-  nlohmann::json mode_scored_json = nlohmann::json::object();
-  for (const auto& [mode, deq] : curriculum_.state().mode_scored_rates) {
-    nlohmann::json arr = nlohmann::json::array();
-    for (double v : deq) arr.push_back(v);
-    mode_scored_json[mode] = arr;
-  }
-  extra["curriculum_mode_scored_rates"] = mode_scored_json;
-  {
-    nlohmann::json recent_json = nlohmann::json::array();
-    for (double v : recent_scored_rates_) recent_json.push_back(v);
-    extra["recent_scored_rates"] = recent_json;
-  }
+
   return CheckpointMetadata{
       .schema_version = config_.schema_version,
       .obs_schema_version = config_.obs_schema_version,
@@ -3924,14 +3986,6 @@ TrainerBenchmarkMetrics APPOTrainer::benchmark(int updates) {
   const bool previous_progress = benchmark_progress_;
   benchmark_progress_ = true;
 
-  if (curriculum_.enabled()) {
-    curriculum_.initialize_stage();
-    if (!curriculum_.mode_allocation().empty()) {
-      rebuild_collectors();
-    }
-    apply_curriculum_to_collectors();
-    apply_curriculum_lr();
-  }
 
   const auto benchmark_start = std::chrono::steady_clock::now();
   for (int index = 0; index < bounded_updates; ++index) {
@@ -3959,7 +4013,7 @@ TrainerBenchmarkMetrics APPOTrainer::benchmark(int updates) {
               << (collected_steps > 0 ? static_cast<double>(collected_steps) / std::max(collection_seconds, 1.0e-9) : 0.0)
               << '\n' << std::flush;
 
-    TrainerMetrics update_metrics = update_actor(rollout_);
+    TrainerMetrics update_metrics = update_actor(rollout_, index + 1);
     result.agent_steps += collected_steps;
     result.update_seconds += update_metrics.update_seconds;
     result.forward_backward_seconds += update_metrics.forward_backward_seconds;
@@ -4055,6 +4109,23 @@ void APPOTrainer::save_training_state(const std::filesystem::path& path) const {
   actor_normalizer_.save(archive);
   actor_optimizer_.save(archive);
   q_normalizer_.save(archive);
+  for (std::size_t i = 0; i < predictor_optimizers_.size() && i < kSparseEventChannelCount; ++i) {
+    const std::string name(kSparseEventChannels[i].name);
+    if (predictor_optimizers_[i]) {
+      torch::serialize::OutputArchive sub_archive;
+      predictor_optimizers_[i]->save(sub_archive);
+      archive.write("predictor_optimizer_" + name, sub_archive);
+    }
+    if (i < predictor_ema_loss_.size()) {
+      write_scalar(archive, "predictor_ema_loss_" + name, predictor_ema_loss_[i]);
+    }
+    if (i < predictor_delta_.size()) {
+      write_scalar(archive, "predictor_delta_" + name, predictor_delta_[i]);
+    }
+    if (i < actor_->predictor_active_.size()) {
+      write_scalar(archive, "predictor_active_" + name, actor_->predictor_active_[i] ? 1.0F : 0.0F);
+    }
+  }
   archive.save_to(path.string());
 }
 
@@ -4063,11 +4134,40 @@ void APPOTrainer::load_training_state(const std::filesystem::path& path) {
   archive.load_from(path.string(), device_);
   actor_->load(archive);
   actor_normalizer_.load(archive);
-  actor_optimizer_.load(archive);
+  try {
+    actor_optimizer_.load(archive);
+  } catch (const std::exception& e) {
+    std::cerr << "Warning: could not load actor optimizer state: " << e.what() << "\n";
+  }
   try {
     q_normalizer_.load(archive);
   } catch (const std::exception& e) {
     std::cerr << "Warning: could not load PopArt stats from training state: " << e.what() << "\n";
+  }
+  if (actor_->predictor_active_.size() < kSparseEventChannelCount) {
+    actor_->predictor_active_.resize(kSparseEventChannelCount, 0);
+  }
+  for (std::size_t i = 0; i < predictor_optimizers_.size() && i < kSparseEventChannelCount; ++i) {
+    const std::string name(kSparseEventChannels[i].name);
+    if (predictor_optimizers_[i]) {
+      try {
+        torch::serialize::InputArchive sub_archive;
+        archive.read("predictor_optimizer_" + name, sub_archive);
+        predictor_optimizers_[i]->load(sub_archive);
+      } catch (...) {
+        std::cerr << "Warning: could not load predictor_" << name << " optimizer stats.\n";
+      }
+    }
+    if (i < predictor_ema_loss_.size()) {
+      read_scalar(archive, "predictor_ema_loss_" + name, predictor_ema_loss_[i]);
+    }
+    if (i < predictor_delta_.size()) {
+      read_scalar(archive, "predictor_delta_" + name, predictor_delta_[i]);
+    }
+    float active = 0.0F;
+    if (read_scalar(archive, "predictor_active_" + name, active)) {
+      actor_->predictor_active_[i] = active > 0.5F ? 1 : 0;
+    }
   }
   actor_->to(device_);
   actor_normalizer_.to(device_);
@@ -4113,23 +4213,12 @@ void APPOTrainer::prune_old_checkpoints(const std::filesystem::path& checkpoint_
 
 void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const std::string& config_path) {
   const bool train_forever = updates <= 0;
-  std::cout << "train_start curriculum_enabled=" << (curriculum_.enabled() ? 1 : 0)
-            << " stages=" << config_.curriculum.stages.size()
-            << '\n';
+  std::cout << "train_start\n";
   std::filesystem::create_directories(checkpoint_dir);
   WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "dappo_train");
   std::int64_t global_step = resumed_global_step_;
 
-  if (curriculum_.enabled()) {
-    if (resumed_update_index_ == 0) {
-      curriculum_.initialize_stage();
-    }
-    if (!curriculum_.mode_allocation().empty()) {
-      rebuild_collectors();
-    }
-    apply_curriculum_to_collectors();
-    apply_curriculum_lr();
-  }
+  sync_self_play_assignments_to_collectors();
 
   TrainerMetrics coll_metrics{};
   std::int64_t coll_steps = 0;
@@ -4154,11 +4243,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       double scored = static_cast<double>(coll_metrics.scored_episodes);
       double completed = static_cast<double>(std::max(coll_metrics.completed_episodes, static_cast<int64_t>(1)));
       double scored_rate = scored / completed;
-      recent_scored_rates_.push_back(scored_rate);
       coll_metrics.scored_episode_rate = scored_rate;
-      if (static_cast<int>(recent_scored_rates_.size()) > kRecentScoredRateWindow) {
-        recent_scored_rates_.pop_front();
-      }
     }
 
     // 2. Update the actor on the main thread so CUDA/Torch thread-local
@@ -4174,15 +4259,15 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
         collect_rollout(rollout_B_, next_coll_metrics, &steps, actor_snapshot_, *collection_normalizer);
         return steps;
       });
-      train_metrics = update_actor(rollout_);
+      train_metrics = update_actor(rollout_, update_index);
       next_coll_steps = collect_future.get();
       actor_normalizer_ = collection_normalizer->clone();
     } else {
-      train_metrics = update_actor(rollout_);
+      train_metrics = update_actor(rollout_, update_index);
     }
 
     // 3. Self-play / ES-LoRA (touch actor_, safe now)
-    if (self_play_manager_ && (!curriculum_.enabled() || curriculum_.stage_index() >= kSelfPlayMinStage)) {
+    if (self_play_manager_ && self_play_manager_->enabled()) {
       const SelfPlayMetrics self_play_metrics =
           self_play_manager_->on_update(actor_, actor_normalizer_, global_step, update_index);
       coll_metrics.self_play_eval_seconds = self_play_metrics.eval_seconds;
@@ -4190,7 +4275,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       coll_metrics.self_play_snapshot_count = self_play_metrics.snapshot_count;
     }
 
-    if (curriculum_.stage_index() >= kEsLoraMinStage && update_index % config_.es_lora.es_interval == 0) {
+    if (config_.es_lora.es_interval > 0 && update_index % config_.es_lora.es_interval == 0) {
       run_es_lora_update(update_index, coll_metrics);
       // Sync ES-LoRA weight changes to replica actors.
       if (compute_actors_.size() > 0) {
@@ -4199,29 +4284,6 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       discard_overlapped_rollout = discard_overlapped_rollout || overlap_collection_update;
     }
 
-    // 4. Curriculum checks + rebuild (may touch collectors, safe after collection)
-    if (curriculum_.enabled()) {
-      bool stage_changed = false;
-      if (curriculum_.check_promotion(
-          coll_metrics.mode_touch_rates,
-          coll_metrics.mode_multi_touch_rates,
-          coll_metrics.mode_scored_rates,
-          coll_metrics.mode_completed_episodes,
-          coll_steps)) {
-        if (curriculum_.mode_allocation_changed()) {
-          rebuild_collectors();
-        }
-        apply_curriculum_to_collectors();
-        apply_curriculum_lr();
-        stage_changed = true;
-      }
-      if (stage_changed) {
-        discard_overlapped_rollout = discard_overlapped_rollout || overlap_collection_update;
-        save_checkpoint(
-            std::filesystem::path(checkpoint_dir) / ("stage_" + std::to_string(curriculum_.state().stage_index) + "_update_" + std::to_string(update_index)),
-            global_step, update_index, wandb.run_id());
-      }
-    }
 
     // 5. Clone snapshot for next iteration's collection after all work using
     // the previous snapshot has completed.
@@ -4271,6 +4333,11 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     coll_metrics.mean_sampled_goal_distance = train_metrics.mean_sampled_goal_distance;
     coll_metrics.q_critic_loss = train_metrics.q_critic_loss;
     coll_metrics.advantage_std = train_metrics.advantage_std;
+    coll_metrics.predictor_loss = train_metrics.predictor_loss;
+    coll_metrics.predictor_delta = train_metrics.predictor_delta;
+    coll_metrics.predictor_positive = train_metrics.predictor_positive;
+    coll_metrics.predictor_active = train_metrics.predictor_active;
+
     coll_metrics.update_agent_steps_per_second =
         next_coll_steps > 0 ? static_cast<double>(next_coll_steps) / std::max(train_metrics.update_seconds, 1.0e-9) : 0.0;
 
@@ -4327,9 +4394,6 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " cuda_max_reserved_mb=" << coll_metrics.cuda_max_memory_reserved_mb
               << " cuda_ooms=" << coll_metrics.cuda_ooms
               << " league_snapshots=" << coll_metrics.self_play_snapshot_count
-              << " curriculum=" << curriculum_.state().stage_index
-              << " cur_steps=" << curriculum_.state().agent_steps_in_stage
-              << " cur_promo=" << curriculum_.state().promotion_counter
               << '\n';
     if (wandb.enabled()) {
       nlohmann::json payload{{"_step", global_step}};
@@ -4380,9 +4444,6 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       add_metric("Optimization", "self_play_snapshot_count", coll_metrics.self_play_snapshot_count);
       add_metric("Optimization", "q_critic_loss", coll_metrics.q_critic_loss);
       add_metric("Optimization", "advantage_std", coll_metrics.advantage_std);
-      add_metric("Optimization", "curriculum_stage", curriculum_.state().stage_index);
-      add_metric("Optimization", "curriculum_agent_steps", curriculum_.state().agent_steps_in_stage);
-      add_metric("Optimization", "curriculum_promotion_counter", curriculum_.state().promotion_counter);
 
       add_metric("System", "process_rss_mb", coll_metrics.process_rss_mb);
       add_metric("System", "process_peak_rss_mb", coll_metrics.process_peak_rss_mb);
@@ -4419,6 +4480,19 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       add_metric("GCRL", "mean_goal_distance", coll_metrics.mean_goal_distance);
       add_metric("GCRL", "min_goal_distance", coll_metrics.min_goal_distance);
 
+      for (const auto& [channel, value] : coll_metrics.predictor_loss) {
+        add_metric("Predictor", "predictor_loss_" + channel, value);
+      }
+      for (const auto& [channel, value] : coll_metrics.predictor_delta) {
+        add_metric("Predictor", "predictor_delta_" + channel, value);
+      }
+      for (const auto& [channel, value] : coll_metrics.predictor_positive) {
+        add_metric("Predictor", "predictor_positive_" + channel, value);
+      }
+      for (const auto& [channel, value] : coll_metrics.predictor_active) {
+        add_metric("Predictor", "predictor_active_" + channel, value);
+      }
+
       for (const auto& [mode, rate] : coll_metrics.mode_touch_rates) {
         add_metric(mode, "mode_" + mode + "_touch_episode_rate", rate);
       }
@@ -4431,7 +4505,7 @@ void APPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       for (const auto& [mode, count] : coll_metrics.mode_completed_episodes) {
         add_metric(mode, "mode_" + mode + "_completed_episodes", count);
       }
-      if (curriculum_.stage_index() >= kEsLoraMinStage && update_index % config_.es_lora.es_interval == 0) {
+      if (config_.es_lora.es_interval > 0 && update_index % config_.es_lora.es_interval == 0) {
         add_metric("ES-LoRA", "es_fitness_mean", coll_metrics.es_fitness_mean);
         add_metric("ES-LoRA", "es_fitness_std", coll_metrics.es_fitness_std);
         add_metric("ES-LoRA", "es_fitness_best", coll_metrics.es_fitness_best);

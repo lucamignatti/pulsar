@@ -6,6 +6,7 @@
 
 #include "pulsar/checkpoint/checkpoint.hpp"
 #include "pulsar/config/config.hpp"
+#include "pulsar/training/sparse_event_channels.hpp"
 #include "test_utils.hpp"
 
 int main() {
@@ -187,31 +188,17 @@ int main() {
       pulsar::validate_experiment_config(prod);
       pulsar::test::require(prod.schema_version == 6, "production config schema");
       pulsar::test::require(!prod.env.disable_truncation, "production config has truncation enabled");
-      pulsar::test::require(prod.curriculum.enabled, "curriculum enabled in production");
-      pulsar::test::require(!prod.curriculum.stages.empty(), "production curriculum has stages");
-      std::set<std::string> stage_names;
-      const auto valid_rate = [](float value) {
-        return std::isfinite(value) && value >= 0.0f && value <= 1.0f;
-      };
-      for (const auto& stage : prod.curriculum.stages) {
-        pulsar::test::require(!stage.name.empty(), "curriculum stage names should be non-empty");
-        pulsar::test::require(stage_names.insert(stage.name).second, "curriculum stage names should be unique");
-        pulsar::test::require(!stage.mode_allocation.empty(), "curriculum stages should declare mode allocation");
-        pulsar::test::require(std::isfinite(stage.learning_rate) && stage.learning_rate > 0.0f,
-                              "curriculum stage learning rates should be positive");
-        pulsar::test::require(stage.min_agent_steps >= 0, "curriculum min_agent_steps should be non-negative");
-        pulsar::test::require(stage.rolling_window_size > 0, "curriculum rolling_window_size should be positive");
-        pulsar::test::require(stage.consecutive_success_threshold > 0,
-                              "curriculum consecutive_success_threshold should be positive");
-        pulsar::test::require(stage.min_completed_episodes_per_mode >= 0,
-                              "curriculum min_completed_episodes_per_mode should be non-negative");
-        pulsar::test::require(valid_rate(stage.required_touch_episode_rate),
-                              "curriculum touch promotion rate should be in [0, 1]");
-        pulsar::test::require(valid_rate(stage.required_multi_touch_episode_rate),
-                              "curriculum multi-touch promotion rate should be in [0, 1]");
-        pulsar::test::require(valid_rate(stage.required_scored_episode_rate),
-                              "curriculum scoring promotion rate should be in [0, 1]");
+      pulsar::test::require(prod.predictor.enabled, "predictor enabled in production");
+      for (const auto& spec : pulsar::kSparseEventChannels) {
+        const std::string name(spec.name);
+        auto it = prod.predictor.channels.find(name);
+        pulsar::test::require(it != prod.predictor.channels.end(), "predictor channel present: " + name);
+        pulsar::test::require(it->second.enabled, "predictor channel enabled: " + name);
       }
+      pulsar::test::require(prod.predictor.channels.at("goal").horizon == 40, "goal horizon check");
+      pulsar::test::require(prod.predictor.channels.at("ball_touch").horizon == 15, "ball_touch horizon check");
+      pulsar::test::require(prod.predictor.channels.at("flip_reset").horizon == 40, "flip_reset horizon check");
+      pulsar::test::require(prod.ppo.device == "cuda", "production config should train on CUDA by default");
       pulsar::test::require(prod.self_play_league.enabled, "self_play_league enabled in production");
       pulsar::test::require(prod.self_play_league.max_snapshots == 4, "max_snapshots in production");
       pulsar::test::require(std::isfinite(prod.ppo.max_policy_log_ratio) && prod.ppo.max_policy_log_ratio >= 0.0f,
@@ -238,11 +225,12 @@ int main() {
                                 prod.outcome.concede == -16.0f &&
                                 prod.outcome.neutral_no_touch == 0.0f,
                             "production base reward should mirror final goal/loss terminal reward");
-      pulsar::test::require(prod.dense_rewards.flat_touch_weight == 0.0f &&
-                                prod.dense_rewards.air_reward_weight == 0.0f &&
-                                prod.dense_rewards.speed_toward_ball_weight == 0.0f &&
-                                prod.dense_rewards.face_ball_weight == 0.0f,
-                            "production base dense reward should be terminal-only");
+      pulsar::test::require(prod.predictor.channels.at("goal").weight == 0.05f &&
+                                prod.predictor.channels.at("ball_touch").weight == 0.01f &&
+                                prod.predictor.channels.at("flip_reset").weight == 0.05f &&
+                                prod.predictor.channels.at("demo").weight > 0.0f &&
+                                prod.predictor.channels.at("flick").weight > 0.0f,
+                            "production predictor weights check");
     }
 
     // Test 15: stable_json is deterministic

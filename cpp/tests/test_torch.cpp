@@ -116,7 +116,7 @@ int main() {
     const pulsar::ModelConfig model_config = small_model_config();
     const pulsar::GoalCriticConfig gc_cfg = default_goal_critic_config();
     pulsar::PPOActor actor(model_config, gc_cfg);
-    
+
     const auto output = actor->forward_step(
         torch::randn({4, model_config.observation_dim}));
 
@@ -128,6 +128,20 @@ int main() {
     }
     if (output.features.sizes() != torch::IntArrayRef({4, actor->feature_dim()})) {
       throw std::runtime_error("actor feature shape mismatch");
+    }
+    {
+      if (actor->predictor_heads_.size() != pulsar::kSparseEventChannelCount) {
+        throw std::runtime_error("predictor channel count mismatch");
+      }
+      for (std::size_t i = 0; i < pulsar::kSparseEventChannelCount; ++i) {
+        const torch::Tensor logits = actor->predictor_head(i)->forward(output.features);
+        if (logits.sizes() != torch::IntArrayRef({4, 2})) {
+          throw std::runtime_error("binary predictor output shape mismatch");
+        }
+        if (logits.abs().max().item<float>() > 10.0F) {
+          throw std::runtime_error("predictor logits should be clamped for stability");
+        }
+      }
     }
     {
       const torch::Tensor projected = torch::randn({3, 5, 20}, torch::requires_grad());
@@ -281,8 +295,8 @@ int main() {
 
     {
       const torch::Tensor obs = torch::randn({2, model_config.observation_dim});
-      
-      
+
+
       const auto default_out = actor->forward_step(obs);
       const auto explicit_out = actor->forward_step(
           obs, torch::zeros({2, gc_cfg.goal_dim}));
@@ -339,7 +353,6 @@ int main() {
 
     // Goal critic forward pass smoke test
     {
-      
       auto out = actor->forward_step(torch::zeros({2, model_config.observation_dim}));
       torch::Tensor goal_score = actor->goal_critic()->forward(
           out.features,
@@ -506,7 +519,7 @@ int main() {
     // PopArtNormalizer unit tests
     {
       pulsar::PopArtNormalizer normalizer(0.1, 1e-4);
-      
+
       // 1. Check inverse property
       torch::Tensor x = torch::randn({10, 5});
       torch::Tensor normalized = normalizer.normalize(x);
@@ -518,7 +531,7 @@ int main() {
       // 2. Check scale preservation invariant
       torch::nn::Linear linear(torch::nn::LinearOptions(5, 3));
       torch::Tensor input = torch::randn({4, 5});
-      
+
       // Compute original forward and denormalize it
       torch::Tensor orig_pred = linear->forward(input);
       torch::Tensor orig_denorm = normalizer.denormalize(orig_pred);

@@ -11,6 +11,7 @@
 #include <nlohmann/json.hpp>
 
 #include "pulsar/rl/action_table.hpp"
+#include "pulsar/training/sparse_event_channels.hpp"
 
 namespace pulsar {
 namespace {
@@ -73,218 +74,55 @@ void from_json(const json& j, OutcomeConfig& value) {
   value.neutral_no_touch = j.value("neutral_no_touch", -1.0F);
 }
 
-void to_json(json& j, const MechanicRewardConfig& value) {
-  j = json{
-      {"kickoff_first_touch", value.kickoff_first_touch},
-      {"kickoff_50_50_touch", value.kickoff_50_50_touch},
-      {"speed_flip", value.speed_flip},
-      {"wavedash", value.wavedash},
-      {"chain_dash_bonus", value.chain_dash_bonus},
-      {"half_flip", value.half_flip},
-      {"wall_dash", value.wall_dash},
-      {"air_dribble_base", value.air_dribble_base},
-      {"air_dribble_scale", value.air_dribble_scale},
-      {"flip_reset", value.flip_reset},
-      {"ceiling_shot", value.ceiling_shot},
-      {"double_tap", value.double_tap},
-      {"preflip", value.preflip},
-      {"redirect", value.redirect},
-      {"pogo", value.pogo},
-      {"pinch", value.pinch},
-      {"team_pinch", value.team_pinch},
-  };
-}
-
-void from_json(const json& j, MechanicRewardConfig& value) {
-  value.kickoff_first_touch = j.value("kickoff_first_touch", 0.0F);
-  value.kickoff_50_50_touch = j.value("kickoff_50_50_touch", 0.0F);
-  value.speed_flip = j.value("speed_flip", 0.0F);
-  value.wavedash = j.value("wavedash", 0.0F);
-  value.chain_dash_bonus = j.value("chain_dash_bonus", 0.0F);
-  value.half_flip = j.value("half_flip", 0.0F);
-  value.wall_dash = j.value("wall_dash", 0.0F);
-  value.air_dribble_base = j.value("air_dribble_base", 0.0F);
-  value.air_dribble_scale = j.value("air_dribble_scale", 0.0F);
-  value.flip_reset = j.value("flip_reset", 0.0F);
-  value.ceiling_shot = j.value("ceiling_shot", 0.0F);
-  value.double_tap = j.value("double_tap", 0.0F);
-  value.preflip = j.value("preflip", 0.0F);
-  value.redirect = j.value("redirect", 0.0F);
-  value.pogo = j.value("pogo", 0.0F);
-  value.pinch = j.value("pinch", 0.0F);
-  value.team_pinch = j.value("team_pinch", 0.0F);
-}
-
-void to_json(json& j, const DenseRewardConfig& value) {
-  j = json{
-      {"ball_touch_vel_weight", value.ball_touch_vel_weight},
-      {"touch_direction_weight", value.touch_direction_weight},
-      {"speed_toward_ball_weight", value.speed_toward_ball_weight},
-      {"speed_toward_ball_decay", value.speed_toward_ball_decay},
-      {"face_ball_weight", value.face_ball_weight},
-      {"air_reward_weight", value.air_reward_weight},
-      {"air_reward_ball_z_min", value.air_reward_ball_z_min},
-      {"velocity_ball_to_goal_weight", value.velocity_ball_to_goal_weight},
-      {"max_ball_speed", value.max_ball_speed},
-      {"air_touch_weight", value.air_touch_weight},
-      {"air_touch_max_air_time", value.air_touch_max_air_time},
-      {"save_boost_weight", value.save_boost_weight},
-      {"boost_efficiency_weight", value.boost_efficiency_weight},
-      {"boost_used_weight", value.boost_used_weight},
-      {"defensive_positioning_weight", value.defensive_positioning_weight},
-      {"defensive_positioning_decay", value.defensive_positioning_decay},
-      {"shot_accuracy_weight", value.shot_accuracy_weight},
-      {"boost_pickup_big_weight", value.boost_pickup_big_weight},
-      {"boost_pickup_small_weight", value.boost_pickup_small_weight},
-      {"boost_pickup_big_threshold", value.boost_pickup_big_threshold},
-      {"boost_pickup_cap_per_episode", value.boost_pickup_cap_per_episode},
-      {"air_touch_cap_per_episode", value.air_touch_cap_per_episode},
-      {"possession_chain_weight", value.possession_chain_weight},
-      {"possession_chain_scale", value.possession_chain_scale},
-      {"possession_chain_timeout_ticks", value.possession_chain_timeout_ticks},
-      {"possession_proximity_weight", value.possession_proximity_weight},
-      {"possession_speed_toward_ball_weight", value.possession_speed_toward_ball_weight},
-      {"possession_face_ball_weight", value.possession_face_ball_weight},
-      {"possession_window_ticks", value.possession_window_ticks},
-      {"possession_distance_decay", value.possession_distance_decay},
-      {"flat_touch_weight", value.flat_touch_weight},
-      {"team_spirit", value.team_spirit},
-  };
-}
-
-void from_json(const json& j, DenseRewardConfig& value) {
-  value.ball_touch_vel_weight = j.value("ball_touch_vel_weight", 0.0F);
-  value.touch_direction_weight = j.value("touch_direction_weight", 0.0F);
-  value.speed_toward_ball_weight = j.value("speed_toward_ball_weight", 0.0F);
-  value.speed_toward_ball_decay = j.value("speed_toward_ball_decay", 300.0F);
-  value.face_ball_weight = j.value("face_ball_weight", 0.0F);
-  value.air_reward_weight = j.value("air_reward_weight", 0.0F);
-  value.air_reward_ball_z_min = j.value("air_reward_ball_z_min", 200.0F);
-  value.velocity_ball_to_goal_weight = j.value("velocity_ball_to_goal_weight", 0.0F);
-  value.max_ball_speed = j.value("max_ball_speed", 6000.0F);
-  value.air_touch_weight = j.value("air_touch_weight", 0.0F);
-  value.air_touch_max_air_time = j.value("air_touch_max_air_time", 1.75F);
-  value.save_boost_weight = j.value("save_boost_weight", 0.0F);
-  value.boost_efficiency_weight = j.value("boost_efficiency_weight", 0.0F);
-  value.boost_used_weight = j.value("boost_used_weight", 0.0F);
-  value.defensive_positioning_weight = j.value("defensive_positioning_weight", 0.0F);
-  value.defensive_positioning_decay = j.value("defensive_positioning_decay", 300.0F);
-  value.shot_accuracy_weight = j.value("shot_accuracy_weight", 0.0F);
-  value.boost_pickup_big_weight = j.value("boost_pickup_big_weight", 0.0F);
-  value.boost_pickup_small_weight = j.value("boost_pickup_small_weight", 0.0F);
-  value.boost_pickup_big_threshold = j.value("boost_pickup_big_threshold", 0.5F);
-  value.boost_pickup_cap_per_episode = j.value("boost_pickup_cap_per_episode", 0.0F);
-  value.air_touch_cap_per_episode = j.value("air_touch_cap_per_episode", 0.0F);
-  value.possession_chain_weight = j.value("possession_chain_weight", 0.0F);
-  value.possession_chain_scale = j.value("possession_chain_scale", 0.0F);
-  value.possession_chain_timeout_ticks = j.value("possession_chain_timeout_ticks", 360);
-  value.possession_proximity_weight = j.value("possession_proximity_weight", 0.0F);
-  value.possession_speed_toward_ball_weight = j.value("possession_speed_toward_ball_weight", 0.0F);
-  value.possession_face_ball_weight = j.value("possession_face_ball_weight", 0.0F);
-  value.possession_window_ticks = j.value("possession_window_ticks", 180);
-  value.possession_distance_decay = j.value("possession_distance_decay", 1000.0F);
-  value.flat_touch_weight = j.value("flat_touch_weight", 0.0F);
-  value.team_spirit = j.value("team_spirit", 0.0F);
-}
-
-void to_json(json& j, const CurriculumStageConfig& value) {
-  j = json{
-      {"name", value.name},
-      {"mode", value.mode},
-      {"mode_allocation", value.mode_allocation},
-      {"outcome_override", value.outcome_override},
-      {"mechanic_rewards_override", value.mechanic_rewards_override},
-      {"dense_rewards_override", value.dense_rewards_override},
-      {"unlocked_mechanics", value.unlocked_mechanics},
-      {"learning_rate", value.learning_rate},
-      {"min_agent_steps", value.min_agent_steps},
-      {"rolling_window_size", value.rolling_window_size},
-      {"consecutive_success_threshold", value.consecutive_success_threshold},
-      {"min_completed_episodes_per_mode", value.min_completed_episodes_per_mode},
-      {"required_touch_episode_rate", value.required_touch_episode_rate},
-      {"required_multi_touch_episode_rate", value.required_multi_touch_episode_rate},
-      {"required_scored_episode_rate", value.required_scored_episode_rate},
-  };
-  if (!value.mode_scored_thresholds.empty()) {
-    j["mode_scored_thresholds"] = value.mode_scored_thresholds;
-  }
-  if (!value.mode_touch_thresholds.empty()) {
-    j["mode_touch_thresholds"] = value.mode_touch_thresholds;
-  }
-  if (!value.mode_multi_touch_thresholds.empty()) {
-    j["mode_multi_touch_thresholds"] = value.mode_multi_touch_thresholds;
-  }
-}
-
-void from_json(const json& j, CurriculumStageConfig& value) {
-  value.name = j.value("name", std::string{});
-  value.mode = j.value("mode", std::string{"1v1"});
-  value.outcome_override = j.value("outcome_override", OutcomeConfig{});
-  value.mechanic_rewards_override = j.value("mechanic_rewards_override", MechanicRewardConfig{});
-  value.dense_rewards_override = j.value("dense_rewards_override", DenseRewardConfig{});
-  value.unlocked_mechanics = j.value("unlocked_mechanics", std::vector<std::string>{});
-  value.learning_rate = j.value("learning_rate", 0.0001F);
-  value.min_agent_steps = j.value("min_agent_steps", 20'000'000LL);
-  const int window_size = j.value("promotion_window_updates", j.value("rolling_window_size", 10));
-  value.rolling_window_size = j.value("rolling_window_size", window_size);
-  value.consecutive_success_threshold = j.value("consecutive_success_threshold", 5);
-  value.min_completed_episodes_per_mode = j.value("min_completed_episodes_per_mode", 0);
-  value.required_touch_episode_rate = j.value("required_touch_episode_rate", 0.0F);
-  value.required_multi_touch_episode_rate = j.value("required_multi_touch_episode_rate", 0.0F);
-  value.required_scored_episode_rate = j.value("required_scored_episode_rate", 0.0F);
-  if (j.contains("mode_scored_thresholds")) {
-    value.mode_scored_thresholds = j["mode_scored_thresholds"].get<std::map<std::string, float>>();
-  }
-  if (j.contains("mode_touch_thresholds")) {
-    value.mode_touch_thresholds = j["mode_touch_thresholds"].get<std::map<std::string, float>>();
-  }
-  if (j.contains("mode_multi_touch_thresholds")) {
-    value.mode_multi_touch_thresholds = j["mode_multi_touch_thresholds"].get<std::map<std::string, float>>();
-  }
-
-  // mode_allocation: if present in JSON, use it; otherwise derive from single "mode" field
-  if (j.contains("mode_allocation")) {
-    value.mode_allocation = j["mode_allocation"].get<std::map<std::string, float>>();
-  }
-  if (value.mode_allocation.empty()) {
-    // backward compat: use the single mode field with 100% allocation
-    value.mode_allocation[value.mode] = 1.0F;
-  }
-}
-
-void validate_mode_allocation(const std::map<std::string, float>& alloc, const std::string& stage_name) {
-  if (alloc.empty()) {
-    throw std::invalid_argument("curriculum stage " + stage_name + " has empty mode_allocation");
-  }
-  float sum = 0.0F;
-  for (const auto& [mode, frac] : alloc) {
-    if (frac < 0.0F) {
-      throw std::invalid_argument("negative allocation for mode " + mode + " in stage " + stage_name);
-    }
-    if (frac > 1.0F) {
-      throw std::invalid_argument("allocation > 1.0 for mode " + mode + " in stage " + stage_name);
-    }
-    if (mode != "1v1" && mode != "2v2" && mode != "3v3") {
-      throw std::invalid_argument("unknown mode \"" + mode + "\" in stage " + stage_name);
-    }
-    sum += frac;
-  }
-  if (std::abs(sum - 1.0F) > 0.01F) {
-    throw std::invalid_argument(
-        "mode allocations sum to " + std::to_string(sum) + " (expected 1.0) in stage " + stage_name);
-  }
-}
-
-void to_json(json& j, const CurriculumConfig& value) {
+void to_json(json& j, const PredictorChannelConfig& value) {
   j = json{
       {"enabled", value.enabled},
-      {"stages", value.stages},
+      {"horizon", value.horizon},
+      {"weight", value.weight},
+      {"learning_rate", value.learning_rate},
+      {"convergence_threshold", value.convergence_threshold},
+      {"warmup_updates", value.warmup_updates},
   };
 }
 
-void from_json(const json& j, CurriculumConfig& value) {
-  value.enabled = j.value("enabled", false);
-  value.stages = j.value("stages", std::vector<CurriculumStageConfig>{});
+void from_json(const json& j, PredictorChannelConfig& value) {
+  value.enabled = j.value("enabled", true);
+  value.horizon = j.value("horizon", 40);
+  value.weight = j.value("weight", 0.05F);
+  value.learning_rate = j.value("learning_rate", 0.005F);
+  value.convergence_threshold = j.value("convergence_threshold", 0.002F);
+  value.warmup_updates = j.value("warmup_updates", 15);
+}
+
+void to_json(json& j, const PredictorConfig& value) {
+  j = json{{"enabled", value.enabled}, {"channels", value.channels}};
+}
+
+void from_json(const json& j, PredictorConfig& value) {
+  value.enabled = j.value("enabled", true);
+  value.channels.clear();
+  for (const auto& spec : kSparseEventChannels) {
+    PredictorChannelConfig channel{};
+    channel.horizon = spec.default_horizon;
+    channel.weight = spec.default_weight;
+    value.channels.emplace(std::string(spec.name), channel);
+  }
+
+  if (j.contains("channels")) {
+    for (const auto& item : j.at("channels").items()) {
+      if (value.channels.find(item.key()) == value.channels.end()) {
+        throw std::runtime_error("Unknown predictor channel: " + item.key());
+      }
+      value.channels[item.key()] = item.value().get<PredictorChannelConfig>();
+    }
+  } else {
+    for (const auto& spec : kSparseEventChannels) {
+      const std::string name(spec.name);
+      if (j.contains(name)) {
+        value.channels[name] = j.at(name).get<PredictorChannelConfig>();
+      }
+    }
+  }
 }
 
 void to_json(json& j, const ActionTableConfig& value) {
@@ -634,9 +472,7 @@ void to_json(json& j, const ExperimentConfig& value) {
       {"obs_schema_version", value.obs_schema_version},
       {"env", value.env},
       {"outcome", value.outcome},
-      {"mechanic_rewards", value.mechanic_rewards},
-      {"dense_rewards", value.dense_rewards},
-      {"curriculum", value.curriculum},
+      {"predictor", value.predictor},
       {"action_table", value.action_table},
       {"model", value.model},
       {"ppo", value.ppo},
@@ -672,9 +508,7 @@ void from_json(const json& j, ExperimentConfig& value) {
   value.obs_schema_version = j.value("obs_schema_version", 2);
   value.env = j.value("env", EnvConfig{});
   value.outcome = j.value("outcome", OutcomeConfig{});
-  value.mechanic_rewards = j.value("mechanic_rewards", MechanicRewardConfig{});
-  value.dense_rewards = j.value("dense_rewards", DenseRewardConfig{});
-  value.curriculum = j.value("curriculum", CurriculumConfig{});
+  value.predictor = j.contains("predictor") ? j.at("predictor").get<PredictorConfig>() : json::object().get<PredictorConfig>();
   value.action_table = j.value("action_table", ActionTableConfig{});
   value.model = j.value("model", ModelConfig{});
   value.ppo = j.value("ppo", PPOConfig{});
@@ -882,11 +716,39 @@ void validate_experiment_config(const ExperimentConfig& config) {
     std::cerr << "Warning: env.tick_rate is currently ignored. Simulation hardcodes 120 Hz.\n";
   }
 
-  if (config.curriculum.enabled) {
-    for (const auto& stage : config.curriculum.stages) {
-      if (!stage.mode_allocation.empty()) {
-        validate_mode_allocation(stage.mode_allocation, stage.name);
+  if (config.predictor.enabled) {
+    auto validate_channel = [](const PredictorChannelConfig& chan, const std::string& name) {
+      if (chan.enabled) {
+        if (chan.horizon <= 0) {
+          throw std::invalid_argument("predictor." + name + ".horizon must be positive.");
+        }
+        if (chan.weight < 0.0F) {
+          throw std::invalid_argument("predictor." + name + ".weight must be non-negative.");
+        }
+        if (chan.learning_rate <= 0.0F) {
+          throw std::invalid_argument("predictor." + name + ".learning_rate must be positive.");
+        }
+        if (chan.convergence_threshold <= 0.0F) {
+          throw std::invalid_argument("predictor." + name + ".convergence_threshold must be positive.");
+        }
+        if (chan.warmup_updates < 0) {
+          throw std::invalid_argument("predictor." + name + ".warmup_updates must be non-negative.");
+        }
       }
+    };
+    for (const auto& spec : kSparseEventChannels) {
+      const std::string name(spec.name);
+      auto it = config.predictor.channels.find(name);
+      if (it == config.predictor.channels.end()) {
+        throw std::invalid_argument("predictor.channels missing required channel: " + name);
+      }
+      validate_channel(it->second, name);
+    }
+    for (const auto& [name, channel] : config.predictor.channels) {
+      if (sparse_event_channel_index(name) < 0) {
+        throw std::invalid_argument("predictor.channels contains unknown channel: " + name);
+      }
+      validate_channel(channel, name);
     }
   }
 }

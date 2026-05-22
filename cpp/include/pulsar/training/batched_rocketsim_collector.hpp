@@ -122,6 +122,7 @@ class BatchedRocketSimCollector {
   [[nodiscard]] const torch::Tensor& host_rewards() const;
   [[nodiscard]] const torch::Tensor& host_gameplay_rewards() const;
   [[nodiscard]] const torch::Tensor& host_mechanic_rewards() const;
+  [[nodiscard]] const torch::Tensor& host_sparse_events() const;
   [[nodiscard]] const torch::Tensor& host_env_touched() const;
   [[nodiscard]] const torch::Tensor& host_env_multi_touched() const;
   [[nodiscard]] const torch::Tensor& host_bootstrap_truncated() const;
@@ -178,6 +179,7 @@ class BatchedRocketSimCollector {
   torch::Tensor host_rewards_;
   torch::Tensor host_gameplay_rewards_;
   torch::Tensor host_mechanic_rewards_;
+  torch::Tensor host_sparse_events_;
   torch::Tensor host_env_touched_;
   torch::Tensor host_env_multi_touched_;
   torch::Tensor host_bootstrap_truncated_;

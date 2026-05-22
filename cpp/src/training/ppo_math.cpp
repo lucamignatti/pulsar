@@ -5,6 +5,7 @@
 #include <cstring>
 #include <limits>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
 #include "pulsar/training/ppo_math.hpp"
@@ -91,6 +92,11 @@ torch::Tensor sample_future_goal_positions_cuda(
     const torch::Tensor& episode_starts,
     int max_future,
     std::uint32_t seed);
+
+torch::Tensor compute_sparse_event_soon_targets_cuda(
+    const torch::Tensor& sparse_events,
+    const torch::Tensor& dones,
+    const torch::Tensor& horizons);
 #endif
 
 #ifdef PULSAR_HAS_PPO_MATH_HIP_KERNELS
@@ -145,6 +151,11 @@ torch::Tensor sample_future_goal_positions_hip(
     const torch::Tensor& episode_starts,
     int max_future,
     std::uint32_t seed);
+
+torch::Tensor compute_sparse_event_soon_targets_hip(
+    const torch::Tensor& sparse_events,
+    const torch::Tensor& dones,
+    const torch::Tensor& horizons);
 #endif
 
 void seed_everything(std::uint64_t seed) {
@@ -218,6 +229,71 @@ bool can_use_action_accel(const torch::Tensor& logits, const torch::Tensor& acti
 }
 
 }  // namespace
+
+torch::Tensor compute_sparse_event_soon_targets(
+    const torch::Tensor& sparse_events,
+    const torch::Tensor& dones,
+    const torch::Tensor& horizons) {
+  if (!sparse_events.defined() || sparse_events.dim() != 3) {
+    throw std::invalid_argument("compute_sparse_event_soon_targets expects [T,N,C] sparse_events.");
+  }
+  if (!dones.defined() || dones.dim() != 2 ||
+      dones.size(0) != sparse_events.size(0) ||
+      dones.size(1) != sparse_events.size(1)) {
+    throw std::invalid_argument("compute_sparse_event_soon_targets dones shape must be [T,N].");
+  }
+  if (!horizons.defined() || horizons.dim() != 1 ||
+      horizons.size(0) != sparse_events.size(2)) {
+    throw std::invalid_argument("compute_sparse_event_soon_targets horizons shape must be [C].");
+  }
+#if defined(PULSAR_HAS_PPO_MATH_CUDA_KERNELS)
+  if (sparse_events.is_cuda()) {
+    return compute_sparse_event_soon_targets_cuda(
+        sparse_events.contiguous(),
+        dones.contiguous(),
+        horizons.to(torch::TensorOptions().device(sparse_events.device()).dtype(torch::kInt32)).contiguous());
+  }
+#elif defined(PULSAR_HAS_PPO_MATH_HIP_KERNELS)
+  if (sparse_events.is_cuda()) {
+    return compute_sparse_event_soon_targets_hip(
+        sparse_events.contiguous(),
+        dones.contiguous(),
+        horizons.to(torch::TensorOptions().device(sparse_events.device()).dtype(torch::kInt32)).contiguous());
+  }
+#endif
+  const torch::Tensor events_cpu = sparse_events.to(torch::kCPU).contiguous();
+  const torch::Tensor dones_cpu = dones.to(torch::kCPU).contiguous();
+  const torch::Tensor horizons_cpu =
+      horizons.to(torch::TensorOptions().device(torch::kCPU).dtype(torch::kInt32)).contiguous();
+  const int T = static_cast<int>(events_cpu.size(0));
+  const int N = static_cast<int>(events_cpu.size(1));
+  const int C = static_cast<int>(events_cpu.size(2));
+  torch::Tensor targets = torch::zeros({T, N, C}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
+  const auto* events_ptr = events_cpu.data_ptr<std::uint8_t>();
+  const auto* dones_ptr = dones_cpu.data_ptr<float>();
+  const auto* horizons_ptr = horizons_cpu.data_ptr<int>();
+  auto* targets_ptr = targets.data_ptr<std::int64_t>();
+  for (int t = 0; t < T; ++t) {
+    for (int n = 0; n < N; ++n) {
+      for (int c = 0; c < C; ++c) {
+        const int horizon = std::max(1, horizons_ptr[c]);
+        for (int k = 0; k < horizon; ++k) {
+          const int look = t + k;
+          if (look >= T) break;
+          const int event_index = (look * N + n) * C + c;
+          if (events_ptr[event_index] != 0) {
+            targets_ptr[(t * N + n) * C + c] = 1;
+            break;
+          }
+          if (dones_ptr[look * N + n] > 0.5F) {
+            break;
+          }
+        }
+      }
+    }
+  }
+  return targets.to(sparse_events.device());
+}
 
 torch::Tensor apply_action_mask_to_logits(const torch::Tensor& logits, const torch::Tensor& action_masks) {
   return logits.masked_fill(action_masks.logical_not(), kMaskedLogit);

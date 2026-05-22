@@ -516,6 +516,29 @@ PPOActorImpl::PPOActorImpl(
 
   goal_critic_ = GoalCritic(feature_dim_, config_.action_dim, goal_critic_config_.embedding_dim, goal_critic_config_.hidden_dim, goal_critic_config_.goal_dim);
   register_module("goal_critic", goal_critic_);
+
+  predictor_heads_.clear();
+  predictor_heads_.reserve(kSparseEventChannelCount);
+  predictor_active_.assign(kSparseEventChannelCount, 0);
+  for (const auto& channel : kSparseEventChannels) {
+    SparseRewardPredictor head(feature_dim_);
+    register_module("predictor_" + std::string(channel.name), head);
+    predictor_heads_.push_back(head);
+  }
+}
+
+SparseRewardPredictor& PPOActorImpl::predictor_head(std::size_t channel_index) {
+  if (channel_index >= predictor_heads_.size()) {
+    throw std::out_of_range("predictor channel index is out of range");
+  }
+  return predictor_heads_[channel_index];
+}
+
+const SparseRewardPredictor& PPOActorImpl::predictor_head(std::size_t channel_index) const {
+  if (channel_index >= predictor_heads_.size()) {
+    throw std::out_of_range("predictor channel index is out of range");
+  }
+  return predictor_heads_[channel_index];
 }
 
 ActorStepOutput PPOActorImpl::forward_step(
@@ -738,6 +761,7 @@ PPOActor clone_ppo_actor(const PPOActor& source, const torch::Device& device) {
   auto clone = PPOActor(source->config(), source->goal_critic_config(), source->es_lora_config(), source->vrpo_config());
   clone->to(device);
   copy_module_tensors_to(source, clone, device);
+  clone->predictor_active_ = source->predictor_active_;
   return clone;
 }
 
@@ -746,6 +770,7 @@ void copy_ppo_actor_tensors_to(const PPOActor& source, PPOActor& target, const t
     throw std::invalid_argument("copy_ppo_actor_tensors_to requires non-null actors.");
   }
   copy_module_tensors_to(source, target, device);
+  target->predictor_active_ = source->predictor_active_;
 }
 
 }  // namespace pulsar

@@ -59,6 +59,11 @@ torch::Tensor sample_future_goal_positions(
     const torch::Tensor& episode_starts,
     int max_future);
 
+torch::Tensor compute_sparse_event_soon_targets(
+    const torch::Tensor& sparse_events,
+    const torch::Tensor& dones,
+    const torch::Tensor& horizons);
+
 torch::Tensor compute_pairwise_negative_l2_logits(
     const torch::Tensor& lhs_embeddings,
     const torch::Tensor& rhs_embeddings,

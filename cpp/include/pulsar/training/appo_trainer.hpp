@@ -19,7 +19,6 @@
 #include "pulsar/model/ppo_actor.hpp"
 #include "pulsar/rl/action_table.hpp"
 #include "pulsar/training/batched_rocketsim_collector.hpp"
-#include "pulsar/training/curriculum.hpp"
 #include "pulsar/training/rollout_storage.hpp"
 #include "pulsar/training/self_play_manager.hpp"
 
@@ -115,6 +114,11 @@ struct TrainerMetrics {
   double q_critic_loss = 0.0;
   double advantage_std = 0.0;
 
+  std::map<std::string, double> predictor_loss{};
+  std::map<std::string, double> predictor_delta{};
+  std::map<std::string, double> predictor_positive{};
+  std::map<std::string, double> predictor_active{};
+
   std::map<std::string, double> elo_ratings{};
   std::map<std::string, double> mode_touch_rates{};
   std::map<std::string, double> mode_multi_touch_rates{};
@@ -182,14 +186,12 @@ class APPOTrainer {
       std::int64_t* collected_agent_steps,
       PPOActor rollout_actor,
       ObservationNormalizer& normalizer);
-  TrainerMetrics update_actor(RolloutStorage& rollout);
+  TrainerMetrics update_actor(RolloutStorage& rollout, int update_index);
   CheckpointMetadata make_checkpoint_metadata(std::int64_t global_step, int update_index, const std::string& wandb_run_id) const;
 
   void run_es_lora_update(int update_index, TrainerMetrics& metrics);
   std::pair<torch::Tensor, torch::Tensor> compute_es_deltas();
 
-  void apply_curriculum_to_collectors();
-  void apply_curriculum_lr();
   void rebuild_collectors();
   void sync_self_play_assignments_to_collectors();
 
@@ -210,7 +212,6 @@ class APPOTrainer {
   ExperimentConfig config_{};
   std::vector<std::unique_ptr<BatchedRocketSimCollector>> collectors_{};
   std::unique_ptr<SelfPlayManager> self_play_manager_{};
-  Curriculum curriculum_{config_.curriculum};
   ControllerActionTable action_table_{};
   PPOActor actor_{nullptr};
   PPOActor actor_snapshot_{nullptr};
@@ -236,8 +237,12 @@ class APPOTrainer {
   std::atomic<bool> es_deltas_ready_{false};
   torch::Tensor es_delta_A_;
   torch::Tensor es_delta_B_;
-  std::deque<double> recent_scored_rates_{};
-  static constexpr int kRecentScoredRateWindow = 20;
+
+  std::vector<std::unique_ptr<torch::optim::Adam>> predictor_optimizers_{};
+  std::vector<float> predictor_ema_loss_{};
+  std::vector<float> predictor_delta_{};
+  torch::Tensor predictor_horizons_device_;
+
 #ifdef PULSAR_HAS_CUDA
   std::vector<c10::cuda::CUDAStream> shard_collection_streams_;
   std::optional<c10::cuda::CUDAStream> training_stream_;

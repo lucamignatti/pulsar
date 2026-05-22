@@ -6,6 +6,7 @@
 #include <unordered_map>
 
 #include "pulsar/config/config.hpp"
+#include "pulsar/training/sparse_event_channels.hpp"
 
 #ifdef PULSAR_HAS_TORCH
 #include <torch/torch.h>
@@ -140,6 +141,32 @@ class Mamba2EncoderImpl : public torch::nn::Module {
 
 TORCH_MODULE(Mamba2Encoder);
 
+class SparseRewardPredictorImpl : public torch::nn::Module {
+ public:
+  explicit SparseRewardPredictorImpl(int feature_dim) {
+    net_ = torch::nn::Sequential(
+        torch::nn::LayerNorm(torch::nn::LayerNormOptions({feature_dim})),
+        torch::nn::Linear(feature_dim, 128),
+        torch::nn::ReLU(),
+        torch::nn::LayerNorm(torch::nn::LayerNormOptions({128})),
+        torch::nn::Linear(128, 2)
+    );
+    register_module("net", net_);
+    auto& output = net_->at<torch::nn::LinearImpl>(4);
+    torch::nn::init::normal_(output.weight, 0.0, 0.01);
+    torch::nn::init::constant_(output.bias, 0.0);
+  }
+
+  torch::Tensor forward(torch::Tensor x) {
+    return torch::clamp(net_->forward(x), -10.0, 10.0);
+  }
+
+ private:
+  torch::nn::Sequential net_{nullptr};
+};
+
+TORCH_MODULE(SparseRewardPredictor);
+
 class PPOActorImpl : public torch::nn::Module {
  public:
   explicit PPOActorImpl(
@@ -174,6 +201,8 @@ class PPOActorImpl : public torch::nn::Module {
   torch::Tensor value_head_forward(const torch::Tensor& encoded);
   torch::Tensor q_head_forward(const torch::Tensor& encoded);
   torch::Tensor policy_head_forward(const torch::Tensor& features);
+  SparseRewardPredictor& predictor_head(std::size_t channel_index);
+  const SparseRewardPredictor& predictor_head(std::size_t channel_index) const;
 
   [[nodiscard]] std::vector<torch::Tensor> es_lora_parameters() const;
   [[nodiscard]] std::vector<torch::Tensor> es_lora_parameters_flat() const;
@@ -201,6 +230,9 @@ class PPOActorImpl : public torch::nn::Module {
 
   torch::nn::Sequential q_head_{nullptr};
   GoalCritic goal_critic_{nullptr};
+
+  std::vector<SparseRewardPredictor> predictor_heads_{};
+  std::vector<std::uint8_t> predictor_active_{};
 };
 
 TORCH_MODULE(PPOActor);

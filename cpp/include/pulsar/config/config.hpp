@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 
 #include "pulsar/core/types.hpp"
+#include "pulsar/training/sparse_event_channels.hpp"
 
 namespace pulsar {
 
@@ -18,88 +19,30 @@ struct OutcomeConfig {
   float neutral_no_touch = -1.0F;
 };
 
-struct MechanicRewardConfig {
-  float kickoff_first_touch = 0.0F;
-  float kickoff_50_50_touch = 0.0F;
-  float speed_flip = 0.0F;
-  float wavedash = 0.0F;
-  float chain_dash_bonus = 0.0F;
-  float half_flip = 0.0F;
-  float wall_dash = 0.0F;
-  float air_dribble_base = 0.0F;
-  float air_dribble_scale = 0.0F;
-  float flip_reset = 0.0F;
-  float ceiling_shot = 0.0F;
-  float double_tap = 0.0F;
-  float preflip = 0.0F;
-  float redirect = 0.0F;
-  float pogo = 0.0F;
-  float pinch = 0.0F;
-  float team_pinch = 0.0F;
+struct PredictorChannelConfig {
+  bool enabled = true;
+  int horizon = 40;
+  float weight = 0.05F;
+  float learning_rate = 0.005F;
+  float convergence_threshold = 0.002F;
+  int warmup_updates = 15;
 };
 
-struct DenseRewardConfig {
-  float ball_touch_vel_weight = 0.0F;
-  float touch_direction_weight = 0.0F;
-  float speed_toward_ball_weight = 0.0F;
-  float speed_toward_ball_decay = 300.0F;
-  float face_ball_weight = 0.0F;
-  float air_reward_weight = 0.0F;
-  float air_reward_ball_z_min = 200.0F;
-  float velocity_ball_to_goal_weight = 0.0F;
-  float max_ball_speed = 6000.0F;
-  float air_touch_weight = 0.0F;
-  float air_touch_max_air_time = 1.75F;
-  float save_boost_weight = 0.0F;
-  float boost_efficiency_weight = 0.0F;
-  float boost_used_weight = 0.0F;
-  float defensive_positioning_weight = 0.0F;
-  float defensive_positioning_decay = 300.0F;
-  float shot_accuracy_weight = 0.0F;
-  float boost_pickup_big_weight = 0.0F;
-  float boost_pickup_small_weight = 0.0F;
-  float boost_pickup_big_threshold = 0.5F;
-  float boost_pickup_cap_per_episode = 0.0F;
-  float air_touch_cap_per_episode = 0.0F;
-  float possession_chain_weight = 0.0F;
-  float possession_chain_scale = 0.0F;
-  int possession_chain_timeout_ticks = 360;
-  float possession_proximity_weight = 0.0F;
-  float possession_speed_toward_ball_weight = 0.0F;
-  float possession_face_ball_weight = 0.0F;
-  int possession_window_ticks = 180;
-  float possession_distance_decay = 1000.0F;
-  float flat_touch_weight = 0.0F;
-  float team_spirit = 0.0F;
+struct PredictorConfig {
+  PredictorConfig() {
+    for (const auto& spec : kSparseEventChannels) {
+      PredictorChannelConfig channel{};
+      channel.horizon = spec.default_horizon;
+      channel.weight = spec.default_weight;
+      channels.emplace(std::string(spec.name), channel);
+    }
+  }
+
+  bool enabled = true;
+  std::map<std::string, PredictorChannelConfig> channels{};
 };
 
-struct CurriculumStageConfig {
-  std::string name;
-  std::string mode = "1v1";
-  OutcomeConfig outcome_override{};
-  MechanicRewardConfig mechanic_rewards_override{};
-  DenseRewardConfig dense_rewards_override{};
-  std::vector<std::string> unlocked_mechanics;
-  std::map<std::string, float> mode_allocation;
-  float learning_rate = 0.0001F;
-  int64_t min_agent_steps = 20'000'000LL;
-  int rolling_window_size = 10;
-  int consecutive_success_threshold = 5;
-  int min_completed_episodes_per_mode = 0;
-  float required_touch_episode_rate = 0.0F;
-  float required_multi_touch_episode_rate = 0.0F;
-  float required_scored_episode_rate = 0.0F;
-  // Per-mode overrides for promotion thresholds.  When non-empty, the value
-  // for a given mode takes precedence over the scalar fields above.
-  std::map<std::string, float> mode_scored_thresholds{};
-  std::map<std::string, float> mode_touch_thresholds{};
-  std::map<std::string, float> mode_multi_touch_thresholds{};
-};
 
-struct CurriculumConfig {
-  bool enabled = false;
-  std::vector<CurriculumStageConfig> stages;
-};
 
 struct ActionTableConfig {
   std::string builtin = "rlgym_lookup_v1";
@@ -265,9 +208,7 @@ struct ExperimentConfig {
   int obs_schema_version = 2;
   EnvConfig env{};
   OutcomeConfig outcome{};
-  MechanicRewardConfig mechanic_rewards{};
-  DenseRewardConfig dense_rewards{};
-  CurriculumConfig curriculum{};
+  PredictorConfig predictor{};
   ActionTableConfig action_table{};
   ModelConfig model{};
   PPOConfig ppo{};
@@ -297,14 +238,11 @@ void from_json(const nlohmann::json& j, ControllerState& value);
 
 void to_json(nlohmann::json& j, const OutcomeConfig& value);
 void from_json(const nlohmann::json& j, OutcomeConfig& value);
-void to_json(nlohmann::json& j, const MechanicRewardConfig& value);
-void from_json(const nlohmann::json& j, MechanicRewardConfig& value);
-void to_json(nlohmann::json& j, const DenseRewardConfig& value);
-void from_json(const nlohmann::json& j, DenseRewardConfig& value);
-void to_json(nlohmann::json& j, const CurriculumStageConfig& value);
-void from_json(const nlohmann::json& j, CurriculumStageConfig& value);
-void to_json(nlohmann::json& j, const CurriculumConfig& value);
-void from_json(const nlohmann::json& j, CurriculumConfig& value);
+
+void to_json(nlohmann::json& j, const PredictorChannelConfig& value);
+void from_json(const nlohmann::json& j, PredictorChannelConfig& value);
+void to_json(nlohmann::json& j, const PredictorConfig& value);
+void from_json(const nlohmann::json& j, PredictorConfig& value);
 void to_json(nlohmann::json& j, const ActionTableConfig& value);
 void from_json(const nlohmann::json& j, ActionTableConfig& value);
 void to_json(nlohmann::json& j, const EnvConfig& value);

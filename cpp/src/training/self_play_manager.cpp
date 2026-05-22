@@ -423,12 +423,6 @@ void SelfPlayManager::ensure_configured_rating_modes() {
 
   add_mode(std::to_string(config_.env.team_size) + "v" + std::to_string(config_.env.team_size));
   add_mode(current_mode_);
-  for (const auto& stage : config_.curriculum.stages) {
-    add_mode(stage.mode);
-    for (const auto& [mode, _] : stage.mode_allocation) {
-      add_mode(mode);
-    }
-  }
 }
 
 void SelfPlayManager::add_snapshot(

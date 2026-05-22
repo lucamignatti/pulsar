@@ -459,18 +459,11 @@ void test_restore_ratings() {
   safe_remove_all(root);
 }
 
-void test_ratings_include_all_curriculum_modes() {
+void test_ratings_include_default_mode() {
   namespace fs = std::filesystem;
   pulsar::ExperimentConfig config = pulsar::test::make_test_config();
   config.self_play_league.enabled = true;
   config.self_play_league.elo_initial = 987.0F;
-  config.curriculum.enabled = true;
-  pulsar::CurriculumStageConfig stage;
-  stage.name = "mixed";
-  stage.mode_allocation["1v1"] = 0.34F;
-  stage.mode_allocation["2v2"] = 0.33F;
-  stage.mode_allocation["3v3"] = 0.33F;
-  config.curriculum.stages = {stage};
   config.ppo.device = "cpu";
 
   const fs::path root = fs::temp_directory_path() / "pulsar_ratings_modes_test";
@@ -481,9 +474,7 @@ void test_ratings_include_all_curriculum_modes() {
 
   pulsar::SelfPlayManager manager(config, root, obs_builder, action_parser, torch::kCPU);
   const auto& ratings = manager.current_ratings();
-  pulsar::test::require(ratings.at("1v1") == 987.0, "1v1 rating should be initialized");
-  pulsar::test::require(ratings.at("2v2") == 987.0, "2v2 rating should be initialized");
-  pulsar::test::require(ratings.at("3v3") == 987.0, "3v3 rating should be initialized");
+  pulsar::test::require(ratings.at(manager.current_mode()) == 987.0, "default mode rating should be initialized");
 
   safe_remove_all(root);
 }
@@ -592,7 +583,7 @@ int main() {
     test_checkpoint_metadata_validation();
     test_rng_state_round_trip();
     test_restore_ratings();
-    test_ratings_include_all_curriculum_modes();
+    test_ratings_include_default_mode();
     test_snapshot_mode_is_preserved();
     test_collection_applies_snapshot_assignments();
     std::cout << "pulsar_self_play_tests passed\n" << std::flush;

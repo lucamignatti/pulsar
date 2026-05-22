@@ -113,7 +113,6 @@ if(PULSAR_ENABLE_TORCH)
       cpp/src/training/rollout_storage.cpp
       cpp/src/training/ppo_math.cpp
       cpp/src/training/reward_engine.cpp
-      cpp/src/training/curriculum.cpp
       cpp/src/training/batched_rocketsim_collector.cpp
       cpp/src/training/appo_trainer.cpp
       cpp/src/training/self_play_manager.cpp
@@ -257,14 +256,6 @@ if(PULSAR_ENABLE_TESTS)
       add_test(NAME pulsar_ppo_math_tests COMMAND pulsar_ppo_math_tests)
       set_tests_properties(pulsar_ppo_math_tests PROPERTIES LABELS "reference")
     endif()
-
-    add_executable(
-      pulsar_curriculum_tests
-      cpp/tests/test_curriculum.cpp
-    )
-    target_include_directories(pulsar_curriculum_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
-    pulsar_link_torch_whole_core(pulsar_curriculum_tests)
-    add_test(NAME pulsar_curriculum_tests COMMAND pulsar_curriculum_tests)
 
     add_executable(
       pulsar_reward_engine_tests
