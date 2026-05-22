@@ -60,7 +60,7 @@
     "policy_hidden_dim": 0
   },
   "ppo": {
-    "num_envs": 3072,
+    "num_envs": 1536,
     "collection_workers": 24,
     "collection_shards": 4,
     "init_checkpoint": "",
