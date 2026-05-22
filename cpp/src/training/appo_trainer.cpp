@@ -396,38 +396,37 @@ GradientSanitizeResult zero_nonfinite_gradients(torch::nn::Module& module) {
 }
 
 double clip_existing_gradients(torch::nn::Module& module, double max_norm) {
-  double max_abs = 0.0;
+  std::vector<torch::Tensor> grads;
   for (auto& p : module.parameters()) {
     const torch::Tensor grad = p.grad();
-    if (!grad.defined()) {
-      continue;
+    if (grad.defined()) {
+      grads.push_back(grad.detach().reshape({-1}));
     }
-    const double param_max = grad.detach().abs().max().item<double>();
-    if (!std::isfinite(param_max)) {
-      return param_max;
-    }
-    max_abs = std::max(max_abs, param_max);
+  }
+  if (grads.empty()) {
+    return 0.0;
+  }
+
+  torch::Tensor all_grads = torch::cat(grads);
+  double max_abs = all_grads.abs().max().item<double>();
+  if (!std::isfinite(max_abs)) {
+    return max_abs;
   }
   if (max_abs == 0.0) {
     return 0.0;
   }
-  double scaled_sq_sum = 0.0;
-  for (auto& p : module.parameters()) {
-    const torch::Tensor grad = p.grad();
-    if (!grad.defined()) {
-      continue;
-    }
-    const torch::Tensor scaled = grad.detach().to(torch::kFloat32) / max_abs;
-    const double param_scaled_sq = scaled.square().sum().item<double>();
-    if (!std::isfinite(param_scaled_sq)) {
-      return param_scaled_sq;
-    }
-    scaled_sq_sum += param_scaled_sq;
+
+  torch::Tensor scaled = all_grads.to(torch::kFloat32) / max_abs;
+  double param_scaled_sq = scaled.square().sum().item<double>();
+  if (!std::isfinite(param_scaled_sq)) {
+    return param_scaled_sq;
   }
-  const double total_norm = max_abs * std::sqrt(scaled_sq_sum);
+  const double total_norm = max_abs * std::sqrt(param_scaled_sq);
+
   if (!std::isfinite(total_norm) || max_norm <= 0.0 || total_norm <= max_norm) {
     return total_norm;
   }
+
   const double scale = max_norm / (total_norm + 1.0e-6);
   for (auto& p : module.parameters()) {
     torch::Tensor grad = p.mutable_grad();
@@ -448,12 +447,17 @@ bool captured_group_has_grad(const std::vector<CapturedGrad>& group) {
 }
 
 bool captured_group_gradients_are_finite(const std::vector<CapturedGrad>& group) {
+  std::vector<torch::Tensor> grads;
+  grads.reserve(group.size());
   for (const auto& captured : group) {
-    if (captured.grad.defined() && !torch::isfinite(captured.grad).all().item<bool>()) {
-      return false;
+    if (captured.grad.defined()) {
+      grads.push_back(captured.grad.reshape({-1}));
     }
   }
-  return true;
+  if (grads.empty()) {
+    return true;
+  }
+  return torch::isfinite(torch::cat(grads)).all().item<bool>();
 }
 
 void scale_existing_gradients(torch::nn::Module& module, double scale) {
@@ -1522,16 +1526,17 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
               << '\n' << std::flush;
   }
   std::int64_t metric_steps = 0;
-  torch::Tensor policy_loss_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-  torch::Tensor value_loss_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-  torch::Tensor entropy_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-  torch::Tensor grad_norm_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-  torch::Tensor policy_approx_kl_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-  torch::Tensor policy_clip_fraction_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-  torch::Tensor goal_critic_loss_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-  torch::Tensor q_critic_loss_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-  torch::Tensor goal_score_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-  torch::Tensor sampled_goal_distance_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+  double policy_loss_sum = 0.0;
+  double value_loss_sum = 0.0;
+  double entropy_sum = 0.0;
+  double grad_norm_sum = 0.0;
+  std::int64_t grad_norm_steps = 0;
+  double policy_approx_kl_sum = 0.0;
+  double policy_clip_fraction_sum = 0.0;
+  double goal_critic_loss_sum = 0.0;
+  double q_critic_loss_sum = 0.0;
+  double goal_score_sum = 0.0;
+  double sampled_goal_distance_sum = 0.0;
   double policy_log_ratio_abs_max = 0.0;
   int accumulated_minibatches = 0;
   bool accumulated_has_backward = false;
@@ -1775,14 +1780,14 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             };
             const auto task_compute_start = std::chrono::steady_clock::now();
 
-            for (int micro_agent_offset = 0; micro_agent_offset < mode_count_local; micro_agent_offset += agents_per_forward_local) {
-              const int micro_count = std::min(agents_per_forward_local, mode_count_local - micro_agent_offset);
-              const int gpu_chunk_start = static_cast<int>(g * micro_count / num_update_gpus);
-              const int gpu_chunk_end = static_cast<int>((g + 1) * micro_count / num_update_gpus);
-              const int gpu_chunk_count = gpu_chunk_end - gpu_chunk_start;
-              if (gpu_chunk_count <= 0) continue;
+            const int gpu_agent_start = static_cast<int>(g * mode_count_local / num_update_gpus);
+            const int gpu_agent_end = static_cast<int>((g + 1) * mode_count_local / num_update_gpus);
+            const int gpu_agent_count = gpu_agent_end - gpu_agent_start;
+            if (gpu_agent_count <= 0) return result;
 
-              torch::Tensor gpu_micro_indices = mode_agent_indices.narrow(0, micro_agent_offset + gpu_chunk_start, gpu_chunk_count);
+            for (int micro_agent_offset = 0; micro_agent_offset < gpu_agent_count; micro_agent_offset += agents_per_forward_local) {
+              const int gpu_chunk_count = std::min(agents_per_forward_local, gpu_agent_count - micro_agent_offset);
+              torch::Tensor gpu_micro_indices = mode_agent_indices.narrow(0, gpu_agent_start + micro_agent_offset, gpu_chunk_count);
 
               torch::Tensor mode_gpu_obs_mb = rollout.obs.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices).to(gpu_dev);
               torch::Tensor mode_gpu_episode_starts_mb = rollout.episode_starts.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices).to(gpu_dev);
@@ -1790,10 +1795,19 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
               torch::Tensor mode_gpu_learner_active_mb = rollout.learner_active.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices).to(gpu_dev);
               torch::Tensor mode_gpu_actions_mb = rollout.actions.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices).to(gpu_dev);
               torch::Tensor mode_gpu_action_log_probs_mb = rollout.action_log_probs.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices).to(gpu_dev);
-              torch::Tensor mode_gpu_advantages_mb = normalized_advantages.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices.to(device_)).to(gpu_dev);
-              torch::Tensor mode_gpu_returns_mb = sparse_returns.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices.to(device_)).to(gpu_dev);
-              torch::Tensor mode_gpu_q_returns_mb =
-                  q_returns.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices.to(device_)).to(gpu_dev);
+
+              torch::Tensor mode_gpu_advantages_mb = normalized_advantages.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices);
+              if (gpu_dev != device_) {
+                mode_gpu_advantages_mb = mode_gpu_advantages_mb.to(gpu_dev);
+              }
+              torch::Tensor mode_gpu_returns_mb = sparse_returns.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices);
+              if (gpu_dev != device_) {
+                mode_gpu_returns_mb = mode_gpu_returns_mb.to(gpu_dev);
+              }
+              torch::Tensor mode_gpu_q_returns_mb = q_returns.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices);
+              if (gpu_dev != device_) {
+                mode_gpu_q_returns_mb = mode_gpu_q_returns_mb.to(gpu_dev);
+              }
               torch::Tensor mode_gpu_old_q_taken_mb =
                   all_values.at("q_taken").narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices).to(gpu_dev);
 
@@ -2043,18 +2057,18 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
           reduce_captured_gradients(*actor_, mode_goal_critic_grad_group, task_result.goal_critic_group, device_);
           reduce_captured_gradients(*actor_, mode_goal_actor_grad_group, task_result.goal_actor_group, device_);
 
-          policy_loss_sum = policy_loss_sum + task_result.policy_loss_sum;
-          value_loss_sum = value_loss_sum + task_result.value_loss_sum;
-          entropy_sum = entropy_sum + task_result.entropy_sum;
-          policy_approx_kl_sum = policy_approx_kl_sum + task_result.policy_approx_kl;
-          policy_clip_fraction_sum = policy_clip_fraction_sum + task_result.policy_clip_frac;
+          policy_loss_sum += task_result.policy_loss_sum;
+          value_loss_sum += task_result.value_loss_sum;
+          entropy_sum += task_result.entropy_sum;
+          policy_approx_kl_sum += task_result.policy_approx_kl;
+          policy_clip_fraction_sum += task_result.policy_clip_frac;
           accumulated_policy_kl_sum += task_result.policy_approx_kl;
           accumulated_policy_kl_count += static_cast<double>(task_result.active_count);
           policy_log_ratio_abs_max = std::max(policy_log_ratio_abs_max, task_result.policy_log_ratio_max);
-          goal_critic_loss_sum = goal_critic_loss_sum + task_result.goal_critic_loss;
-          goal_score_sum = goal_score_sum + task_result.goal_score;
-          sampled_goal_distance_sum = sampled_goal_distance_sum + task_result.sampled_goal_dist;
-          q_critic_loss_sum = q_critic_loss_sum + task_result.q_critic_loss_sum;
+          goal_critic_loss_sum += task_result.goal_critic_loss;
+          goal_score_sum += task_result.goal_score;
+          sampled_goal_distance_sum += task_result.sampled_goal_dist;
+          q_critic_loss_sum += task_result.q_critic_loss_sum;
           metrics.forward_backward_seconds += task_result.fwd_bwd_seconds;
           accumulated_has_backward = accumulated_has_backward || task_result.has_backward;
           metric_steps += task_result.active_count;
@@ -2096,20 +2110,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       if (use_pcgrad && !pcgrad_groups.empty()) {
         zero_existing_gradients(*actor_);
         apply_pcgrad_multi(pcgrad_groups);
-        bool pcgrad_finite = true;
-        for (const auto& group : pcgrad_groups) {
-          if (!captured_group_gradients_are_finite(group)) {
-            pcgrad_finite = false;
-            break;
-          }
-        }
-        if (!pcgrad_finite) {
-          ++metrics.nonfinite_grad_norm_skips;
-          pcgrad_groups.clear();
-          accumulated_has_backward = false;
-        }
-      }
-      if (use_pcgrad && !pcgrad_groups.empty()) {
+
+        std::vector<torch::Tensor> combined_grads;
+        combined_grads.reserve(pcgrad_groups[0].size());
         for (size_t i = 0; i < pcgrad_groups[0].size(); ++i) {
           torch::Tensor combined;
           bool has_any = false;
@@ -2120,8 +2123,34 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             }
           }
           if (has_any) {
-            pcgrad_groups[0][i].param.mutable_grad() = combined;
+            combined_grads.push_back(combined.reshape({-1}));
           }
+        }
+
+        bool combined_finite = true;
+        if (!combined_grads.empty()) {
+          combined_finite = torch::isfinite(torch::cat(combined_grads)).all().item<bool>();
+        }
+
+        if (combined_finite) {
+          for (size_t i = 0; i < pcgrad_groups[0].size(); ++i) {
+            torch::Tensor combined;
+            bool has_any = false;
+            for (const auto& group : pcgrad_groups) {
+              if (group[i].grad.defined()) {
+                combined = has_any ? combined + group[i].grad : group[i].grad;
+                has_any = true;
+              }
+            }
+            if (has_any) {
+              pcgrad_groups[0][i].param.mutable_grad() = combined;
+            }
+          }
+        } else {
+          ++metrics.nonfinite_grad_norm_skips;
+          pcgrad_groups.clear();
+          accumulated_has_backward = false;
+          zero_existing_gradients(*actor_);
         }
       }
 
@@ -2192,7 +2221,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
             config_.ppo.max_preclip_grad_norm > 0.0F &&
             grad_norm > static_cast<double>(config_.ppo.max_preclip_grad_norm);
         if (std::isfinite(grad_norm) && !grad_guard_hit) {
-          grad_norm_sum = grad_norm_sum + grad_norm * accumulated_total_active;
+          grad_norm_sum += grad_norm;
+          ++grad_norm_steps;
           actor_optimizer_.step();
           stepped_optimizer = true;
         } else if (std::isfinite(grad_norm)) {
@@ -2219,7 +2249,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       metrics.optimizer_step_seconds +=
           std::chrono::duration<double>(std::chrono::steady_clock::now() - optim_start).count();
       if (stepped_optimizer) {
-        metrics.grad_norm += grad_norm * accumulated_total_active;
+        // Redundant metrics.grad_norm accumulation removed.
       }
       accumulated_minibatches = 0;
       accumulated_has_backward = false;
@@ -2245,17 +2275,17 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
   if (metric_steps > 0) {
     const double denom = static_cast<double>(metric_steps);
-    metrics.policy_loss = (policy_loss_sum / denom).item<double>();
-    metrics.value_loss = (value_loss_sum / denom).item<double>();
-    metrics.entropy = (entropy_sum / denom).item<double>();
-    metrics.grad_norm = (grad_norm_sum / denom).item<double>();
-    metrics.policy_approx_kl = (policy_approx_kl_sum / denom).item<double>();
-    metrics.policy_clip_fraction = (policy_clip_fraction_sum / denom).item<double>();
+    metrics.policy_loss = policy_loss_sum / denom;
+    metrics.value_loss = value_loss_sum / denom;
+    metrics.entropy = entropy_sum / denom;
+    metrics.grad_norm = grad_norm_steps > 0 ? grad_norm_sum / static_cast<double>(grad_norm_steps) : 0.0;
+    metrics.policy_approx_kl = policy_approx_kl_sum / denom;
+    metrics.policy_clip_fraction = policy_clip_fraction_sum / denom;
     metrics.policy_log_ratio_abs_max = policy_log_ratio_abs_max;
-    metrics.goal_critic_loss = (goal_critic_loss_sum / denom).item<double>();
-    metrics.mean_goal_score = (goal_score_sum / denom).item<double>();
-    metrics.mean_sampled_goal_distance = (sampled_goal_distance_sum / denom).item<double>();
-    metrics.q_critic_loss = (q_critic_loss_sum / denom).item<double>();
+    metrics.goal_critic_loss = goal_critic_loss_sum / denom;
+    metrics.mean_goal_score = goal_score_sum / denom;
+    metrics.mean_sampled_goal_distance = sampled_goal_distance_sum / denom;
+    metrics.q_critic_loss = q_critic_loss_sum / denom;
   }
   metrics.effective_entropy_coef = static_cast<double>(effective_entropy_coef);
   metrics.update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count();
@@ -2864,6 +2894,10 @@ void APPOTrainer::collect_rollout(
       rollout_actors.push_back(clone_ppo_actor(rollout_actor, shard_device));
       rollout_actors.back()->eval();
     }
+    // NOTE: Cloned normalizers are thread-safe for parallel execution.
+    // Each sharded rollout worker runs asynchronously on its own thread and operates on
+    // a disjoint cloned ObservationNormalizer instance. This avoids concurrent updates/reads
+    // to the shared 'normalizer' object, preventing data races without requiring lock overhead.
     shard_normalizers.push_back(normalizer.clone());
     shard_normalizers.back().to(shard_device);
     shard_normalizer_updates.emplace_back(config_.model.observation_dim);
@@ -3386,7 +3420,7 @@ void APPOTrainer::collect_rollout(
     torch::Tensor goal_norms = goal_pos_host.norm(2, 1);
     float gd_min = goal_norms.min().item<float>();
     float gd_mean = goal_norms.mean().item<float>();
-    total_goal_distance += static_cast<double>(gd_mean);
+    total_goal_distance += static_cast<double>(gd_mean) * static_cast<double>(goal_pos_host.size(0)) / static_cast<double>(total_agents_);
     if (gd_min < min_goal_distance) {
       min_goal_distance = static_cast<double>(gd_min);
     }

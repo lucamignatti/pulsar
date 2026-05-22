@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <random>
 #include <vector>
 
 #include "pulsar/training/ppo_math.hpp"
@@ -20,6 +21,20 @@ constexpr float kAdvantageAbsCap = 10.0F;
 
 torch::Tensor clamp_normalized_advantage(const torch::Tensor& normalized) {
   return normalized.clamp(-kAdvantageAbsCap, kAdvantageAbsCap);
+}
+
+std::uint32_t get_thread_local_seed() {
+  thread_local std::random_device rd;
+  thread_local std::mt19937 generator(rd());
+  return generator();
+}
+
+int64_t get_thread_local_random(int64_t max_val) {
+  if (max_val <= 0) return 0;
+  thread_local std::random_device rd;
+  thread_local std::mt19937 generator(rd());
+  std::uniform_int_distribution<int64_t> dist(0, max_val - 1);
+  return dist(generator);
 }
 
 }  // namespace
@@ -215,7 +230,7 @@ torch::Tensor sample_masked_actions(
     torch::Tensor* log_probs) {
   if (can_use_action_accel(logits, action_masks) && logits.dim() == 2) {
     const bool need_log_probs = log_probs != nullptr;
-    const std::uint32_t seed = static_cast<std::uint32_t>(std::rand());
+    const std::uint32_t seed = get_thread_local_seed();
 #if defined(PULSAR_HAS_PPO_MATH_CUDA_KERNELS)
     std::vector<torch::Tensor> result = sample_masked_actions_cuda(
         logits.contiguous(),
@@ -539,7 +554,7 @@ torch::Tensor sample_future_goal_positions(
   if (can_use_ppo_math_accel(goal_positions) &&
       (!dones.defined() || (dones.is_cuda() && dones.scalar_type() == torch::kFloat32)) &&
       (!episode_starts.defined() || (episode_starts.is_cuda() && episode_starts.scalar_type() == torch::kFloat32))) {
-    const std::uint32_t seed = static_cast<std::uint32_t>(std::rand());
+    const std::uint32_t seed = get_thread_local_seed();
 #ifdef PULSAR_HAS_PPO_MATH_CUDA_KERNELS
     return sample_future_goal_positions_cuda(
         goal_positions.contiguous(),
@@ -584,7 +599,7 @@ torch::Tensor sample_future_goal_positions(
       const int64_t end_exclusive = std::min(done_exclusive, next_start_index);
       const int64_t max_offset = std::min<int64_t>(end_exclusive - t - 1, horizon);
       const int64_t chosen = (max_offset > 0)
-          ? (t + 1 + (std::rand() % max_offset))
+          ? (t + 1 + get_thread_local_random(max_offset))
           : t;
       for (int64_t d = 0; d < dim; ++d) {
         sampled_cpu[t][a][d] = goal_cpu[chosen][a][d];
