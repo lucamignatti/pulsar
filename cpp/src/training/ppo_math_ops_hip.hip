@@ -603,7 +603,7 @@ at::Tensor compute_sparse_event_soon_targets_hip(
     const at::Tensor& sparse_events,
     const at::Tensor& dones,
     const at::Tensor& horizons) {
-  const c10::hip::HIPGuard guard(sparse_events.device());
+  set_hip_device_for(sparse_events);
   const int steps = static_cast<int>(sparse_events.size(0));
   const int agents = static_cast<int>(sparse_events.size(1));
   const int channels = static_cast<int>(sparse_events.size(2));
