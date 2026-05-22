@@ -1119,6 +1119,7 @@ APPOTrainer::APPOTrainer(
               << " collection_workers=" << config_.ppo.collection_workers
               << '\n';
   }
+  sync_self_play_assignments_to_collectors();
 }
 
 APPOTrainer::~APPOTrainer() {
@@ -1148,6 +1149,23 @@ void APPOTrainer::apply_curriculum_to_collectors() {
   if (self_play_manager_) {
     self_play_manager_->set_curriculum_stage(curriculum_.stage_index());
     self_play_manager_->set_current_mode(curriculum_.primary_mode());
+  }
+  sync_self_play_assignments_to_collectors();
+}
+
+void APPOTrainer::sync_self_play_assignments_to_collectors() {
+  for (auto& collector : collectors_) {
+    if (!collector) {
+      continue;
+    }
+    if (self_play_manager_ && self_play_manager_->enabled()) {
+      collector->set_self_play_assignment_fn(
+          [this](std::size_t env_idx, std::uint64_t seed) {
+            return self_play_manager_->sample_assignment(env_idx, seed);
+          });
+    } else {
+      collector->set_self_play_assignment_fn({});
+    }
   }
 }
 
@@ -2995,6 +3013,8 @@ void APPOTrainer::collect_rollout(
       int64_t total_learner_steps = 0;
       double total_goal_distance = 0.0;
       double min_goal_distance = 1.0;
+      std::string mode;
+      std::vector<SelfPlayLiveOutcome> self_play_outcomes;
     };
 
     // Launch one async task per shard that processes all rollout steps.
@@ -3045,6 +3065,7 @@ void APPOTrainer::collect_rollout(
           torch::Tensor episode_starts_host = collector.host_episode_starts();
           torch::Tensor action_masks_host = collector.host_action_masks();
           torch::Tensor learner_active_host = collector.host_learner_active();
+          torch::Tensor snapshot_ids_host = collector.host_snapshot_ids();
           std::future<void> physics_prefix_future;
           if (physics_prefix_ticks > 0) {
             physics_prefix_future = std::async(std::launch::async, [&collector, &shard_step, physics_prefix_ticks]() {
@@ -3054,6 +3075,7 @@ void APPOTrainer::collect_rollout(
           torch::Tensor raw_obs = raw_obs_host.to(shard_device, use_pinned_host_buffers_);
           torch::Tensor episode_starts = episode_starts_host.to(shard_device, use_pinned_host_buffers_);
           torch::Tensor action_masks = action_masks_host.to(shard_device, use_pinned_host_buffers_);  // uint8, sample_masked_actions handles it
+          torch::Tensor snapshot_ids = snapshot_ids_host.to(shard_device, use_pinned_host_buffers_);
 
           torch::Tensor normalized_obs;
           torch::Tensor actions;
@@ -3069,6 +3091,19 @@ void APPOTrainer::collect_rollout(
             output = shard_actor->forward_step_stateful(
                 normalized_obs, recurrent_state, episode_starts, &recurrent_state, goal_values);
             actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
+            if (self_play_manager_ && self_play_manager_->has_snapshots()) {
+              torch::Tensor snapshot_actions;
+              self_play_manager_->infer_opponent_actions(
+                  shard_actor,
+                  raw_obs,
+                  action_masks,
+                  episode_starts,
+                  snapshot_ids,
+                  output.encoded,
+                  &snapshot_actions,
+                  nullptr);
+              actions = torch::where(snapshot_ids >= 0, snapshot_actions.to(actions.device()), actions);
+            }
           }
           if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
             torch::cuda::synchronize();
@@ -3087,6 +3122,8 @@ void APPOTrainer::collect_rollout(
                   static_cast<std::size_t>(action_indices_cpu.numel())),
               physics_prefix_ticks,
               &shard_step.timings);
+          shard_step.mode = collector.mode();
+          shard_step.self_play_outcomes = collector.last_self_play_outcomes();
 
           // Done-reset processing inside the shard task.
           torch::Tensor dones_host = collector.host_dones();
@@ -3264,6 +3301,9 @@ void APPOTrainer::collect_rollout(
         for (const auto& [mode, count] : shard_step.mode_touched) mode_touched[mode] += count;
         for (const auto& [mode, count] : shard_step.mode_multi_touched) mode_multi_touched[mode] += count;
         for (const auto& [mode, count] : shard_step.mode_scored) mode_scored[mode] += count;
+        if (self_play_manager_ && !shard_step.self_play_outcomes.empty()) {
+          self_play_manager_->record_live_outcomes(shard_step.mode, shard_step.self_play_outcomes);
+        }
 
         accumulated_sampled_value += shard_step.sampled_value_sum;
         accumulated_value_count += shard_step.sampled_value_count;
@@ -3333,10 +3373,11 @@ void APPOTrainer::collect_rollout(
       if (config_.model.sequence_length > 0 && step % config_.model.sequence_length == 0) {
         rollout_recurrent_states[0].zero_();
       }
-      torch::Tensor raw_obs_host = collector_->host_observations();
+    torch::Tensor raw_obs_host = collector_->host_observations();
     torch::Tensor episode_starts_host = collector_->host_episode_starts();
     torch::Tensor action_masks_host = collector_->host_action_masks();
     torch::Tensor learner_active_host = collector_->host_learner_active();
+    torch::Tensor snapshot_ids_host = collector_->host_snapshot_ids();
     std::future<void> physics_prefix_future;
     if (physics_prefix_ticks > 0) {
       physics_prefix_future = std::async(std::launch::async, [&]() {
@@ -3346,6 +3387,7 @@ void APPOTrainer::collect_rollout(
     torch::Tensor raw_obs = raw_obs_host.to(device_, use_pinned_host_buffers_);
     torch::Tensor episode_starts = episode_starts_host.to(device_, use_pinned_host_buffers_);
     torch::Tensor action_masks = action_masks_host.to(device_, use_pinned_host_buffers_);  // uint8
+    torch::Tensor snapshot_ids = snapshot_ids_host.to(device_, use_pinned_host_buffers_);
 
     torch::Tensor normalized_obs;
     torch::Tensor actions;
@@ -3365,6 +3407,19 @@ void APPOTrainer::collect_rollout(
           &rollout_recurrent_states[0],
           goal_values);
       actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
+      if (self_play_manager_ && self_play_manager_->has_snapshots()) {
+        torch::Tensor snapshot_actions;
+        self_play_manager_->infer_opponent_actions(
+            rollout_actor,
+            raw_obs,
+            action_masks,
+            episode_starts,
+            snapshot_ids,
+            output.encoded,
+            &snapshot_actions,
+            nullptr);
+        actions = torch::where(snapshot_ids >= 0, snapshot_actions.to(actions.device()), actions);
+      }
     }
     if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
       torch::cuda::synchronize();
@@ -3386,6 +3441,9 @@ void APPOTrainer::collect_rollout(
               static_cast<std::size_t>(action_indices_cpu.numel())),
           physics_prefix_ticks,
           &collector_timings);
+      if (self_play_manager_ && !collector_->last_self_play_outcomes().empty()) {
+        self_play_manager_->record_live_outcomes(collector_->mode(), collector_->last_self_play_outcomes());
+      }
     }
     metrics.action_decode_seconds +=
         std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();

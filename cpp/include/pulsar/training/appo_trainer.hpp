@@ -191,6 +191,7 @@ class APPOTrainer {
   void apply_curriculum_to_collectors();
   void apply_curriculum_lr();
   void rebuild_collectors();
+  void sync_self_play_assignments_to_collectors();
 
   struct ESPopulationFitness {
     std::vector<float> fitness{};

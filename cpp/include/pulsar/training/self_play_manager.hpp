@@ -63,6 +63,9 @@ class SelfPlayManager {
       const ObservationNormalizer& current_normalizer,
       std::int64_t global_step,
       int update_index);
+  void record_live_outcomes(
+      const std::string& mode,
+      const std::vector<SelfPlayLiveOutcome>& outcomes);
 
  private:
   struct Snapshot {

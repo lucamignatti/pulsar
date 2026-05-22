@@ -34,6 +34,11 @@ struct SelfPlayAssignment {
   int snapshot_index = -1;
 };
 
+struct SelfPlayLiveOutcome {
+  int snapshot_index = -1;
+  int learner_result = 0;  // 1 = learner/current win, 0 = draw, -1 = learner/current loss.
+};
+
 class BatchedRocketSimCollector {
  public:
   using AssignmentFn = std::function<SelfPlayAssignment(std::size_t, std::uint64_t)>;
@@ -98,6 +103,7 @@ class BatchedRocketSimCollector {
     int64_t ball_prox_denom = 0;
   };
   [[nodiscard]] const StepOutput& last_step_output() const;
+  [[nodiscard]] const std::vector<SelfPlayLiveOutcome>& last_self_play_outcomes() const;
 
   [[nodiscard]] const torch::Tensor& host_observations() const;
   [[nodiscard]] const torch::Tensor& host_action_masks() const;
@@ -147,6 +153,7 @@ class BatchedRocketSimCollector {
   void initialize(std::vector<TransitionEnginePtr> engines, bool pin_host_memory);
   void rebuild_host_buffers(HostBuffers& buffers, CollectorTimings* timings);
   void rebuild_next_buffers(CollectorTimings* timings);
+  void collect_live_self_play_outcomes();
   [[nodiscard]] int bounded_physics_prefix_ticks(int prefix_tick_count) const;
 
   ExperimentConfig config_{};
@@ -178,6 +185,7 @@ class BatchedRocketSimCollector {
   std::vector<EnvRewardState> env_reward_states_;
   RewardEngine reward_engine_;
   StepOutput last_step_output_;
+  std::vector<SelfPlayLiveOutcome> last_self_play_outcomes_;
   std::string mode_ = "1v1";
   std::size_t total_agents_ = 0;
   int obs_dim_ = 0;

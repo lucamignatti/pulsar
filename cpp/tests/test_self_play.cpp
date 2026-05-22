@@ -86,6 +86,7 @@ void test_snapshot_save_load_trim_and_assignment() {
 
 void test_opponent_inference_and_elo_math() {
   pulsar::ExperimentConfig config = pulsar::test::make_test_config();
+  config.env.team_size = 1;
   config.self_play_league.enabled = true;
   config.self_play_league.opponent_probability = 1.0F;
   config.self_play_league.snapshot_interval_updates = 1;
@@ -131,6 +132,15 @@ void test_opponent_inference_and_elo_math() {
     pulsar::test::require(actions[2].item<std::int64_t>() == 7, "opponent slot should obey mask");
     pulsar::test::require(!actions.requires_grad(), "opponent actions should be inference-only");
     pulsar::test::require(inference_seconds >= 0.0, "inference timing should be recorded");
+
+    const double rating_before = manager.current_ratings().at("1v1");
+    manager.record_live_outcomes("1v1", {pulsar::SelfPlayLiveOutcome{
+        .snapshot_index = 0,
+        .learner_result = 1,
+    }});
+    pulsar::test::require(
+        manager.current_ratings().at("1v1") > rating_before,
+        "live self-play win should increase current ELO");
   }
   safe_remove_all(root);
 
@@ -252,7 +262,7 @@ void test_snapshot_reload_preserves_actor_config() {
   safe_remove_all(root);
 }
 
-void test_self_play_eval_runs_and_loaded_snapshots_are_bounded() {
+void test_self_play_eval_is_skipped_and_loaded_snapshots_are_bounded() {
   namespace fs = std::filesystem;
   pulsar::ExperimentConfig config = pulsar::test::make_test_config();
   config.env.collision_meshes_path = pulsar::test::find_repo_collision_meshes().string();
@@ -286,8 +296,8 @@ void test_self_play_eval_runs_and_loaded_snapshots_are_bounded() {
     pulsar::SelfPlayManager reloaded(config, root, obs_builder, action_parser, torch::kCPU);
     const auto metrics = reloaded.on_update(model, normalizer, 40, 4);
     pulsar::test::require(metrics.snapshot_count == 2, "loaded snapshot pool should honor max_snapshots");
-    pulsar::test::require(metrics.eval_seconds >= 0.0, "self-play evaluation should run");
-    pulsar::test::require(!metrics.ratings.empty(), "self-play evaluation should report ELO ratings");
+    pulsar::test::require(metrics.eval_seconds == 0.0, "scheduled self-play evaluation should be skipped");
+    pulsar::test::require(!metrics.ratings.empty(), "self-play update should report live ELO ratings");
   }
 
   safe_remove_all(root);
@@ -520,7 +530,7 @@ void test_snapshot_mode_is_preserved() {
   safe_remove_all(root);
 }
 
-void test_collection_ignores_snapshot_assignments() {
+void test_collection_applies_snapshot_assignments() {
   pulsar::ExperimentConfig config = pulsar::test::make_test_config();
   config.env.collision_meshes_path = pulsar::test::find_repo_collision_meshes().string();
   config.env.team_size = 1;
@@ -546,22 +556,25 @@ void test_collection_ignores_snapshot_assignments() {
     };
   });
 
-  const auto require_all_current_policy = [&collector](const std::string& context) {
+  const auto require_split_self_play = [&collector](const std::string& context) {
     const torch::Tensor learner_active = collector.host_learner_active();
     const torch::Tensor snapshot_ids = collector.host_snapshot_ids();
     pulsar::test::require(
-        learner_active.sum().item<float>() == static_cast<float>(learner_active.numel()),
-        context + ": every agent should remain learner-active");
+        learner_active.sum().item<float>() == static_cast<float>(learner_active.numel() / 2),
+        context + ": one team should remain learner-active");
     pulsar::test::require(
-        (snapshot_ids == -1).all().item<bool>(),
-        context + ": snapshot ids should remain disabled");
+        ((snapshot_ids == 42).sum().item<int64_t>() == snapshot_ids.numel() / 2),
+        context + ": snapshot ids should be assigned to the opponent team");
+    pulsar::test::require(
+        ((snapshot_ids == -1).sum().item<int64_t>() == snapshot_ids.numel() / 2),
+        context + ": learner team should not have snapshot ids");
   };
 
-  require_all_current_policy("after assignment hook");
+  require_split_self_play("after assignment hook");
 
   std::vector<std::int64_t> actions(collector.total_agents(), 0);
   collector.step(std::span<const std::int64_t>(actions.data(), actions.size()));
-  require_all_current_policy("after environment step");
+  require_split_self_play("after environment step");
 }
 
 }  // namespace
@@ -575,13 +588,13 @@ int main() {
     test_snapshot_save_load_trim_and_assignment();
     test_opponent_inference_and_elo_math();
     test_snapshot_reload_preserves_actor_config();
-    test_self_play_eval_runs_and_loaded_snapshots_are_bounded();
+    test_self_play_eval_is_skipped_and_loaded_snapshots_are_bounded();
     test_checkpoint_metadata_validation();
     test_rng_state_round_trip();
     test_restore_ratings();
     test_ratings_include_all_curriculum_modes();
     test_snapshot_mode_is_preserved();
-    test_collection_ignores_snapshot_assignments();
+    test_collection_applies_snapshot_assignments();
     std::cout << "pulsar_self_play_tests passed\n" << std::flush;
     std::_Exit(EXIT_SUCCESS);
   } catch (const std::exception& exc) {

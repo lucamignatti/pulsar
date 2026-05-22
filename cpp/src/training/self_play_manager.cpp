@@ -108,14 +108,16 @@ bool SelfPlayManager::enabled() const {
   return config_.self_play_league.enabled;
 }
 
-SelfPlayAssignment SelfPlayManager::sample_assignment(std::size_t, std::uint64_t) {
+SelfPlayAssignment SelfPlayManager::sample_assignment(std::size_t env_idx, std::uint64_t seed) {
   SelfPlayAssignment assignment{};
   if (!enabled() || snapshots_.empty()) {
     return assignment;
   }
 
+  std::mt19937 rng(static_cast<std::mt19937::result_type>(
+      seed ^ (static_cast<std::uint64_t>(env_idx) * 0x9e3779b97f4a7c15ULL)));
   std::uniform_real_distribution<float> probability(0.0F, 1.0F);
-  if (probability(rng_) > config_.self_play_league.opponent_probability) {
+  if (probability(rng) > config_.self_play_league.opponent_probability) {
     return assignment;
   }
 
@@ -140,7 +142,7 @@ SelfPlayAssignment SelfPlayManager::sample_assignment(std::size_t, std::uint64_t
 
   std::uniform_int_distribution<int> team_dist(0, 1);
   assignment.enabled = true;
-  assignment.learner_team = team_dist(rng_) == 0 ? Team::Blue : Team::Orange;
+  assignment.learner_team = team_dist(rng) == 0 ? Team::Blue : Team::Orange;
 
   if (config_.self_play_league.pfsp_enabled) {
     double r_current = config_.self_play_league.elo_initial;
@@ -163,10 +165,10 @@ SelfPlayAssignment SelfPlayManager::sample_assignment(std::size_t, std::uint64_t
       weights.push_back(std::max(w, 1e-6));
     }
     std::discrete_distribution<std::size_t> dist(weights.begin(), weights.end());
-    assignment.snapshot_index = matching_indices[dist(rng_)];
+    assignment.snapshot_index = matching_indices[dist(rng)];
   } else {
     std::uniform_int_distribution<int> snapshot_dist(0, static_cast<int>(matching_indices.size()) - 1);
-    assignment.snapshot_index = matching_indices[static_cast<std::size_t>(snapshot_dist(rng_))];
+    assignment.snapshot_index = matching_indices[static_cast<std::size_t>(snapshot_dist(rng))];
   }
   return assignment;
 }
@@ -262,17 +264,35 @@ SelfPlayMetrics SelfPlayManager::on_update(
   }
   metrics.snapshot_count = static_cast<int>(snapshots_.size());
 
-  if (!snapshots_.empty() &&
-      config_.self_play_league.eval_interval_updates > 0 &&
-      update_index % config_.self_play_league.eval_interval_updates == 0) {
-    metrics = evaluate_current(current_model, current_normalizer);
-    metrics.snapshot_count = static_cast<int>(snapshots_.size());
-  } else {
-    for (const auto& pair : current_ratings_) {
-      metrics.ratings[pair.first] = pair.second;
-    }
+  for (const auto& pair : current_ratings_) {
+    metrics.ratings[pair.first] = pair.second;
   }
   return metrics;
+}
+
+void SelfPlayManager::record_live_outcomes(
+    const std::string& mode,
+    const std::vector<SelfPlayLiveOutcome>& outcomes) {
+  if (!enabled() || outcomes.empty()) {
+    return;
+  }
+  const std::string rating_mode = mode.empty() ? current_mode_ : mode;
+  auto [current_it, _] = current_ratings_.emplace(rating_mode, config_.self_play_league.elo_initial);
+  for (const SelfPlayLiveOutcome& outcome : outcomes) {
+    if (outcome.snapshot_index < 0 ||
+        outcome.snapshot_index >= static_cast<int>(snapshots_.size())) {
+      continue;
+    }
+    Snapshot& snapshot = snapshots_[static_cast<std::size_t>(outcome.snapshot_index)];
+    auto [snapshot_it, __] = snapshot.ratings.emplace(rating_mode, config_.self_play_league.elo_initial);
+    if (outcome.learner_result > 0) {
+      update_elo_ratings(current_it->second, snapshot_it->second, config_.self_play_league.elo_k);
+    } else if (outcome.learner_result < 0) {
+      update_elo_ratings(snapshot_it->second, current_it->second, config_.self_play_league.elo_k);
+    } else {
+      update_elo_draw_impl(current_it->second, snapshot_it->second, config_.self_play_league.elo_k);
+    }
+  }
 }
 
 void SelfPlayManager::load_existing_snapshots() {

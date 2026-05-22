@@ -164,8 +164,7 @@ void BatchedRocketSimCollector::initialize(
 }
 
 void BatchedRocketSimCollector::set_self_play_assignment_fn(AssignmentFn assignment_fn) {
-  (void)assignment_fn;
-  assignment_fn_ = {};
+  assignment_fn_ = std::move(assignment_fn);
   for (std::size_t env_idx = 0; env_idx < envs_.size(); ++env_idx) {
     assign_env(env_idx, envs_[env_idx].reset_seed);
   }
@@ -373,8 +372,15 @@ void BatchedRocketSimCollector::rebuild_host_buffers(HostBuffers& buffers, Colle
 
       for (std::size_t local_idx = 0; local_idx < state.cars.size(); ++local_idx) {
         const std::size_t global_idx = agent_offset + local_idx;
-        learner_ptr[global_idx] = 1.0F;
-        snapshot_ptr[global_idx] = -1;
+        const SelfPlayAssignment& assignment = envs_[env_idx].assignment;
+        const bool self_play =
+            assignment.enabled && assignment.snapshot_index >= 0;
+        const bool learner =
+            !self_play || state.cars[local_idx].team == assignment.learner_team;
+        learner_ptr[global_idx] = learner ? 1.0F : 0.0F;
+        snapshot_ptr[global_idx] = (self_play && !learner)
+            ? static_cast<std::int64_t>(assignment.snapshot_index)
+            : -1;
       }
     }
   });
@@ -388,6 +394,51 @@ void BatchedRocketSimCollector::rebuild_next_buffers(CollectorTimings* timings) 
   PULSAR_TRACE_SCOPE_CAT("collector", "rebuild_next_buffers");
   next_buffers_.episode_starts.copy_(host_dones_);
   rebuild_host_buffers(next_buffers_, timings);
+}
+
+void BatchedRocketSimCollector::collect_live_self_play_outcomes() {
+  last_self_play_outcomes_.clear();
+  const auto* dones_ptr = host_dones_.data_ptr<float>();
+  const auto* labels_ptr = host_terminal_outcome_labels_.data_ptr<std::int64_t>();
+  const auto* learner_ptr = current_buffers_.learner_active.data_ptr<float>();
+
+  for (std::size_t env_idx = 0; env_idx < envs_.size(); ++env_idx) {
+    const SelfPlayAssignment& assignment = envs_[env_idx].assignment;
+    if (!assignment.enabled || assignment.snapshot_index < 0) {
+      continue;
+    }
+
+    const std::size_t agent_begin = agent_offsets_[env_idx];
+    const std::size_t agent_end = agent_offsets_[env_idx + 1];
+    bool env_done = false;
+    bool has_learner_terminal = false;
+    int learner_result = 0;
+    for (std::size_t gi = agent_begin; gi < agent_end; ++gi) {
+      if (dones_ptr[gi] <= 0.5F) {
+        continue;
+      }
+      env_done = true;
+      if (learner_ptr[gi] <= 0.5F) {
+        continue;
+      }
+      has_learner_terminal = true;
+      const std::int64_t label = labels_ptr[gi];
+      if (label == 0) {
+        learner_result = 1;
+        break;
+      }
+      if (label == 1) {
+        learner_result = -1;
+        break;
+      }
+    }
+    if (env_done && has_learner_terminal) {
+      last_self_play_outcomes_.push_back(SelfPlayLiveOutcome{
+          .snapshot_index = assignment.snapshot_index,
+          .learner_result = learner_result,
+      });
+    }
+  }
 }
 
 void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
@@ -583,6 +634,7 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         std::chrono::duration<double>(std::chrono::steady_clock::now() - done_reset_start).count();
   }
 
+  collect_live_self_play_outcomes();
   rebuild_next_buffers(timings);
   std::swap(current_buffers_, next_buffers_);
 }
@@ -675,6 +727,7 @@ void BatchedRocketSimCollector::step_after_physics_prefix(
 
   // Reset step output
   last_step_output_ = StepOutput{};
+  last_self_play_outcomes_.clear();
   auto& so = last_step_output_;
 
   // Output tensor pointers
@@ -883,11 +936,21 @@ void BatchedRocketSimCollector::step_after_physics_prefix(
 
       for (std::size_t i = 0; i < count; ++i) {
         const std::size_t gi = agent_begin + i;
-        next_learner_ptr[gi] = 1.0F;
-        next_snapshot_ptr[gi] = -1;
+        const SelfPlayAssignment& assignment = envs_[env_idx].assignment;
+        const bool self_play =
+            assignment.enabled && assignment.snapshot_index >= 0;
+        const bool learner =
+            !self_play || next_state.cars[i].team == assignment.learner_team;
+        next_learner_ptr[gi] = learner ? 1.0F : 0.0F;
+        next_snapshot_ptr[gi] = (self_play && !learner)
+            ? static_cast<std::int64_t>(assignment.snapshot_index)
+            : -1;
       }
     }
   });
+
+  collect_live_self_play_outcomes();
+  const torch::Tensor step_learner_active = current_buffers_.learner_active;
 
   // Mark the next observation as an episode start exactly when the just-taken
   // step ended an episode. This must happen after the loop fills host_dones_.
@@ -897,7 +960,7 @@ void BatchedRocketSimCollector::step_after_physics_prefix(
   std::swap(current_buffers_, next_buffers_);
 
   // Compute scalar step output
-  const auto* la_ptr = current_buffers_.learner_active.data_ptr<float>();
+  const auto* la_ptr = step_learner_active.data_ptr<float>();
   const float* env_t_ptr = host_env_touched_.data_ptr<float>();
   const float* env_mt_ptr = host_env_multi_touched_.data_ptr<float>();
   const int64_t n_agents = static_cast<int64_t>(total_agents_);
@@ -961,6 +1024,10 @@ int BatchedRocketSimCollector::bounded_physics_prefix_ticks(int prefix_tick_coun
 
 const BatchedRocketSimCollector::StepOutput& BatchedRocketSimCollector::last_step_output() const {
   return last_step_output_;
+}
+
+const std::vector<SelfPlayLiveOutcome>& BatchedRocketSimCollector::last_self_play_outcomes() const {
+  return last_self_play_outcomes_;
 }
 
 const torch::Tensor& BatchedRocketSimCollector::host_observations() const {
