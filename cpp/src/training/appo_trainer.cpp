@@ -786,9 +786,9 @@ int effective_update_forward_samples(
       static_cast<std::int64_t>(rollout_total_agents) >
           static_cast<std::int64_t>(nominal_env_count) * 2;
   if (total_memory == 0 || total_memory <= 20LL * kGiB) {
-    samples = std::min(samples, expanded_rollout ? 8192 : 16384);
+    samples = std::min(samples, expanded_rollout ? 4096 : 8192);
   } else if (total_memory <= 24LL * kGiB) {
-    samples = std::min(samples, expanded_rollout ? 12288 : 24576);
+    samples = std::min(samples, expanded_rollout ? 8192 : 12288);
   }
   return std::max(1, samples);
 }
