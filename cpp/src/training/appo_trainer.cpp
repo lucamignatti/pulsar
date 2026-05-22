@@ -748,25 +748,6 @@ int effective_max_forward_samples(const ModelConfig& config, const torch::Device
       : std::max(1, std::min(std::max(1, config.max_forward_samples), cap));
 }
 
-std::int64_t cuda_total_memory_bytes(const torch::Device& device) noexcept {
-#ifdef PULSAR_HAS_CUDA
-  if (!device.is_cuda()) {
-    return 0;
-  }
-  try {
-    const int device_index = device.has_index() ? device.index() : 0;
-    const auto [free_bytes, total_bytes] = c10::cuda::CUDACachingAllocator::get()->getMemoryInfo(device_index);
-    (void)free_bytes;
-    return static_cast<std::int64_t>(total_bytes);
-  } catch (const std::exception&) {
-    return 0;
-  }
-#else
-  (void)device;
-  return 0;
-#endif
-}
-
 int effective_update_forward_samples(
     const ModelConfig& config,
     const torch::Device& device,
@@ -774,23 +755,11 @@ int effective_update_forward_samples(
     std::size_t num_update_gpus,
     int rollout_total_agents,
     int nominal_env_count) {
-  int samples = effective_max_forward_samples(config, device);
-  if (!device.is_cuda() || !overlap_collection_update || num_update_gpus != 1) {
-    return samples;
-  }
-
-  constexpr std::int64_t kGiB = 1024LL * 1024LL * 1024LL;
-  const std::int64_t total_memory = cuda_total_memory_bytes(device);
-  const bool expanded_rollout =
-      nominal_env_count > 0 &&
-      static_cast<std::int64_t>(rollout_total_agents) >
-          static_cast<std::int64_t>(nominal_env_count) * 2;
-  if (total_memory == 0 || total_memory <= 20LL * kGiB) {
-    samples = std::min(samples, expanded_rollout ? 4096 : 8192);
-  } else if (total_memory <= 24LL * kGiB) {
-    samples = std::min(samples, expanded_rollout ? 8192 : 12288);
-  }
-  return std::max(1, samples);
+  (void)overlap_collection_update;
+  (void)num_update_gpus;
+  (void)rollout_total_agents;
+  (void)nominal_env_count;
+  return effective_max_forward_samples(config, device);
 }
 
 void append_metrics_line(
@@ -2474,17 +2443,98 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
     eval_modes.emplace_back(mode, 1.0F);
   }
 
-  float weight_sum = 0.0F;
-  for (const auto& [mode, weight] : eval_modes) {
-    (void)mode;
-    weight_sum += weight;
+  struct EsModePlan {
+    std::string mode;
+    float raw_weight = 0.0F;
+    int agents_per_env = 2;
+    std::vector<std::int64_t> member_indices;
+  };
+
+  std::vector<EsModePlan> es_mode_plans;
+  es_mode_plans.reserve(eval_modes.size());
+  double agent_budget_score_sum = 0.0;
+  for (const auto& [mode, raw_weight] : eval_modes) {
+    const int agents_per_env = 2 * team_size_from_mode(mode);
+    es_mode_plans.push_back({
+        .mode = mode,
+        .raw_weight = raw_weight,
+        .agents_per_env = agents_per_env,
+        .member_indices = {},
+    });
+    agent_budget_score_sum +=
+        static_cast<double>(std::max(raw_weight, 0.0F)) /
+        static_cast<double>(std::max(agents_per_env, 1));
   }
-  if (weight_sum <= 0.0F) {
-    weight_sum = 1.0F;
+  if (agent_budget_score_sum <= 0.0) {
+    agent_budget_score_sum = 1.0;
   }
 
-  for (const auto& [mode, raw_weight] : eval_modes) {
-    const float mode_weight = raw_weight / weight_sum;
+  const bool allocate_antithetic_pairs = es_cfg.antithetic_sampling && (pop % 2) == 0;
+  const int allocation_units = allocate_antithetic_pairs ? pop / 2 : pop;
+  const int min_units_per_mode =
+      allocation_units >= static_cast<int>(es_mode_plans.size()) ? 1 : 0;
+  std::vector<int> units_per_mode(es_mode_plans.size(), 0);
+  std::vector<double> target_units(es_mode_plans.size(), 0.0);
+  int assigned_units = 0;
+  for (std::size_t i = 0; i < es_mode_plans.size(); ++i) {
+    const double score =
+        static_cast<double>(std::max(es_mode_plans[i].raw_weight, 0.0F)) /
+        static_cast<double>(std::max(es_mode_plans[i].agents_per_env, 1));
+    target_units[i] = static_cast<double>(allocation_units) * score / agent_budget_score_sum;
+    units_per_mode[i] = std::max(min_units_per_mode, static_cast<int>(std::floor(target_units[i])));
+    assigned_units += units_per_mode[i];
+  }
+  while (assigned_units < allocation_units) {
+    int best_idx = -1;
+    double best_deficit = -std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i < units_per_mode.size(); ++i) {
+      const double deficit = target_units[i] - static_cast<double>(units_per_mode[i]);
+      if (deficit > best_deficit) {
+        best_deficit = deficit;
+        best_idx = static_cast<int>(i);
+      }
+    }
+    if (best_idx < 0) break;
+    ++units_per_mode[static_cast<std::size_t>(best_idx)];
+    ++assigned_units;
+  }
+  while (assigned_units > allocation_units) {
+    int remove_idx = -1;
+    double worst_surplus = -std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i < units_per_mode.size(); ++i) {
+      if (units_per_mode[i] <= min_units_per_mode) continue;
+      const double surplus = static_cast<double>(units_per_mode[i]) - target_units[i];
+      if (surplus > worst_surplus) {
+        worst_surplus = surplus;
+        remove_idx = static_cast<int>(i);
+      }
+    }
+    if (remove_idx < 0) break;
+    --units_per_mode[static_cast<std::size_t>(remove_idx)];
+    --assigned_units;
+  }
+
+  int unit_cursor = 0;
+  for (std::size_t mode_idx = 0; mode_idx < es_mode_plans.size(); ++mode_idx) {
+    EsModePlan& plan = es_mode_plans[mode_idx];
+    const int units = units_per_mode[mode_idx];
+    plan.member_indices.reserve(static_cast<std::size_t>(allocate_antithetic_pairs ? units * 2 : units));
+    for (int unit = 0; unit < units && unit_cursor < allocation_units; ++unit, ++unit_cursor) {
+      if (allocate_antithetic_pairs) {
+        plan.member_indices.push_back(unit_cursor);
+        plan.member_indices.push_back(unit_cursor + allocation_units);
+      } else {
+        plan.member_indices.push_back(unit_cursor);
+      }
+    }
+  }
+
+  for (const EsModePlan& plan : es_mode_plans) {
+    const std::string& mode = plan.mode;
+    const int mode_pop = static_cast<int>(plan.member_indices.size());
+    if (mode_pop <= 0) {
+      continue;
+    }
     ExperimentConfig mode_config = config_;
     mode_config.env.team_size = team_size_from_mode(mode);
     mode_config.env.spawn_opponents = true;
@@ -2497,7 +2547,16 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
     const int team_size = mode_config.env.team_size;
     const int agents_per_env = team_size * 2;
     const int member_agents = eval_envs * agents_per_env;
-    result.agent_steps += static_cast<std::int64_t>(pop) *
+    const torch::Tensor member_index_tensor = torch::from_blob(
+        const_cast<std::int64_t*>(plan.member_indices.data()),
+        {static_cast<long>(mode_pop)},
+        torch::TensorOptions().dtype(torch::kInt64))
+        .clone()
+        .to(A_stack.device());
+    const torch::Tensor A_mode = A_stack.index_select(0, member_index_tensor);
+    const torch::Tensor B_mode = B_stack.index_select(0, member_index_tensor);
+
+    result.agent_steps += static_cast<std::int64_t>(mode_pop) *
         static_cast<std::int64_t>(eval_envs) *
         static_cast<std::int64_t>(agents_per_env) *
         static_cast<std::int64_t>(es_cfg.eval_episodes_per_member) *
@@ -2523,16 +2582,16 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
         1,
         static_cast<int>(compute_devices_.empty() ? 1 : compute_devices_.size()));
     const int requested_shards = std::max(1, std::min(
-        pop,
+        mode_pop,
         es_cfg.eval_shards > 0 ? es_cfg.eval_shards : device_count));
     std::vector<EsShardSpec> shard_specs;
     shard_specs.reserve(static_cast<std::size_t>(requested_shards));
     for (int shard = 0; shard < requested_shards; ++shard) {
-      const int base_members = pop / requested_shards;
-      const int extra_members = shard < (pop % requested_shards) ? 1 : 0;
+      const int base_members = mode_pop / requested_shards;
+      const int extra_members = shard < (mode_pop % requested_shards) ? 1 : 0;
       const int member_count = base_members + extra_members;
       if (member_count <= 0) continue;
-      const int member_start = shard * base_members + std::min(shard, pop % requested_shards);
+      const int member_start = shard * base_members + std::min(shard, mode_pop % requested_shards);
       const int total_workers = es_cfg.eval_workers;
       const int base_workers = total_workers > 0 ? total_workers / requested_shards : 0;
       const int extra_workers = total_workers > 0 && shard < (total_workers % requested_shards) ? 1 : 0;
@@ -2579,8 +2638,8 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
         shard_actor->eval();
         ObservationNormalizer shard_normalizer = actor_normalizer_.clone();
         shard_normalizer.to(spec.device);
-        torch::Tensor A_shard = A_stack.narrow(0, spec.member_start, spec.member_count).to(spec.device);
-        torch::Tensor B_shard = B_stack.narrow(0, spec.member_start, spec.member_count).to(spec.device);
+        torch::Tensor A_shard = A_mode.narrow(0, spec.member_start, spec.member_count).to(spec.device);
+        torch::Tensor B_shard = B_mode.narrow(0, spec.member_start, spec.member_count).to(spec.device);
 
 #ifdef PULSAR_HAS_CUDA
         std::optional<c10::cuda::CUDAGuard> shard_device_guard;
@@ -2728,12 +2787,12 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
       }));
     }
 
-    std::vector<float> reward_sum(static_cast<std::size_t>(pop), 0.0F);
-    std::vector<float> reward_count(static_cast<std::size_t>(pop), 0.0F);
-    std::vector<float> kl_sum(static_cast<std::size_t>(pop), 0.0F);
-    std::vector<float> kl_count(static_cast<std::size_t>(pop), 0.0F);
-    std::vector<int> episode_counts(static_cast<std::size_t>(pop), 0);
-    std::vector<int> win_counts(static_cast<std::size_t>(pop), 0);
+    std::vector<float> reward_sum(static_cast<std::size_t>(mode_pop), 0.0F);
+    std::vector<float> reward_count(static_cast<std::size_t>(mode_pop), 0.0F);
+    std::vector<float> kl_sum(static_cast<std::size_t>(mode_pop), 0.0F);
+    std::vector<float> kl_count(static_cast<std::size_t>(mode_pop), 0.0F);
+    std::vector<int> episode_counts(static_cast<std::size_t>(mode_pop), 0);
+    std::vector<int> win_counts(static_cast<std::size_t>(mode_pop), 0);
     for (auto& future : shard_futures) {
       EsShardResult shard_result = future.get();
       for (std::size_t local = 0; local < shard_result.reward_sum.size(); ++local) {
@@ -2747,7 +2806,7 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
       }
     }
 
-    for (int i = 0; i < pop; ++i) {
+    for (int i = 0; i < mode_pop; ++i) {
       const int denom = std::max(episode_counts[static_cast<std::size_t>(i)], 1);
       const float mode_winrate =
           static_cast<float>(win_counts[static_cast<std::size_t>(i)]) / static_cast<float>(denom);
@@ -2755,9 +2814,10 @@ APPOTrainer::ESPopulationFitness APPOTrainer::evaluate_es_population(
           std::max(reward_count[static_cast<std::size_t>(i)], 1.0F);
       const float kl_mean = kl_sum[static_cast<std::size_t>(i)] /
           std::max(kl_count[static_cast<std::size_t>(i)], 1.0F);
-      result.reward[static_cast<std::size_t>(i)] += mode_weight * reward_mean;
-      result.winrate[static_cast<std::size_t>(i)] += mode_weight * mode_winrate;
-      result.kl[static_cast<std::size_t>(i)] += mode_weight * kl_mean;
+      const std::size_t global = static_cast<std::size_t>(plan.member_indices[static_cast<std::size_t>(i)]);
+      result.reward[global] = reward_mean;
+      result.winrate[global] = mode_winrate;
+      result.kl[global] = kl_mean;
     }
   }
 
