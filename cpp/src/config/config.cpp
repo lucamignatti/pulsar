@@ -288,12 +288,13 @@ void from_json(const json& j, CurriculumConfig& value) {
 }
 
 void to_json(json& j, const ActionTableConfig& value) {
-  j = json{{"builtin", value.builtin}, {"actions", value.actions}};
+  j = json{{"builtin", value.builtin}, {"actions", value.actions}, {"refined_action_masking", value.refined_action_masking}};
 }
 
 void from_json(const json& j, ActionTableConfig& value) {
   value.builtin = j.value("builtin", std::string{});
   value.actions = j.value("actions", std::vector<ControllerState>{});
+  value.refined_action_masking = j.value("refined_action_masking", false);
 }
 
 void to_json(json& j, const EnvConfig& value) {
@@ -310,6 +311,14 @@ void to_json(json& j, const EnvConfig& value) {
       {"spawn_opponents", value.spawn_opponents},
       {"randomize_kickoffs", value.randomize_kickoffs},
       {"seed", value.seed},
+      {"obs_x_mirror", value.obs_x_mirror},
+      {"obs_local_frame", value.obs_local_frame},
+      {"obs_relative_goals", value.obs_relative_goals},
+      {"obs_proximity_boosts", value.obs_proximity_boosts},
+      {"obs_explicit_kinematics", value.obs_explicit_kinematics},
+      {"obs_flip_decay", value.obs_flip_decay},
+      {"obs_action_history", value.obs_action_history},
+      {"obs_ball_prediction", value.obs_ball_prediction},
   };
 }
 
@@ -326,6 +335,14 @@ void from_json(const json& j, EnvConfig& value) {
   value.spawn_opponents = j.value("spawn_opponents", true);
   value.randomize_kickoffs = j.value("randomize_kickoffs", true);
   value.seed = j.value("seed", static_cast<std::uint64_t>(0));
+  value.obs_x_mirror = j.value("obs_x_mirror", false);
+  value.obs_local_frame = j.value("obs_local_frame", false);
+  value.obs_relative_goals = j.value("obs_relative_goals", false);
+  value.obs_proximity_boosts = j.value("obs_proximity_boosts", false);
+  value.obs_explicit_kinematics = j.value("obs_explicit_kinematics", false);
+  value.obs_flip_decay = j.value("obs_flip_decay", false);
+  value.obs_action_history = j.value("obs_action_history", false);
+  value.obs_ball_prediction = j.value("obs_ball_prediction", false);
 }
 
 void to_json(json& j, const ModelConfig& value) {

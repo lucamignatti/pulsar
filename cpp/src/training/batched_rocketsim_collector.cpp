@@ -499,6 +499,13 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
 
         float goal_pos[3];
         compute_goal_position(current_state, config_.goal_mapping, goal_pos);
+        if (config_.env.obs_x_mirror) {
+          const bool inverted = car.team == Team::Orange;
+          const float self_x = inverted ? -car.position.x : car.position.x;
+          if (self_x > 0.0F) {
+            goal_pos[0] = -goal_pos[0];
+          }
+        }
         const int pos_offset = static_cast<int>(global_idx) * 3;
         goal_pos_ptr[pos_offset + 0] = goal_pos[0];
         goal_pos_ptr[pos_offset + 1] = goal_pos[1];
@@ -601,14 +608,27 @@ void BatchedRocketSimCollector::step_after_physics_prefix(
       const std::size_t agent_begin = agent_offsets_[env_idx];
       const std::size_t agent_end = agent_offsets_[env_idx + 1];
       auto& engine = *envs_[env_idx].engine;
-      std::span<const ControllerState> env_actions(
-          actions.data() + static_cast<std::ptrdiff_t>(agent_begin),
-          agent_end - agent_begin);
+      const std::size_t count = agent_end - agent_begin;
+      auto& action_scratch = envs_[env_idx].action_scratch;
+      const EnvState& current_state = engine.state();
+      for (std::size_t idx = 0; idx < count; ++idx) {
+        action_scratch[idx] = actions[agent_begin + idx];
+        if (config_.env.obs_x_mirror) {
+          const CarState& car = current_state.cars[idx];
+          const bool inverted = car.team == Team::Orange;
+          const float self_x = inverted ? -car.position.x : car.position.x;
+          if (self_x > 0.0F) {
+            action_scratch[idx].steer = -action_scratch[idx].steer;
+            action_scratch[idx].yaw = -action_scratch[idx].yaw;
+            action_scratch[idx].roll = -action_scratch[idx].roll;
+          }
+        }
+      }
       if (remaining_ticks > 0) {
-        engine.apply_controls(env_actions);
+        engine.apply_controls(action_scratch);
         engine.step_physics(remaining_ticks);
       } else if (prefix_ticks == 0) {
-        engine.step_inplace(env_actions);
+        engine.step_inplace(action_scratch);
       }
     }
   });
@@ -699,6 +719,20 @@ void BatchedRocketSimCollector::step_after_physics_prefix(
               action_indices.data() + static_cast<std::ptrdiff_t>(agent_begin), count),
           envs_[env_idx].action_scratch);
       auto& engine = *envs_[env_idx].engine;
+      if (config_.env.obs_x_mirror) {
+        const EnvState& pre_step_state = engine.state();
+        for (std::size_t idx = 0; idx < count; ++idx) {
+          const CarState& car = pre_step_state.cars[idx];
+          const bool inverted = car.team == Team::Orange;
+          const float self_x = inverted ? -car.position.x : car.position.x;
+          if (self_x > 0.0F) {
+            auto& act = envs_[env_idx].action_scratch[idx];
+            act.steer = -act.steer;
+            act.yaw = -act.yaw;
+            act.roll = -act.roll;
+          }
+        }
+      }
       if (remaining_ticks > 0) {
         engine.apply_controls(envs_[env_idx].action_scratch);
         engine.step_physics(remaining_ticks);
@@ -775,6 +809,13 @@ void BatchedRocketSimCollector::step_after_physics_prefix(
 
         float goal_pos[3];
         compute_goal_position(current_state, config_.goal_mapping, goal_pos);
+        if (config_.env.obs_x_mirror) {
+          const bool inverted = car.team == Team::Orange;
+          const float self_x = inverted ? -car.position.x : car.position.x;
+          if (self_x > 0.0F) {
+            goal_pos[0] = -goal_pos[0];
+          }
+        }
         const int po = static_cast<int>(gi) * 3;
         goal_pos_ptr[po] = goal_pos[0];
         goal_pos_ptr[po + 1] = goal_pos[1];

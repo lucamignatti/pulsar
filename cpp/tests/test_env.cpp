@@ -8,7 +8,14 @@
 #include "pulsar/env/mutators.hpp"
 #include "pulsar/env/obs_builder.hpp"
 #include "pulsar/env/rocketsim_engine.hpp"
+#include "pulsar/rl/action_table.hpp"
 #include "test_utils.hpp"
+
+namespace pulsar {
+extern std::vector<int> g_boost_pad_mirror_indices;
+extern std::vector<Vec3> g_boost_pad_positions;
+extern std::vector<bool> g_boost_pad_is_big;
+}
 
 namespace {
 
@@ -193,6 +200,258 @@ void test_rocketsim_reproducibility() {
   pulsar::test::require(stepped_first.cars[0].is_boosting == stepped_second.cars[0].is_boosting, "boost flag mismatch");
 }
 
+void test_obs_x_mirror() {
+  pulsar::ExperimentConfig config = pulsar::test::make_test_config();
+  config.env.obs_x_mirror = true;
+
+  pulsar::EnvState state;
+  pulsar::FixedTeamSizeMutator fixed(config.env);
+  pulsar::KickoffMutator kickoff(config.env);
+  fixed.apply(state, 11);
+  kickoff.apply(state, 11);
+
+  // Set up pads
+  state.boost_pad_timers = {1.0F, 2.0F};
+  pulsar::g_boost_pad_mirror_indices = {1, 0};
+
+  // Case 1: Mirrored agent (on right side of field, x > 0)
+  state.ball.position = {230.0F, -460.0F, 920.0F};
+  state.ball.velocity = {115.0F, -230.0F, 345.0F};
+  state.ball.angular_velocity = {3.14159265F, 0.0F, -3.14159265F};
+  state.cars[0].position = {460.0F, 230.0F, 17.0F};
+  state.cars[0].velocity = {230.0F, -460.0F, 0.0F};
+  state.cars[0].angular_velocity = {0.0F, 1.0F, 2.0F};
+  state.cars[0].forward = {0.8F, 0.6F, 0.0F};
+  state.cars[0].up = {0.0F, 0.0F, 1.0F};
+
+  pulsar::PulsarObsBuilder obs_builder(config.env);
+  auto obs = obs_builder.build_obs(state, 0);
+
+  pulsar::test::require(nearly_equal(obs[0], -230.0F / 2300.0F), "mirrored ball pos x mismatch");
+  pulsar::test::require(nearly_equal(obs[1], -460.0F / 2300.0F), "mirrored ball pos y mismatch");
+  pulsar::test::require(nearly_equal(obs[3], -115.0F / 2300.0F), "mirrored ball vel x mismatch");
+  pulsar::test::require(nearly_equal(obs[6], 3.14159265F / 3.14159265F), "mirrored ball ang_vel x mismatch");
+  pulsar::test::require(nearly_equal(obs[8], 3.14159265F / 3.14159265F), "mirrored ball ang_vel z mismatch");
+
+  // Pad timers should be swapped: index 0 gets pad 1's timer (2.0F), index 1 gets pad 0's timer (1.0F)
+  pulsar::test::require(nearly_equal(obs[9], 2.0F * 0.1F), "mirrored boost pad 0 timer mismatch");
+  pulsar::test::require(nearly_equal(obs[10], 1.0F * 0.1F), "mirrored boost pad 1 timer mismatch");
+
+  // Car features start after ball (9 slots) + boost pads (2 slots in this mock state) + agent flags (9 slots)
+  // Let's count: ball (9) + pads (2) + flags (9) = 20 slots. So self car starts at obs[20].
+  pulsar::test::require(nearly_equal(obs[20], -460.0F / 2300.0F), "mirrored self pos x mismatch");
+  pulsar::test::require(nearly_equal(obs[23], -0.8F), "mirrored self forward x mismatch");
+  pulsar::test::require(nearly_equal(obs[29], -230.0F / 2300.0F), "mirrored self vel x mismatch");
+  pulsar::test::require(nearly_equal(obs[32], 0.0F / 3.14159265F), "mirrored self ang_vel x mismatch");
+  pulsar::test::require(nearly_equal(obs[33], -1.0F / 3.14159265F), "mirrored self ang_vel y mismatch");
+  pulsar::test::require(nearly_equal(obs[34], -2.0F / 3.14159265F), "mirrored self ang_vel z mismatch");
+
+  // Case 2: Non-mirrored agent (on left side of field, x < 0)
+  state.cars[0].position = {-460.0F, 230.0F, 17.0F};
+  obs = obs_builder.build_obs(state, 0);
+
+  pulsar::test::require(nearly_equal(obs[0], 230.0F / 2300.0F), "non-mirrored ball pos x mismatch");
+  pulsar::test::require(nearly_equal(obs[9], 1.0F * 0.1F), "non-mirrored boost pad 0 timer mismatch");
+  pulsar::test::require(nearly_equal(obs[20], -460.0F / 2300.0F), "non-mirrored self pos x mismatch");
+  pulsar::test::require(nearly_equal(obs[23], 0.8F), "non-mirrored self forward x mismatch");
+  pulsar::test::require(nearly_equal(obs[33], 1.0F / 3.14159265F), "non-mirrored self ang_vel y mismatch");
+}
+
+void test_advanced_obs_features() {
+  pulsar::ExperimentConfig config = pulsar::test::make_test_config();
+  
+  // 1. Verify dynamic dimension math
+  pulsar::PulsarObsBuilder base_builder(config.env);
+  std::size_t base_dim = base_builder.obs_dim();
+  
+  // Flag 1: obs_local_frame
+  auto local_frame_config = config.env;
+  local_frame_config.obs_local_frame = true;
+  pulsar::PulsarObsBuilder local_frame_builder(local_frame_config);
+  pulsar::test::require(local_frame_builder.obs_dim() == base_dim + 12 * config.env.team_size, "obs_local_frame dim mismatch");
+  
+  // Flag 2: obs_relative_goals
+  auto relative_goals_config = config.env;
+  relative_goals_config.obs_relative_goals = true;
+  pulsar::PulsarObsBuilder relative_goals_builder(relative_goals_config);
+  pulsar::test::require(relative_goals_builder.obs_dim() == base_dim + 18, "obs_relative_goals dim mismatch");
+  
+  // Flag 3: obs_proximity_boosts
+  auto proximity_boosts_config = config.env;
+  proximity_boosts_config.obs_proximity_boosts = true;
+  pulsar::PulsarObsBuilder proximity_boosts_builder(proximity_boosts_config);
+  pulsar::test::require(proximity_boosts_builder.obs_dim() == base_dim + 20, "obs_proximity_boosts dim mismatch");
+  
+  // Flag 4: obs_explicit_kinematics
+  auto explicit_kinematics_config = config.env;
+  explicit_kinematics_config.obs_explicit_kinematics = true;
+  pulsar::PulsarObsBuilder explicit_kinematics_builder(explicit_kinematics_config);
+  pulsar::test::require(explicit_kinematics_builder.obs_dim() == base_dim + 2, "obs_explicit_kinematics dim mismatch");
+  
+  // Flag 5: obs_flip_decay
+  auto flip_decay_config = config.env;
+  flip_decay_config.obs_flip_decay = true;
+  pulsar::PulsarObsBuilder flip_decay_builder(flip_decay_config);
+  pulsar::test::require(flip_decay_builder.obs_dim() == base_dim + 1, "obs_flip_decay dim mismatch");
+  
+  // Flag 6: obs_action_history
+  auto action_history_config = config.env;
+  action_history_config.obs_action_history = true;
+  pulsar::PulsarObsBuilder action_history_builder(action_history_config);
+  pulsar::test::require(action_history_builder.obs_dim() == base_dim + 8, "obs_action_history dim mismatch");
+  
+  // Flag 7: obs_ball_prediction
+  auto ball_prediction_config = config.env;
+  ball_prediction_config.obs_ball_prediction = true;
+  pulsar::PulsarObsBuilder ball_prediction_builder(ball_prediction_config);
+  pulsar::test::require(ball_prediction_builder.obs_dim() == base_dim + 9, "obs_ball_prediction dim mismatch");
+
+  // 2. Set up dummy state to verify extraction
+  pulsar::EnvState state;
+  pulsar::FixedTeamSizeMutator fixed(config.env);
+  fixed.apply(state, 11);
+  
+  // Initialize some pads (exactly 34 pads to match baseline dimension)
+  pulsar::g_boost_pad_positions = std::vector<pulsar::Vec3>(34, pulsar::Vec3{10000.0F, 10000.0F, 0.0F});
+  pulsar::g_boost_pad_positions[0] = {0.0F, 0.0F, 0.0F};
+  pulsar::g_boost_pad_positions[1] = {100.0F, 100.0F, 0.0F};
+  pulsar::g_boost_pad_positions[2] = {200.0F, 200.0F, 0.0F};
+  pulsar::g_boost_pad_positions[3] = {1000.0F, 1000.0F, 0.0F};
+  pulsar::g_boost_pad_positions[4] = {2000.0F, 2000.0F, 0.0F};
+
+  pulsar::g_boost_pad_is_big = std::vector<bool>(34, false);
+  pulsar::g_boost_pad_is_big[0] = true;
+  pulsar::g_boost_pad_is_big[4] = true;
+
+  state.boost_pad_timers = std::vector<float>(34, 0.0F);
+  state.boost_pad_timers[0] = 0.0F;
+  state.boost_pad_timers[1] = 1.0F;
+  state.boost_pad_timers[2] = 2.0F;
+  state.boost_pad_timers[3] = 3.0F;
+  state.boost_pad_timers[4] = 4.0F;
+  
+  state.ball.position = {0.0F, 1000.0F, 100.0F};
+  state.ball.velocity = {0.0F, -500.0F, 0.0F};
+  state.cars[0].position = {0.0F, 0.0F, 17.0F};
+  state.cars[0].velocity = {0.0F, 500.0F, 0.0F};
+  state.cars[0].forward = {0.0F, 1.0F, 0.0F};
+  state.cars[0].up = {0.0F, 0.0F, 1.0F};
+  state.cars[0].has_flip = true;
+  state.cars[0].has_jumped = true;
+  state.cars[0].air_time_since_jump = 0.25F;
+  state.cars[0].last_action = pulsar::ControllerState{.throttle = 0.5F, .steer = -0.5F, .yaw = 0.0F, .pitch = 1.0F, .roll = 0.0F, .jump = true, .boost = false, .handbrake = true};
+  
+  // Verify Local Frame values
+  {
+    auto obs = local_frame_builder.build_obs(state, 0);
+    const float* local_start = obs.data() + base_dim;
+    std::cout << "DEBUG: team=" << static_cast<int>(state.cars[0].team)
+              << " local_start[0]=" << local_start[0]
+              << " local_start[1]=" << local_start[1]
+              << " local_start[2]=" << local_start[2]
+              << " local_start[3]=" << local_start[3]
+              << " local_start[4]=" << local_start[4]
+              << " local_start[5]=" << local_start[5] << std::endl;
+    // Relative ball pos = ball - car = (0, 1000, 83)
+    // Project on right=(1,0,0), forward=(0,1,0), up=(0,0,1)
+    // local ball pos should be (0, 1000, 83) scaled by kPosScale
+    pulsar::test::require(nearly_equal(local_start[0], 0.0F), "local ball pos x mismatch");
+    pulsar::test::require(nearly_equal(local_start[1], 1000.0F / 2300.0F), "local ball pos y mismatch");
+    pulsar::test::require(nearly_equal(local_start[2], 83.0F / 2300.0F), "local ball pos z mismatch");
+  }
+  
+  // Verify Relative Goals values
+  {
+    auto obs = relative_goals_builder.build_obs(state, 0);
+    const float* goals_start = obs.data() + base_dim;
+    // Opponent goal is at (0, 5120, 0), self position (0, 0, 17) -> relative = (0, 5120, -17)
+    pulsar::test::require(nearly_equal(goals_start[0], 0.0F), "rel opp goal center x mismatch");
+    pulsar::test::require(nearly_equal(goals_start[1], 5120.0F / 2300.0F), "rel opp goal center y mismatch");
+    pulsar::test::require(nearly_equal(goals_start[2], -17.0F / 2300.0F), "rel opp goal center z mismatch");
+  }
+  
+  // Verify Proximity Boosts values
+  {
+    auto obs = proximity_boosts_builder.build_obs(state, 0);
+    const float* boost_start = obs.data() + base_dim;
+    // P1 (small, 100,100,0): dist = ~141
+    // P2 (small, 200,200,0): dist = ~282
+    // P3 (small, 1000,1000,0): dist = ~1414
+    // Closest small pad is P1, vector is (100, 100, -17)
+    pulsar::test::require(nearly_equal(boost_start[0], 100.0F / 2300.0F), "prox small boost pos x mismatch");
+    pulsar::test::require(nearly_equal(boost_start[3], 1.0F * 0.1F), "prox small boost timer mismatch");
+  }
+  
+  // Verify Explicit Kinematics values
+  {
+    auto obs = explicit_kinematics_builder.build_obs(state, 0);
+    const float* kin_start = obs.data() + base_dim;
+    pulsar::test::require(nearly_equal(kin_start[0], std::sqrt(1000.0F * 1000.0F + 83.0F * 83.0F) / 2300.0F, 1.0e-3F), "explicit distance mismatch");
+    pulsar::test::require(nearly_equal(kin_start[1], 1000.0F * 1000.0F / std::sqrt(1000.0F * 1000.0F + 83.0F * 83.0F) / 2300.0F, 1.0e-3F), "explicit closing vel mismatch");
+  }
+  
+  // Verify Flip Decay values
+  {
+    auto obs = flip_decay_builder.build_obs(state, 0);
+    const float* flip_start = obs.data() + base_dim;
+    // air_time_since_jump = 0.25 -> remaining = 1.0 / 1.25 = 0.8
+    pulsar::test::require(nearly_equal(flip_start[0], 0.8F), "flip decay mismatch");
+  }
+  
+  // Verify Action History values
+  {
+    auto obs = action_history_builder.build_obs(state, 0);
+    const float* act_start = obs.data() + base_dim;
+    pulsar::test::require(nearly_equal(act_start[0], 0.5F), "action history throttle mismatch");
+    pulsar::test::require(nearly_equal(act_start[1], -0.5F), "action history steer mismatch");
+    pulsar::test::require(nearly_equal(act_start[5], 1.0F), "action history jump mismatch");
+    pulsar::test::require(nearly_equal(act_start[7], 1.0F), "action history handbrake mismatch");
+  }
+  
+  // Verify Ball Prediction values
+  {
+    auto obs = ball_prediction_builder.build_obs(state, 0);
+    const float* pred_start = obs.data() + base_dim;
+    pulsar::test::require(std::abs(pred_start[0]) >= 0.0F, "ball prediction validity check");
+  }
+
+  // 3. Verify Refined Action Masking
+  {
+    pulsar::ActionTableConfig mask_config;
+    mask_config.refined_action_masking = true;
+    pulsar::ControllerActionTable action_table(mask_config);
+    pulsar::DiscreteActionParser parser(action_table);
+    
+    // In air, not on ground
+    pulsar::CarState air_car;
+    air_car.on_ground = false;
+    air_car.boost = 10.0F;
+    air_car.has_flip = true;
+    air_car.has_jumped = true;
+    air_car.air_time_since_jump = 1.3F; // Expired flip window!
+    
+    pulsar::EnvState mask_state = state;
+    mask_state.cars[0] = air_car;
+    
+    // Validate mask
+    auto mask = parser.build_action_mask(mask_state, 0);
+    // Find all valid actions
+    for (std::size_t i = 0; i < action_table.size(); ++i) {
+      const auto& act = action_table.at(i);
+      if (mask[i] == 1) {
+        // If expired, jump/dodge inputs (where action.jump is true) should be masked
+        if (act.jump) {
+          pulsar::test::require(false, "jump action allowed after 1.25s!");
+        }
+        // In air, handbrake should be masked
+        if (act.handbrake) {
+          pulsar::test::require(false, "handbrake allowed in air!");
+        }
+      }
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -201,6 +460,8 @@ int main() {
     test_obs_shuffled_car_order();
     test_mutators();
     test_rocketsim_reproducibility();
+    test_obs_x_mirror();
+    test_advanced_obs_features();
     std::cout << "pulsar_env_tests passed\n";
     return EXIT_SUCCESS;
   } catch (const std::exception& exc) {

@@ -65,12 +65,25 @@ std::vector<ControllerState> make_rlgym_lookup_actions() {
 }
 
 // Shared per-action validity check used by both single-agent and batch mask builders.
-bool action_is_valid(const ControllerState& action, const CarState& car) {
+bool action_is_valid(const ControllerState& action, const CarState& car, bool refined_action_masking) {
   if (action.boost && car.boost <= 0.5F) {
     return false;
   }
   if (action.jump && !(car.on_ground || car.has_flip)) {
     return false;
+  }
+  if (refined_action_masking) {
+    if (action.handbrake && !car.on_ground) {
+      return false;
+    }
+    if (car.on_ground && !car.is_jumping) {
+      if (action.roll != 0.0F || action.pitch != 0.0F) {
+        return false;
+      }
+    }
+    if (action.jump && car.has_jumped && !car.has_flip_reset && car.air_time_since_jump > 1.25F) {
+      return false;
+    }
   }
   return true;
 }
@@ -79,7 +92,7 @@ bool action_is_valid(const ControllerState& action, const CarState& car) {
 
 ControllerActionTable::ControllerActionTable(ActionTableConfig config) : config_(std::move(config)) {
   if (config_.actions.empty() && !config_.builtin.empty()) {
-    config_ = make_builtin(config_.builtin);
+    config_.actions = make_builtin(config_.builtin).actions;
   }
   if (config_.actions.empty()) {
     throw std::invalid_argument("Action table must contain at least one action.");
@@ -165,8 +178,9 @@ std::vector<std::uint8_t> DiscreteActionParser::build_action_mask(const EnvState
   const CarState& car = state.cars[agent_id];
   std::vector<std::uint8_t> mask(action_table_.size(), static_cast<std::uint8_t>(0));
   bool any_valid = false;
+  const bool refined = action_table_.config().refined_action_masking;
   for (std::size_t index = 0; index < action_table_.size(); ++index) {
-    const bool valid = action_is_valid(action_table_.at(index), car);
+    const bool valid = action_is_valid(action_table_.at(index), car, refined);
     mask[index] = static_cast<std::uint8_t>(valid ? 1 : 0);
     any_valid = any_valid || valid;
   }
@@ -190,12 +204,13 @@ void DiscreteActionParser::build_action_mask_batch(const EnvState& state, std::s
     throw std::invalid_argument("DiscreteActionParser::build_action_mask_batch received an output span with the wrong size.");
   }
 
+  const bool refined = action_table_.config().refined_action_masking;
   for (std::size_t agent_id = 0; agent_id < state.cars.size(); ++agent_id) {
     const CarState& car = state.cars[agent_id];
     std::uint8_t* dst = out.data() + static_cast<std::ptrdiff_t>(agent_id * stride);
     bool any_valid = false;
     for (std::size_t index = 0; index < stride; ++index) {
-      const bool valid = action_is_valid(action_table_.at(index), car);
+      const bool valid = action_is_valid(action_table_.at(index), car, refined);
       dst[index] = static_cast<std::uint8_t>(valid ? 1 : 0);
       any_valid = any_valid || valid;
     }

@@ -68,6 +68,7 @@ struct CarState {
   float air_time_since_jump = 0.0F;
   float handbrake = 0.0F;
   float demo_respawn_timer = 0.0F;
+  ControllerState last_action{};
 };
 
 struct BallState {

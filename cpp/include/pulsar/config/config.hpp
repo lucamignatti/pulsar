@@ -104,6 +104,7 @@ struct CurriculumConfig {
 struct ActionTableConfig {
   std::string builtin = "rlgym_lookup_v1";
   std::vector<ControllerState> actions{};
+  bool refined_action_masking = false;
 };
 
 struct EnvConfig {
@@ -120,6 +121,14 @@ struct EnvConfig {
   bool spawn_opponents = true;
   bool randomize_kickoffs = true;
   std::uint64_t seed = 0;
+  bool obs_x_mirror = false;
+  bool obs_local_frame = false;
+  bool obs_relative_goals = false;
+  bool obs_proximity_boosts = false;
+  bool obs_explicit_kinematics = false;
+  bool obs_flip_decay = false;
+  bool obs_action_history = false;
+  bool obs_ball_prediction = false;
 };
 
 struct ModelConfig {

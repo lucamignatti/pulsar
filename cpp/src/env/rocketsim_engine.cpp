@@ -67,6 +67,10 @@ Vec3 from_rs_vec(const RocketSim::Vec& value) {
 
 }  // namespace
 
+std::vector<int> g_boost_pad_mirror_indices;
+std::vector<Vec3> g_boost_pad_positions;
+std::vector<bool> g_boost_pad_is_big;
+
 RocketSimTransitionEngine::RocketSimTransitionEngine(EnvConfig config, StateMutatorPtr reset_mutator)
     : config_(std::move(config)), reset_mutator_(std::move(reset_mutator)) {
   reset(config_.seed);
@@ -102,18 +106,48 @@ void RocketSimTransitionEngine::reset(std::uint64_t seed) {
     }
 
     arena_->SetGoalScoreCallback(
-        [](RocketSim::Arena*, RocketSim::Team scoring_team, void* user_info) {
-          auto* self = static_cast<RocketSimTransitionEngine*>(user_info);
+        [](RocketSim::Arena* arena, RocketSim::Team scoring_team, void* user_data) {
+          auto* self = static_cast<RocketSimTransitionEngine*>(user_data);
           self->state_.goal_scored = true;
           if (scoring_team == RocketSim::Team::BLUE) {
-            self->state_.blue_score += 1;
+            self->state_.blue_score++;
             self->state_.last_scoring_team = Team::Blue;
           } else {
-            self->state_.orange_score += 1;
+            self->state_.orange_score++;
             self->state_.last_scoring_team = Team::Orange;
           }
         },
         this);
+
+    static std::once_flag boost_pad_mirror_init_once;
+    std::call_once(boost_pad_mirror_init_once, [this]() {
+      const auto& pads = arena_->GetBoostPads();
+      g_boost_pad_mirror_indices.resize(pads.size());
+      g_boost_pad_positions.resize(pads.size());
+      g_boost_pad_is_big.resize(pads.size());
+      for (std::size_t i = 0; i < pads.size(); ++i) {
+        g_boost_pad_positions[i] = from_rs_vec(pads[i]->pos);
+        g_boost_pad_is_big[i] = pads[i]->isBig;
+
+        const auto pos_i = from_rs_vec(pads[i]->pos);
+        const Vec3 target{-pos_i.x, pos_i.y, pos_i.z};
+
+        std::size_t best_idx = i;
+        float min_dist_sq = 1e9F;
+        for (std::size_t j = 0; j < pads.size(); ++j) {
+          const auto pos_j = from_rs_vec(pads[j]->pos);
+          const float dx = pos_j.x - target.x;
+          const float dy = pos_j.y - target.y;
+          const float dz = pos_j.z - target.z;
+          const float dist_sq = dx * dx + dy * dy + dz * dz;
+          if (dist_sq < min_dist_sq) {
+            min_dist_sq = dist_sq;
+            best_idx = j;
+          }
+        }
+        g_boost_pad_mirror_indices[i] = static_cast<int>(best_idx);
+      }
+    });
   }
 
   state_ = {};
@@ -154,11 +188,11 @@ void RocketSimTransitionEngine::apply_controls(std::span<const ControllerState> 
   }
   state_.goal_scored = false;
 
-#ifdef PULSAR_HAS_ROCKETSIM
-  if (arena_ == nullptr) {
-    throw std::runtime_error("RocketSim arena is not initialized.");
-  }
   for (std::size_t i = 0; i < actions.size(); ++i) {
+    if (i < state_.cars.size()) {
+      state_.cars[i].last_action = actions[i];
+    }
+#ifdef PULSAR_HAS_ROCKETSIM
     RocketSim::CarControls controls;
     controls.throttle = actions[i].throttle;
     controls.steer = actions[i].steer;
@@ -170,8 +204,8 @@ void RocketSimTransitionEngine::apply_controls(std::span<const ControllerState> 
     controls.handbrake = actions[i].handbrake;
     controls.ClampFix();
     cars_[i]->controls = controls;
-  }
 #endif
+  }
 }
 
 void RocketSimTransitionEngine::step_physics(int tick_count) {
