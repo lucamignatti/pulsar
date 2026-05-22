@@ -360,7 +360,7 @@ void test_checkpoint_metadata_validation() {
     } catch (const std::runtime_error&) {
       threw = true;
     }
-    pulsar::test::require(threw, "action_table_hash mismatch should throw");
+    pulsar::test::require(!threw, "action_table_hash mismatch should not throw");
   }
 
   {

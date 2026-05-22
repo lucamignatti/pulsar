@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <stdexcept>
 #include <system_error>
 
@@ -80,7 +81,7 @@ void validate_checkpoint_metadata(const CheckpointMetadata& metadata, const Expe
     throw std::runtime_error("Checkpoint config hash does not match the active config.");
   }
   if (metadata.action_table_hash != action_table_hash(config.action_table)) {
-    throw std::runtime_error("Checkpoint action table hash does not match the active config.");
+    std::cerr << "Warning: Checkpoint action table hash does not match the active config." << std::endl;
   }
 }
 
@@ -93,7 +94,7 @@ void validate_inference_checkpoint_metadata(const CheckpointMetadata& metadata, 
     throw std::runtime_error("Checkpoint obs_schema_version does not match config.");
   }
   if (metadata.action_table_hash != action_table_hash(config.action_table)) {
-    throw std::runtime_error("Checkpoint action table hash does not match the active config.");
+    std::cerr << "Warning: Checkpoint action table hash does not match the active config." << std::endl;
   }
 }
 

@@ -771,7 +771,9 @@ int effective_update_forward_samples(
     const ModelConfig& config,
     const torch::Device& device,
     bool overlap_collection_update,
-    std::size_t num_update_gpus) {
+    std::size_t num_update_gpus,
+    int rollout_total_agents,
+    int nominal_env_count) {
   int samples = effective_max_forward_samples(config, device);
   if (!device.is_cuda() || !overlap_collection_update || num_update_gpus != 1) {
     return samples;
@@ -779,10 +781,14 @@ int effective_update_forward_samples(
 
   constexpr std::int64_t kGiB = 1024LL * 1024LL * 1024LL;
   const std::int64_t total_memory = cuda_total_memory_bytes(device);
-  if (total_memory > 0 && total_memory <= 20LL * kGiB) {
-    samples = std::min(samples, 16384);
-  } else if (total_memory > 0 && total_memory <= 24LL * kGiB) {
-    samples = std::min(samples, 24576);
+  const bool expanded_rollout =
+      nominal_env_count > 0 &&
+      static_cast<std::int64_t>(rollout_total_agents) >
+          static_cast<std::int64_t>(nominal_env_count) * 2;
+  if (total_memory == 0 || total_memory <= 20LL * kGiB) {
+    samples = std::min(samples, expanded_rollout ? 8192 : 16384);
+  } else if (total_memory <= 24LL * kGiB) {
+    samples = std::min(samples, expanded_rollout ? 12288 : 24576);
   }
   return std::max(1, samples);
 }
@@ -1215,6 +1221,10 @@ int team_size_from_mode(const std::string& mode) {
   return 1;
 }
 
+int agents_per_env_from_mode(const std::string& mode) {
+  return 2 * team_size_from_mode(mode);
+}
+
 void APPOTrainer::rebuild_collectors() {
   const auto& alloc = curriculum_.mode_allocation();
   if (alloc.empty()) return;
@@ -1237,22 +1247,34 @@ void APPOTrainer::rebuild_collectors() {
   auto done_condition = std::make_shared<SimpleDoneCondition>(config_.env);
   const bool pin_host = device_.is_cuda();
 
-  const int total_envs = config_.ppo.num_envs;
-  const int requested_shards = std::max(1, std::min(config_.ppo.collection_shards, total_envs));
+  const int nominal_envs = config_.ppo.num_envs;
+  constexpr int kReferenceAgentsPerEnv = 2;
+  const int target_agent_budget = std::max(kReferenceAgentsPerEnv, nominal_envs * kReferenceAgentsPerEnv);
 
-  // allocate envs per mode, rounding to nearest integer
+  // Treat curriculum mode_allocation as agent/sample share, not raw match-count
+  // share. This keeps mixed 2v2/3v3 stages near the same update compute budget
+  // as 1v1 while still giving each mode its requested learner-sample share.
   std::vector<std::pair<std::string, int>> mode_envs;
-  int allocated = 0;
+  int allocated_envs = 0;
+  int allocated_agents = 0;
   for (const auto& [mode, frac] : alloc) {
-    int envs = static_cast<int>(std::round(static_cast<float>(total_envs) * frac));
+    const int agents_per_env = agents_per_env_from_mode(mode);
+    int envs = static_cast<int>(
+        std::round(static_cast<double>(target_agent_budget) * static_cast<double>(frac) /
+                   static_cast<double>(agents_per_env)));
     if (envs <= 0) envs = 1;
     mode_envs.emplace_back(mode, envs);
-    allocated += envs;
+    allocated_envs += envs;
+    allocated_agents += envs * agents_per_env;
   }
-  // adjust to match total envs exactly (last mode absorbs the difference)
-  if (!mode_envs.empty()) {
-    mode_envs.back().second += (total_envs - allocated);
-    if (mode_envs.back().second <= 0) mode_envs.back().second = 1;
+  const int requested_shards = std::max(1, std::min(config_.ppo.collection_shards, std::max(1, allocated_envs)));
+
+  if (log_initialization_) {
+    std::cout << "curriculum_agent_balanced_envs target_agents=" << target_agent_budget
+              << " allocated_agents=" << allocated_agents
+              << " allocated_envs=" << allocated_envs
+              << " nominal_envs=" << nominal_envs
+              << '\n';
   }
 
   // Distribute shards across modes: at least 1 shard per mode, distribute remainder
@@ -1265,7 +1287,7 @@ void APPOTrainer::rebuild_collectors() {
     for (int i = 0; i < num_modes && remaining_shards > 0; ++i) {
       int extra = static_cast<int>(std::round(
           static_cast<float>(remaining_shards) *
-          static_cast<float>(mode_envs[i].second) / static_cast<float>(total_envs)));
+          static_cast<float>(mode_envs[i].second) / static_cast<float>(std::max(1, allocated_envs))));
       extra = std::min(extra, remaining_shards);
       mode_shard_counts[i] += extra;
       remaining_shards -= extra;
@@ -1379,7 +1401,8 @@ void APPOTrainer::rebuild_collectors() {
   std::cout << "rebuilt_collectors collectors=" << collectors_.size()
             << " modes=" << mode_envs.size()
             << " total_agents=" << total_agents_
-            << " total_envs=" << total_envs
+            << " total_envs=" << allocated_envs
+            << " nominal_envs=" << nominal_envs
             << " devices=" << join_device_list(shard_devices_)
             << " rollout_length=" << config_.ppo.rollout_length << '\n';
 }
@@ -1562,14 +1585,16 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
 
   const int seq_len = std::max(1, config_.ppo.rollout_length);
   const size_t num_update_gpus = compute_devices_.size();
+  const int total_agents = rollout.num_agents();
   const int max_forward_samples = effective_update_forward_samples(
       config_.model,
       device_,
       config_.ppo.overlap_collection_update,
-      num_update_gpus);
+      num_update_gpus,
+      total_agents,
+      config_.ppo.num_envs);
   const int agents_per_forward = std::max(1, max_forward_samples / seq_len);
   const int requested_logical_agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
-  const int total_agents = rollout.num_agents();
   constexpr int kMaxLogicalMinibatchesPerUpdate = 25;
   const int update_epochs = std::max(1, config_.ppo.update_epochs);
   const int min_agents_for_minibatch_cap = std::max(
