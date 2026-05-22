@@ -1619,7 +1619,9 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
       channel_positive_sums[i] = torch::zeros({}, torch::TensorOptions().device(device_).dtype(torch::kFloat64));
     }
 
-    const int predictor_agents_per_batch = total_agents;
+    const int predictor_agents_per_batch = std::min(
+        total_agents,
+        std::max(1, max_forward_samples / std::max(1, rollout_steps)));
     for (int agent_offset = 0; agent_offset < total_agents; agent_offset += predictor_agents_per_batch) {
       const int count = std::min(predictor_agents_per_batch, total_agents - agent_offset);
 
