@@ -1419,12 +1419,19 @@ void APPOTrainer::maybe_initialize_from_checkpoint() {
     }
   } else {
     try {
-      validate_checkpoint_metadata(metadata, config_);
+      validate_inference_checkpoint_metadata(metadata, config_);
     } catch (const std::exception& e) {
       throw std::runtime_error(
           "Refusing to auto-resume checkpoint " + base.string() +
           ": " + e.what() +
           " Use a fresh output directory for a new run, or set ppo.init_checkpoint explicitly if you intentionally want this checkpoint.");
+    }
+    if (log_initialization_ && metadata.config_hash != config_hash(config_)) {
+      std::cerr << "warning: auto-resuming checkpoint " << base.string()
+                << " with active config changes"
+                << " checkpoint_config_hash=" << metadata.config_hash
+                << " active_config_hash=" << config_hash(config_)
+                << '\n';
     }
     const int checkpoint_state_version = metadata.extra.value("trainer_state_version", 0);
     if (checkpoint_state_version != kTrainerStateVersion) {
