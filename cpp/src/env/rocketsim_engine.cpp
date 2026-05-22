@@ -126,16 +126,16 @@ void RocketSimTransitionEngine::reset(std::uint64_t seed) {
       g_boost_pad_positions.resize(pads.size());
       g_boost_pad_is_big.resize(pads.size());
       for (std::size_t i = 0; i < pads.size(); ++i) {
-        g_boost_pad_positions[i] = from_rs_vec(pads[i]->pos);
-        g_boost_pad_is_big[i] = pads[i]->isBig;
+        g_boost_pad_positions[i] = from_rs_vec(pads[i]->config.pos);
+        g_boost_pad_is_big[i] = pads[i]->config.isBig;
 
-        const auto pos_i = from_rs_vec(pads[i]->pos);
+        const auto pos_i = from_rs_vec(pads[i]->config.pos);
         const Vec3 target{-pos_i.x, pos_i.y, pos_i.z};
 
         std::size_t best_idx = i;
         float min_dist_sq = 1e9F;
         for (std::size_t j = 0; j < pads.size(); ++j) {
-          const auto pos_j = from_rs_vec(pads[j]->pos);
+          const auto pos_j = from_rs_vec(pads[j]->config.pos);
           const float dx = pos_j.x - target.x;
           const float dy = pos_j.y - target.y;
           const float dz = pos_j.z - target.z;
