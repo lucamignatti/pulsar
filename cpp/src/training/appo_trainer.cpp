@@ -1611,7 +1611,14 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
         rollout_dones_for_targets,
         predictor_horizons_device_);
 
-    std::vector<PredictorUpdateStats> predictor_stats(kSparseEventChannelCount);
+    std::vector<torch::Tensor> channel_loss_sums(kSparseEventChannelCount);
+    std::vector<torch::Tensor> channel_positive_sums(kSparseEventChannelCount);
+    std::vector<double> channel_sample_counts(kSparseEventChannelCount, 0.0);
+    for (std::size_t i = 0; i < kSparseEventChannelCount; ++i) {
+      channel_loss_sums[i] = torch::zeros({}, torch::TensorOptions().device(device_).dtype(torch::kFloat64));
+      channel_positive_sums[i] = torch::zeros({}, torch::TensorOptions().device(device_).dtype(torch::kFloat64));
+    }
+
     // The predictor encoder runs under NoGrad, so no activation storage is
     // needed. Use a larger batch than the gradient-limited max_forward_samples
     // to reduce the number of expensive encoder forward_sequence calls.
@@ -1667,10 +1674,10 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
         total_loss = total_loss + loss;
         has_any_loss = true;
 
-        const double positive = (targets > 0).to(torch::kFloat32).sum().item<double>();
-        predictor_stats[channel_index].loss_sum += loss.item<double>() * samples;
-        predictor_stats[channel_index].samples += samples;
-        predictor_stats[channel_index].positive_sum += positive;
+        // Accumulate on GPU — no .item() sync stalls
+        channel_loss_sums[channel_index].add_(loss.to(torch::kFloat64) * samples);
+        channel_sample_counts[channel_index] += samples;
+        channel_positive_sums[channel_index].add_((targets > 0).to(torch::kFloat64).sum());
       }
 
       if (has_any_loss) {
@@ -1708,6 +1715,14 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
           shaped_view.add_(channel.weight * (2.0F * p_soon - 1.0F));
         }
       }
+    }
+
+    // Extract accumulated stats from GPU — single sync point
+    std::vector<PredictorUpdateStats> predictor_stats(kSparseEventChannelCount);
+    for (std::size_t channel_index = 0; channel_index < kSparseEventChannelCount; ++channel_index) {
+      predictor_stats[channel_index].loss_sum = channel_loss_sums[channel_index].item<double>();
+      predictor_stats[channel_index].samples = channel_sample_counts[channel_index];
+      predictor_stats[channel_index].positive_sum = channel_positive_sums[channel_index].item<double>();
     }
 
     const auto finish_channel = [&](double mean_loss,
