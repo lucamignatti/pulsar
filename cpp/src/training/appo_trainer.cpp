@@ -502,6 +502,19 @@ torch::Tensor elementwise_smooth_l1_loss(
   return torch::where(abs_error < delta_tensor, quadratic, linear);
 }
 
+torch::Tensor index_select_on_source_device(
+    const torch::Tensor& tensor,
+    int64_t dim,
+    const torch::Tensor& indices) {
+  torch::Tensor select_indices = indices;
+  if (select_indices.scalar_type() != torch::kLong) {
+    select_indices = select_indices.to(torch::kLong);
+  }
+  if (select_indices.device() != tensor.device()) {
+    select_indices = select_indices.to(tensor.device());
+  }
+  return tensor.index_select(dim, select_indices);
+}
 
 // Multi-group PCGrad: project each group's gradient against all others.
 // groups[idx][param] = gradient tensor for that group+parameter.
@@ -1636,7 +1649,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
       // Determine if this minibatch spans multiple modes.
       // Fast-path: if the entire rollout has only one mode (common in curriculum),
       // skip expensive mode detection and splitting.
-      torch::Tensor agent_mode_ids = rollout.mode_ids[0].index_select(0, agent_indices);
+      torch::Tensor agent_mode_ids = index_select_on_source_device(rollout.mode_ids[0], 0, agent_indices);
       const bool use_pcgrad = config_.ppo.pcgrad;
       int num_modes_present = 1;
       bool has_1v1 = false, has_2v2 = false, has_3v3 = false;
@@ -1687,8 +1700,10 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         double mode_total_active;
         bool mode_all_active = false;
         {
-          torch::Tensor active_slice = rollout.learner_active.narrow(0, 0, rollout.rollout_length())
-              .index_select(1, mode_agent_indices);
+          torch::Tensor active_slice = index_select_on_source_device(
+              rollout.learner_active.narrow(0, 0, rollout.rollout_length()),
+              1,
+              mode_agent_indices);
           const float active_sum = active_slice.sum().item<float>();
           const float active_all = static_cast<float>(mode_count * rollout.rollout_length());
           mode_total_active = static_cast<double>(active_sum);
@@ -1698,9 +1713,11 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
         combined_total_active += mode_total_active;
 
         if (config_.ppo.popart_enabled) {
-          torch::Tensor mb_q_returns = q_returns.index_select(1, mode_agent_indices);
-          torch::Tensor mb_active = rollout.learner_active.narrow(0, 0, rollout_steps)
-              .index_select(1, mode_agent_indices).to(device_);
+          torch::Tensor mb_q_returns = index_select_on_source_device(q_returns, 1, mode_agent_indices);
+          torch::Tensor mb_active = index_select_on_source_device(
+              rollout.learner_active.narrow(0, 0, rollout_steps),
+              1,
+              mode_agent_indices).to(device_);
           torch::Tensor mb_active_returns = mb_q_returns.index({mb_active > 0.5F});
           if (mb_active_returns.numel() > 0) {
             auto& final_layer = actor_->q_head_->at<torch::nn::LinearImpl>(2);
@@ -1789,27 +1806,56 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
               const int gpu_chunk_count = std::min(agents_per_forward_local, gpu_agent_count - micro_agent_offset);
               torch::Tensor gpu_micro_indices = mode_agent_indices.narrow(0, gpu_agent_start + micro_agent_offset, gpu_chunk_count);
 
-              torch::Tensor mode_gpu_obs_mb = rollout.obs.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices).to(gpu_dev);
-              torch::Tensor mode_gpu_episode_starts_mb = rollout.episode_starts.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices).to(gpu_dev);
-              torch::Tensor mode_gpu_action_masks_mb = rollout.action_masks.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices).to(gpu_dev);
-              torch::Tensor mode_gpu_learner_active_mb = rollout.learner_active.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices).to(gpu_dev);
-              torch::Tensor mode_gpu_actions_mb = rollout.actions.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices).to(gpu_dev);
-              torch::Tensor mode_gpu_action_log_probs_mb = rollout.action_log_probs.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices).to(gpu_dev);
+              torch::Tensor mode_gpu_obs_mb = index_select_on_source_device(
+                  rollout.obs.narrow(0, 0, rollout_steps_local),
+                  1,
+                  gpu_micro_indices).to(gpu_dev);
+              torch::Tensor mode_gpu_episode_starts_mb = index_select_on_source_device(
+                  rollout.episode_starts.narrow(0, 0, rollout_steps_local),
+                  1,
+                  gpu_micro_indices).to(gpu_dev);
+              torch::Tensor mode_gpu_action_masks_mb = index_select_on_source_device(
+                  rollout.action_masks.narrow(0, 0, rollout_steps_local),
+                  1,
+                  gpu_micro_indices).to(gpu_dev);
+              torch::Tensor mode_gpu_learner_active_mb = index_select_on_source_device(
+                  rollout.learner_active.narrow(0, 0, rollout_steps_local),
+                  1,
+                  gpu_micro_indices).to(gpu_dev);
+              torch::Tensor mode_gpu_actions_mb = index_select_on_source_device(
+                  rollout.actions.narrow(0, 0, rollout_steps_local),
+                  1,
+                  gpu_micro_indices).to(gpu_dev);
+              torch::Tensor mode_gpu_action_log_probs_mb = index_select_on_source_device(
+                  rollout.action_log_probs.narrow(0, 0, rollout_steps_local),
+                  1,
+                  gpu_micro_indices).to(gpu_dev);
 
-              torch::Tensor mode_gpu_advantages_mb = normalized_advantages.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices);
+              torch::Tensor mode_gpu_advantages_mb = index_select_on_source_device(
+                  normalized_advantages.narrow(0, 0, rollout_steps_local),
+                  1,
+                  gpu_micro_indices);
               if (gpu_dev != device_) {
                 mode_gpu_advantages_mb = mode_gpu_advantages_mb.to(gpu_dev);
               }
-              torch::Tensor mode_gpu_returns_mb = sparse_returns.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices);
+              torch::Tensor mode_gpu_returns_mb = index_select_on_source_device(
+                  sparse_returns.narrow(0, 0, rollout_steps_local),
+                  1,
+                  gpu_micro_indices);
               if (gpu_dev != device_) {
                 mode_gpu_returns_mb = mode_gpu_returns_mb.to(gpu_dev);
               }
-              torch::Tensor mode_gpu_q_returns_mb = q_returns.narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices);
+              torch::Tensor mode_gpu_q_returns_mb = index_select_on_source_device(
+                  q_returns.narrow(0, 0, rollout_steps_local),
+                  1,
+                  gpu_micro_indices);
               if (gpu_dev != device_) {
                 mode_gpu_q_returns_mb = mode_gpu_q_returns_mb.to(gpu_dev);
               }
-              torch::Tensor mode_gpu_old_q_taken_mb =
-                  all_values.at("q_taken").narrow(0, 0, rollout_steps_local).index_select(1, gpu_micro_indices).to(gpu_dev);
+              torch::Tensor mode_gpu_old_q_taken_mb = index_select_on_source_device(
+                  all_values.at("q_taken").narrow(0, 0, rollout_steps_local),
+                  1,
+                  gpu_micro_indices).to(gpu_dev);
 
               for (int seq_start = 0; seq_start < rollout_steps_local; seq_start += seq_len_local) {
                 const int chunk_start = seq_start;
@@ -1927,12 +1973,18 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout) {
                 const bool compute_goal_critic_loss = config_.goal_critic.lambda_Zg > 0.0F;
                 const bool compute_goal_actor_loss = config_.goal_critic.lambda_goal_actor > 0.0F;
                 if (compute_goal_critic_loss || compute_goal_actor_loss) {
-                  torch::Tensor chunk_goal_pos =
-                      rollout.goal_positions.narrow(0, chunk_start, loss_steps).index_select(1, gpu_micro_indices).to(gpu_dev);
-                  torch::Tensor chunk_dones =
-                      rollout.dones.narrow(0, chunk_start, loss_steps).index_select(1, gpu_micro_indices).to(gpu_dev);
-                  torch::Tensor chunk_ep_starts =
-                      rollout.episode_starts.narrow(0, chunk_start, loss_steps).index_select(1, gpu_micro_indices).to(gpu_dev);
+                  torch::Tensor chunk_goal_pos = index_select_on_source_device(
+                      rollout.goal_positions.narrow(0, chunk_start, loss_steps),
+                      1,
+                      gpu_micro_indices).to(gpu_dev);
+                  torch::Tensor chunk_dones = index_select_on_source_device(
+                      rollout.dones.narrow(0, chunk_start, loss_steps),
+                      1,
+                      gpu_micro_indices).to(gpu_dev);
+                  torch::Tensor chunk_ep_starts = index_select_on_source_device(
+                      rollout.episode_starts.narrow(0, chunk_start, loss_steps),
+                      1,
+                      gpu_micro_indices).to(gpu_dev);
                   torch::Tensor future_goal_pos = sample_future_goal_positions(chunk_goal_pos, chunk_dones, chunk_ep_starts, config_.goal_critic.max_future_horizon);
                   torch::Tensor flat_future_goal_pos = future_goal_pos.reshape({samples, config_.goal_critic.goal_dim});
                   torch::Tensor active_future_goal_pos = all_active ? flat_future_goal_pos : flat_future_goal_pos.index({flat_active});
