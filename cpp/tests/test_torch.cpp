@@ -133,6 +133,10 @@ int main() {
       if (actor->predictor_heads_.size() != pulsar::kSparseEventChannelCount) {
         throw std::runtime_error("predictor channel count mismatch");
       }
+      torch::Tensor all_logits = actor->forward_all_predictors(output.features);
+      if (all_logits.sizes() != torch::IntArrayRef({4, static_cast<int64_t>(pulsar::kSparseEventChannelCount), 2})) {
+        throw std::runtime_error("forward_all_predictors output shape mismatch");
+      }
       for (std::size_t i = 0; i < pulsar::kSparseEventChannelCount; ++i) {
         const torch::Tensor logits = actor->predictor_head(i)->forward(output.features);
         if (logits.sizes() != torch::IntArrayRef({4, 2})) {
@@ -140,6 +144,9 @@ int main() {
         }
         if (logits.abs().max().item<float>() > 10.0F) {
           throw std::runtime_error("predictor logits should be clamped for stability");
+        }
+        if (!torch::allclose(all_logits.select(1, static_cast<int64_t>(i)), logits, 1.0e-5, 1.0e-5)) {
+          throw std::runtime_error("forward_all_predictors output mismatch with individual head forward");
         }
       }
     }

@@ -1612,7 +1612,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
         predictor_horizons_device_);
 
     std::vector<PredictorUpdateStats> predictor_stats(kSparseEventChannelCount);
-    const int predictor_agents_per_batch = std::max(1, max_forward_samples / std::max(1, rollout_steps));
+    const int predictor_agents_per_batch = total_agents;
     for (int agent_offset = 0; agent_offset < total_agents; agent_offset += predictor_agents_per_batch) {
       const int count = std::min(predictor_agents_per_batch, total_agents - agent_offset);
       torch::Tensor obs = rollout.obs.narrow(0, 0, rollout_steps).narrow(1, agent_offset, count).to(device_);
@@ -1628,34 +1628,67 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
       }
 
       const double samples = static_cast<double>(rollout_steps * count);
+
+      // Prepare gradient zeroing for enabled channels
       for (std::size_t channel_index = 0; channel_index < kSparseEventChannelCount; ++channel_index) {
         const std::string channel_name(kSparseEventChannels[channel_index].name);
         const auto& channel = config_.predictor.channels.at(channel_name);
         if (!channel.enabled || channel_index >= predictor_optimizers_.size() || !predictor_optimizers_[channel_index]) {
           continue;
         }
-        auto& optimizer = predictor_optimizers_[channel_index];
-        SparseRewardPredictor& head = actor_->predictor_head(channel_index);
-        optimizer->zero_grad();
+        predictor_optimizers_[channel_index]->zero_grad();
+      }
+
+      // Forward all predictor heads in a single batched operation
+      torch::Tensor logits_all = actor_->forward_all_predictors(flat_features);
+
+      torch::Tensor total_loss = torch::zeros({}, torch::TensorOptions().device(device_).dtype(torch::kFloat32));
+      bool has_any_loss = false;
+
+      for (std::size_t channel_index = 0; channel_index < kSparseEventChannelCount; ++channel_index) {
+        const std::string channel_name(kSparseEventChannels[channel_index].name);
+        const auto& channel = config_.predictor.channels.at(channel_name);
+        if (!channel.enabled || channel_index >= predictor_optimizers_.size() || !predictor_optimizers_[channel_index]) {
+          continue;
+        }
+        
         torch::Tensor targets = targets_all
             .narrow(1, agent_offset, count)
             .select(2, static_cast<int64_t>(channel_index))
             .reshape({rollout_steps * count});
-        torch::Tensor logits = head->forward(flat_features);
+        torch::Tensor logits = logits_all.select(1, static_cast<int64_t>(channel_index));
         torch::Tensor loss = torch::nn::functional::cross_entropy(logits, targets);
-        loss.backward();
-        torch::nn::utils::clip_grad_norm_(head->parameters(), 0.1);
-        optimizer->step();
-        optimizer->zero_grad();
+        
+        total_loss = total_loss + loss;
+        has_any_loss = true;
+
         const double positive = (targets > 0).to(torch::kFloat32).sum().item<double>();
         predictor_stats[channel_index].loss_sum += loss.item<double>() * samples;
         predictor_stats[channel_index].samples += samples;
         predictor_stats[channel_index].positive_sum += positive;
       }
 
+      if (has_any_loss) {
+        total_loss.backward();
+
+        for (std::size_t channel_index = 0; channel_index < kSparseEventChannelCount; ++channel_index) {
+          const std::string channel_name(kSparseEventChannels[channel_index].name);
+          const auto& channel = config_.predictor.channels.at(channel_name);
+          if (!channel.enabled || channel_index >= predictor_optimizers_.size() || !predictor_optimizers_[channel_index]) {
+            continue;
+          }
+          auto& optimizer = predictor_optimizers_[channel_index];
+          SparseRewardPredictor& head = actor_->predictor_head(channel_index);
+          torch::nn::utils::clip_grad_norm_(head->parameters(), 0.1);
+          optimizer->step();
+          optimizer->zero_grad();
+        }
+      }
+
       {
         torch::NoGradGuard no_grad;
         const torch::Tensor shaped_view = shaped_rewards.narrow(1, agent_offset, count);
+        torch::Tensor shaping_logits_all = actor_->forward_all_predictors(flat_features).detach();
         for (std::size_t channel_index = 0; channel_index < kSparseEventChannelCount; ++channel_index) {
           const std::string channel_name(kSparseEventChannels[channel_index].name);
           const auto& channel = config_.predictor.channels.at(channel_name);
@@ -1664,8 +1697,8 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
           if (!channel.enabled || !active || channel.weight <= 0.0F) {
             continue;
           }
-          const torch::Tensor probs = torch::softmax(
-              actor_->predictor_head(channel_index)->forward(flat_features), -1);
+          const torch::Tensor logits = shaping_logits_all.select(1, static_cast<int64_t>(channel_index));
+          const torch::Tensor probs = torch::softmax(logits, -1);
           const torch::Tensor p_soon = probs.select(1, 1).reshape({rollout_steps, count});
           shaped_view.add_(channel.weight * (2.0F * p_soon - 1.0F));
         }

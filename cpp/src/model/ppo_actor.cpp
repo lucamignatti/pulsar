@@ -541,6 +541,15 @@ const SparseRewardPredictor& PPOActorImpl::predictor_head(std::size_t channel_in
   return predictor_heads_[channel_index];
 }
 
+torch::Tensor PPOActorImpl::forward_all_predictors(const torch::Tensor& features) {
+  std::vector<torch::Tensor> outputs;
+  outputs.reserve(predictor_heads_.size());
+  for (auto& head : predictor_heads_) {
+    outputs.push_back(head->forward(features));
+  }
+  return torch::stack(outputs, 1);
+}
+
 ActorStepOutput PPOActorImpl::forward_step(
     torch::Tensor obs,
     torch::Tensor goal_values,

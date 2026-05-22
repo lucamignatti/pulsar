@@ -203,6 +203,7 @@ class PPOActorImpl : public torch::nn::Module {
   torch::Tensor policy_head_forward(const torch::Tensor& features);
   SparseRewardPredictor& predictor_head(std::size_t channel_index);
   const SparseRewardPredictor& predictor_head(std::size_t channel_index) const;
+  torch::Tensor forward_all_predictors(const torch::Tensor& features);
 
   [[nodiscard]] std::vector<torch::Tensor> es_lora_parameters() const;
   [[nodiscard]] std::vector<torch::Tensor> es_lora_parameters_flat() const;
