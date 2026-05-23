@@ -1,35 +1,36 @@
 # Pulsar
 
-Rocket League bot training with **Asyncronous PPO**, **contrastive goal-conditioned auxiliary learning**, **all-mode self-play**, **PCGrad**, and **Evolutionary Sampling**.
+Rocket League bot training with **Variance-Reduced Policy Optimization (VRPO)**, **contrastive goal-conditioned auxiliary learning (GCRL)**, **all-mode self-play**, **PCGrad**, and **EGGROLL Evolutionary Sampling**.
 
 The training loop combines three complementary signals:
 
-1. **APPO**: the main local optimizer.
-2. **Contrastive goal-conditioned critic**: self-supervised future-goal encoders (state-action and goal) trained with symmetric InfoNCE. Provides a representation-learning signal that never shapes the environment reward.
-3. **Evolutionary Sampling**: periodic global parameter-space search over a LoRA adapter on the final policy layer, driven by rollout reward with KL penalty.
+1. **VRPO**: The main local optimizer using variance-reduced centralized Q-critic Expected SARSA($\lambda$) advantage estimation. This mitigates the extreme noise of GAE in self-play reinforcement learning, averaging out action-sampling noise to stably converge to game-theoretic equilibria.
+2. **Contrastive goal-conditioned critic (GCRL)**: Self-supervised future-goal encoders (state-action and goal) trained with a symmetric InfoNCE loss. Provides a representation-learning signal that never shapes the environment reward.
+3. **Evolutionary Sampling (EGGROLL)**: Periodic global parameter-space search using low-rank ($A \times B$) LoRA adapters on the final policy layer, driven by rollout reward with a KL divergence constraint.
 
-The production setup trains 1v1, 2v2, and 3v3 using curriculum learning. It is able to achieve 188k collection SPS, 155k update SPS and 133K overall SPS on a 7900x+6800xt. 
+The production setup trains 1v1, 2v2, and 3v3 using curriculum learning. It achieves 188k collection SPS, 155k update SPS, and 133k overall SPS on a 7900x + 6800xt. 
 
 ## Architecture
 
-- **Encoder**: **Mamba 2**
-- **Contrastive goal-conditioned encoder pair**: state-action encoder and goal encoder trained with symmetric InfoNCE
-- **Evolutionary Sampling** on the final policy layer via EGGROLL
-- **Multi-mode training** with PCGrad over per-mode minibatch groups
-- **Custom CUDA/HIP kernels** for mamba2, ppo, and other functions
-- **Sharded collection** and **Distributed micro-batches** for efficient multi-gpu scaling
-- **Overlap** between collection and update
-- **half-stepping** per-shard for simultaneous action computation/env stepping during collection
+- **Encoder**: **SSD (Structured State Space Duality)** Mamba-2 sequential backbone.
+- **Contrastive goal-conditioned encoder pair (GCRL)**: State-action encoder and goal encoder trained with symmetric InfoNCE.
+- **Evolutionary Sampling** via **EGGROLL** on the final policy layer.
+- **Multi-mode training** with Projecting Conflicting Gradients (PCGrad) over per-mode minibatch groups.
+- **Loss of Plasticity (LoP) Mitigation**: Active optimizer state resets upon parameter repair, coupled with periodic EGGROLL structured parameter rejuvenation.
+- **Custom CUDA/HIP kernels** for Mamba-2, VRPO, and other custom operators.
+- **Sharded collection** and **Distributed micro-batches** for efficient multi-GPU scaling.
+- **Overlap** between collection and update.
+- **Half-stepping** per-shard for simultaneous action computation and environment stepping during collection.
   
 ## Repository Layout
 
-- `cpp/`: C++20 runtime, neural network models, APPO training loop, batched collector, reward engine, curriculum, tests, benchmarks
-- `configs/`: experiment config files (JSON)
-- `scripts/`: smoke tests, collision mesh downloader, W&B streaming, development setup
-- `docs/`: platform notes (CUDA setup)
-- `external/RocketSim/`: vendored RocketSim submodule
-- `python/pulsar_viz/`: Python visualization and evaluation package
-- `cmake/`: CMake dependency finders
+- `cpp/`: C++20 runtime, neural network models, VRPO training loops, modular sub-systems (PredictorTrainer, GCRLTrainer, GradientSurgery), batched collector, reward engine, curriculum, tests, benchmarks.
+- `configs/`: Experiment config files (JSON).
+- `scripts/`: Smoke tests, collision mesh downloader, W&B streaming, development setup.
+- `docs/`: Platform setup guides (CUDA and AMD/HIP ROCm).
+- `external/RocketSim/`: Vendored RocketSim submodule.
+- `python/pulsar_viz/`: Python visualization and evaluation package.
+- `cmake/`: CMake dependency finders.
 
 ## Requirements
 
@@ -61,25 +62,25 @@ cmake -S . -B build/release \
 cmake --build build/release --parallel
 ```
 
-For CUDA setup, see [docs/cuda_linux.md](docs/cuda_linux.md).
+For CUDA setup, see [docs/cuda_linux.md](docs/cuda_linux.md). For AMD ROCm/HIP setup, see [docs/hip_linux.md](docs/hip_linux.md).
 
 ## Validation
 
 ```bash
 ctest --test-dir build/release --output-on-failure
-./build/release/pulsar_bench 20 configs/2v2_appo.json cuda:0
+./build/release/pulsar_bench 20 configs/2v2_appo.json cpu
 ```
 
 ## Training
 
 ```bash
-./build/release/pulsar_appo_train configs/2v2_appo.json /path/to/run_outputs
+./build/release/pulsar_vrpo_train configs/2v2_appo.json /path/to/run_outputs
 ```
 
 To run a bounded number of updates:
 
 ```bash
-./build/release/pulsar_appo_train configs/2v2_appo.json /path/to/run_outputs 100
+./build/release/pulsar_vrpo_train configs/2v2_appo.json /path/to/run_outputs 100
 ```
 
 ## Visualizing a Checkpoint
