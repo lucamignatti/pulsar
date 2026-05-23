@@ -1135,6 +1135,27 @@ APPOTrainer::APPOTrainer(
   actor_->to(primary_device);
   actor_normalizer_.to(primary_device);
 
+  if (config_.predictor.enabled) {
+    predictor_optimizers_.clear();
+    predictor_optimizers_.resize(kSparseEventChannelCount);
+    predictor_ema_loss_.assign(kSparseEventChannelCount, -1.0F);
+    predictor_delta_.assign(kSparseEventChannelCount, 1.0F);
+    std::vector<std::int32_t> horizons(kSparseEventChannelCount, 1);
+    for (std::size_t i = 0; i < kSparseEventChannelCount; ++i) {
+      const std::string name(kSparseEventChannels[i].name);
+      const auto& channel = config_.predictor.channels.at(name);
+      horizons[i] = static_cast<std::int32_t>(std::max(1, channel.horizon));
+      if (channel.enabled) {
+        predictor_optimizers_[i] = std::make_unique<torch::optim::Adam>(
+            actor_->predictor_head(i)->parameters(),
+            torch::optim::AdamOptions(channel.learning_rate).weight_decay(1.0e-4));
+      }
+    }
+    predictor_horizons_device_ = torch::tensor(
+        horizons,
+        torch::TensorOptions().dtype(torch::kInt32).device(device_));
+  }
+
   maybe_initialize_from_checkpoint();
   actor_snapshot_ = clone_ppo_actor(actor_, device_);
   actor_snapshot_->eval();
@@ -1172,26 +1193,6 @@ APPOTrainer::APPOTrainer(
               << " collection_shards=" << collectors_.size()
               << " collection_workers=" << config_.ppo.collection_workers
               << '\n';
-  }
-  if (config_.predictor.enabled) {
-    predictor_optimizers_.clear();
-    predictor_optimizers_.resize(kSparseEventChannelCount);
-    predictor_ema_loss_.assign(kSparseEventChannelCount, -1.0F);
-    predictor_delta_.assign(kSparseEventChannelCount, 1.0F);
-    std::vector<std::int32_t> horizons(kSparseEventChannelCount, 1);
-    for (std::size_t i = 0; i < kSparseEventChannelCount; ++i) {
-      const std::string name(kSparseEventChannels[i].name);
-      const auto& channel = config_.predictor.channels.at(name);
-      horizons[i] = static_cast<std::int32_t>(std::max(1, channel.horizon));
-      if (channel.enabled) {
-        predictor_optimizers_[i] = std::make_unique<torch::optim::Adam>(
-            actor_->predictor_head(i)->parameters(),
-            torch::optim::AdamOptions(channel.learning_rate).weight_decay(1.0e-4));
-      }
-    }
-    predictor_horizons_device_ = torch::tensor(
-        horizons,
-        torch::TensorOptions().dtype(torch::kInt32).device(device_));
   }
 
   sync_self_play_assignments_to_collectors();

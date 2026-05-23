@@ -225,7 +225,7 @@ int main() {
                                 prod.outcome.concede == -16.0f &&
                                 prod.outcome.neutral_no_touch == 0.0f,
                             "production base reward should mirror final goal/loss terminal reward");
-      pulsar::test::require(prod.predictor.channels.at("goal").weight == 0.05f &&
+      pulsar::test::require(prod.predictor.channels.at("goal").weight == 0.08f &&
                                 prod.predictor.channels.at("ball_touch").weight == 0.01f &&
                                 prod.predictor.channels.at("flip_reset").weight == 0.05f &&
                                 prod.predictor.channels.at("demo").weight > 0.0f &&
