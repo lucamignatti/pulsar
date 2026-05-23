@@ -101,13 +101,14 @@ struct PredictorUpdateStats {
   double loss_sum = 0.0;
   double samples = 0.0;
   double positive_sum = 0.0;
+  double positive_samples = 0.0;
 
   [[nodiscard]] double mean_loss() const {
     return samples > 0.0 ? loss_sum / samples : 0.0;
   }
 
   [[nodiscard]] double positive_rate() const {
-    return samples > 0.0 ? positive_sum / samples : 0.0;
+    return positive_samples > 0.0 ? positive_sum / positive_samples : 0.0;
   }
 };
 
@@ -416,6 +417,34 @@ struct GradientSanitizeResult {
   std::string first_parameter;
 };
 
+GradientSanitizeResult zero_nonfinite_parameters(torch::nn::Module& module) {
+  GradientSanitizeResult result;
+  for (auto& item : module.named_parameters(true)) {
+    torch::Tensor param = item.value();
+    if (!param.defined()) {
+      continue;
+    }
+    const torch::Tensor finite = torch::isfinite(param);
+    if (!finite.all().item<bool>()) {
+      if (!result.changed) {
+        result.first_parameter = item.key();
+      }
+      torch::NoGradGuard no_grad;
+      const bool is_weight =
+          item.key().size() >= std::string(".weight").size() &&
+          item.key().compare(
+              item.key().size() - std::string(".weight").size(),
+              std::string(".weight").size(),
+              ".weight") == 0;
+      const bool default_to_one = item.key().find("norm") != std::string::npos && is_weight;
+      const torch::Tensor replacement = default_to_one ? torch::ones_like(param) : torch::zeros_like(param);
+      param.copy_(torch::where(finite, param, replacement));
+      result.changed = true;
+    }
+  }
+  return result;
+}
+
 GradientSanitizeResult zero_nonfinite_gradients(torch::nn::Module& module) {
   GradientSanitizeResult result;
   for (auto& item : module.named_parameters(true)) {
@@ -433,6 +462,13 @@ GradientSanitizeResult zero_nonfinite_gradients(torch::nn::Module& module) {
     }
   }
   return result;
+}
+
+torch::Tensor finite_or_zero(const torch::Tensor& tensor) {
+  if (!tensor.defined()) {
+    return tensor;
+  }
+  return torch::where(torch::isfinite(tensor), tensor, torch::zeros_like(tensor));
 }
 
 double clip_existing_gradients(torch::nn::Module& module, double max_norm) {
@@ -1615,6 +1651,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
     std::vector<torch::Tensor> channel_loss_sums(kSparseEventChannelCount);
     std::vector<torch::Tensor> channel_positive_sums(kSparseEventChannelCount);
     std::vector<double> channel_sample_counts(kSparseEventChannelCount, 0.0);
+    std::vector<double> channel_positive_sample_counts(kSparseEventChannelCount, 0.0);
     for (std::size_t i = 0; i < kSparseEventChannelCount; ++i) {
       channel_loss_sums[i] = torch::zeros({}, torch::TensorOptions().device(device_).dtype(torch::kFloat64));
       channel_positive_sums[i] = torch::zeros({}, torch::TensorOptions().device(device_).dtype(torch::kFloat64));
@@ -1634,6 +1671,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
             .narrow(1, agent_offset, count)
             .to(device_)
             .reshape({rollout_steps * count, -1});
+        flat_features = finite_or_zero(flat_features);
       }
 
       const double samples = static_cast<double>(rollout_steps * count);
@@ -1645,11 +1683,21 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
         if (!channel.enabled || channel_index >= predictor_optimizers_.size() || !predictor_optimizers_[channel_index]) {
           continue;
         }
+        SparseRewardPredictor& head = actor_->predictor_head(channel_index);
+        const GradientSanitizeResult sanitized = zero_nonfinite_parameters(*head);
+        if (sanitized.changed) {
+          std::cerr << "Warning: repaired non-finite predictor_" << channel_name
+                    << " parameter " << sanitized.first_parameter
+                    << "; resetting its optimizer state.\n";
+          predictor_optimizers_[channel_index] = std::make_unique<torch::optim::Adam>(
+              head->parameters(),
+              torch::optim::AdamOptions(channel.learning_rate).weight_decay(1.0e-4));
+        }
         predictor_optimizers_[channel_index]->zero_grad();
       }
 
       // Forward all predictor heads in a single batched operation
-      torch::Tensor logits_all = actor_->forward_all_predictors(flat_features);
+      torch::Tensor logits_all = finite_or_zero(actor_->forward_all_predictors(flat_features));
 
       torch::Tensor total_loss = torch::zeros({}, torch::TensorOptions().device(device_).dtype(torch::kFloat32));
       bool has_any_loss = false;
@@ -1665,8 +1713,18 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
             .narrow(1, agent_offset, count)
             .select(2, static_cast<int64_t>(channel_index))
             .reshape({rollout_steps * count});
+        channel_positive_sums[channel_index].add_((targets > 0).to(torch::kFloat64).sum());
+        channel_positive_sample_counts[channel_index] += samples;
         torch::Tensor logits = logits_all.select(1, static_cast<int64_t>(channel_index));
         torch::Tensor loss = torch::nn::functional::cross_entropy(logits, targets);
+        if (!torch::isfinite(loss).item<bool>()) {
+          std::cerr << "Warning: skipping non-finite predictor_" << channel_name
+                    << " loss at update=" << update_index
+                    << " agent_offset=" << agent_offset
+                    << '\n';
+          predictor_optimizers_[channel_index]->zero_grad();
+          continue;
+        }
         
         total_loss = total_loss + loss;
         has_any_loss = true;
@@ -1674,7 +1732,6 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
         // Accumulate on GPU — no .item() sync stalls
         channel_loss_sums[channel_index].add_(loss.to(torch::kFloat64) * samples);
         channel_sample_counts[channel_index] += samples;
-        channel_positive_sums[channel_index].add_((targets > 0).to(torch::kFloat64).sum());
       }
 
       if (has_any_loss) {
@@ -1688,7 +1745,21 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
           }
           auto& optimizer = predictor_optimizers_[channel_index];
           SparseRewardPredictor& head = actor_->predictor_head(channel_index);
-          torch::nn::utils::clip_grad_norm_(head->parameters(), 0.1);
+          GradientSanitizeResult sanitized = zero_nonfinite_gradients(*head);
+          if (sanitized.changed && !gradients_are_finite(*head)) {
+            std::cerr << "Warning: skipping predictor_" << channel_name
+                      << " optimizer step after non-finite gradient in "
+                      << sanitized.first_parameter << '\n';
+            optimizer->zero_grad();
+            continue;
+          }
+          const double grad_norm = torch::nn::utils::clip_grad_norm_(head->parameters(), 0.1);
+          if (!std::isfinite(grad_norm)) {
+            std::cerr << "Warning: skipping predictor_" << channel_name
+                      << " optimizer step with non-finite grad_norm=" << grad_norm << '\n';
+            optimizer->zero_grad();
+            continue;
+          }
           optimizer->step();
           optimizer->zero_grad();
         }
@@ -1697,7 +1768,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
       {
         torch::NoGradGuard no_grad;
         const torch::Tensor shaped_view = shaped_rewards.narrow(1, agent_offset, count);
-        torch::Tensor shaping_logits_all = actor_->forward_all_predictors(flat_features).detach();
+        torch::Tensor shaping_logits_all = finite_or_zero(actor_->forward_all_predictors(flat_features)).detach();
         for (std::size_t channel_index = 0; channel_index < kSparseEventChannelCount; ++channel_index) {
           const std::string channel_name(kSparseEventChannels[channel_index].name);
           const auto& channel = config_.predictor.channels.at(channel_name);
@@ -1720,6 +1791,7 @@ TrainerMetrics APPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
       predictor_stats[channel_index].loss_sum = channel_loss_sums[channel_index].item<double>();
       predictor_stats[channel_index].samples = channel_sample_counts[channel_index];
       predictor_stats[channel_index].positive_sum = channel_positive_sums[channel_index].item<double>();
+      predictor_stats[channel_index].positive_samples = channel_positive_sample_counts[channel_index];
     }
 
     const auto finish_channel = [&](double mean_loss,
