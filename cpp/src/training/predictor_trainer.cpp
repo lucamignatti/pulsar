@@ -1,0 +1,297 @@
+#include "pulsar/training/predictor_trainer.hpp"
+
+#include <iostream>
+#include <limits>
+#include <cmath>
+
+#include "pulsar/training/gradient_surgery.hpp"
+#include "pulsar/tracing/tracing.hpp"
+
+#ifdef PULSAR_HAS_TORCH
+
+namespace pulsar {
+
+PredictorTrainer::PredictorTrainer(
+    const ExperimentConfig& config,
+    const torch::Device& device)
+    : config_(config), device_(device) {
+  ema_losses_.assign(kSparseEventChannelCount, -1.0F);
+  deltas_.assign(kSparseEventChannelCount, std::numeric_limits<float>::infinity());
+}
+
+void PredictorTrainer::initialize_optimizers(VRPOActor& actor) {
+  optimizers_.clear();
+  optimizers_.resize(kSparseEventChannelCount);
+  for (std::size_t i = 0; i < kSparseEventChannelCount; ++i) {
+    const std::string channel_name(kSparseEventChannels[i].name);
+    const auto& channel = config_.predictor.channels.at(channel_name);
+    if (channel.enabled) {
+      auto& head = actor->predictor_head(i);
+      optimizers_[i] = std::make_unique<torch::optim::Adam>(
+          head->parameters(),
+          torch::optim::AdamOptions(channel.learning_rate).weight_decay(1.0e-4));
+    }
+  }
+}
+
+void PredictorTrainer::save_optimizers(torch::serialize::OutputArchive& archive) const {
+  for (std::size_t i = 0; i < optimizers_.size() && i < kSparseEventChannelCount; ++i) {
+    if (optimizers_[i]) {
+      torch::serialize::OutputArchive sub_archive;
+      optimizers_[i]->save(sub_archive);
+      archive.write("predictor_optimizer_" + std::to_string(i), sub_archive);
+    }
+  }
+}
+
+void PredictorTrainer::load_optimizers(torch::serialize::InputArchive& archive) {
+  for (std::size_t i = 0; i < optimizers_.size() && i < kSparseEventChannelCount; ++i) {
+    if (optimizers_[i]) {
+      torch::serialize::InputArchive sub_archive;
+      if (archive.try_read("predictor_optimizer_" + std::to_string(i), sub_archive)) {
+        optimizers_[i]->load(sub_archive);
+      }
+    }
+  }
+}
+
+void PredictorTrainer::update_predictors(
+    VRPOActor& actor,
+    const torch::Tensor& flat_features,
+    const torch::Tensor& targets_all,
+    int64_t rollout_steps,
+    int64_t count,
+    int64_t agent_offset,
+    int update_index,
+    std::vector<torch::Tensor>& channel_loss_sums,
+    std::vector<double>& channel_sample_counts,
+    std::vector<torch::Tensor>& channel_positive_sums,
+    std::vector<double>& channel_positive_sample_counts) {
+  PULSAR_TRACE_SCOPE_CAT("predictor_trainer", "update_predictors");
+
+  const double samples = static_cast<double>(rollout_steps * count);
+
+  // 1. Loss of Plasticity NaN sanitizer and active optimizer resetting
+  for (std::size_t channel_index = 0; channel_index < kSparseEventChannelCount; ++channel_index) {
+    const std::string channel_name(kSparseEventChannels[channel_index].name);
+    const auto& channel = config_.predictor.channels.at(channel_name);
+    if (!channel.enabled || channel_index >= optimizers_.size() || !optimizers_[channel_index]) {
+      continue;
+    }
+    SparseRewardPredictor& head = actor->predictor_head(channel_index);
+    const GradientSanitizeResult sanitized = zero_nonfinite_parameters(*head);
+    if (sanitized.changed) {
+      std::cerr << "Warning: repaired non-finite predictor_" << channel_name
+                << " parameter " << sanitized.first_parameter
+                << "; resetting its optimizer state.\n";
+      optimizers_[channel_index] = std::make_unique<torch::optim::Adam>(
+          head->parameters(),
+          torch::optim::AdamOptions(channel.learning_rate).weight_decay(1.0e-4));
+    }
+    optimizers_[channel_index]->zero_grad();
+  }
+
+  // 2. Forward pass all predictors
+  torch::Tensor logits_all = finite_or_zero(actor->forward_all_predictors(flat_features));
+
+  torch::Tensor total_loss = torch::zeros({}, torch::TensorOptions().device(device_).dtype(torch::kFloat32));
+  bool has_any_loss = false;
+
+  // 3. Compute loss per enabled channel
+  for (std::size_t channel_index = 0; channel_index < kSparseEventChannelCount; ++channel_index) {
+    const std::string channel_name(kSparseEventChannels[channel_index].name);
+    const auto& channel = config_.predictor.channels.at(channel_name);
+    if (!channel.enabled || channel_index >= optimizers_.size() || !optimizers_[channel_index]) {
+      continue;
+    }
+
+    torch::Tensor targets = targets_all
+        .narrow(1, agent_offset, count)
+        .select(2, static_cast<int64_t>(channel_index))
+        .reshape({rollout_steps * count});
+    channel_positive_sums[channel_index].add_((targets > 0).to(torch::kFloat64).sum());
+    channel_positive_sample_counts[channel_index] += samples;
+    torch::Tensor logits = logits_all.select(1, static_cast<int64_t>(channel_index));
+    torch::Tensor loss = torch::nn::functional::cross_entropy(logits, targets);
+    if (!torch::isfinite(loss).item<bool>()) {
+      std::cerr << "Warning: skipping non-finite predictor_" << channel_name
+                << " loss at update=" << update_index
+                << " agent_offset=" << agent_offset
+                << '\n';
+      optimizers_[channel_index]->zero_grad();
+      continue;
+    }
+
+    total_loss = total_loss + loss;
+    has_any_loss = true;
+
+    // Accumulate on GPU — no sync stalls
+    channel_loss_sums[channel_index].add_(loss.to(torch::kFloat64) * samples);
+    channel_sample_counts[channel_index] += samples;
+  }
+
+  // 4. Backward pass & step optimizers
+  if (has_any_loss) {
+    total_loss.backward();
+
+    for (std::size_t channel_index = 0; channel_index < kSparseEventChannelCount; ++channel_index) {
+      const std::string channel_name(kSparseEventChannels[channel_index].name);
+      const auto& channel = config_.predictor.channels.at(channel_name);
+      if (!channel.enabled || channel_index >= optimizers_.size() || !optimizers_[channel_index]) {
+        continue;
+      }
+      auto& optimizer = optimizers_[channel_index];
+      SparseRewardPredictor& head = actor->predictor_head(channel_index);
+      GradientSanitizeResult sanitized = zero_nonfinite_gradients(*head);
+      if (sanitized.changed && !gradients_are_finite(*head)) {
+        std::cerr << "Warning: skipping predictor_" << channel_name
+                  << " optimizer step after non-finite gradient in "
+                  << sanitized.first_parameter << '\n';
+        optimizer->zero_grad();
+        continue;
+      }
+      const double grad_norm = torch::nn::utils::clip_grad_norm_(head->parameters(), 0.1);
+      if (!std::isfinite(grad_norm)) {
+        std::cerr << "Warning: skipping predictor_" << channel_name
+                  << " optimizer step with non-finite grad_norm=" << grad_norm << '\n';
+        optimizer->zero_grad();
+        continue;
+      }
+      optimizer->step();
+      optimizer->zero_grad();
+    }
+  }
+}
+
+void PredictorTrainer::apply_reward_shaping(
+    const VRPOActor& actor,
+    const torch::Tensor& flat_features,
+    torch::Tensor& shaped_rewards,
+    int64_t rollout_steps,
+    int64_t count,
+    int64_t agent_offset) {
+  PULSAR_TRACE_SCOPE_CAT("predictor_trainer", "apply_reward_shaping");
+  torch::NoGradGuard no_grad;
+  const torch::Tensor shaped_view = shaped_rewards.narrow(1, agent_offset, count);
+  torch::Tensor shaping_logits_all = finite_or_zero(actor->forward_all_predictors(flat_features)).detach();
+  for (std::size_t channel_index = 0; channel_index < kSparseEventChannelCount; ++channel_index) {
+    const std::string channel_name(kSparseEventChannels[channel_index].name);
+    const auto& channel = config_.predictor.channels.at(channel_name);
+    const bool active = channel_index < actor->predictor_active_.size() &&
+        actor->predictor_active_[channel_index];
+    if (!channel.enabled || !active || channel.weight <= 0.0F) {
+      continue;
+    }
+    const torch::Tensor logits = shaping_logits_all.select(1, static_cast<int64_t>(channel_index));
+    const torch::Tensor probs = torch::softmax(logits, -1);
+    const torch::Tensor p_soon = probs.select(1, 1).reshape({rollout_steps, count});
+    shaped_view.add_(channel.weight * (2.0F * p_soon - 1.0F));
+  }
+}
+
+void PredictorTrainer::process_convergence(
+    VRPOActor& actor,
+    const std::vector<PredictorUpdateStats>& stats,
+    int update_index) {
+  const auto finish_channel = [&](double mean_loss,
+                                  double positive_rate,
+                                  float& ema_loss,
+                                  float& delta,
+                                  std::uint8_t& active,
+                                  const PredictorChannelConfig& channel,
+                                  const char* channel_name) {
+    if (mean_loss <= 0.0 || !std::isfinite(mean_loss)) {
+      return;
+    }
+    if (ema_loss < 0.0F) {
+      ema_loss = static_cast<float>(mean_loss);
+      delta = std::numeric_limits<float>::infinity();
+    } else {
+      const float next_ema = 0.9F * ema_loss + 0.1F * static_cast<float>(mean_loss);
+      delta = std::abs(next_ema - ema_loss);
+      ema_loss = next_ema;
+    }
+    if (active == 0 &&
+        update_index >= channel.warmup_updates &&
+        positive_rate > 0.0 &&
+        std::isfinite(delta) &&
+        delta <= channel.convergence_threshold) {
+      active = 1;
+      std::cout << "predictor_enabled channel=" << channel_name
+                << " update=" << update_index
+                << " ema_loss=" << ema_loss
+                << " delta=" << delta
+                << " positive_rate=" << positive_rate
+                << '\n';
+    }
+  };
+
+  for (std::size_t channel_index = 0; channel_index < kSparseEventChannelCount; ++channel_index) {
+    const std::string channel_name(kSparseEventChannels[channel_index].name);
+    const auto& channel = config_.predictor.channels.at(channel_name);
+    if (channel_index >= actor->predictor_active_.size()) {
+      actor->predictor_active_.resize(kSparseEventChannelCount, 0);
+    }
+    const double mean_loss = stats[channel_index].mean_loss();
+    const double positive_rate = stats[channel_index].positive_rate();
+    finish_channel(
+        mean_loss,
+        positive_rate,
+        ema_losses_[channel_index],
+        deltas_[channel_index],
+        actor->predictor_active_[channel_index],
+        channel,
+        channel_name.c_str());
+  }
+}
+
+void PredictorTrainer::log_metrics(
+    WandbLogger& logger,
+    const std::map<std::string, double>& losses,
+    const std::map<std::string, double>& deltas,
+    const std::map<std::string, double>& positive_rates,
+    const std::map<std::string, double>& active_states) {
+  // First-class visual logging for predictor channels
+  for (const auto& [channel, val] : losses) {
+    logger.add_metric("Predictor", "predictor_loss_" + channel, val);
+  }
+  for (const auto& [channel, val] : deltas) {
+    logger.add_metric("Predictor", "predictor_delta_" + channel, val);
+  }
+  for (const auto& [channel, val] : positive_rates) {
+    logger.add_metric("Predictor", "predictor_positive_" + channel, val);
+  }
+  for (const auto& [channel, val] : active_states) {
+    logger.add_metric("Predictor", "predictor_active_" + channel, val);
+  }
+  
+  // Tabular summary W&B Table logging
+  std::vector<std::string> columns = {"Channel", "Active", "BCE Loss (EMA)", "Convergence Delta", "Positive Rate"};
+  std::vector<std::vector<nlohmann::json>> row_data;
+  
+  for (std::size_t i = 0; i < kSparseEventChannelCount; ++i) {
+    const std::string name(kSparseEventChannels[i].name);
+    if (!config_.predictor.channels.at(name).enabled) {
+      continue;
+    }
+    bool active = active_states.count(name) ? (active_states.at(name) > 0.5) : false;
+    double loss = losses.count(name) ? losses.at(name) : 0.0;
+    double delta = deltas.count(name) ? deltas.at(name) : 0.0;
+    double pos_rate = positive_rates.count(name) ? positive_rates.at(name) : 0.0;
+    
+    std::vector<nlohmann::json> row = {
+      name,
+      active ? "ACTIVE" : "INACTIVE",
+      loss,
+      delta,
+      pos_rate
+    };
+    row_data.push_back(row);
+  }
+  
+  logger.add_table("predictor_status_table", columns, row_data);
+}
+
+}  // namespace pulsar
+
+#endif

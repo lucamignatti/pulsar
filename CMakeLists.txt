@@ -33,8 +33,8 @@ option(PULSAR_ENABLE_BENCHMARKS "Build benchmark targets" ON)
 option(PULSAR_ENABLE_ROCKETSIM "Enable RocketSim-backed simulation" ON)
 option(PULSAR_ENABLE_CUDA_SMOKE "Enable CUDA integration smoke test when Python and Torch are available." ON)
 option(
-  PULSAR_ENABLE_PPO_MATH_TESTS
-  "Enable standalone PPO math unit tests (pure computation, no IO). Should always be ON for CI."
+  PULSAR_ENABLE_VRPO_MATH_TESTS
+  "Enable standalone VRPO math unit tests (pure computation, no IO). Should always be ON for CI."
   ON
 )
 option(
@@ -106,15 +106,18 @@ if(PULSAR_ENABLE_TORCH)
   if(Torch_FOUND)
     add_library(
       pulsar_torch
-      cpp/src/model/ppo_actor.cpp
+      cpp/src/model/vrpo_actor.cpp
       cpp/src/model/mamba2_ops.cpp
       cpp/src/model/layernorm_ops.cpp
       cpp/src/model/normalizer.cpp
       cpp/src/training/rollout_storage.cpp
-      cpp/src/training/ppo_math.cpp
+      cpp/src/training/vrpo_math.cpp
       cpp/src/training/reward_engine.cpp
       cpp/src/training/batched_rocketsim_collector.cpp
-      cpp/src/training/appo_trainer.cpp
+      cpp/src/training/vrpo_trainer.cpp
+      cpp/src/training/gradient_surgery.cpp
+      cpp/src/training/predictor_trainer.cpp
+      cpp/src/training/gcrl_trainer.cpp
       cpp/src/training/self_play_manager.cpp
     )
 
@@ -195,8 +198,8 @@ if(PULSAR_ENABLE_TORCH)
       message(STATUS "Custom HIP kernels disabled: HIP language compiler unavailable.")
     endif()
 
-    add_executable(pulsar_appo_train cpp/src/apps/train_main.cpp)
-    pulsar_link_torch_whole_core(pulsar_appo_train)
+    add_executable(pulsar_vrpo_train cpp/src/apps/train_main.cpp)
+    pulsar_link_torch_whole_core(pulsar_vrpo_train)
   else()
     message(WARNING "Torch not found; skipping pulsar_torch and APPO training targets.")
   endif()
@@ -246,15 +249,15 @@ if(PULSAR_ENABLE_TESTS)
     pulsar_link_torch_whole_core(pulsar_torch_tests)
     add_test(NAME pulsar_torch_tests COMMAND pulsar_torch_tests)
 
-    if(PULSAR_ENABLE_PPO_MATH_TESTS)
+    if(PULSAR_ENABLE_VRPO_MATH_TESTS)
       add_executable(
-        pulsar_ppo_math_tests
-        cpp/tests/test_ppo_math.cpp
+        pulsar_vrpo_math_tests
+        cpp/tests/test_vrpo_math.cpp
       )
-      target_include_directories(pulsar_ppo_math_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
-      pulsar_link_torch_whole_core(pulsar_ppo_math_tests)
-      add_test(NAME pulsar_ppo_math_tests COMMAND pulsar_ppo_math_tests)
-      set_tests_properties(pulsar_ppo_math_tests PROPERTIES LABELS "reference")
+      target_include_directories(pulsar_vrpo_math_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
+      pulsar_link_torch_whole_core(pulsar_vrpo_math_tests)
+      add_test(NAME pulsar_vrpo_math_tests COMMAND pulsar_vrpo_math_tests)
+      set_tests_properties(pulsar_vrpo_math_tests PROPERTIES LABELS "reference")
     endif()
 
     add_executable(
@@ -318,15 +321,28 @@ if(PULSAR_ENABLE_BENCHMARKS AND TARGET pulsar_torch)
   endif()
 endif()
 
-if(PULSAR_ENABLE_TESTS AND PULSAR_ENABLE_CUDA_SMOKE AND TARGET pulsar_appo_train AND Python3_EXECUTABLE)
+if(PULSAR_ENABLE_TESTS AND PULSAR_ENABLE_CUDA_SMOKE AND TARGET pulsar_vrpo_train AND Python3_EXECUTABLE)
   add_test(
     NAME pulsar_cuda_smoke
     COMMAND
       ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/scripts/cuda_smoke.py
       ${CMAKE_CURRENT_SOURCE_DIR}
-      $<TARGET_FILE:pulsar_appo_train>
+      $<TARGET_FILE:pulsar_vrpo_train>
       ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_appo.json
   )
   set_tests_properties(pulsar_cuda_smoke PROPERTIES LABELS "cuda;smoke" SKIP_RETURN_CODE 77)
+ENDIF()
+
+if(PULSAR_ENABLE_TESTS AND TARGET pulsar_vrpo_train AND Python3_EXECUTABLE)
+  add_test(
+    NAME pulsar_cpu_smoke
+    COMMAND
+      ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/cpu_smoke.py
+      ${CMAKE_CURRENT_SOURCE_DIR}
+      $<TARGET_FILE:pulsar_vrpo_train>
+      ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_appo.json
+  )
+  set_tests_properties(pulsar_cpu_smoke PROPERTIES LABELS "cpu;smoke")
 endif()

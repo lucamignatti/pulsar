@@ -1,4 +1,4 @@
-#include "pulsar/model/ppo_actor.hpp"
+#include "pulsar/model/vrpo_actor.hpp"
 
 #include "pulsar/model/layernorm_ops.hpp"
 
@@ -38,7 +38,7 @@ torch::Tensor eggroll_lora_perturb_hip(
 
 namespace {
 
-void copy_module_tensors_to(const PPOActor& source, PPOActor& target, const torch::Device&) {
+void copy_module_tensors_to(const VRPOActor& source, VRPOActor& target, const torch::Device&) {
   torch::NoGradGuard no_grad;
 
   const auto source_params = source->named_parameters(true);
@@ -289,7 +289,6 @@ torch::Tensor Mamba2BlockImpl::forward(const torch::Tensor& tokens, const torch:
     const torch::Tensor weight = causal_conv_->weight.squeeze(1);
     conv_out = mamba2_causal_conv1d_silu(block_input, weight, causal_conv_->bias, reset);
   } else {
-    // Local causal mixing before the selective scan. Conv1d expects [B, C, S].
     torch::Tensor conv_input = block_input.transpose(1, 2);
     conv_out = causal_conv_->forward(conv_input).narrow(2, 0, sequence).transpose(1, 2);
     conv_out = torch::silu(conv_out);
@@ -478,7 +477,7 @@ torch::Tensor GoalCriticImpl::goal_embedding(const torch::Tensor& goal_values) {
   return normalize_goal_embedding(goal_encoder_->forward(goal_values.to(torch::kFloat32)));
 }
 
-PPOActorImpl::PPOActorImpl(
+VRPOActorImpl::VRPOActorImpl(
     ModelConfig config,
     const GoalCriticConfig& goal_critic_config,
     const ESLoraConfig& es_lora_config,
@@ -527,21 +526,21 @@ PPOActorImpl::PPOActorImpl(
   }
 }
 
-SparseRewardPredictor& PPOActorImpl::predictor_head(std::size_t channel_index) {
+SparseRewardPredictor& VRPOActorImpl::predictor_head(std::size_t channel_index) {
   if (channel_index >= predictor_heads_.size()) {
     throw std::out_of_range("predictor channel index is out of range");
   }
   return predictor_heads_[channel_index];
 }
 
-const SparseRewardPredictor& PPOActorImpl::predictor_head(std::size_t channel_index) const {
+const SparseRewardPredictor& VRPOActorImpl::predictor_head(std::size_t channel_index) const {
   if (channel_index >= predictor_heads_.size()) {
     throw std::out_of_range("predictor channel index is out of range");
   }
   return predictor_heads_[channel_index];
 }
 
-torch::Tensor PPOActorImpl::forward_all_predictors(const torch::Tensor& features) {
+torch::Tensor VRPOActorImpl::forward_all_predictors(const torch::Tensor& features) const {
   std::vector<torch::Tensor> outputs;
   outputs.reserve(predictor_heads_.size());
   for (auto& head : predictor_heads_) {
@@ -550,7 +549,7 @@ torch::Tensor PPOActorImpl::forward_all_predictors(const torch::Tensor& features
   return torch::stack(outputs, 1);
 }
 
-ActorStepOutput PPOActorImpl::forward_step(
+ActorStepOutput VRPOActorImpl::forward_step(
     torch::Tensor obs,
     torch::Tensor goal_values,
     bool compute_value) {
@@ -580,7 +579,7 @@ ActorStepOutput PPOActorImpl::forward_step(
   };
 }
 
-ActorStepOutput PPOActorImpl::forward_step_stateful(
+ActorStepOutput VRPOActorImpl::forward_step_stateful(
     torch::Tensor obs,
     torch::Tensor state,
     torch::Tensor episode_starts,
@@ -613,25 +612,25 @@ ActorStepOutput PPOActorImpl::forward_step_stateful(
   };
 }
 
-torch::Tensor PPOActorImpl::value_head_forward(const torch::Tensor& encoded) {
+torch::Tensor VRPOActorImpl::value_head_forward(const torch::Tensor& encoded) {
   auto policy_logits = policy_head_forward(encoded);
   auto q_values = q_head_forward(encoded);
   auto policy_probs = torch::softmax(policy_logits, -1);
   return (policy_probs * q_values).sum(-1, true);
 }
 
-torch::Tensor PPOActorImpl::q_head_forward(const torch::Tensor& encoded) {
+torch::Tensor VRPOActorImpl::q_head_forward(const torch::Tensor& encoded) {
   return q_head_->forward(encoded);
 }
 
-torch::Tensor PPOActorImpl::policy_head_forward(const torch::Tensor& features) {
+torch::Tensor VRPOActorImpl::policy_head_forward(const torch::Tensor& features) {
   if (!policy_hidden_.is_empty()) {
     return policy_lora_->forward(policy_hidden_->forward(features));
   }
   return policy_lora_->forward(features);
 }
 
-ActorSequenceOutput PPOActorImpl::forward_sequence(
+ActorSequenceOutput VRPOActorImpl::forward_sequence(
     torch::Tensor obs_seq,
     torch::Tensor goal_values,
     torch::Tensor episode_starts,
@@ -665,43 +664,43 @@ ActorSequenceOutput PPOActorImpl::forward_sequence(
   };
 }
 
-torch::Tensor PPOActorImpl::initial_recurrent_state(int64_t batch, const torch::Device& device) const {
+torch::Tensor VRPOActorImpl::initial_recurrent_state(int64_t batch, const torch::Device& device) const {
   return mamba2_encoder_->initial_state(batch, device);
 }
 
-int PPOActorImpl::feature_dim() const {
+int VRPOActorImpl::feature_dim() const {
   return feature_dim_;
 }
 
-const ModelConfig& PPOActorImpl::config() const {
+const ModelConfig& VRPOActorImpl::config() const {
   return config_;
 }
 
-const GoalCriticConfig& PPOActorImpl::goal_critic_config() const {
+const GoalCriticConfig& VRPOActorImpl::goal_critic_config() const {
   return goal_critic_config_;
 }
 
-const ESLoraConfig& PPOActorImpl::es_lora_config() const {
+const ESLoraConfig& VRPOActorImpl::es_lora_config() const {
   return es_lora_config_;
 }
 
-const VRPOConfig& PPOActorImpl::vrpo_config() const {
+const VRPOConfig& VRPOActorImpl::vrpo_config() const {
   return vrpo_config_;
 }
 
-std::vector<torch::Tensor> PPOActorImpl::es_lora_parameters() const {
+std::vector<torch::Tensor> VRPOActorImpl::es_lora_parameters() const {
   return policy_lora_->lora_parameters();
 }
 
-std::vector<torch::Tensor> PPOActorImpl::es_lora_parameters_flat() const {
+std::vector<torch::Tensor> VRPOActorImpl::es_lora_parameters_flat() const {
   return policy_lora_->lora_parameters_flat();
 }
 
-void PPOActorImpl::restore_es_lora_parameters(const std::vector<torch::Tensor>& params) {
+void VRPOActorImpl::restore_es_lora_parameters(const std::vector<torch::Tensor>& params) {
   policy_lora_->restore_lora_parameters(params);
 }
 
-void PPOActorImpl::apply_lora_perturbation(
+void VRPOActorImpl::apply_lora_perturbation(
     const std::vector<torch::Tensor>& perturbation, float sigma) {
   torch::NoGradGuard no_grad;
   auto params = es_lora_parameters();
@@ -710,7 +709,7 @@ void PPOActorImpl::apply_lora_perturbation(
   }
 }
 
-torch::Tensor PPOActorImpl::policy_eggroll_logits(
+torch::Tensor VRPOActorImpl::policy_eggroll_logits(
     const torch::Tensor& features,
     const torch::Tensor& A_stack,
     const torch::Tensor& B_stack,
@@ -723,23 +722,23 @@ torch::Tensor PPOActorImpl::policy_eggroll_logits(
   return policy_lora_->forward_eggroll_population(policy_input, A_stack, B_stack, sigma);
 }
 
-void PPOActorImpl::apply_policy_eggroll_update(const torch::Tensor& delta_weight) {
+void VRPOActorImpl::apply_policy_eggroll_update(const torch::Tensor& delta_weight) {
   policy_lora_->apply_base_weight_update(delta_weight);
 }
 
-const LoRALinear& PPOActorImpl::policy_lora() const {
+const LoRALinear& VRPOActorImpl::policy_lora() const {
   return policy_lora_;
 }
 
-GoalCritic& PPOActorImpl::goal_critic() {
+GoalCritic& VRPOActorImpl::goal_critic() {
   return goal_critic_;
 }
 
-std::vector<std::string> PPOActorImpl::enabled_critic_heads() const {
+std::vector<std::string> VRPOActorImpl::enabled_critic_heads() const {
   return {"extrinsic", "q_critic"};
 }
 
-PPOActor load_ppo_actor(const std::string& checkpoint_path, const std::string& device) {
+VRPOActor load_vrpo_actor(const std::string& checkpoint_path, const std::string& device) {
   namespace fs = std::filesystem;
   const fs::path base(checkpoint_path);
   const ExperimentConfig config = load_experiment_config((base / "config.json").string());
@@ -747,7 +746,7 @@ PPOActor load_ppo_actor(const std::string& checkpoint_path, const std::string& d
   validate_inference_checkpoint_metadata(metadata, config);
 
   torch::Device torch_device(device);
-  auto model = PPOActor(config.model, config.goal_critic, config.es_lora, config.vrpo);
+  auto model = VRPOActor(config.model, config.goal_critic, config.es_lora, config.vrpo);
   const fs::path state_path = base / "state.pt";
   if (fs::exists(state_path)) {
     torch::serialize::InputArchive archive;
@@ -763,20 +762,20 @@ PPOActor load_ppo_actor(const std::string& checkpoint_path, const std::string& d
   return model;
 }
 
-PPOActor clone_ppo_actor(const PPOActor& source, const torch::Device& device) {
+VRPOActor clone_vrpo_actor(const VRPOActor& source, const torch::Device& device) {
   if (!source) {
     return nullptr;
   }
-  auto clone = PPOActor(source->config(), source->goal_critic_config(), source->es_lora_config(), source->vrpo_config());
+  auto clone = VRPOActor(source->config(), source->goal_critic_config(), source->es_lora_config(), source->vrpo_config());
   clone->to(device);
   copy_module_tensors_to(source, clone, device);
   clone->predictor_active_ = source->predictor_active_;
   return clone;
 }
 
-void copy_ppo_actor_tensors_to(const PPOActor& source, PPOActor& target, const torch::Device& device) {
+void copy_vrpo_actor_tensors_to(const VRPOActor& source, VRPOActor& target, const torch::Device& device) {
   if (!source || !target) {
-    throw std::invalid_argument("copy_ppo_actor_tensors_to requires non-null actors.");
+    throw std::invalid_argument("copy_vrpo_actor_tensors_to requires non-null actors.");
   }
   copy_module_tensors_to(source, target, device);
   target->predictor_active_ = source->predictor_active_;

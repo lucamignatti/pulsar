@@ -16,11 +16,14 @@
 #include "pulsar/config/config.hpp"
 #include "pulsar/logging/wandb_logger.hpp"
 #include "pulsar/model/normalizer.hpp"
-#include "pulsar/model/ppo_actor.hpp"
+#include "pulsar/model/vrpo_actor.hpp"
 #include "pulsar/rl/action_table.hpp"
 #include "pulsar/training/batched_rocketsim_collector.hpp"
 #include "pulsar/training/rollout_storage.hpp"
 #include "pulsar/training/self_play_manager.hpp"
+#include "pulsar/training/gradient_surgery.hpp"
+#include "pulsar/training/predictor_trainer.hpp"
+#include "pulsar/training/gcrl_trainer.hpp"
 
 #ifdef PULSAR_HAS_CUDA
 #include <c10/cuda/CUDAStream.h>
@@ -154,21 +157,21 @@ struct TrainerBenchmarkMetrics {
   double es_policy_update_norm = 0.0;
 };
 
-class APPOTrainer {
+class VRPOTrainer {
  public:
-  APPOTrainer(
+  VRPOTrainer(
       ExperimentConfig config,
       std::unique_ptr<BatchedRocketSimCollector> collector,
       std::unique_ptr<SelfPlayManager> self_play_manager,
       std::filesystem::path run_output_root = {},
       bool log_initialization = true);
-  APPOTrainer(
+  VRPOTrainer(
       ExperimentConfig config,
       std::vector<std::unique_ptr<BatchedRocketSimCollector>> collectors,
       std::unique_ptr<SelfPlayManager> self_play_manager,
       std::filesystem::path run_output_root = {},
       bool log_initialization = true);
-  ~APPOTrainer();
+  ~VRPOTrainer();
 
   void train(int updates, const std::string& checkpoint_dir, const std::string& config_path = "");
   TrainerBenchmarkMetrics benchmark(int updates);
@@ -184,7 +187,7 @@ class APPOTrainer {
       RolloutStorage& dest,
       TrainerMetrics& metrics,
       std::int64_t* collected_agent_steps,
-      PPOActor rollout_actor,
+      VRPOActor rollout_actor,
       ObservationNormalizer& normalizer);
   TrainerMetrics update_actor(RolloutStorage& rollout, int update_index);
   CheckpointMetadata make_checkpoint_metadata(std::int64_t global_step, int update_index, const std::string& wandb_run_id) const;
@@ -213,16 +216,16 @@ class APPOTrainer {
   std::vector<std::unique_ptr<BatchedRocketSimCollector>> collectors_{};
   std::unique_ptr<SelfPlayManager> self_play_manager_{};
   ControllerActionTable action_table_{};
-  PPOActor actor_{nullptr};
-  PPOActor actor_snapshot_{nullptr};
-  std::vector<PPOActor> compute_actors_;
+  VRPOActor actor_{nullptr};
+  VRPOActor actor_snapshot_{nullptr};
+  std::vector<VRPOActor> compute_actors_;
   ObservationNormalizer actor_normalizer_;
   torch::optim::AdamW actor_optimizer_;
   PopArtNormalizer q_normalizer_{};
   torch::Device device_{torch::kCPU};
   std::vector<torch::Device> compute_devices_{};
   std::vector<torch::Device> shard_devices_{};
-  std::vector<PPOActor> collection_actors_;  // persistent per-GPU collection replicas
+  std::vector<VRPOActor> collection_actors_;
   RolloutStorage rollout_;
   RolloutStorage rollout_B_;
   std::filesystem::path run_output_root_{};
@@ -238,9 +241,12 @@ class APPOTrainer {
   torch::Tensor es_delta_A_;
   torch::Tensor es_delta_B_;
 
-  std::vector<std::unique_ptr<torch::optim::Adam>> predictor_optimizers_{};
-  std::vector<float> predictor_ema_loss_{};
-  std::vector<float> predictor_delta_{};
+  // Modular trainers
+  std::unique_ptr<PredictorTrainer> predictor_trainer_{nullptr};
+  std::unique_ptr<GCRLTrainer> gcrl_trainer_{nullptr};
+
+  std::vector<torch::Tensor> predictor_ema_loss_{};
+  std::vector<torch::Tensor> predictor_delta_{};
   torch::Tensor predictor_horizons_device_;
 
 #ifdef PULSAR_HAS_CUDA

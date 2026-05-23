@@ -2,8 +2,9 @@
 
 #include <cstdio>
 #include <string>
+#include <vector>
 
-#include <nlohmann/json_fwd.hpp>
+#include <nlohmann/json.hpp>
 
 #include "pulsar/config/config.hpp"
 
@@ -25,6 +26,15 @@ class WandbLogger {
 
   [[nodiscard]] bool enabled() const;
   [[nodiscard]] std::string run_id() const;
+
+  // Decoupled, first-class logger interface
+  void add_metric(const std::string& section, const std::string& key, nlohmann::json value);
+  void add_table(
+      const std::string& key,
+      const std::vector<std::string>& columns,
+      const std::vector<std::vector<nlohmann::json>>& data);
+  void commit(std::int64_t global_step);
+
   void log(const nlohmann::json& payload);
   void finish();
 
@@ -34,6 +44,10 @@ class WandbLogger {
   bool enabled_ = false;
   std::string run_dir_{};
   mutable std::string run_id_{};
+
+  // Logging buffers
+  nlohmann::json payload_ = nlohmann::json::object();
+  nlohmann::json sections_ = nlohmann::json::object();
 };
 
 }  // namespace pulsar

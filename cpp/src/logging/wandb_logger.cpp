@@ -128,6 +128,53 @@ std::string WandbLogger::run_id() const {
   return run_id_;
 }
 
+void WandbLogger::add_metric(const std::string& section, const std::string& key, nlohmann::json value) {
+  if (!enabled_) return;
+  if (!section.empty() && !key.empty()) {
+    sections_[key] = section;
+  }
+  payload_[key] = std::move(value);
+}
+
+void WandbLogger::add_table(
+    const std::string& key,
+    const std::vector<std::string>& columns,
+    const std::vector<std::vector<nlohmann::json>>& data) {
+  if (!enabled_ || key.empty()) return;
+  nlohmann::json table = nlohmann::json::object();
+  table["_type"] = "table";
+  table["columns"] = columns;
+  table["data"] = data;
+
+  sections_[key] = "Tables";
+  payload_[key] = std::move(table);
+}
+
+void WandbLogger::commit(std::int64_t global_step) {
+  if (!enabled_) return;
+  payload_["_step"] = global_step;
+  payload_["_wandb_sections"] = sections_;
+  payload_["_wandb_section_order"] = nlohmann::json::array({
+      "Tables",
+      "1v1",
+      "2v2",
+      "3v3",
+      "Rewards",
+      "GCRL",
+      "ES-LoRA",
+      "Optimization",
+      "Charts",
+      "System",
+      "Hidden Panels"
+  });
+
+  log(payload_);
+
+  // Reset buffers for the next step
+  payload_ = nlohmann::json::object();
+  sections_ = nlohmann::json::object();
+}
+
 void WandbLogger::log(const nlohmann::json& payload) {
   if (!enabled_ || pipe_ == nullptr) {
     return;

@@ -18,7 +18,7 @@
 #include "pulsar/env/rocketsim_engine.hpp"
 #include "pulsar/rl/action_table.hpp"
 #include "pulsar/tracing/tracing.hpp"
-#include "pulsar/training/ppo_math.hpp"
+#include "pulsar/training/vrpo_math.hpp"
 
 namespace pulsar {
 namespace {
@@ -195,7 +195,7 @@ const std::string& SelfPlayManager::current_mode() const {
 }
 
 void SelfPlayManager::infer_opponent_actions(
-    PPOActor&,
+    VRPOActor&,
     const torch::Tensor& raw_obs,
     const torch::Tensor& action_masks,
     const torch::Tensor& episode_starts,
@@ -248,7 +248,7 @@ void SelfPlayManager::infer_opponent_actions(
 }
 
 SelfPlayMetrics SelfPlayManager::on_update(
-    PPOActor& current_model,
+    VRPOActor& current_model,
     const ObservationNormalizer& current_normalizer,
     std::int64_t global_step,
     int update_index) {
@@ -334,7 +334,7 @@ void SelfPlayManager::load_existing_snapshots() {
         .update_index = static_cast<int>(metadata.update_index),
         .curriculum_stage = metadata.extra.value("curriculum_stage", -1),
         .mode = metadata.extra.value("mode", std::string{"1v1"}),
-        .model = PPOActor(snapshot_config.model, snapshot_config.goal_critic, snapshot_config.es_lora),
+        .model = VRPOActor(snapshot_config.model, snapshot_config.goal_critic, snapshot_config.es_lora, snapshot_config.vrpo),
         .normalizer = ObservationNormalizer(snapshot_config.model.observation_dim),
         .ratings = {},
     };
@@ -384,7 +384,7 @@ void SelfPlayManager::save_snapshot(const Snapshot& snapshot) const {
         },
         (staging / "metadata.json").string());
 
-    PPOActor model_cpu = clone_ppo_actor(snapshot.model, torch::Device(torch::kCPU));
+    VRPOActor model_cpu = clone_vrpo_actor(snapshot.model, torch::Device(torch::kCPU));
     ObservationNormalizer normalizer_cpu = snapshot.normalizer.clone();
     normalizer_cpu.to(torch::Device(torch::kCPU));
     torch::serialize::OutputArchive archive;
@@ -426,7 +426,7 @@ void SelfPlayManager::ensure_configured_rating_modes() {
 }
 
 void SelfPlayManager::add_snapshot(
-    PPOActor& current_model,
+    VRPOActor& current_model,
     const ObservationNormalizer& current_normalizer,
     std::int64_t global_step,
     int update_index) {
@@ -436,7 +436,7 @@ void SelfPlayManager::add_snapshot(
       .update_index = update_index,
       .curriculum_stage = curriculum_stage_,
       .mode = current_mode_,
-      .model = clone_ppo_actor(current_model, device_),
+      .model = clone_vrpo_actor(current_model, device_),
       .normalizer = current_normalizer.clone(),
       .ratings = current_ratings_,
   };
@@ -448,7 +448,7 @@ void SelfPlayManager::add_snapshot(
 }
 
 SelfPlayMetrics SelfPlayManager::evaluate_current(
-    PPOActor& current_model,
+    VRPOActor& current_model,
     const ObservationNormalizer& current_normalizer) {
   PULSAR_TRACE_SCOPE_CAT("self_play", "evaluate_current");
   SelfPlayMetrics metrics{};

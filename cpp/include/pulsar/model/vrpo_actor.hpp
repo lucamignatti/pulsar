@@ -4,6 +4,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <vector>
 
 #include "pulsar/config/config.hpp"
 #include "pulsar/training/sparse_event_channels.hpp"
@@ -32,6 +33,10 @@ struct ActorSequenceOutput {
   torch::Tensor q_values;
 };
 
+/**
+ * @brief LoRALinearImpl handles low-rank adaptations (A x B) of linear projections.
+ * Used for evolutionary parameter search via EGGROLL (Sarkar et al., 2025).
+ */
 class LoRALinearImpl : public torch::nn::Module {
  public:
   LoRALinearImpl(int in_features, int out_features, int rank, float lora_alpha = 4.0F);
@@ -64,6 +69,10 @@ class LoRALinearImpl : public torch::nn::Module {
 
 TORCH_MODULE(LoRALinear);
 
+/**
+ * @brief GoalCritic pair for contrastive self-supervised goal reaching (Nimonkar et al., 2025).
+ * Represents state-action embeddings and goal embeddings trained via symmetric InfoNCE loss.
+ */
 class GoalCriticImpl : public torch::nn::Module {
  public:
   GoalCriticImpl(int feature_dim, int action_dim, int embedding_dim = 64, int hidden_dim = 256, int goal_dim = 3);
@@ -88,6 +97,9 @@ class GoalCriticImpl : public torch::nn::Module {
 
 TORCH_MODULE(GoalCritic);
 
+/**
+ * @brief Mamba2Block implements Structured State Space Duality (SSD) layer scan (Dao & Gu, 2024).
+ */
 class Mamba2BlockImpl : public torch::nn::Module {
  public:
   Mamba2BlockImpl(int embed_dim, int sequence_length, bool use_layer_norm);
@@ -102,7 +114,7 @@ class Mamba2BlockImpl : public torch::nn::Module {
       torch::Tensor* next_conv_1,
       torch::Tensor* next_scan);
 
- private:
+ public:
   int embed_dim_ = 0;
   int sequence_length_ = 0;
   bool use_layer_norm_ = true;
@@ -117,6 +129,9 @@ class Mamba2BlockImpl : public torch::nn::Module {
 
 TORCH_MODULE(Mamba2Block);
 
+/**
+ * @brief Mamba2Encoder implements the sequence encoding backbone using stack of Mamba-2 blocks.
+ */
 class Mamba2EncoderImpl : public torch::nn::Module {
  public:
   explicit Mamba2EncoderImpl(const ModelConfig& config);
@@ -141,6 +156,9 @@ class Mamba2EncoderImpl : public torch::nn::Module {
 
 TORCH_MODULE(Mamba2Encoder);
 
+/**
+ * @brief SparseRewardPredictor live online auxiliary MLP.
+ */
 class SparseRewardPredictorImpl : public torch::nn::Module {
  public:
   explicit SparseRewardPredictorImpl(int feature_dim) {
@@ -157,8 +175,9 @@ class SparseRewardPredictorImpl : public torch::nn::Module {
     torch::nn::init::constant_(output.bias, 0.0);
   }
 
-  torch::Tensor forward(torch::Tensor x) {
-    return torch::clamp(net_->forward(x), -10.0, 10.0);
+  torch::Tensor forward(torch::Tensor x) const {
+    auto* non_const_net = const_cast<torch::nn::SequentialImpl*>(net_.get());
+    return torch::clamp(non_const_net->forward(x), -10.0, 10.0);
   }
 
  private:
@@ -167,9 +186,13 @@ class SparseRewardPredictorImpl : public torch::nn::Module {
 
 TORCH_MODULE(SparseRewardPredictor);
 
-class PPOActorImpl : public torch::nn::Module {
+/**
+ * @brief VRPOActorImpl is a unified network for Variance-Reduced Policy Optimization.
+ * Houses the SSD sequence encoder, the EGGROLL-perturbed LoRA policy head, and centralized Q-head.
+ */
+class VRPOActorImpl : public torch::nn::Module {
  public:
-  explicit PPOActorImpl(
+  explicit VRPOActorImpl(
       ModelConfig config,
       const GoalCriticConfig& goal_critic_config = {},
       const ESLoraConfig& es_lora_config = {},
@@ -203,8 +226,9 @@ class PPOActorImpl : public torch::nn::Module {
   torch::Tensor policy_head_forward(const torch::Tensor& features);
   SparseRewardPredictor& predictor_head(std::size_t channel_index);
   const SparseRewardPredictor& predictor_head(std::size_t channel_index) const;
-  torch::Tensor forward_all_predictors(const torch::Tensor& features);
+  torch::Tensor forward_all_predictors(const torch::Tensor& features) const;
 
+  // EGGROLL Evolutionary LoRA Perturbations
   [[nodiscard]] std::vector<torch::Tensor> es_lora_parameters() const;
   [[nodiscard]] std::vector<torch::Tensor> es_lora_parameters_flat() const;
   void restore_es_lora_parameters(const std::vector<torch::Tensor>& params);
@@ -236,20 +260,20 @@ class PPOActorImpl : public torch::nn::Module {
   std::vector<std::uint8_t> predictor_active_{};
 };
 
-TORCH_MODULE(PPOActor);
+TORCH_MODULE(VRPOActor);
 
-PPOActor load_ppo_actor(const std::string& checkpoint_path, const std::string& device);
-PPOActor clone_ppo_actor(const PPOActor& source, const torch::Device& device);
-void copy_ppo_actor_tensors_to(const PPOActor& source, PPOActor& target, const torch::Device& device);
+VRPOActor load_vrpo_actor(const std::string& checkpoint_path, const std::string& device);
+VRPOActor clone_vrpo_actor(const VRPOActor& source, const torch::Device& device);
+void copy_vrpo_actor_tensors_to(const VRPOActor& source, VRPOActor& target, const torch::Device& device);
 
 #else
 
 struct ActorStepOutput {};
 struct ActorSequenceOutput {};
 
-class PPOActor {
+class VRPOActor {
  public:
-  PPOActor() = default;
+  VRPOActor() = default;
 };
 
 #endif

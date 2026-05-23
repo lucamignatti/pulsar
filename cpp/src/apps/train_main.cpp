@@ -10,7 +10,7 @@
 #include "pulsar/env/obs_builder.hpp"
 #include "pulsar/rl/action_table.hpp"
 #include "pulsar/tracing/tracing.hpp"
-#include "pulsar/training/appo_trainer.hpp"
+#include "pulsar/training/vrpo_trainer.hpp"
 #include "pulsar/training/batched_rocketsim_collector.hpp"
 #include "pulsar/training/self_play_manager.hpp"
 
@@ -32,13 +32,13 @@ torch::Device resolve_startup_device(const std::string& device_name) {
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::cerr << "usage: pulsar_appo_train <config.json> <checkpoint_dir> [updates]\n"
+    std::cerr << "usage: pulsar_vrpo_train <config.json> <checkpoint_dir> [updates]\n"
               << "       omit updates, or pass <=0, to train indefinitely\n";
     return 1;
   }
 
   try {
-    pulsar::tracing::Session trace_session(std::filesystem::path(argv[2]) / "trace.perfetto.json", "pulsar_appo_train");
+    pulsar::tracing::Session trace_session(std::filesystem::path(argv[2]) / "trace.perfetto.json", "pulsar_vrpo_train");
     PULSAR_TRACE_SET_THREAD_NAME("main");
     const pulsar::ExperimentConfig config = pulsar::load_experiment_config(argv[1]);
 
@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
     }
 
     const int updates = argc > 3 ? std::stoi(argv[3]) : 0;
-    pulsar::APPOTrainer trainer(
+    pulsar::VRPOTrainer trainer(
         config,
         std::move(collectors),
         std::move(self_play_manager),
@@ -94,7 +94,7 @@ int main(int argc, char** argv) {
     trainer.train(updates, argv[2], argv[1]);
     return 0;
   } catch (const std::exception& exc) {
-    std::cerr << "pulsar_appo_train failed: " << exc.what() << '\n';
+    std::cerr << "pulsar_vrpo_train failed: " << exc.what() << '\n';
     return 1;
   }
 }

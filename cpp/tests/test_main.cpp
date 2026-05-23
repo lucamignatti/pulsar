@@ -9,6 +9,7 @@
 #include "pulsar/env/mutators.hpp"
 #include "pulsar/env/obs_builder.hpp"
 #include "pulsar/rl/action_table.hpp"
+#include "pulsar/core/parallel_executor.hpp"
 #include "test_utils.hpp"
 
 namespace {
@@ -138,6 +139,49 @@ int main() {
     const auto production_config = pulsar::load_experiment_config(production_config_path.string());
     pulsar::validate_experiment_config(production_config);
     require(production_config.schema_version == 6, "production config schema should be v6");
+
+    // Concurrency engine tests
+    {
+      pulsar::ParallelExecutor exec(4);
+      require(exec.worker_count() == 4, "ParallelExecutor worker count mismatch");
+    }
+    {
+      pulsar::ParallelExecutor exec(0);
+      require(exec.worker_count() >= 1, "0 workers should resolve to at least 1");
+    }
+    {
+      pulsar::ParallelExecutor exec(4);
+      int count = 0;
+      exec.parallel_for(0, [&](std::size_t, std::size_t) {
+        count++;
+      });
+      require(count == 0, "empty loop should not call task");
+    }
+    {
+      pulsar::ParallelExecutor exec(4);
+      std::atomic<int> sum{0};
+      exec.parallel_for(1, [&](std::size_t begin, std::size_t end) {
+        for (auto i = begin; i < end; ++i) {
+          sum++;
+        }
+      });
+      require(sum == 1, "single element loop failed");
+    }
+    {
+      pulsar::ParallelExecutor exec(4);
+      constexpr std::size_t N = 1000;
+      std::vector<int> data(N, 1);
+      std::atomic<std::size_t> total_sum{0};
+      exec.parallel_for(N, [&](std::size_t begin, std::size_t end) {
+        std::size_t local_sum = 0;
+        for (std::size_t i = begin; i < end; ++i) {
+          local_sum += data[i];
+        }
+        total_sum += local_sum;
+      });
+      require(total_sum == N, "parallel sum reduction mismatch");
+    }
+
 
     std::cout << "pulsar_core_tests passed\n";
     return EXIT_SUCCESS;

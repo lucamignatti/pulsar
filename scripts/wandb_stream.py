@@ -355,6 +355,12 @@ def main() -> int:
                         section_order,
                     )
                     workspace_signature = signature
+            
+            # Parse direct table payloads into wandb.Table objects
+            for key, val in list(payload.items()):
+                if isinstance(val, dict) and val.get("_type") == "table":
+                    payload[key] = wandb.Table(columns=val.get("columns", []), data=val.get("data", []))
+
             step = payload.pop("_step", None)
             wandb.log(payload, step=step)
     finally:

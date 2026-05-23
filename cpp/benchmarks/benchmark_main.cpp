@@ -14,7 +14,7 @@
 #include "pulsar/env/done.hpp"
 #include "pulsar/env/obs_builder.hpp"
 #include "pulsar/rl/action_table.hpp"
-#include "pulsar/training/appo_trainer.hpp"
+#include "pulsar/training/vrpo_trainer.hpp"
 #include "pulsar/training/batched_rocketsim_collector.hpp"
 #include "pulsar/training/self_play_manager.hpp"
 
@@ -152,7 +152,7 @@ int main(int argc, char** argv) {
     }
 
     std::unique_ptr<pulsar::SelfPlayManager> self_play_manager;
-    pulsar::APPOTrainer trainer(
+    pulsar::VRPOTrainer trainer(
         config,
         std::move(collectors),
         std::move(self_play_manager),

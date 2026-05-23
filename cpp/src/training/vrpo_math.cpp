@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <vector>
 
-#include "pulsar/training/ppo_math.hpp"
+#include "pulsar/training/vrpo_math.hpp"
 #include "pulsar/tracing/tracing.hpp"
 
 #ifdef PULSAR_HAS_TORCH
@@ -41,6 +41,7 @@ int64_t get_thread_local_random(int64_t max_val) {
 }  // namespace
 
 #ifdef PULSAR_HAS_PPO_MATH_CUDA_KERNELS
+// Keep raw CUDA kernel signatures untouched for compiling safety
 torch::Tensor compute_gae_cuda(
     const torch::Tensor& values,
     const torch::Tensor& rewards,
@@ -100,6 +101,7 @@ torch::Tensor compute_sparse_event_soon_targets_cuda(
 #endif
 
 #ifdef PULSAR_HAS_PPO_MATH_HIP_KERNELS
+// Keep raw HIP kernel signatures untouched for compiling safety
 torch::Tensor compute_gae_hip(
     const torch::Tensor& values,
     const torch::Tensor& rewards,
@@ -174,31 +176,6 @@ torch::Tensor sample_categorical_from_logits(const torch::Tensor& logits) {
   const torch::Tensor uniform = torch::rand_like(logits).clamp_min_(1.0e-6);
   const torch::Tensor gumbel = -torch::log(-torch::log(uniform));
   return (logits + gumbel).argmax(-1);
-}
-
-torch::Tensor detach_tensor(const torch::Tensor& tensor) {
-  return tensor.defined() ? tensor.detach() : tensor;
-}
-
-torch::Tensor clone_tensor(const torch::Tensor& tensor) {
-  return tensor.defined() ? tensor.detach().clone() : tensor;
-}
-
-torch::Tensor tensor_to_device(const torch::Tensor& tensor, const torch::Device& device) {
-  return tensor.defined() ? tensor.to(device) : tensor;
-}
-
-torch::Tensor gather_tensor(const torch::Tensor& tensor, const torch::Tensor& indices) {
-  if (!tensor.defined()) {
-    return tensor;
-  }
-  return tensor.index_select(0, indices.to(tensor.device()));
-}
-
-void scatter_tensor(torch::Tensor& dst, const torch::Tensor& indices, const torch::Tensor& src) {
-  if (dst.defined() && src.defined()) {
-    dst.index_copy_(0, indices.to(dst.device()), src);
-  }
 }
 
 bool can_use_ppo_math_accel(const torch::Tensor& tensor) {
@@ -340,7 +317,7 @@ torch::Tensor sample_masked_actions(
 }
 
 torch::Tensor masked_action_entropy(const torch::Tensor& logits, const torch::Tensor& action_masks) {
-  PULSAR_TRACE_SCOPE_CAT("ppo_math", "entropy");
+  PULSAR_TRACE_SCOPE_CAT("vrpo_math", "entropy");
   if (!logits.requires_grad() && can_use_action_accel(logits, action_masks) && logits.dim() == 2) {
 #if defined(PULSAR_HAS_PPO_MATH_CUDA_KERNELS)
     return masked_action_entropy_cuda(logits.contiguous(), action_masks.contiguous());
@@ -366,7 +343,7 @@ torch::Tensor compute_gae(
     const torch::Tensor& next_values,
     const torch::Tensor& bootstrap_mask,
     const torch::Tensor& bootstrap_values) {
-  PULSAR_TRACE_SCOPE_CAT("ppo_math", "compute_gae");
+  PULSAR_TRACE_SCOPE_CAT("vrpo_math", "compute_gae");
   if (can_use_ppo_math_accel(values) &&
       rewards.is_cuda() &&
       dones.is_cuda() &&
@@ -433,7 +410,7 @@ torch::Tensor compute_q_boosted_gae(
     const torch::Tensor& next_v_from_q,
     const torch::Tensor& bootstrap_mask,
     const torch::Tensor& bootstrap_v_from_q) {
-  PULSAR_TRACE_SCOPE_CAT("ppo_math", "compute_q_boosted_gae");
+  PULSAR_TRACE_SCOPE_CAT("vrpo_math", "compute_q_boosted_gae");
   if (can_use_ppo_math_accel(q_values_taken) &&
       v_from_q.is_cuda() &&
       rewards.is_cuda() &&
@@ -497,8 +474,8 @@ torch::Tensor compute_q_boosted_gae(
 namespace {
 
 #if defined(PULSAR_HAS_PPO_MATH_CUDA_KERNELS) || defined(PULSAR_HAS_PPO_MATH_HIP_KERNELS)
-class ClippedPpoPolicyLossAccelFunction
-    : public torch::autograd::Function<ClippedPpoPolicyLossAccelFunction> {
+class ClippedVrpoPolicyLossAccelFunction
+    : public torch::autograd::Function<ClippedVrpoPolicyLossAccelFunction> {
  public:
   static torch::Tensor forward(
       torch::autograd::AutogradContext* ctx,
@@ -565,15 +542,15 @@ bool can_use_clipped_loss_accel(
 
 }  // namespace
 
-torch::Tensor clipped_ppo_policy_loss(
+torch::Tensor clipped_vrpo_policy_loss(
     const torch::Tensor& current_log_probs,
     const torch::Tensor& old_log_probs,
     const torch::Tensor& advantages,
     float clip_range) {
-  PULSAR_TRACE_SCOPE_CAT("ppo_math", "clipped_ppo_loss");
+  PULSAR_TRACE_SCOPE_CAT("vrpo_math", "clipped_vrpo_loss");
   if (can_use_clipped_loss_accel(current_log_probs, old_log_probs, advantages)) {
 #if defined(PULSAR_HAS_PPO_MATH_CUDA_KERNELS) || defined(PULSAR_HAS_PPO_MATH_HIP_KERNELS)
-    return ClippedPpoPolicyLossAccelFunction::apply(
+    return ClippedVrpoPolicyLossAccelFunction::apply(
         current_log_probs,
         old_log_probs,
         advantages,
@@ -585,7 +562,7 @@ torch::Tensor clipped_ppo_policy_loss(
   return -torch::min(ratio * advantages, clipped_ratio * advantages);
 }
 
-torch::Tensor clipped_ppo_policy_loss(
+torch::Tensor clipped_vrpo_policy_loss(
     const torch::Tensor& current_log_probs,
     const torch::Tensor& old_log_probs,
     const torch::Tensor& advantages,
@@ -596,7 +573,7 @@ torch::Tensor clipped_ppo_policy_loss(
 }
 
 torch::Tensor normalize_advantage(const torch::Tensor& advantages, const torch::Tensor& active_mask) {
-  PULSAR_TRACE_SCOPE_CAT("ppo_math", "normalize_advantage");
+  PULSAR_TRACE_SCOPE_CAT("vrpo_math", "normalize_advantage");
   if (can_use_ppo_math_accel(advantages) && active_mask.defined() && active_mask.is_cuda()) {
     const torch::Tensor active_arg = active_mask.scalar_type() == torch::kFloat32
         ? active_mask.contiguous()
@@ -626,7 +603,7 @@ torch::Tensor sample_future_goal_positions(
     const torch::Tensor& dones,
     const torch::Tensor& episode_starts,
     int max_future) {
-  PULSAR_TRACE_SCOPE_CAT("ppo_math", "sample_future_goal_positions");
+  PULSAR_TRACE_SCOPE_CAT("vrpo_math", "sample_future_goal_positions");
   if (can_use_ppo_math_accel(goal_positions) &&
       (!dones.defined() || (dones.is_cuda() && dones.scalar_type() == torch::kFloat32)) &&
       (!episode_starts.defined() || (episode_starts.is_cuda() && episode_starts.scalar_type() == torch::kFloat32))) {
@@ -704,7 +681,7 @@ torch::Tensor compute_pairwise_negative_l2_logits(
     const torch::Tensor& lhs_embeddings,
     const torch::Tensor& rhs_embeddings,
     float temperature) {
-  PULSAR_TRACE_SCOPE_CAT("ppo_math", "infonce_logits");
+  PULSAR_TRACE_SCOPE_CAT("vrpo_math", "infonce_logits");
   constexpr float kMaxSquaredDistance = 1.0e6F;
   const torch::Tensor lhs = lhs_embeddings.to(torch::kFloat32);
   const torch::Tensor rhs = rhs_embeddings.to(torch::kFloat32);
@@ -718,7 +695,7 @@ torch::Tensor compute_pairwise_negative_l2_logits(
 torch::Tensor compute_symmetric_infonce_loss(
     const torch::Tensor& logits,
     float logsumexp_penalty_coeff) {
-  PULSAR_TRACE_SCOPE_CAT("ppo_math", "infonce_loss");
+  PULSAR_TRACE_SCOPE_CAT("vrpo_math", "infonce_loss");
   constexpr float kFiniteLogitClamp = 1.0e6F;
   const torch::Tensor logits_f32 = logits.to(torch::kFloat32).clamp(-kFiniteLogitClamp, kFiniteLogitClamp);
   const torch::Tensor diag = logits_f32.diagonal();
@@ -726,10 +703,6 @@ torch::Tensor compute_symmetric_infonce_loss(
   const torch::Tensor col_lse = torch::logsumexp(logits_f32, 0);
   const torch::Tensor row_loss = -(diag - row_lse).mean();
   const torch::Tensor col_loss = -(diag - col_lse).mean();
-  // With negative-distance logits, a linear logsumexp term is unbounded below:
-  // the model can reduce the loss by driving all logits toward large negative
-  // values. Penalize the partition magnitude instead so the auxiliary
-  // contrastive objective cannot create runaway embedding scales.
   const torch::Tensor penalty = logsumexp_penalty_coeff * (row_lse.square().mean() + col_lse.square().mean());
   return row_loss + col_loss + penalty;
 }

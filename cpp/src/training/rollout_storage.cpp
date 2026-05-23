@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <stdexcept>
 
-#include "pulsar/training/ppo_math.hpp"
+#include "pulsar/training/vrpo_math.hpp"
 #include "pulsar/training/sparse_event_channels.hpp"
 
 namespace pulsar {
