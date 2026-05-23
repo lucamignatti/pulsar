@@ -30,8 +30,9 @@ __device__ __forceinline__ float uniform01_from_u32(std::uint32_t x) {
   return (static_cast<float>((x >> 8) + 1U)) * (1.0F / 16777217.0F);
 }
 
+template <typename scalar_t>
 __global__ void sample_masked_actions_kernel(
-    const float* __restrict__ logits,
+    const scalar_t* __restrict__ logits,
     const std::uint8_t* __restrict__ masks,
     int64_t* __restrict__ actions,
     float* __restrict__ log_probs,
@@ -39,7 +40,8 @@ __global__ void sample_masked_actions_kernel(
     int action_dim,
     bool deterministic,
     bool need_log_probs,
-    std::uint32_t seed) {
+    std::uint32_t seed,
+    float temperature) {
   const int row = blockIdx.x * blockDim.x + threadIdx.x;
   if (row >= rows) return;
   const int base = row * action_dim;
@@ -50,7 +52,7 @@ __global__ void sample_masked_actions_kernel(
   int valid_count = 0;
   for (int a = 0; a < action_dim; ++a) {
     if (masks[base + a] == 0) continue;
-    const float logit = logits[base + a];
+    const float logit = static_cast<float>(logits[base + a]) / temperature;
     ++valid_count;
     if (logit > max_valid_logit) {
       max_valid_logit = logit;
@@ -75,19 +77,21 @@ __global__ void sample_masked_actions_kernel(
     float sum_exp = 0.0F;
     for (int a = 0; a < action_dim; ++a) {
       if (masks[base + a] != 0) {
-        sum_exp += safe_logit_exp(logits[base + a] - max_valid_logit);
+        sum_exp += safe_logit_exp(static_cast<float>(logits[base + a]) / temperature - max_valid_logit);
       }
     }
-    log_probs[row] = logits[base + best_action] - (max_valid_logit + logf(fmaxf(sum_exp, 1.0e-20F)));
+    log_probs[row] = static_cast<float>(logits[base + best_action]) / temperature - (max_valid_logit + logf(fmaxf(sum_exp, 1.0e-20F)));
   }
 }
 
+template <typename scalar_t>
 __global__ void masked_action_entropy_kernel(
-    const float* __restrict__ logits,
+    const scalar_t* __restrict__ logits,
     const std::uint8_t* __restrict__ masks,
     float* __restrict__ entropy,
     int rows,
-    int action_dim) {
+    int action_dim,
+    float temperature) {
   const int row = blockIdx.x * blockDim.x + threadIdx.x;
   if (row >= rows) return;
   const int base = row * action_dim;
@@ -96,7 +100,7 @@ __global__ void masked_action_entropy_kernel(
   for (int a = 0; a < action_dim; ++a) {
     if (masks[base + a] == 0) continue;
     ++valid_count;
-    max_logit = fmaxf(max_logit, logits[base + a]);
+    max_logit = fmaxf(max_logit, static_cast<float>(logits[base + a]) / temperature);
   }
   if (valid_count <= 1) {
     entropy[row] = 0.0F;
@@ -106,7 +110,7 @@ __global__ void masked_action_entropy_kernel(
   float weighted = 0.0F;
   for (int a = 0; a < action_dim; ++a) {
     if (masks[base + a] == 0) continue;
-    const float shifted = logits[base + a] - max_logit;
+    const float shifted = static_cast<float>(logits[base + a]) / temperature - max_logit;
     const float e = safe_logit_exp(shifted);
     sum_exp += e;
     weighted += e * shifted;
@@ -491,23 +495,29 @@ std::vector<at::Tensor> sample_masked_actions_hip(
     const at::Tensor& action_masks,
     bool deterministic,
     bool need_log_probs,
-    std::uint32_t seed) {
+    std::uint32_t seed,
+    float temperature) {
   set_hip_device_for(logits);
   const int rows = static_cast<int>(logits.size(0));
   const int action_dim = static_cast<int>(logits.size(1));
   at::Tensor actions = at::empty({rows}, logits.options().dtype(at::kLong));
-  at::Tensor log_probs = need_log_probs ? at::empty({rows}, logits.options()) : at::Tensor{};
+  at::Tensor log_probs = need_log_probs ? at::empty({rows}, logits.options().dtype(at::kFloat)) : at::Tensor{};
+  const at::Tensor masks_u8 = action_masks.to(at::kByte).contiguous();
+  const float safe_temperature = fmaxf(temperature, 1.0e-6F);
   constexpr int kThreads = 256;
-  sample_masked_actions_kernel<<<blocks_for(rows, kThreads), kThreads, 0, at::hip::getCurrentHIPStream()>>>(
-      logits.data_ptr<float>(),
-      reinterpret_cast<const std::uint8_t*>(action_masks.data_ptr()),
-      actions.data_ptr<int64_t>(),
-      need_log_probs ? log_probs.data_ptr<float>() : nullptr,
-      rows,
-      action_dim,
-      deterministic,
-      need_log_probs,
-      seed);
+  if (logits.scalar_type() == at::kHalf) {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(sample_masked_actions_kernel<at::Half>),
+        dim3(blocks_for(rows, kThreads)), dim3(kThreads), 0, at::hip::getCurrentHIPStream(),
+        logits.data_ptr<at::Half>(), masks_u8.data_ptr<std::uint8_t>(), actions.data_ptr<int64_t>(),
+        need_log_probs ? log_probs.data_ptr<float>() : nullptr, rows, action_dim, deterministic, need_log_probs, seed, safe_temperature);
+  } else {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(sample_masked_actions_kernel<float>),
+        dim3(blocks_for(rows, kThreads)), dim3(kThreads), 0, at::hip::getCurrentHIPStream(),
+        logits.data_ptr<float>(), masks_u8.data_ptr<std::uint8_t>(), actions.data_ptr<int64_t>(),
+        need_log_probs ? log_probs.data_ptr<float>() : nullptr, rows, action_dim, deterministic, need_log_probs, seed, safe_temperature);
+  }
   check_hip_launch();
   if (need_log_probs) {
     return {actions, log_probs};
@@ -515,18 +525,25 @@ std::vector<at::Tensor> sample_masked_actions_hip(
   return {actions};
 }
 
-at::Tensor masked_action_entropy_hip(const at::Tensor& logits, const at::Tensor& action_masks) {
+at::Tensor masked_action_entropy_hip(const at::Tensor& logits, const at::Tensor& action_masks, float temperature) {
   set_hip_device_for(logits);
   const int rows = static_cast<int>(logits.size(0));
   const int action_dim = static_cast<int>(logits.size(1));
-  at::Tensor entropy = at::empty({rows}, logits.options());
+  at::Tensor entropy = at::empty({rows}, logits.options().dtype(at::kFloat));
+  const at::Tensor masks_u8 = action_masks.to(at::kByte).contiguous();
+  const float safe_temperature = fmaxf(temperature, 1.0e-6F);
   constexpr int kThreads = 256;
-  masked_action_entropy_kernel<<<blocks_for(rows, kThreads), kThreads, 0, at::hip::getCurrentHIPStream()>>>(
-      logits.data_ptr<float>(),
-      reinterpret_cast<const std::uint8_t*>(action_masks.data_ptr()),
-      entropy.data_ptr<float>(),
-      rows,
-      action_dim);
+  if (logits.scalar_type() == at::kHalf) {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(masked_action_entropy_kernel<at::Half>),
+        dim3(blocks_for(rows, kThreads)), dim3(kThreads), 0, at::hip::getCurrentHIPStream(),
+        logits.data_ptr<at::Half>(), masks_u8.data_ptr<std::uint8_t>(), entropy.data_ptr<float>(), rows, action_dim, safe_temperature);
+  } else {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(masked_action_entropy_kernel<float>),
+        dim3(blocks_for(rows, kThreads)), dim3(kThreads), 0, at::hip::getCurrentHIPStream(),
+        logits.data_ptr<float>(), masks_u8.data_ptr<std::uint8_t>(), entropy.data_ptr<float>(), rows, action_dim, safe_temperature);
+  }
   check_hip_launch();
   return entropy;
 }

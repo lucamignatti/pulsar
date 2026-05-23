@@ -107,17 +107,17 @@ bool can_use_eggroll_lora_accel(
 #if defined(PULSAR_HAS_LORA_CUDA_KERNELS) || defined(PULSAR_HAS_LORA_HIP_KERNELS)
   return x.defined() &&
       x.is_cuda() &&
-      x.scalar_type() == torch::kFloat32 &&
+      (x.scalar_type() == torch::kFloat32 || x.scalar_type() == torch::kFloat16) &&
       weight.is_cuda() &&
-      weight.scalar_type() == torch::kFloat32 &&
+      weight.scalar_type() == x.scalar_type() &&
       A.is_cuda() &&
       B.is_cuda() &&
       A_stack.is_cuda() &&
       B_stack.is_cuda() &&
-      A.scalar_type() == torch::kFloat32 &&
-      B.scalar_type() == torch::kFloat32 &&
-      A_stack.scalar_type() == torch::kFloat32 &&
-      B_stack.scalar_type() == torch::kFloat32 &&
+      A.scalar_type() == x.scalar_type() &&
+      B.scalar_type() == x.scalar_type() &&
+      A_stack.scalar_type() == x.scalar_type() &&
+      B_stack.scalar_type() == x.scalar_type() &&
       x.dim() == 2 &&
       weight.dim() == 2 &&
       A.dim() == 2 &&

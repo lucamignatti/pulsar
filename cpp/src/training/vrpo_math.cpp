@@ -70,9 +70,10 @@ std::vector<torch::Tensor> sample_masked_actions_cuda(
     const torch::Tensor& action_masks,
     bool deterministic,
     bool need_log_probs,
-    std::uint32_t seed);
+    std::uint32_t seed,
+    float temperature);
 
-torch::Tensor masked_action_entropy_cuda(const torch::Tensor& logits, const torch::Tensor& action_masks);
+torch::Tensor masked_action_entropy_cuda(const torch::Tensor& logits, const torch::Tensor& action_masks, float temperature);
 
 torch::Tensor clipped_ppo_policy_loss_forward_cuda(
     const torch::Tensor& current_log_probs,
@@ -130,9 +131,10 @@ std::vector<torch::Tensor> sample_masked_actions_hip(
     const torch::Tensor& action_masks,
     bool deterministic,
     bool need_log_probs,
-    std::uint32_t seed);
+    std::uint32_t seed,
+    float temperature);
 
-torch::Tensor masked_action_entropy_hip(const torch::Tensor& logits, const torch::Tensor& action_masks);
+torch::Tensor masked_action_entropy_hip(const torch::Tensor& logits, const torch::Tensor& action_masks, float temperature);
 
 torch::Tensor clipped_ppo_policy_loss_forward_hip(
     const torch::Tensor& current_log_probs,
@@ -180,7 +182,8 @@ torch::Tensor sample_categorical_from_logits(const torch::Tensor& logits) {
 
 bool can_use_ppo_math_accel(const torch::Tensor& tensor) {
 #if defined(PULSAR_HAS_PPO_MATH_CUDA_KERNELS) || defined(PULSAR_HAS_PPO_MATH_HIP_KERNELS)
-  return tensor.defined() && tensor.is_cuda() && tensor.scalar_type() == torch::kFloat32;
+  return tensor.defined() && tensor.is_cuda() &&
+      (tensor.scalar_type() == torch::kFloat32 || tensor.scalar_type() == torch::kFloat16);
 #else
   (void)tensor;
   return false;
@@ -280,7 +283,9 @@ torch::Tensor sample_masked_actions(
     const torch::Tensor& logits,
     const torch::Tensor& action_masks,
     bool deterministic,
-    torch::Tensor* log_probs) {
+    torch::Tensor* log_probs,
+    float temperature) {
+  const float safe_temperature = std::max(temperature, 1.0e-6F);
   if (can_use_action_accel(logits, action_masks) && logits.dim() == 2) {
     const bool need_log_probs = log_probs != nullptr;
     const std::uint32_t seed = get_thread_local_seed();
@@ -290,7 +295,8 @@ torch::Tensor sample_masked_actions(
         action_masks.contiguous(),
         deterministic,
         need_log_probs,
-        seed);
+        seed,
+        safe_temperature);
     if (need_log_probs) {
       *log_probs = result[1];
     }
@@ -301,14 +307,15 @@ torch::Tensor sample_masked_actions(
         action_masks.contiguous(),
         deterministic,
         need_log_probs,
-        seed);
+        seed,
+        safe_temperature);
     if (need_log_probs) {
       *log_probs = result[1];
     }
     return result[0];
 #endif
   }
-  torch::Tensor masked = apply_action_mask_to_logits(logits, action_masks);
+  torch::Tensor masked = apply_action_mask_to_logits(logits / safe_temperature, action_masks);
   const torch::Tensor actions = deterministic ? masked.argmax(-1) : sample_categorical_from_logits(masked);
   if (log_probs != nullptr) {
     *log_probs = torch::log_softmax(masked, -1).gather(-1, actions.unsqueeze(-1)).squeeze(-1);
@@ -316,16 +323,17 @@ torch::Tensor sample_masked_actions(
   return actions;
 }
 
-torch::Tensor masked_action_entropy(const torch::Tensor& logits, const torch::Tensor& action_masks) {
+torch::Tensor masked_action_entropy(const torch::Tensor& logits, const torch::Tensor& action_masks, float temperature) {
   PULSAR_TRACE_SCOPE_CAT("vrpo_math", "entropy");
+  const float safe_temperature = std::max(temperature, 1.0e-6F);
   if (!logits.requires_grad() && can_use_action_accel(logits, action_masks) && logits.dim() == 2) {
 #if defined(PULSAR_HAS_PPO_MATH_CUDA_KERNELS)
-    return masked_action_entropy_cuda(logits.contiguous(), action_masks.contiguous());
+    return masked_action_entropy_cuda(logits.contiguous(), action_masks.contiguous(), safe_temperature);
 #elif defined(PULSAR_HAS_PPO_MATH_HIP_KERNELS)
-    return masked_action_entropy_hip(logits.contiguous(), action_masks.contiguous());
+    return masked_action_entropy_hip(logits.contiguous(), action_masks.contiguous(), safe_temperature);
 #endif
   }
-  const torch::Tensor masked = apply_action_mask_to_logits(logits, action_masks);
+  const torch::Tensor masked = apply_action_mask_to_logits(logits / safe_temperature, action_masks);
   const torch::Tensor probs = torch::softmax(masked, -1);
   const torch::Tensor valid_counts = action_masks.to(torch::kFloat32).sum(-1);
   const torch::Tensor trivial = valid_counts <= 1.0F;

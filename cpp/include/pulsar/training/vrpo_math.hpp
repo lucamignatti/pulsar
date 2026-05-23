@@ -19,8 +19,12 @@ torch::Tensor sample_masked_actions(
     const torch::Tensor& logits,
     const torch::Tensor& action_masks,
     bool deterministic,
-    torch::Tensor* log_probs = nullptr);
-torch::Tensor masked_action_entropy(const torch::Tensor& logits, const torch::Tensor& action_masks);
+    torch::Tensor* log_probs = nullptr,
+    float temperature = 1.0F);
+torch::Tensor masked_action_entropy(
+    const torch::Tensor& logits,
+    const torch::Tensor& action_masks,
+    float temperature = 1.0F);
 
 // Standard GAE baseline
 torch::Tensor compute_gae(

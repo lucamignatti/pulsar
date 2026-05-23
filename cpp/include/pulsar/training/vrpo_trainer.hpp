@@ -14,6 +14,7 @@
 
 #include "pulsar/checkpoint/checkpoint.hpp"
 #include "pulsar/config/config.hpp"
+#include "pulsar/core/work_stealing_thread_pool.hpp"
 #include "pulsar/logging/wandb_logger.hpp"
 #include "pulsar/model/normalizer.hpp"
 #include "pulsar/model/vrpo_actor.hpp"
@@ -24,6 +25,7 @@
 #include "pulsar/training/gradient_surgery.hpp"
 #include "pulsar/training/predictor_trainer.hpp"
 #include "pulsar/training/gcrl_trainer.hpp"
+#include "pulsar/training/optimizers.hpp"
 
 #ifdef PULSAR_HAS_CUDA
 #include <c10/cuda/CUDAStream.h>
@@ -220,7 +222,8 @@ class VRPOTrainer {
   VRPOActor actor_snapshot_{nullptr};
   std::vector<VRPOActor> compute_actors_;
   ObservationNormalizer actor_normalizer_;
-  torch::optim::AdamW actor_optimizer_;
+  MagSGD actor_optimizer_;
+  std::unique_ptr<WorkStealingThreadPool> task_pool_;
   PopArtNormalizer q_normalizer_{};
   torch::Device device_{torch::kCPU};
   std::vector<torch::Device> compute_devices_{};

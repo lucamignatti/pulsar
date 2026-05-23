@@ -149,6 +149,8 @@ struct PPOConfig {
   float gamma = 0.99F;
   float gae_lambda = 0.95F;
   float learning_rate = 3.0e-4F;
+  bool overbatching = true;
+  float policy_temperature = 1.0F;
   float max_grad_norm = 1.0F;
   std::string device = "cpu";
   int checkpoint_interval = 10;

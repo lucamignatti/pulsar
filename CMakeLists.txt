@@ -115,6 +115,7 @@ if(PULSAR_ENABLE_TORCH)
       cpp/src/training/reward_engine.cpp
       cpp/src/training/batched_rocketsim_collector.cpp
       cpp/src/training/vrpo_trainer.cpp
+      cpp/src/training/optimizers.cpp
       cpp/src/training/gradient_surgery.cpp
       cpp/src/training/predictor_trainer.cpp
       cpp/src/training/gcrl_trainer.cpp

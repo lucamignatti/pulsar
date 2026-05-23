@@ -440,6 +440,24 @@ bool can_use_cuda_scan(const torch::Tensor& projected, const torch::Tensor& deca
 #endif
 }
 
+bool can_use_cuda_step(const torch::Tensor& projected, const torch::Tensor& previous_scan, const torch::Tensor& decay_bias, const torch::Tensor& skip) {
+#if defined(PULSAR_HAS_MAMBA2_CUDA_KERNELS) || defined(PULSAR_HAS_MAMBA2_HIP_KERNELS)
+  return !mamba2_scan_accel_disabled() &&
+      projected.is_cuda() &&
+      previous_scan.is_cuda() &&
+      previous_scan.scalar_type() == torch::kFloat32 &&
+      (projected.scalar_type() == torch::kFloat32 || projected.scalar_type() == torch::kFloat16) &&
+      decay_bias.scalar_type() == projected.scalar_type() &&
+      skip.scalar_type() == projected.scalar_type();
+#else
+  (void)projected;
+  (void)previous_scan;
+  (void)decay_bias;
+  (void)skip;
+  return false;
+#endif
+}
+
 bool can_use_cuda_conv(const torch::Tensor& input, const torch::Tensor& weight, const torch::Tensor& bias) {
 #if defined(PULSAR_HAS_MAMBA2_CUDA_KERNELS) || defined(PULSAR_HAS_MAMBA2_HIP_KERNELS)
   return !mamba2_conv_accel_disabled() &&
@@ -511,7 +529,7 @@ std::tuple<torch::Tensor, torch::Tensor> mamba2_step_mixed(
     const torch::Tensor& skip) {
   validate_step_inputs(projected, previous_scan, decay_bias, skip);
 #ifdef PULSAR_HAS_MAMBA2_CUDA_KERNELS
-  if (!torch::autograd::GradMode::is_enabled() && can_use_cuda_scan(projected, decay_bias, skip)) {
+  if (!torch::autograd::GradMode::is_enabled() && can_use_cuda_step(projected, previous_scan, decay_bias, skip)) {
     return mamba2_step_forward_cuda(
         projected.contiguous(),
         previous_scan.contiguous(),
@@ -520,7 +538,7 @@ std::tuple<torch::Tensor, torch::Tensor> mamba2_step_mixed(
   }
 #endif
 #ifdef PULSAR_HAS_MAMBA2_HIP_KERNELS
-  if (!torch::autograd::GradMode::is_enabled() && can_use_cuda_scan(projected, decay_bias, skip)) {
+  if (!torch::autograd::GradMode::is_enabled() && can_use_cuda_step(projected, previous_scan, decay_bias, skip)) {
     return mamba2_step_forward_hip(
         projected.contiguous(),
         previous_scan.contiguous(),

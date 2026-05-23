@@ -33,6 +33,7 @@
 #include "pulsar/env/obs_builder.hpp"
 #include "pulsar/env/rocketsim_engine.hpp"
 #include "pulsar/training/cuda_utils.hpp"
+#include "pulsar/training/optimizers.hpp"
 #include "pulsar/training/vrpo_math.hpp"
 #include "pulsar/tracing/tracing.hpp"
 
@@ -643,7 +644,10 @@ VRPOTrainer::VRPOTrainer(
       action_table_(config_.action_table),
       actor_(VRPOActor(config_.model, config_.goal_critic, config_.es_lora, config_.vrpo)),
       actor_normalizer_(config_.model.observation_dim),
-      actor_optimizer_(actor_policy_parameters(actor_), torch::optim::AdamWOptions(config_.ppo.learning_rate).eps(1.0e-5F).weight_decay(config_.ppo.weight_decay)),
+      actor_optimizer_(
+          actor_policy_parameters(actor_),
+          torch::optim::SGDOptions(config_.ppo.learning_rate).weight_decay(config_.ppo.weight_decay)),
+      task_pool_(std::make_unique<WorkStealingThreadPool>()),
       q_normalizer_(config_.ppo.popart_beta, config_.ppo.popart_epsilon),
       device_(resolve_runtime_device(config_.ppo.device)),
       compute_devices_(resolve_runtime_devices(config_.ppo.device)),
@@ -1114,10 +1118,14 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
   const int optimizer_accumulation_steps = std::max(1, config_.ppo.optimizer_accumulation_steps);
   int minibatches_per_epoch = 0;
   int microbatches_per_epoch = 0;
-  for (int offset = 0; offset < total_agents; offset += logical_agents_per_batch) {
-    const int count = std::min(logical_agents_per_batch, total_agents - offset);
+  for (int offset = 0; offset < total_agents;) {
+    const int remaining = total_agents - offset;
+    const int count = config_.ppo.overbatching && remaining <= logical_agents_per_batch * 2
+        ? remaining
+        : std::min(logical_agents_per_batch, remaining);
     ++minibatches_per_epoch;
     microbatches_per_epoch += (count + agents_per_forward - 1) / agents_per_forward;
+    offset += count;
   }
   if (benchmark_progress_) {
     std::cout << "bench_update_phase_start"
@@ -1278,7 +1286,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
         auto chunk_out = actor_->forward_step(chunk, chunk_goal);
         auto term_logits = chunk_out.policy_logits;
         auto term_q = chunk_out.q_values;
-        auto term_probs = torch::softmax(term_logits, -1);
+        auto term_probs = torch::softmax(term_logits / std::max(config_.ppo.policy_temperature, 1.0e-6F), -1);
         auto term_v = (term_probs * term_q).sum(-1);
         if (config_.ppo.popart_enabled) {
           term_v = q_normalizer_.denormalize(term_v);
@@ -1324,12 +1332,17 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
   for (int epoch = 0; epoch < config_.ppo.update_epochs; ++epoch) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "update_epoch");
     const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
-    for (int agent_offset = 0; agent_offset < total_agents; agent_offset += logical_agents_per_batch) {
+    for (int agent_offset = 0; agent_offset < total_agents;) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "update_minibatch");
       const auto minibatch_start = std::chrono::steady_clock::now();
 
-      const int count = std::min(logical_agents_per_batch, total_agents - agent_offset);
+      const int remaining_agents = total_agents - agent_offset;
+      const int count = config_.ppo.overbatching && remaining_agents <= logical_agents_per_batch * 2
+          ? remaining_agents
+          : std::min(logical_agents_per_batch, remaining_agents);
       const torch::Tensor agent_indices = perm.narrow(0, agent_offset, count);
+      const int next_agent_offset = agent_offset + count;
+      agent_offset = next_agent_offset;
 
       // Determine if this minibatch spans multiple modes.
       // Fast-path: if the entire rollout has only one mode (common in curriculum),
@@ -1456,7 +1469,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
           const torch::Device gpu_dev = compute_devices_[g];
           VRPOActor gpu_act = (g == 0) ? actor_ : compute_actors_[g - 1];
 
-          gpu_futures.push_back(std::async(std::launch::async, [=, &rollout, &normalized_advantages, &sparse_returns, &q_returns,
+          gpu_futures.push_back(task_pool_->submit([=, &rollout, &normalized_advantages, &sparse_returns, &q_returns,
               &mode_agent_indices, &effective_entropy_coef, &effective_entropy_floor_coef, this]() mutable -> GpuTaskResult {
             GpuTaskResult result;
             std::vector<CapturedGrad>& gpu_task_group = result.task_group;
@@ -1587,7 +1600,9 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
                 const auto active_samples = static_cast<double>(active_sample_count);
                 result.active_count += active_sample_count;
 
-                const torch::Tensor log_probs = torch::log_softmax(apply_action_mask_to_logits(active_logits, active_masks), -1);
+                const float policy_temperature = std::max(config_.ppo.policy_temperature, 1.0e-6F);
+                const torch::Tensor log_probs = torch::log_softmax(
+                    apply_action_mask_to_logits(active_logits / policy_temperature, active_masks), -1);
                 const torch::Tensor current_log_probs = log_probs.gather(1, active_actions.unsqueeze(1)).squeeze(1);
                 torch::Tensor bounded_current_log_probs = current_log_probs;
                 torch::Tensor raw_log_ratio = current_log_probs - active_old_log_probs;
@@ -1609,7 +1624,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
                     active_old_log_probs,
                     active_advantages,
                     config_.ppo.clip_range).mean();
-                const torch::Tensor entropy_values = masked_action_entropy(active_logits, active_masks);
+                const torch::Tensor entropy_values = masked_action_entropy(active_logits, active_masks, policy_temperature);
                 const torch::Tensor entropy = entropy_values.mean();
                 torch::Tensor entropy_floor_loss = torch::zeros({}, active_advantages.options());
                 if (config_.ppo.entropy_floor > 0.0F && effective_entropy_floor_coef > 0.0F) {
@@ -1880,7 +1895,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
         }
       }
 
-      const bool at_epoch_end = agent_offset + logical_agents_per_batch >= total_agents;
+      const bool at_epoch_end = agent_offset >= total_agents;
       const bool should_step_optimizer =
           use_pcgrad ||
           accumulated_minibatches >= optimizer_accumulation_steps ||
@@ -2213,7 +2228,7 @@ VRPOTrainer::ESPopulationFitness VRPOTrainer::evaluate_es_population(
 
     for (std::size_t shard_idx = 0; shard_idx < shard_specs.size(); ++shard_idx) {
       const EsShardSpec spec = shard_specs[shard_idx];
-      shard_futures.push_back(std::async(std::launch::async,
+      shard_futures.push_back(task_pool_->submit(
           [&, mode_config, spec, shard_idx]() -> EsShardResult {
         EsShardResult shard_result;
         shard_result.member_start = spec.member_start;
@@ -2314,15 +2329,18 @@ VRPOTrainer::ESPopulationFitness VRPOTrainer::evaluate_es_population(
             torch::Tensor perturbed_logits = shard_actor->policy_eggroll_logits(
                 output.features, A_shard, B_shard, es_cfg.sigma_ES, goal_values);
 
-            torch::Tensor base_actions = sample_masked_actions(output.policy_logits, action_masks, true, nullptr);
-            torch::Tensor perturbed_actions = sample_masked_actions(perturbed_logits, action_masks, true, nullptr);
+            torch::Tensor base_actions = sample_masked_actions(
+                output.policy_logits, action_masks, true, nullptr, config_.ppo.policy_temperature);
+            torch::Tensor perturbed_actions = sample_masked_actions(
+                perturbed_logits, action_masks, true, nullptr, config_.ppo.policy_temperature);
             torch::Tensor actions = torch::where(controlled_mask, perturbed_actions, base_actions);
 
             if ((step % es_cfg.kl_eval_stride) == 0) {
               const torch::Tensor base_masked = apply_action_mask_to_logits(output.policy_logits, action_masks);
               const torch::Tensor perturbed_masked = apply_action_mask_to_logits(perturbed_logits, action_masks);
-              const torch::Tensor base_probs = torch::softmax(base_masked, -1);
-              const torch::Tensor perturbed_probs = torch::softmax(perturbed_masked, -1);
+              const float policy_temperature = std::max(config_.ppo.policy_temperature, 1.0e-6F);
+              const torch::Tensor base_probs = torch::softmax(base_masked / policy_temperature, -1);
+              const torch::Tensor perturbed_probs = torch::softmax(perturbed_masked / policy_temperature, -1);
               const torch::Tensor kl_values = (
                   perturbed_probs * (torch::log(perturbed_probs + 1.0e-8) - torch::log(base_probs + 1.0e-8)))
                   .sum(-1)
@@ -2768,7 +2786,7 @@ void VRPOTrainer::collect_rollout(
       const torch::Device shard_device = shard_devices_.empty() ? device_ : shard_devices_[shard];
       const std::size_t shard_idx = shard;
 
-      shard_futures.push_back(std::async(std::launch::async,
+      shard_futures.push_back(task_pool_->submit(
           [&, collector_ptr, shard_actor, shard_normalizer, shard_normalizer_update, recurrent_state, shard_device, shard_idx]() mutable -> ShardResult {
         ShardResult result;
         result.shard = shard_idx;
@@ -2822,7 +2840,8 @@ void VRPOTrainer::collect_rollout(
             const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
             output = shard_actor->forward_step_stateful(
                 normalized_obs, recurrent_state, episode_starts, &recurrent_state, goal_values);
-            actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
+            actions = sample_masked_actions(
+                output.policy_logits, action_masks, false, &action_log_probs, config_.ppo.policy_temperature);
             if (self_play_manager_ && self_play_manager_->has_snapshots()) {
               torch::Tensor snapshot_actions;
               self_play_manager_->infer_opponent_actions(
@@ -2951,7 +2970,8 @@ void VRPOTrainer::collect_rollout(
             }
             torch::Tensor q_taken = q_all.gather(1, actions.unsqueeze(1)).squeeze(1);
             torch::Tensor policy_probs = torch::softmax(
-                apply_action_mask_to_logits(output.policy_logits, action_masks), -1);
+                apply_action_mask_to_logits(
+                    output.policy_logits / std::max(config_.ppo.policy_temperature, 1.0e-6F), action_masks), -1);
             torch::Tensor v_from_q = (policy_probs * q_all).sum(-1);
 
             all_values["q_taken"] = q_taken.to(torch::kCPU);
@@ -3142,7 +3162,8 @@ void VRPOTrainer::collect_rollout(
           episode_starts,
           &rollout_recurrent_states[0],
           goal_values);
-      actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
+      actions = sample_masked_actions(
+          output.policy_logits, action_masks, false, &action_log_probs, config_.ppo.policy_temperature);
       if (self_play_manager_ && self_play_manager_->has_snapshots()) {
         torch::Tensor snapshot_actions;
         self_play_manager_->infer_opponent_actions(
@@ -3290,7 +3311,8 @@ void VRPOTrainer::collect_rollout(
       }
       torch::Tensor q_taken = q_all.gather(1, actions.unsqueeze(1)).squeeze(1);
       torch::Tensor policy_probs = torch::softmax(
-          apply_action_mask_to_logits(output.policy_logits, action_masks), -1);
+          apply_action_mask_to_logits(
+              output.policy_logits / std::max(config_.ppo.policy_temperature, 1.0e-6F), action_masks), -1);
       torch::Tensor v_from_q = (policy_probs * q_all).sum(-1);
 
       all_values["q_taken"] = q_taken.to(torch::kCPU);
@@ -3350,7 +3372,8 @@ void VRPOTrainer::collect_rollout(
         q_all = q_normalizer_.denormalize(q_all);
       }
       torch::Tensor policy_probs = torch::softmax(
-          apply_action_mask_to_logits(final_output.policy_logits, final_masks), -1);
+          apply_action_mask_to_logits(
+              final_output.policy_logits / std::max(config_.ppo.policy_temperature, 1.0e-6F), final_masks), -1);
       torch::Tensor v_from_q = (policy_probs * q_all).sum(-1);
       bootstrap_values["v_from_q"] = v_from_q;
     }
@@ -3762,7 +3785,7 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     bool discard_overlapped_rollout = false;
     if (overlap_collection_update) {
       collection_normalizer.emplace(actor_normalizer_.clone());
-      collect_future = std::async(std::launch::async, [&]() {
+      collect_future = task_pool_->submit([&]() {
         std::int64_t steps = 0;
         collect_rollout(rollout_B_, next_coll_metrics, &steps, actor_snapshot_, *collection_normalizer);
         return steps;

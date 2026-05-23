@@ -226,12 +226,13 @@ __global__ void reduce_batch_dim_pair_kernel(
   }
 }
 
+template <typename scalar_t>
 __global__ void mamba2_step_forward_kernel(
-    const float* __restrict__ projected,
+    const scalar_t* __restrict__ projected,
     const float* __restrict__ previous_scan,
-    const float* __restrict__ decay_bias,
-    const float* __restrict__ skip,
-    float* __restrict__ mixed,
+    const scalar_t* __restrict__ decay_bias,
+    const scalar_t* __restrict__ skip,
+    scalar_t* __restrict__ mixed,
     float* __restrict__ next_scan,
     int batch,
     int embed_dim) {
@@ -244,11 +245,11 @@ __global__ void mamba2_step_forward_kernel(
   const int b = index / embed_dim;
   const int d = index - b * embed_dim;
   const int base = b * 5 * embed_dim + d;
-  const float p0 = projected[base];
-  const float p1 = projected[base + embed_dim];
-  const float p2 = projected[base + 2 * embed_dim];
-  const float p3 = projected[base + 3 * embed_dim];
-  const float p4 = projected[base + 4 * embed_dim] + decay_bias[d];
+  const float p0 = static_cast<float>(projected[base]);
+  const float p1 = static_cast<float>(projected[base + embed_dim]);
+  const float p2 = static_cast<float>(projected[base + 2 * embed_dim]);
+  const float p3 = static_cast<float>(projected[base + 3 * embed_dim]);
+  const float p4 = static_cast<float>(projected[base + 4 * embed_dim]) + static_cast<float>(decay_bias[d]);
   const float x = siluf_fast(p0);
   const float gate_b = sigmoidf_fast(p1);
   const float gate_c = sigmoidf_fast(p2);
@@ -256,7 +257,7 @@ __global__ void mamba2_step_forward_kernel(
   const float retention = fminf(fmaxf(sigmoidf_fast(p4), kRetentionMin), kRetentionMax);
   const float scan = retention * previous_scan[b * embed_dim + d] + gate_b * x;
   next_scan[b * embed_dim + d] = scan;
-  mixed[b * embed_dim + d] = (gate_c * scan + skip[d] * x) * gate_z;
+  mixed[b * embed_dim + d] = static_cast<scalar_t>((gate_c * scan + static_cast<float>(skip[d]) * x) * gate_z);
 }
 
 __global__ void causal_conv1d_silu_forward_kernel(
@@ -389,9 +390,21 @@ void check_cuda_inputs(const at::Tensor& projected, const at::Tensor& decay_bias
   TORCH_CHECK(projected.is_cuda(), "Mamba2 CUDA kernel requires CUDA projected tensor.");
   TORCH_CHECK(decay_bias.is_cuda(), "Mamba2 CUDA kernel requires CUDA decay_bias tensor.");
   TORCH_CHECK(skip.is_cuda(), "Mamba2 CUDA kernel requires CUDA skip tensor.");
-  TORCH_CHECK(projected.scalar_type() == at::kFloat, "Mamba2 CUDA kernel currently supports float32 projected tensors.");
-  TORCH_CHECK(decay_bias.scalar_type() == at::kFloat, "Mamba2 CUDA kernel currently supports float32 decay_bias tensors.");
-  TORCH_CHECK(skip.scalar_type() == at::kFloat, "Mamba2 CUDA kernel currently supports float32 skip tensors.");
+  TORCH_CHECK(projected.scalar_type() == at::kFloat, "Mamba2 CUDA training scan currently supports float32 projected tensors.");
+  TORCH_CHECK(decay_bias.scalar_type() == at::kFloat, "Mamba2 CUDA training scan currently supports float32 decay_bias tensors.");
+  TORCH_CHECK(skip.scalar_type() == at::kFloat, "Mamba2 CUDA training scan currently supports float32 skip tensors.");
+}
+
+void check_cuda_step_inputs(const at::Tensor& projected, const at::Tensor& previous_scan, const at::Tensor& decay_bias, const at::Tensor& skip) {
+  TORCH_CHECK(projected.is_cuda(), "Mamba2 CUDA step kernel requires CUDA projected tensor.");
+  TORCH_CHECK(previous_scan.is_cuda(), "Mamba2 CUDA step kernel requires CUDA previous_scan tensor.");
+  TORCH_CHECK(decay_bias.is_cuda(), "Mamba2 CUDA step kernel requires CUDA decay_bias tensor.");
+  TORCH_CHECK(skip.is_cuda(), "Mamba2 CUDA step kernel requires CUDA skip tensor.");
+  TORCH_CHECK(previous_scan.scalar_type() == at::kFloat, "Mamba2 CUDA step keeps recurrent scan state in float32.");
+  TORCH_CHECK(projected.scalar_type() == decay_bias.scalar_type() && projected.scalar_type() == skip.scalar_type(),
+      "Mamba2 CUDA step projected, decay_bias, and skip must have matching dtype.");
+  TORCH_CHECK(projected.scalar_type() == at::kFloat || projected.scalar_type() == at::kHalf,
+      "Mamba2 CUDA step supports float32 or float16 inference tensors.");
 }
 
 inline bool use_direct_grad_reduce() {
@@ -570,25 +583,23 @@ std::tuple<at::Tensor, at::Tensor> mamba2_step_forward_cuda(
     const at::Tensor& previous_scan,
     const at::Tensor& decay_bias,
     const at::Tensor& skip) {
-  check_cuda_inputs(projected, decay_bias, skip);
-  TORCH_CHECK(previous_scan.is_cuda(), "Mamba2 CUDA kernel requires CUDA previous_scan tensor.");
-  TORCH_CHECK(previous_scan.scalar_type() == at::kFloat, "Mamba2 CUDA kernel currently supports float32 previous_scan tensors.");
+  check_cuda_step_inputs(projected, previous_scan, decay_bias, skip);
   const c10::cuda::CUDAGuard device_guard(projected.device());
   const int batch = static_cast<int>(projected.size(0));
   const int embed_dim = static_cast<int>(projected.size(1) / 5);
   at::Tensor mixed = at::empty({batch, embed_dim}, projected.options());
-  at::Tensor next_scan = at::empty({batch, embed_dim}, projected.options());
+  at::Tensor next_scan = at::empty({batch, embed_dim}, previous_scan.options());
   constexpr int kThreads = 256;
   const int elements = batch * embed_dim;
-  mamba2_step_forward_kernel<<<blocks_for(elements, kThreads), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
-      projected.data_ptr<float>(),
-      previous_scan.data_ptr<float>(),
-      decay_bias.data_ptr<float>(),
-      skip.data_ptr<float>(),
-      mixed.data_ptr<float>(),
-      next_scan.data_ptr<float>(),
-      batch,
-      embed_dim);
+  if (projected.scalar_type() == at::kHalf) {
+    mamba2_step_forward_kernel<at::Half><<<blocks_for(elements, kThreads), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+        projected.data_ptr<at::Half>(), previous_scan.data_ptr<float>(), decay_bias.data_ptr<at::Half>(),
+        skip.data_ptr<at::Half>(), mixed.data_ptr<at::Half>(), next_scan.data_ptr<float>(), batch, embed_dim);
+  } else {
+    mamba2_step_forward_kernel<float><<<blocks_for(elements, kThreads), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+        projected.data_ptr<float>(), previous_scan.data_ptr<float>(), decay_bias.data_ptr<float>(),
+        skip.data_ptr<float>(), mixed.data_ptr<float>(), next_scan.data_ptr<float>(), batch, embed_dim);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {mixed, next_scan};
 }

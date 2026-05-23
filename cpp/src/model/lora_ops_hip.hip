@@ -7,11 +7,12 @@
 namespace pulsar {
 namespace {
 
+template <typename scalar_t>
 __global__ void eggroll_lora_perturb_kernel(
-    const float* __restrict__ base_out,
-    const float* __restrict__ x_A_stack,
-    const float* __restrict__ B_stack,
-    float* __restrict__ out,
+    const scalar_t* __restrict__ base_out,
+    const scalar_t* __restrict__ x_A_stack,
+    const scalar_t* __restrict__ B_stack,
+    scalar_t* __restrict__ out,
     int population,
     int member_batch,
     int out_features,
@@ -29,11 +30,11 @@ __global__ void eggroll_lora_perturb_kernel(
   const int x_a_stack_base = sample * rank;
   const int stack_b_base = (p * out_features + o) * rank;
   for (int r = 0; r < rank; ++r) {
-    const float xas = x_A_stack[x_a_stack_base + r];
-    const float b_stack = B_stack[stack_b_base + r];
-    perturbation += xas * b_stack;
+      const float xas = static_cast<float>(x_A_stack[x_a_stack_base + r]);
+      const float b_stack = static_cast<float>(B_stack[stack_b_base + r]);
+      perturbation += xas * b_stack;
   }
-  out[index] = base_out[index] + perturb_scale * perturbation;
+  out[index] = static_cast<scalar_t>(static_cast<float>(base_out[index]) + perturb_scale * perturbation);
 }
 
 inline int blocks_for(int elements, int threads) {
@@ -72,16 +73,19 @@ at::Tensor eggroll_lora_perturb_hip(
   at::Tensor out = at::empty_like(base_out);
   constexpr int kThreads = 256;
   const int total = static_cast<int>(base_out.numel());
-  eggroll_lora_perturb_kernel<<<blocks_for(total, kThreads), kThreads, 0, at::hip::getCurrentHIPStream()>>>(
-      base_out.data_ptr<float>(),
-      x_A_stack.data_ptr<float>(),
-      B_stack.data_ptr<float>(),
-      out.data_ptr<float>(),
-      population,
-      member_batch,
-      out_features,
-      rank,
-      perturb_scale);
+  if (base_out.scalar_type() == at::kHalf) {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(eggroll_lora_perturb_kernel<at::Half>),
+        dim3(blocks_for(total, kThreads)), dim3(kThreads), 0, at::hip::getCurrentHIPStream(),
+        base_out.data_ptr<at::Half>(), x_A_stack.data_ptr<at::Half>(), B_stack.data_ptr<at::Half>(),
+        out.data_ptr<at::Half>(), population, member_batch, out_features, rank, perturb_scale);
+  } else {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(eggroll_lora_perturb_kernel<float>),
+        dim3(blocks_for(total, kThreads)), dim3(kThreads), 0, at::hip::getCurrentHIPStream(),
+        base_out.data_ptr<float>(), x_A_stack.data_ptr<float>(), B_stack.data_ptr<float>(),
+        out.data_ptr<float>(), population, member_batch, out_features, rank, perturb_scale);
+  }
   check_hip_launch();
   return out;
 }

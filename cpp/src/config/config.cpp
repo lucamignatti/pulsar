@@ -333,6 +333,8 @@ void to_json(json& j, const PPOConfig& value) {
       {"gamma", value.gamma},
       {"gae_lambda", value.gae_lambda},
       {"learning_rate", value.learning_rate},
+      {"overbatching", value.overbatching},
+      {"policy_temperature", value.policy_temperature},
       {"max_grad_norm", value.max_grad_norm},
       {"device", value.device},
       {"checkpoint_interval", value.checkpoint_interval},
@@ -375,6 +377,8 @@ void from_json(const json& j, PPOConfig& value) {
   value.gamma = j.value("gamma", 0.99F);
   value.gae_lambda = j.value("gae_lambda", 0.95F);
   value.learning_rate = j.value("learning_rate", 3.0e-4F);
+  value.overbatching = j.value("overbatching", true);
+  value.policy_temperature = j.value("policy_temperature", 1.0F);
   value.max_grad_norm = j.value("max_grad_norm", 1.0F);
   value.device = j.value("device", std::string{"cpu"});
   value.checkpoint_interval = j.value("checkpoint_interval", 10);
