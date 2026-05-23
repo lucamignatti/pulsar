@@ -46,9 +46,9 @@ __global__ void sample_masked_actions_kernel(
   if (row >= rows) return;
   const int base = row * action_dim;
 
-  float best = -CUDART_INF_F;
+  float best = -INFINITY;
   int best_action = 0;
-  float max_valid_logit = -CUDART_INF_F;
+  float max_valid_logit = -INFINITY;
   int valid_count = 0;
   for (int a = 0; a < action_dim; ++a) {
     if (masks[base + a] == 0) continue;
@@ -94,7 +94,7 @@ __global__ void masked_action_entropy_kernel(
   if (row >= rows) return;
   const int base = row * action_dim;
   int valid_count = 0;
-  float max_logit = -CUDART_INF_F;
+  float max_logit = -INFINITY;
   for (int a = 0; a < action_dim; ++a) {
     if (masks[base + a] == 0) continue;
     ++valid_count;
