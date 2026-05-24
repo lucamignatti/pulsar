@@ -58,13 +58,15 @@ class RewardEngine {
 
   [[nodiscard]] bool has_any_gameplay_reward() const { return false; }
   [[nodiscard]] bool has_any_mechanic_reward() const { return false; }
-  [[nodiscard]] bool has_team_spirit() const { return false; }
+  [[nodiscard]] bool has_team_spirit() const { return outcome_.team_spirit > 0.0F; }
   [[nodiscard]] bool has_velocity_ball_to_goal() const { return false; }
 
   [[nodiscard]] float outcome_score() const;
   [[nodiscard]] float outcome_concede() const;
   [[nodiscard]] float outcome_neutral() const;
   [[nodiscard]] float outcome_neutral_no_touch() const;
+  [[nodiscard]] float outcome_team_spirit() const;
+  [[nodiscard]] float outcome_step_penalty() const;
 
   RewardBreakdown compute(
       int global_tick,

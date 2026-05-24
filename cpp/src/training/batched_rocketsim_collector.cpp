@@ -459,7 +459,12 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
   float* ball_touch_ptr = host_ball_proximity_.data_ptr<float>();
   float* episode_touch_ptr = host_episode_ball_touch_.data_ptr<float>();
   float* episode_touch_count_ptr = host_episode_ball_touch_count_.data_ptr<float>();
+  float* reward_ptr = host_rewards_.data_ptr<float>();
+  float* gp_reward_ptr = host_gameplay_rewards_.data_ptr<float>();
+  float* mech_reward_ptr = host_mechanic_rewards_.data_ptr<float>();
+  float* bootstrap_truncated_ptr = host_bootstrap_truncated_.data_ptr<float>();
   const std::size_t obs_stride = static_cast<std::size_t>(obs_dim_);
+  const bool has_team_spirit = reward_engine_.has_team_spirit();
   host_dones_.zero_();
   host_terminated_.zero_();
   host_truncated_.zero_();
@@ -529,7 +534,7 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         dones_ptr[global_idx] = done ? 1.0F : 0.0F;
         terminated_ptr[global_idx] = is_terminated ? 1.0F : 0.0F;
         truncated_ptr[global_idx] = is_truncated ? 1.0F : 0.0F;
-        host_bootstrap_truncated_.data_ptr<float>()[global_idx] = 0.0F;
+        bootstrap_truncated_ptr[global_idx] = (is_truncated && !is_terminated) ? 1.0F : 0.0F;
         reset_needed = reset_needed || done;
       }
 
@@ -568,9 +573,9 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
             agent_reward_states_[global_idx],
             env_reward_states_[env_idx],
             done, label);
-        host_rewards_.data_ptr<float>()[global_idx] = breakdown.total;
-        host_gameplay_rewards_.data_ptr<float>()[global_idx] = breakdown.gameplay;
-        host_mechanic_rewards_.data_ptr<float>()[global_idx] = breakdown.mechanic;
+        reward_ptr[global_idx] = breakdown.total;
+        gp_reward_ptr[global_idx] = breakdown.gameplay;
+        mech_reward_ptr[global_idx] = breakdown.mechanic;
 
         float goal_pos[3];
         compute_goal_position(current_state, config_.goal_mapping, goal_pos);
@@ -587,7 +592,20 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         goal_pos_ptr[pos_offset + 2] = goal_pos[2];
       }
 
-
+      if (has_team_spirit) {
+        const float ts = reward_engine_.outcome_team_spirit();
+        float team_reward[2] = {0.0F, 0.0F};
+        for (std::size_t idx = 0; idx < count; ++idx) {
+          const int team_index = (current_state.cars[idx].team == Team::Blue) ? 0 : 1;
+          team_reward[team_index] += reward_ptr[agent_begin + idx];
+        }
+        for (std::size_t idx = 0; idx < count; ++idx) {
+          const int team_index = (current_state.cars[idx].team == Team::Blue) ? 0 : 1;
+          const std::size_t global_idx = agent_begin + idx;
+          const float teammate_reward = team_reward[team_index] - reward_ptr[global_idx];
+          reward_ptr[global_idx] += ts * teammate_reward;
+        }
+      }
 
       if (reset_needed) {
         build_env_obs_batch(
@@ -884,6 +902,22 @@ void BatchedRocketSimCollector::step_after_physics_prefix(
         goal_pos_ptr[po] = goal_pos[0];
         goal_pos_ptr[po + 1] = goal_pos[1];
         goal_pos_ptr[po + 2] = goal_pos[2];
+      }
+
+      // Team spirit: each agent's reward gets a fraction of teammates' rewards
+      if (has_team_spirit) {
+        const float ts = reward_engine_.outcome_team_spirit();
+        // sum per-team rewards
+        float team_reward[2] = {0.0F, 0.0F};
+        for (std::size_t idx = 0; idx < count; ++idx) {
+          const int ti = (current_state.cars[idx].team == Team::Blue) ? 0 : 1;
+          team_reward[ti] += reward_ptr[agent_begin + idx];
+        }
+        for (std::size_t idx = 0; idx < count; ++idx) {
+          const int ti = (current_state.cars[idx].team == Team::Blue) ? 0 : 1;
+          const float teammate_reward = team_reward[ti] - reward_ptr[agent_begin + idx];
+          reward_ptr[agent_begin + idx] += ts * teammate_reward;
+        }
       }
 
 

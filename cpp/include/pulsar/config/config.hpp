@@ -17,6 +17,8 @@ struct OutcomeConfig {
   float concede = -1.0F;
   float neutral = 0.0F;
   float neutral_no_touch = -1.0F;
+  float team_spirit = 0.0F;
+  float step_penalty = 0.0F;
 };
 
 struct PredictorChannelConfig {
@@ -78,8 +80,8 @@ struct ModelConfig {
   int observation_dim = 132;
   int action_dim = 90;
   bool use_layer_norm = true;
-  int encoder_dim = 640;
-  int num_encoder_blocks = 5;
+  int encoder_dim = 256;
+  int num_encoder_blocks = 2;
   int sequence_length = 16;
   int max_forward_samples = 0;
   int value_hidden_dim = 256;

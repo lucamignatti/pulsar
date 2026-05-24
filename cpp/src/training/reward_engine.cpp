@@ -44,6 +44,8 @@ float RewardEngine::outcome_score() const { return outcome_.score; }
 float RewardEngine::outcome_concede() const { return outcome_.concede; }
 float RewardEngine::outcome_neutral() const { return outcome_.neutral; }
 float RewardEngine::outcome_neutral_no_touch() const { return outcome_.neutral_no_touch; }
+float RewardEngine::outcome_team_spirit() const { return outcome_.team_spirit; }
+float RewardEngine::outcome_step_penalty() const { return outcome_.step_penalty; }
 
 RewardBreakdown RewardEngine::compute(
     int global_tick,
@@ -75,6 +77,13 @@ RewardBreakdown RewardEngine::compute(
   }
 
   bd.total = bd.terminal + bd.gameplay + bd.mechanic;
+
+  // Apply constant step penalty (non-terminal steps)
+  if (!done && outcome_.step_penalty != 0.0F) {
+    bd.total += outcome_.step_penalty;
+    bd.terms["step_penalty"] = outcome_.step_penalty;
+  }
+
   return bd;
 }
 

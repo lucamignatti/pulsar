@@ -64,6 +64,8 @@ void to_json(json& j, const OutcomeConfig& value) {
       {"concede", value.concede},
       {"neutral", value.neutral},
       {"neutral_no_touch", value.neutral_no_touch},
+      {"team_spirit", value.team_spirit},
+      {"step_penalty", value.step_penalty},
   };
 }
 
@@ -72,6 +74,8 @@ void from_json(const json& j, OutcomeConfig& value) {
   value.concede = j.value("concede", -1.0F);
   value.neutral = j.value("neutral", 0.0F);
   value.neutral_no_touch = j.value("neutral_no_touch", -1.0F);
+  value.team_spirit = j.value("team_spirit", 0.0F);
+  value.step_penalty = j.value("step_penalty", 0.0F);
 }
 
 void to_json(json& j, const PredictorChannelConfig& value) {
