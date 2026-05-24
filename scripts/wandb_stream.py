@@ -122,6 +122,12 @@ def _line_panel(metric: str) -> dict[str, Any]:
     }
 
 
+def _is_table_line_panel(panel: dict[str, Any], table_keys: set[str]) -> bool:
+    if panel.get("viewType") != "Run History Line Plot":
+        return False
+    return any(metric in table_keys for metric in _panel_metrics(panel))
+
+
 def _classify_panel(panel: dict[str, Any], original_section: str, metric_sections: dict[str, str]) -> str:
     metrics = _panel_metrics(panel)
     for metric in metrics:
@@ -148,7 +154,9 @@ def _organize_workspace_spec(
     spec: dict[str, Any],
     metric_sections: dict[str, str],
     section_order: list[str],
+    table_keys: set[str] | None = None,
 ) -> tuple[dict[str, Any], Counter[str]]:
+    table_keys = table_keys or set()
     panel_bank = spec["section"]["panelBankConfig"]
     existing_sections = {
         section.get("name", ""): section
@@ -177,6 +185,9 @@ def _organize_workspace_spec(
     for section in panel_bank.get("sections", []):
         original_name = section.get("name", "Charts")
         for panel in section.get("panels", []):
+            if _is_table_line_panel(panel, table_keys):
+                counts["Removed table line plots"] += 1
+                continue
             key = _panel_key(panel)
             if key[1] and key in seen:
                 continue
@@ -196,6 +207,8 @@ def _organize_workspace_spec(
         for metric in _panel_metrics(panel)
     }
     for metric, target in metric_sections.items():
+        if metric in table_keys:
+            continue
         if metric in existing_metric_panels:
             continue
         if target not in organized:
@@ -220,6 +233,7 @@ def _organize_wandb_workspace(
     mode: str,
     metric_sections: dict[str, str],
     section_order: list[str],
+    table_keys: set[str] | None = None,
 ) -> None:
     if not _env_enabled("PULSAR_WANDB_ORGANIZE_WORKSPACE", True):
         return
@@ -236,7 +250,12 @@ def _organize_wandb_workspace(
             _workspace_view_query(gql),
             {"entityName": entity, "name": project, "viewType": "project-view"},
         )["project"]["allViews"]["edges"][0]["node"]
-        spec, counts = _organize_workspace_spec(json.loads(node["spec"]), metric_sections, section_order)
+        spec, counts = _organize_workspace_spec(
+            json.loads(node["spec"]),
+            metric_sections,
+            section_order,
+            table_keys,
+        )
         api.client.execute(
             _workspace_upsert_query(gql),
             {
@@ -324,13 +343,18 @@ def main() -> int:
     except OSError:
         pass
 
-    workspace_signature: tuple[tuple[tuple[str, str], ...], tuple[str, ...]] | None = None
+    workspace_signature: tuple[tuple[tuple[str, str], ...], tuple[str, ...], tuple[str, ...]] | None = None
     try:
         for line in sys.stdin:
             stripped = line.strip()
             if not stripped:
                 continue
             payload = json.loads(stripped)
+            table_keys = {
+                str(key)
+                for key, val in payload.items()
+                if isinstance(key, str) and isinstance(val, dict) and val.get("_type") == "table"
+            }
             metric_sections_raw = payload.pop(_WANDB_SECTIONS_KEY, None)
             section_order_raw = payload.pop(_WANDB_SECTION_ORDER_KEY, None)
             if isinstance(metric_sections_raw, dict):
@@ -344,7 +368,7 @@ def main() -> int:
                     for section in (section_order_raw if isinstance(section_order_raw, list) else [])
                     if isinstance(section, str) and section
                 ]
-                signature = (tuple(sorted(metric_sections.items())), tuple(section_order))
+                signature = (tuple(sorted(metric_sections.items())), tuple(section_order), tuple(sorted(table_keys)))
                 if signature != workspace_signature:
                     _organize_wandb_workspace(
                         wandb,
@@ -353,6 +377,7 @@ def main() -> int:
                         args.mode,
                         metric_sections,
                         section_order,
+                        table_keys,
                     )
                     workspace_signature = signature
             
