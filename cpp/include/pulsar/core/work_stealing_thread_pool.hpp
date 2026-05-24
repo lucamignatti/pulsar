@@ -55,6 +55,10 @@ class WorkStealingThreadPool {
       std::lock_guard<std::mutex> lock(queues_[queue]->mutex);
       queues_[queue]->tasks.emplace_back([task]() { (*task)(); });
     }
+    // Briefly acquire cv_mutex_ before notify so the notification is guaranteed
+    // to arrive either while the worker is sleeping or before it enters wait()
+    // (in which case the predicate finds the task and it never sleeps).
+    { std::lock_guard<std::mutex> cv_lock(cv_mutex_); }
     cv_.notify_one();
     return future;
   }

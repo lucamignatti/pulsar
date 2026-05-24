@@ -1124,7 +1124,10 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
     H_mean /= static_cast<double>(entropy_window_.size());
   }
   const double entropy_deficit = std::max(0.0, H_floor - H_mean);
-  const double alpha = (H_floor > 0.0) ? std::min(1.0, entropy_deficit / H_floor) : 0.0;
+  // No data yet: assume no deficit rather than maximum deficit.
+  const double alpha = (H_floor > 0.0 && !entropy_window_.empty())
+      ? std::min(1.0, entropy_deficit / H_floor)
+      : 0.0;
   last_alpha_ = alpha;
   last_entropy_mean_ = H_mean;
 

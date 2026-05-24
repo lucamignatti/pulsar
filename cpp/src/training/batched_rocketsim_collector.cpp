@@ -595,15 +595,20 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
       if (has_team_spirit) {
         const float ts = reward_engine_.outcome_team_spirit();
         float team_reward[2] = {0.0F, 0.0F};
+        float team_gp_reward[2] = {0.0F, 0.0F};
+        float team_mech_reward[2] = {0.0F, 0.0F};
         for (std::size_t idx = 0; idx < count; ++idx) {
           const int team_index = (current_state.cars[idx].team == Team::Blue) ? 0 : 1;
           team_reward[team_index] += reward_ptr[agent_begin + idx];
+          team_gp_reward[team_index] += gp_reward_ptr[agent_begin + idx];
+          team_mech_reward[team_index] += mech_reward_ptr[agent_begin + idx];
         }
         for (std::size_t idx = 0; idx < count; ++idx) {
           const int team_index = (current_state.cars[idx].team == Team::Blue) ? 0 : 1;
           const std::size_t global_idx = agent_begin + idx;
-          const float teammate_reward = team_reward[team_index] - reward_ptr[global_idx];
-          reward_ptr[global_idx] += ts * teammate_reward;
+          reward_ptr[global_idx] += ts * (team_reward[team_index] - reward_ptr[global_idx]);
+          gp_reward_ptr[global_idx] += ts * (team_gp_reward[team_index] - gp_reward_ptr[global_idx]);
+          mech_reward_ptr[global_idx] += ts * (team_mech_reward[team_index] - mech_reward_ptr[global_idx]);
         }
       }
 
@@ -907,16 +912,20 @@ void BatchedRocketSimCollector::step_after_physics_prefix(
       // Team spirit: each agent's reward gets a fraction of teammates' rewards
       if (has_team_spirit) {
         const float ts = reward_engine_.outcome_team_spirit();
-        // sum per-team rewards
         float team_reward[2] = {0.0F, 0.0F};
+        float team_gp_reward[2] = {0.0F, 0.0F};
+        float team_mech_reward[2] = {0.0F, 0.0F};
         for (std::size_t idx = 0; idx < count; ++idx) {
           const int ti = (current_state.cars[idx].team == Team::Blue) ? 0 : 1;
           team_reward[ti] += reward_ptr[agent_begin + idx];
+          team_gp_reward[ti] += gp_reward_ptr[agent_begin + idx];
+          team_mech_reward[ti] += mech_reward_ptr[agent_begin + idx];
         }
         for (std::size_t idx = 0; idx < count; ++idx) {
           const int ti = (current_state.cars[idx].team == Team::Blue) ? 0 : 1;
-          const float teammate_reward = team_reward[ti] - reward_ptr[agent_begin + idx];
-          reward_ptr[agent_begin + idx] += ts * teammate_reward;
+          reward_ptr[agent_begin + idx] += ts * (team_reward[ti] - reward_ptr[agent_begin + idx]);
+          gp_reward_ptr[agent_begin + idx] += ts * (team_gp_reward[ti] - gp_reward_ptr[agent_begin + idx]);
+          mech_reward_ptr[agent_begin + idx] += ts * (team_mech_reward[ti] - mech_reward_ptr[agent_begin + idx]);
         }
       }
 

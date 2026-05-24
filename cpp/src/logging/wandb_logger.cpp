@@ -16,6 +16,10 @@
 namespace pulsar {
 namespace {
 
+// Drop log entries if the async queue grows beyond this to prevent unbounded
+// memory growth when the wandb subprocess stalls.
+constexpr std::size_t kMaxQueueSize = 512;
+
 std::string shell_quote(const std::string& value) {
   std::string quoted = "'";
   for (const char ch : value) {
@@ -141,6 +145,8 @@ void WandbLogger::commit(std::int64_t global_step) {
       "3v3",
       "Rewards",
       "GCRL",
+      "Predictor",
+      "Exploration",
       "ES-LoRA",
       "Optimization",
       "Charts",
@@ -164,6 +170,10 @@ void WandbLogger::log(const nlohmann::json& payload) {
     if (stopping_ || worker_failed_) {
       enabled_ = false;
       return;
+    }
+    if (queue_.size() >= kMaxQueueSize) {
+      // Subprocess is stalled — drop the oldest entry to bound memory usage.
+      queue_.pop_front();
     }
     queue_.push_back(payload.dump());
   }

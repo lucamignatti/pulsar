@@ -217,7 +217,7 @@ void scale_existing_gradients(torch::nn::Module& module, double scale) {
   for (auto& p : module.parameters()) {
     torch::Tensor grad = p.mutable_grad();
     if (grad.defined()) {
-      grad.div_(scale);
+      grad.mul_(scale);
     }
   }
 }

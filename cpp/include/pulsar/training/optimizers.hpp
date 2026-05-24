@@ -23,16 +23,20 @@ class MagSGD : public torch::optim::SGD {
       loss = closure();
     }
 
-    double grad_sq_sum = 0.0;
+    // Compute global grad norm in one device-side op (no per-parameter sync).
+    std::vector<torch::Tensor> grad_parts;
     for (auto& group : param_groups()) {
       for (auto& param : group.params()) {
         if (param.grad().defined()) {
-          grad_sq_sum += param.grad().detach().to(torch::kFloat32).square().sum().cpu().item<double>();
+          grad_parts.push_back(param.grad().detach().to(torch::kFloat32).reshape({-1}));
         }
       }
     }
 
-    const double grad_norm = std::sqrt(grad_sq_sum);
+    const double grad_norm = grad_parts.empty()
+        ? 0.0
+        : std::sqrt(torch::cat(grad_parts).square().sum().item<double>());
+
     if (std::isfinite(grad_norm) && grad_norm > 0.0) {
       for (auto& group : param_groups()) {
         for (auto& param : group.params()) {
