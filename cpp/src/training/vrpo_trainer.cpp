@@ -1270,6 +1270,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
         predictor_trainer_->apply_reward_shaping(
             actor_,
             flat_features,
+            sparse_events_device,
             shaped_rewards,
             rollout_steps,
             count,

@@ -24,7 +24,6 @@ struct OutcomeConfig {
 struct PredictorChannelConfig {
   bool enabled = true;
   int horizon = 40;
-  float weight = 0.05F;
   float learning_rate = 0.005F;
   float convergence_threshold = 0.002F;
   int warmup_updates = 15;
@@ -35,7 +34,6 @@ struct PredictorConfig {
     for (const auto& spec : kSparseEventChannels) {
       PredictorChannelConfig channel{};
       channel.horizon = spec.default_horizon;
-      channel.weight = spec.default_weight;
       channels.emplace(std::string(spec.name), channel);
     }
   }

@@ -56,6 +56,7 @@ class PredictorTrainer {
   void apply_reward_shaping(
       const VRPOActor& actor,
       const torch::Tensor& flat_features,
+      const torch::Tensor& sparse_events,
       torch::Tensor& shaped_rewards,
       int64_t rollout_steps,
       int64_t count,
@@ -85,6 +86,12 @@ class PredictorTrainer {
   std::vector<std::unique_ptr<torch::optim::Adam>> optimizers_{};
   std::vector<float> ema_losses_{};
   std::vector<float> deltas_{};
+
+  // Hindsight weighting state
+  static constexpr int kGoalChannelIndex = 0;
+  std::vector<float> ema_p_goal_given_event_{};
+  std::vector<float> ema_p_goal_given_no_event_{};
+  bool hindsight_initialized_ = false;
 };
 
 }  // namespace pulsar

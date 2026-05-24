@@ -172,26 +172,87 @@ void PredictorTrainer::update_predictors(
 void PredictorTrainer::apply_reward_shaping(
     const VRPOActor& actor,
     const torch::Tensor& flat_features,
+    const torch::Tensor& sparse_events,
     torch::Tensor& shaped_rewards,
     int64_t rollout_steps,
     int64_t count,
     int64_t agent_offset) {
   PULSAR_TRACE_SCOPE_CAT("predictor_trainer", "apply_reward_shaping");
   torch::NoGradGuard no_grad;
-  const torch::Tensor shaped_view = shaped_rewards.narrow(1, agent_offset, count);
+
+  // Initialize hindsight EMAs once
+  if (!hindsight_initialized_) {
+    ema_p_goal_given_event_.assign(kSparseEventChannelCount, -1.0F);
+    ema_p_goal_given_no_event_.assign(kSparseEventChannelCount, -1.0F);
+    hindsight_initialized_ = true;
+  }
+
+  // Get all predictor probabilities
   torch::Tensor shaping_logits_all = finite_or_zero(actor->forward_all_predictors(flat_features)).detach();
-  for (std::size_t channel_index = 0; channel_index < kSparseEventChannelCount; ++channel_index) {
+
+  // Goal predictor P_goal
+  const torch::Tensor goal_logits = shaping_logits_all.select(1, kGoalChannelIndex);
+  const torch::Tensor goal_probs = torch::softmax(goal_logits, -1);
+  const torch::Tensor p_goal = goal_probs.select(1, 1).reshape({rollout_steps, count});
+
+  constexpr float kAlpha = 0.95F;
+  const torch::Tensor shaped_view = shaped_rewards.narrow(1, agent_offset, count);
+
+  for (std::size_t channel_index = 1; channel_index < kSparseEventChannelCount; ++channel_index) {
     const std::string channel_name(kSparseEventChannels[channel_index].name);
     const auto& channel = config_.predictor.channels.at(channel_name);
     const bool active = channel_index < actor->predictor_active_.size() &&
         actor->predictor_active_[channel_index];
-    if (!channel.enabled || !active || channel.weight <= 0.0F) {
+    if (!channel.enabled || !active) {
       continue;
     }
-    const torch::Tensor logits = shaping_logits_all.select(1, static_cast<int64_t>(channel_index));
-    const torch::Tensor probs = torch::softmax(logits, -1);
-    const torch::Tensor p_soon = probs.select(1, 1).reshape({rollout_steps, count});
-    shaped_view.add_(channel.weight * (2.0F * p_soon - 1.0F));
+
+    // Get event indicators from sparse_events buffer
+    const torch::Tensor events_flat = sparse_events
+        .narrow(1, agent_offset, count)
+        .select(2, static_cast<int64_t>(channel_index))
+        .reshape({rollout_steps * count});
+
+    const torch::Tensor p_goal_flat = p_goal.reshape({rollout_steps * count});
+
+    // Update EMAs: P_goal when event fires vs when it doesn't
+    const torch::Tensor event_mask = events_flat > 0.5F;
+    const bool has_events = event_mask.any().item<bool>();
+    const bool has_no_events = (~event_mask).any().item<bool>();
+
+    if (has_events) {
+      const float pg_event = p_goal_flat.masked_select(event_mask).mean().item<float>();
+      if (ema_p_goal_given_event_[channel_index] < 0.0F) {
+        ema_p_goal_given_event_[channel_index] = pg_event;
+      } else {
+        ema_p_goal_given_event_[channel_index] =
+            kAlpha * ema_p_goal_given_event_[channel_index] + (1.0F - kAlpha) * pg_event;
+      }
+    }
+    if (has_no_events) {
+      const float pg_no_event = p_goal_flat.masked_select(~event_mask).mean().item<float>();
+      if (ema_p_goal_given_no_event_[channel_index] < 0.0F) {
+        ema_p_goal_given_no_event_[channel_index] = pg_no_event;
+      } else {
+        ema_p_goal_given_no_event_[channel_index] =
+            kAlpha * ema_p_goal_given_no_event_[channel_index] + (1.0F - kAlpha) * pg_no_event;
+      }
+    }
+
+    // Compute advantage: how much does this event type predict goals?
+    float advantage = 0.0F;
+    if (ema_p_goal_given_event_[channel_index] >= 0.0F &&
+        ema_p_goal_given_no_event_[channel_index] >= 0.0F) {
+      advantage = ema_p_goal_given_event_[channel_index] - ema_p_goal_given_no_event_[channel_index];
+      if (advantage < 0.0F) advantage = 0.0F;
+    }
+
+    // Dynamic weight = P_goal * (1 + advantage)
+    // Events that happen when P_goal is high and that historically correlate with goals get more reward
+    const torch::Tensor dynamic_weight = p_goal_flat * (1.0F + advantage);
+    const torch::Tensor hindsight_reward = dynamic_weight.reshape({rollout_steps, count}) *
+        events_flat.reshape({rollout_steps, count});
+    shaped_view.add_(hindsight_reward);
   }
 }
 

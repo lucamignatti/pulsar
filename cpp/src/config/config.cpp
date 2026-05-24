@@ -82,7 +82,6 @@ void to_json(json& j, const PredictorChannelConfig& value) {
   j = json{
       {"enabled", value.enabled},
       {"horizon", value.horizon},
-      {"weight", value.weight},
       {"learning_rate", value.learning_rate},
       {"convergence_threshold", value.convergence_threshold},
       {"warmup_updates", value.warmup_updates},
@@ -92,7 +91,6 @@ void to_json(json& j, const PredictorChannelConfig& value) {
 void from_json(const json& j, PredictorChannelConfig& value) {
   value.enabled = j.value("enabled", true);
   value.horizon = j.value("horizon", 40);
-  value.weight = j.value("weight", 0.05F);
   value.learning_rate = j.value("learning_rate", 0.005F);
   value.convergence_threshold = j.value("convergence_threshold", 0.002F);
   value.warmup_updates = j.value("warmup_updates", 15);
@@ -108,7 +106,6 @@ void from_json(const json& j, PredictorConfig& value) {
   for (const auto& spec : kSparseEventChannels) {
     PredictorChannelConfig channel{};
     channel.horizon = spec.default_horizon;
-    channel.weight = spec.default_weight;
     value.channels.emplace(std::string(spec.name), channel);
   }
 
@@ -739,9 +736,6 @@ void validate_experiment_config(const ExperimentConfig& config) {
       if (chan.enabled) {
         if (chan.horizon <= 0) {
           throw std::invalid_argument("predictor." + name + ".horizon must be positive.");
-        }
-        if (chan.weight < 0.0F) {
-          throw std::invalid_argument("predictor." + name + ".weight must be non-negative.");
         }
         if (chan.learning_rate <= 0.0F) {
           throw std::invalid_argument("predictor." + name + ".learning_rate must be positive.");

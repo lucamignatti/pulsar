@@ -223,14 +223,15 @@ int main() {
                             "production config should overlap collection/update");
       pulsar::test::require(prod.outcome.score == 20.0f &&
                                 prod.outcome.concede == -16.0f &&
-                                prod.outcome.neutral_no_touch == 0.0f,
-                            "production base reward should mirror final goal/loss terminal reward");
-      pulsar::test::require(prod.predictor.channels.at("goal").weight == 0.08f &&
-                                prod.predictor.channels.at("ball_touch").weight == 0.01f &&
-                                prod.predictor.channels.at("flip_reset").weight == 0.05f &&
-                                prod.predictor.channels.at("demo").weight > 0.0f &&
-                                prod.predictor.channels.at("flick").weight > 0.0f,
-                            "production predictor weights check");
+                                prod.outcome.team_spirit == 0.1f &&
+                                prod.outcome.step_penalty == -0.01f,
+                            "production base reward should use asymmetric zero-sum with team spirit");
+      pulsar::test::require(prod.predictor.channels.at("goal").horizon == 40 &&
+                                prod.predictor.channels.at("ball_touch").horizon == 15 &&
+                                prod.predictor.channels.at("flip_reset").horizon == 40 &&
+                                prod.predictor.channels.at("demo").enabled &&
+                                prod.predictor.channels.at("flick").enabled,
+                            "production predictor channels check");
     }
 
     // Test 15: stable_json is deterministic

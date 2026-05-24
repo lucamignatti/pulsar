@@ -28,7 +28,6 @@
       "goal": {
         "enabled": true,
         "horizon": 40,
-        "weight": 0.08,
         "learning_rate": 0.005,
         "convergence_threshold": 0.002,
         "warmup_updates": 15
@@ -36,7 +35,6 @@
       "ball_touch": {
         "enabled": true,
         "horizon": 15,
-        "weight": 0.01,
         "learning_rate": 0.005,
         "convergence_threshold": 0.002,
         "warmup_updates": 15
@@ -44,7 +42,6 @@
       "air_touch": {
         "enabled": true,
         "horizon": 20,
-        "weight": 0.02,
         "learning_rate": 0.005,
         "convergence_threshold": 0.002,
         "warmup_updates": 15
@@ -52,7 +49,6 @@
       "flip_reset": {
         "enabled": true,
         "horizon": 40,
-        "weight": 0.05,
         "learning_rate": 0.005,
         "convergence_threshold": 0.002,
         "warmup_updates": 15
@@ -60,7 +56,6 @@
       "boost_pickup": {
         "enabled": true,
         "horizon": 20,
-        "weight": 0.01,
         "learning_rate": 0.005,
         "convergence_threshold": 0.002,
         "warmup_updates": 15
@@ -68,7 +63,6 @@
       "big_boost_pickup": {
         "enabled": true,
         "horizon": 30,
-        "weight": 0.015,
         "learning_rate": 0.005,
         "convergence_threshold": 0.002,
         "warmup_updates": 15
@@ -76,7 +70,6 @@
       "bump": {
         "enabled": true,
         "horizon": 20,
-        "weight": 0.015,
         "learning_rate": 0.005,
         "convergence_threshold": 0.002,
         "warmup_updates": 15
@@ -84,7 +77,6 @@
       "demo": {
         "enabled": true,
         "horizon": 30,
-        "weight": 0.03,
         "learning_rate": 0.005,
         "convergence_threshold": 0.002,
         "warmup_updates": 15
@@ -92,7 +84,6 @@
       "speed_flip": {
         "enabled": true,
         "horizon": 25,
-        "weight": 0.02,
         "learning_rate": 0.005,
         "convergence_threshold": 0.002,
         "warmup_updates": 15
@@ -100,7 +91,6 @@
       "wavedash": {
         "enabled": true,
         "horizon": 30,
-        "weight": 0.02,
         "learning_rate": 0.005,
         "convergence_threshold": 0.002,
         "warmup_updates": 15
@@ -108,7 +98,6 @@
       "wall_dash": {
         "enabled": true,
         "horizon": 30,
-        "weight": 0.02,
         "learning_rate": 0.005,
         "convergence_threshold": 0.002,
         "warmup_updates": 15
@@ -116,7 +105,6 @@
       "flick": {
         "enabled": true,
         "horizon": 30,
-        "weight": 0.03,
         "learning_rate": 0.005,
         "convergence_threshold": 0.002,
         "warmup_updates": 15
@@ -124,7 +112,6 @@
       "air_dribble": {
         "enabled": true,
         "horizon": 35,
-        "weight": 0.03,
         "learning_rate": 0.005,
         "convergence_threshold": 0.002,
         "warmup_updates": 15
@@ -132,7 +119,6 @@
       "ceiling_shot": {
         "enabled": true,
         "horizon": 45,
-        "weight": 0.04,
         "learning_rate": 0.005,
         "convergence_threshold": 0.002,
         "warmup_updates": 15
@@ -140,7 +126,6 @@
       "double_tap": {
         "enabled": true,
         "horizon": 45,
-        "weight": 0.04,
         "learning_rate": 0.005,
         "convergence_threshold": 0.002,
         "warmup_updates": 15
@@ -148,7 +133,6 @@
       "preflip": {
         "enabled": true,
         "horizon": 30,
-        "weight": 0.025,
         "learning_rate": 0.005,
         "convergence_threshold": 0.002,
         "warmup_updates": 15
@@ -156,7 +140,6 @@
       "redirect": {
         "enabled": true,
         "horizon": 35,
-        "weight": 0.03,
         "learning_rate": 0.005,
         "convergence_threshold": 0.002,
         "warmup_updates": 15
@@ -164,7 +147,6 @@
       "pogo": {
         "enabled": true,
         "horizon": 35,
-        "weight": 0.025,
         "learning_rate": 0.005,
         "convergence_threshold": 0.002,
         "warmup_updates": 15
@@ -172,7 +154,6 @@
       "pinch": {
         "enabled": true,
         "horizon": 35,
-        "weight": 0.03,
         "learning_rate": 0.005,
         "convergence_threshold": 0.002,
         "warmup_updates": 15
@@ -180,7 +161,6 @@
       "kickoff_50_50": {
         "enabled": true,
         "horizon": 20,
-        "weight": 0.015,
         "learning_rate": 0.005,
         "convergence_threshold": 0.002,
         "warmup_updates": 15
