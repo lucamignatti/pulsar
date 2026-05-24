@@ -94,8 +94,10 @@ void PredictorTrainer::update_predictors(
   // 2. Forward pass all predictors
   torch::Tensor logits_all = finite_or_zero(actor->forward_all_predictors(flat_features));
 
-  torch::Tensor total_loss = torch::zeros({}, torch::TensorOptions().device(device_).dtype(torch::kFloat32));
-  bool has_any_loss = false;
+  std::vector<torch::Tensor> losses;
+  losses.reserve(kSparseEventChannelCount);
+  std::vector<std::size_t> loss_channels;
+  loss_channels.reserve(kSparseEventChannelCount);
 
   // 3. Compute loss per enabled channel
   for (std::size_t channel_index = 0; channel_index < kSparseEventChannelCount; ++channel_index) {
@@ -113,17 +115,9 @@ void PredictorTrainer::update_predictors(
     channel_positive_sample_counts[channel_index] += samples;
     torch::Tensor logits = logits_all.select(1, static_cast<int64_t>(channel_index));
     torch::Tensor loss = torch::nn::functional::cross_entropy(logits, targets);
-    if (!torch::isfinite(loss).item<bool>()) {
-      std::cerr << "Warning: skipping non-finite predictor_" << channel_name
-                << " loss at update=" << update_index
-                << " agent_offset=" << agent_offset
-                << '\n';
-      optimizers_[channel_index]->zero_grad();
-      continue;
-    }
 
-    total_loss = total_loss + loss;
-    has_any_loss = true;
+    losses.push_back(loss);
+    loss_channels.push_back(channel_index);
 
     // Accumulate on GPU — no sync stalls
     channel_loss_sums[channel_index].add_(loss.to(torch::kFloat64) * samples);
@@ -131,7 +125,19 @@ void PredictorTrainer::update_predictors(
   }
 
   // 4. Backward pass & step optimizers
-  if (has_any_loss) {
+  if (!losses.empty()) {
+    const torch::Tensor stacked_losses = torch::stack(losses);
+    if (!torch::isfinite(stacked_losses).all().item<bool>()) {
+      std::cerr << "Warning: skipping predictor optimizer step after non-finite loss"
+                << " at update=" << update_index
+                << " agent_offset=" << agent_offset
+                << '\n';
+      for (std::size_t channel_index : loss_channels) {
+        optimizers_[channel_index]->zero_grad();
+      }
+      return;
+    }
+    torch::Tensor total_loss = stacked_losses.sum();
     total_loss.backward();
 
     for (std::size_t channel_index = 0; channel_index < kSparseEventChannelCount; ++channel_index) {

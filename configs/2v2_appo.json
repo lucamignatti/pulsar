@@ -276,10 +276,10 @@
   },
   "self_play_league": {
     "enabled": true,
-    "opponent_probability": 0.5,
-    "snapshot_interval_updates": 50,
+    "opponent_probability": 0.0,
+    "snapshot_interval_updates": 0,
     "max_snapshots": 4,
-    "training_opponent_policy": "stochastic",
+    "training_opponent_policy": "current_policy",
     "eval_interval_updates": 10,
     "eval_num_envs": 8,
     "eval_matches_per_snapshot": 4,

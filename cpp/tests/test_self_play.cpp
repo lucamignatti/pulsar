@@ -37,6 +37,7 @@ void test_snapshot_save_load_trim_and_assignment() {
   config.self_play_league.snapshot_interval_updates = 1;
   config.self_play_league.max_snapshots = 1;
   config.self_play_league.eval_interval_updates = 0;
+  config.self_play_league.training_opponent_policy = "snapshot_stochastic";
   config.ppo.device = "cpu";
 
   const fs::path root = fs::temp_directory_path() / "pulsar_self_play_test";
@@ -92,7 +93,7 @@ void test_opponent_inference_and_elo_math() {
   config.self_play_league.snapshot_interval_updates = 1;
   config.self_play_league.max_snapshots = 2;
   config.self_play_league.eval_interval_updates = 0;
-  config.self_play_league.training_opponent_policy = "stochastic";
+  config.self_play_league.training_opponent_policy = "snapshot_stochastic";
   config.ppo.device = "cpu";
 
   const auto root = std::filesystem::temp_directory_path() / "pulsar_self_play_infer";
@@ -212,6 +213,7 @@ void test_snapshot_reload_preserves_actor_config() {
   config.self_play_league.snapshot_interval_updates = 1;
   config.self_play_league.max_snapshots = 3;
   config.self_play_league.eval_interval_updates = 0;
+  config.self_play_league.training_opponent_policy = "snapshot_stochastic";
   config.ppo.device = "cpu";
 
   config.goal_critic.embedding_dim = 64;
@@ -272,6 +274,7 @@ void test_self_play_eval_is_skipped_and_loaded_snapshots_are_bounded() {
   config.self_play_league.snapshot_interval_updates = 1;
   config.self_play_league.max_snapshots = 2;
   config.self_play_league.eval_interval_updates = 1;
+  config.self_play_league.training_opponent_policy = "snapshot_stochastic";
   config.self_play_league.eval_num_envs = 1;
   config.self_play_league.eval_matches_per_snapshot = 1;
   config.ppo.device = "cpu";
@@ -395,7 +398,7 @@ void test_self_play_league_default_config() {
   pulsar::test::require(league.elo_k == 32.0F, "default elo_k should be 32");
   pulsar::test::require(league.max_snapshots == 8, "default max_snapshots should be 8");
   pulsar::test::require(league.snapshot_interval_updates == 10, "default snapshot_interval_updates should be 10");
-  pulsar::test::require(league.training_opponent_policy == "stochastic", "default training_opponent_policy");
+  pulsar::test::require(league.training_opponent_policy == "current_policy", "default training_opponent_policy");
   pulsar::test::require(league.eval_policy == "deterministic", "default eval_policy");
 }
 
@@ -408,6 +411,7 @@ void test_rng_state_round_trip() {
   config.self_play_league.snapshot_interval_updates = 1;
   config.self_play_league.max_snapshots = 1;
   config.self_play_league.eval_interval_updates = 0;
+  config.self_play_league.training_opponent_policy = "snapshot_stochastic";
   config.ppo.device = "cpu";
 
   const fs::path root = fs::temp_directory_path() / "pulsar_rng_test";
@@ -488,6 +492,7 @@ void test_snapshot_mode_is_preserved() {
   config.self_play_league.snapshot_interval_updates = 1;
   config.self_play_league.max_snapshots = 2;
   config.self_play_league.eval_interval_updates = 0;
+  config.self_play_league.training_opponent_policy = "snapshot_stochastic";
   config.ppo.device = "cpu";
 
   const fs::path root = fs::temp_directory_path() / "pulsar_snapshot_mode_test";

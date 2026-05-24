@@ -541,12 +541,62 @@ const SparseRewardPredictor& VRPOActorImpl::predictor_head(std::size_t channel_i
 }
 
 torch::Tensor VRPOActorImpl::forward_all_predictors(const torch::Tensor& features) const {
-  std::vector<torch::Tensor> outputs;
-  outputs.reserve(predictor_heads_.size());
-  for (auto& head : predictor_heads_) {
-    outputs.push_back(head->forward(features));
+  if (predictor_heads_.empty()) {
+    return torch::empty({features.size(0), 0, 2}, features.options());
   }
-  return torch::stack(outputs, 1);
+
+  std::vector<torch::Tensor> input_norm_weights;
+  std::vector<torch::Tensor> input_norm_biases;
+  std::vector<torch::Tensor> input_linear_weights;
+  std::vector<torch::Tensor> input_linear_biases;
+  std::vector<torch::Tensor> hidden_norm_weights;
+  std::vector<torch::Tensor> hidden_norm_biases;
+  std::vector<torch::Tensor> output_linear_weights;
+  std::vector<torch::Tensor> output_linear_biases;
+  input_norm_weights.reserve(predictor_heads_.size());
+  input_norm_biases.reserve(predictor_heads_.size());
+  input_linear_weights.reserve(predictor_heads_.size());
+  input_linear_biases.reserve(predictor_heads_.size());
+  hidden_norm_weights.reserve(predictor_heads_.size());
+  hidden_norm_biases.reserve(predictor_heads_.size());
+  output_linear_weights.reserve(predictor_heads_.size());
+  output_linear_biases.reserve(predictor_heads_.size());
+
+  for (const auto& head : predictor_heads_) {
+    const auto& input_norm = head->input_norm();
+    const auto& input_linear = head->input_linear();
+    const auto& hidden_norm = head->hidden_norm();
+    const auto& output_linear = head->output_linear();
+    input_norm_weights.push_back(input_norm.weight);
+    input_norm_biases.push_back(input_norm.bias);
+    input_linear_weights.push_back(input_linear.weight);
+    input_linear_biases.push_back(input_linear.bias);
+    hidden_norm_weights.push_back(hidden_norm.weight);
+    hidden_norm_biases.push_back(hidden_norm.bias);
+    output_linear_weights.push_back(output_linear.weight);
+    output_linear_biases.push_back(output_linear.bias);
+  }
+
+  constexpr double kLayerNormEps = 1.0e-5;
+  auto normalize_last_dim = [](const torch::Tensor& input) {
+    const torch::Tensor mean = input.mean(-1, true);
+    const torch::Tensor centered = input - mean;
+    const torch::Tensor variance = centered.square().mean(-1, true);
+    return centered * torch::rsqrt(variance + kLayerNormEps);
+  };
+
+  const torch::Tensor input_normalized = normalize_last_dim(features);
+  torch::Tensor hidden = input_normalized.unsqueeze(0) * torch::stack(input_norm_weights).unsqueeze(1) +
+      torch::stack(input_norm_biases).unsqueeze(1);
+  hidden = torch::bmm(hidden, torch::stack(input_linear_weights).transpose(1, 2)) +
+      torch::stack(input_linear_biases).unsqueeze(1);
+  hidden = torch::relu(hidden);
+  hidden = normalize_last_dim(hidden);
+  hidden = hidden * torch::stack(hidden_norm_weights).unsqueeze(1) +
+      torch::stack(hidden_norm_biases).unsqueeze(1);
+  torch::Tensor logits = torch::bmm(hidden, torch::stack(output_linear_weights).transpose(1, 2)) +
+      torch::stack(output_linear_biases).unsqueeze(1);
+  return torch::clamp(logits.permute({1, 0, 2}), -10.0, 10.0);
 }
 
 ActorStepOutput VRPOActorImpl::forward_step(

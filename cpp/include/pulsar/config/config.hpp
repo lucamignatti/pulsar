@@ -178,7 +178,7 @@ struct SelfPlayLeagueConfig {
   float opponent_probability = 0.0F;
   int snapshot_interval_updates = 10;
   int max_snapshots = 8;
-  std::string training_opponent_policy = "stochastic";
+  std::string training_opponent_policy = "current_policy";
   int eval_interval_updates = 10;
   int eval_num_envs = 8;
   int eval_matches_per_snapshot = 4;

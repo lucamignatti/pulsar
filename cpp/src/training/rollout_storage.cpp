@@ -9,6 +9,13 @@
 #include "pulsar/training/sparse_event_channels.hpp"
 
 namespace pulsar {
+namespace {
+
+void copy_detached(torch::Tensor destination, const torch::Tensor& source) {
+  destination.copy_(source.detach(), /*non_blocking=*/true);
+}
+
+}  // namespace
 
 RolloutStorage::RolloutStorage(
     int rollout_length,
@@ -74,32 +81,32 @@ void RolloutStorage::append(
   if (step < 0 || step >= rollout_length_) {
     throw std::out_of_range("RolloutStorage::append step is outside rollout capacity.");
   }
-  obs[step].copy_(obs_in.detach());
-  episode_starts[step].copy_(episode_starts_in.detach());
-  action_masks[step].copy_(action_masks_in.detach());
-  learner_active[step].copy_(learner_active_in.detach());
-  actions[step].copy_(actions_in.detach());
-  action_log_probs[step].copy_(action_log_probs_in.detach());
-  dones[step].copy_(dones_in.detach());
-  truncated[step].copy_(truncated_in.detach());
-  bootstrap_truncated[step].copy_(bootstrap_truncated_in.detach());
-  goal_positions[step].copy_(goal_positions_in.detach());
-  terminal_outcome_labels[step].copy_(terminal_outcome_labels_in.detach());
-  terminal_observations[step].copy_(terminal_observations_in.detach());
+  copy_detached(obs[step], obs_in);
+  copy_detached(episode_starts[step], episode_starts_in);
+  copy_detached(action_masks[step], action_masks_in);
+  copy_detached(learner_active[step], learner_active_in);
+  copy_detached(actions[step], actions_in);
+  copy_detached(action_log_probs[step], action_log_probs_in);
+  copy_detached(dones[step], dones_in);
+  copy_detached(truncated[step], truncated_in);
+  copy_detached(bootstrap_truncated[step], bootstrap_truncated_in);
+  copy_detached(goal_positions[step], goal_positions_in);
+  copy_detached(terminal_outcome_labels[step], terminal_outcome_labels_in);
+  copy_detached(terminal_observations[step], terminal_observations_in);
   if (encoded_in.defined()) {
-    encoded_features[step].copy_(encoded_in.detach());
+    copy_detached(encoded_features[step], encoded_in);
   }
 
   for (const auto& [name, tensor] : values_in) {
     auto it = values_.find(name);
     if (it != values_.end()) {
-      it->second[step].copy_(tensor.detach());
+      copy_detached(it->second[step], tensor);
     }
   }
   for (const auto& [name, tensor] : rewards_in) {
     auto it = rewards_.find(name);
     if (it != rewards_.end()) {
-      it->second[step].copy_(tensor.detach());
+      copy_detached(it->second[step], tensor);
     }
   }
   filled_length_ = std::max(filled_length_, step + 1);
@@ -131,32 +138,32 @@ void RolloutStorage::append_slice(
     throw std::out_of_range("RolloutStorage::append_slice agent range is outside rollout capacity.");
   }
 
-  obs[step].narrow(0, agent_offset, agent_count).copy_(obs_in.detach());
-  episode_starts[step].narrow(0, agent_offset, agent_count).copy_(episode_starts_in.detach());
-  action_masks[step].narrow(0, agent_offset, agent_count).copy_(action_masks_in.detach());
-  learner_active[step].narrow(0, agent_offset, agent_count).copy_(learner_active_in.detach());
-  actions[step].narrow(0, agent_offset, agent_count).copy_(actions_in.detach());
-  action_log_probs[step].narrow(0, agent_offset, agent_count).copy_(action_log_probs_in.detach());
-  dones[step].narrow(0, agent_offset, agent_count).copy_(dones_in.detach());
-  truncated[step].narrow(0, agent_offset, agent_count).copy_(truncated_in.detach());
-  bootstrap_truncated[step].narrow(0, agent_offset, agent_count).copy_(bootstrap_truncated_in.detach());
-  goal_positions[step].narrow(0, agent_offset, agent_count).copy_(goal_positions_in.detach());
-  terminal_outcome_labels[step].narrow(0, agent_offset, agent_count).copy_(terminal_outcome_labels_in.detach());
-  terminal_observations[step].narrow(0, agent_offset, agent_count).copy_(terminal_observations_in.detach());
+  copy_detached(obs[step].narrow(0, agent_offset, agent_count), obs_in);
+  copy_detached(episode_starts[step].narrow(0, agent_offset, agent_count), episode_starts_in);
+  copy_detached(action_masks[step].narrow(0, agent_offset, agent_count), action_masks_in);
+  copy_detached(learner_active[step].narrow(0, agent_offset, agent_count), learner_active_in);
+  copy_detached(actions[step].narrow(0, agent_offset, agent_count), actions_in);
+  copy_detached(action_log_probs[step].narrow(0, agent_offset, agent_count), action_log_probs_in);
+  copy_detached(dones[step].narrow(0, agent_offset, agent_count), dones_in);
+  copy_detached(truncated[step].narrow(0, agent_offset, agent_count), truncated_in);
+  copy_detached(bootstrap_truncated[step].narrow(0, agent_offset, agent_count), bootstrap_truncated_in);
+  copy_detached(goal_positions[step].narrow(0, agent_offset, agent_count), goal_positions_in);
+  copy_detached(terminal_outcome_labels[step].narrow(0, agent_offset, agent_count), terminal_outcome_labels_in);
+  copy_detached(terminal_observations[step].narrow(0, agent_offset, agent_count), terminal_observations_in);
   if (encoded_in.defined()) {
-    encoded_features[step].narrow(0, agent_offset, agent_count).copy_(encoded_in.detach());
+    copy_detached(encoded_features[step].narrow(0, agent_offset, agent_count), encoded_in);
   }
 
   for (const auto& [name, tensor] : values_in) {
     auto it = values_.find(name);
     if (it != values_.end()) {
-      it->second[step].narrow(0, agent_offset, agent_count).copy_(tensor.detach());
+      copy_detached(it->second[step].narrow(0, agent_offset, agent_count), tensor);
     }
   }
   for (const auto& [name, tensor] : rewards_in) {
     auto it = rewards_.find(name);
     if (it != rewards_.end()) {
-      it->second[step].narrow(0, agent_offset, agent_count).copy_(tensor.detach());
+      copy_detached(it->second[step].narrow(0, agent_offset, agent_count), tensor);
     }
   }
 }
@@ -241,7 +248,7 @@ void RolloutStorage::set_rewards_at(
   for (const auto& [name, tensor] : rewards_in) {
     auto it = rewards_.find(name);
     if (it != rewards_.end()) {
-      it->second[step].copy_(tensor.detach());
+      copy_detached(it->second[step], tensor);
     }
   }
 }
@@ -257,7 +264,7 @@ void RolloutStorage::set_sparse_events_slice(
   if (agent_offset < 0 || agent_count < 0 || agent_offset + agent_count > num_agents_) {
     throw std::out_of_range("RolloutStorage::set_sparse_events_slice agent range is outside rollout capacity.");
   }
-  sparse_events[step].narrow(0, agent_offset, agent_count).copy_(sparse_events_in.detach());
+  copy_detached(sparse_events[step].narrow(0, agent_offset, agent_count), sparse_events_in);
 }
 
 }  // namespace pulsar

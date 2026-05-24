@@ -425,7 +425,7 @@ void from_json(const json& j, SelfPlayLeagueConfig& value) {
   value.opponent_probability = j.value("opponent_probability", 0.0F);
   value.snapshot_interval_updates = j.value("snapshot_interval_updates", 10);
   value.max_snapshots = j.value("max_snapshots", 8);
-  value.training_opponent_policy = j.value("training_opponent_policy", std::string{"stochastic"});
+  value.training_opponent_policy = j.value("training_opponent_policy", std::string{"current_policy"});
   value.eval_interval_updates = j.value("eval_interval_updates", 10);
   value.eval_num_envs = j.value("eval_num_envs", 8);
   value.eval_matches_per_snapshot = j.value("eval_matches_per_snapshot", 4);

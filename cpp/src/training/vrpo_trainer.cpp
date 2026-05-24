@@ -49,6 +49,10 @@ constexpr int kEsLoraMinStage = 0;
 constexpr int kSelfPlayMinStage = 0;
 constexpr int kTrainerStateVersion = 2;
 
+bool uses_snapshot_opponents(const ExperimentConfig& config) {
+  return config.self_play_league.training_opponent_policy.rfind("snapshot", 0) == 0;
+}
+
 double current_process_rss_mb() {
 #if defined(__linux__)
   std::ifstream statm("/proc/self/statm");
@@ -296,6 +300,21 @@ void synchronize_cuda_if_needed(const torch::Device& device, const char* context
     torch::cuda::synchronize();
   } catch (const std::exception& exc) {
     std::cerr << "cuda synchronize failed during " << context << ": " << exc.what() << '\n';
+  }
+}
+
+void synchronize_current_cuda_stream_if_needed(const torch::Device& device, const char* context) noexcept {
+  if (!device.is_cuda()) {
+    return;
+  }
+  try {
+#ifdef PULSAR_HAS_CUDA
+    c10::cuda::getCurrentCUDAStream(device.index()).synchronize();
+#else
+    (void)context;
+#endif
+  } catch (const std::exception& exc) {
+    std::cerr << "cuda stream synchronize failed during " << context << ": " << exc.what() << '\n';
   }
 }
 
@@ -781,7 +800,7 @@ void VRPOTrainer::sync_self_play_assignments_to_collectors() {
     if (!collector) {
       continue;
     }
-    if (self_play_manager_ && self_play_manager_->enabled()) {
+    if (self_play_manager_ && self_play_manager_->enabled() && uses_snapshot_opponents(config_)) {
       collector->set_self_play_assignment_fn(
           [this](std::size_t env_idx, std::uint64_t seed) {
             return self_play_manager_->sample_assignment(env_idx, seed);
@@ -2750,8 +2769,6 @@ void VRPOTrainer::collect_rollout(
       int multi_touched_episodes = 0;
       std::int64_t ball_prox_steps = 0;
       std::int64_t ball_prox_denom = 0;
-      double sampled_value_sum = 0.0;
-      std::int64_t sampled_value_count = 0;
       std::map<std::string, int> mode_completed;
       std::map<std::string, int> mode_touched;
       std::map<std::string, int> mode_multi_touched;
@@ -2773,6 +2790,8 @@ void VRPOTrainer::collect_rollout(
       std::size_t shard;
       std::vector<PendingShardStep> steps;
       torch::Tensor next_recurrent_state;
+      torch::Tensor sampled_value_sum;
+      std::int64_t sampled_value_count = 0;
     };
     std::vector<std::future<ShardResult>> shard_futures;
     shard_futures.reserve(collectors_.size());
@@ -2791,6 +2810,8 @@ void VRPOTrainer::collect_rollout(
         ShardResult result;
         result.shard = shard_idx;
         result.steps.reserve(config_.ppo.rollout_length);
+        result.sampled_value_sum =
+            torch::zeros({}, torch::TensorOptions().device(shard_device).dtype(torch::kFloat64));
         auto& collector = *collector_ptr;
 
 #ifdef PULSAR_HAS_CUDA
@@ -2825,7 +2846,10 @@ void VRPOTrainer::collect_rollout(
           torch::Tensor raw_obs = raw_obs_host.to(shard_device, use_pinned_host_buffers_);
           torch::Tensor episode_starts = episode_starts_host.to(shard_device, use_pinned_host_buffers_);
           torch::Tensor action_masks = action_masks_host.to(shard_device, use_pinned_host_buffers_);  // uint8, sample_masked_actions handles it
-          torch::Tensor snapshot_ids = snapshot_ids_host.to(shard_device, use_pinned_host_buffers_);
+          torch::Tensor snapshot_ids;
+          if (uses_snapshot_opponents(config_)) {
+            snapshot_ids = snapshot_ids_host.to(shard_device, use_pinned_host_buffers_);
+          }
 
           torch::Tensor normalized_obs;
           torch::Tensor actions;
@@ -2842,7 +2866,7 @@ void VRPOTrainer::collect_rollout(
                 normalized_obs, recurrent_state, episode_starts, &recurrent_state, goal_values);
             actions = sample_masked_actions(
                 output.policy_logits, action_masks, false, &action_log_probs, config_.ppo.policy_temperature);
-            if (self_play_manager_ && self_play_manager_->has_snapshots()) {
+            if (uses_snapshot_opponents(config_) && self_play_manager_ && self_play_manager_->has_snapshots()) {
               torch::Tensor snapshot_actions;
               self_play_manager_->infer_opponent_actions(
                   shard_actor,
@@ -2959,8 +2983,8 @@ void VRPOTrainer::collect_rollout(
 
           // Write tensor data directly to rollout storage.
           torch::Tensor sampled_value = output.value_win_logits.squeeze(-1);
-          shard_step.sampled_value_sum = sampled_value.sum().item<double>();
-          shard_step.sampled_value_count = sampled_value.numel();
+          result.sampled_value_sum = result.sampled_value_sum + sampled_value.to(torch::kFloat64).sum();
+          result.sampled_value_count += sampled_value.numel();
           std::unordered_map<std::string, torch::Tensor> all_values;
           all_values["extrinsic"] = sampled_value;
           {
@@ -2974,8 +2998,8 @@ void VRPOTrainer::collect_rollout(
                     output.policy_logits / std::max(config_.ppo.policy_temperature, 1.0e-6F), action_masks), -1);
             torch::Tensor v_from_q = (policy_probs * q_all).sum(-1);
 
-            all_values["q_taken"] = q_taken.to(torch::kCPU);
-            all_values["v_from_q"] = v_from_q.to(torch::kCPU);
+            all_values["q_taken"] = q_taken;
+            all_values["v_from_q"] = v_from_q;
           }
           std::unordered_map<std::string, torch::Tensor> all_rewards;
           all_rewards["extrinsic"] = extrinsic_rewards_host;
@@ -3021,6 +3045,8 @@ void VRPOTrainer::collect_rollout(
       if (shard_result.next_recurrent_state.defined()) {
         rollout_recurrent_states[shard_result.shard] = shard_result.next_recurrent_state;
       }
+      accumulated_sampled_value += shard_result.sampled_value_sum.to(torch::kCPU).item<double>();
+      accumulated_value_count += shard_result.sampled_value_count;
       all_shard_steps[shard_result.shard] = std::move(shard_result.steps);
     }
 
@@ -3060,9 +3086,6 @@ void VRPOTrainer::collect_rollout(
         if (self_play_manager_ && !shard_step.self_play_outcomes.empty()) {
           self_play_manager_->record_live_outcomes(shard_step.mode, shard_step.self_play_outcomes);
         }
-
-        accumulated_sampled_value += shard_step.sampled_value_sum;
-        accumulated_value_count += shard_step.sampled_value_count;
 
         local_collected_steps += shard_step.total_learner_steps;
       }
@@ -3125,6 +3148,9 @@ void VRPOTrainer::collect_rollout(
 #ifdef PULSAR_HAS_CUDA
     c10::cuda::setCurrentCUDAStream(default_collect_stream);
 #endif
+    torch::Tensor sampled_value_sum =
+        torch::zeros({}, torch::TensorOptions().device(device_).dtype(torch::kFloat64));
+    std::int64_t sampled_value_count = 0;
     for (int step = 0; step < config_.ppo.rollout_length; ++step) {
       PULSAR_TRACE_SCOPE_CAT("trainer", "collect_step");
       if (config_.model.sequence_length > 0 && step % config_.model.sequence_length == 0) {
@@ -3134,7 +3160,6 @@ void VRPOTrainer::collect_rollout(
     torch::Tensor episode_starts_host = collector_->host_episode_starts();
     torch::Tensor action_masks_host = collector_->host_action_masks();
     torch::Tensor learner_active_host = collector_->host_learner_active();
-    torch::Tensor snapshot_ids_host = collector_->host_snapshot_ids();
     std::future<void> physics_prefix_future;
     if (physics_prefix_ticks > 0) {
       physics_prefix_future = std::async(std::launch::async, [&]() {
@@ -3144,7 +3169,6 @@ void VRPOTrainer::collect_rollout(
     torch::Tensor raw_obs = raw_obs_host.to(device_, use_pinned_host_buffers_);
     torch::Tensor episode_starts = episode_starts_host.to(device_, use_pinned_host_buffers_);
     torch::Tensor action_masks = action_masks_host.to(device_, use_pinned_host_buffers_);  // uint8
-    torch::Tensor snapshot_ids = snapshot_ids_host.to(device_, use_pinned_host_buffers_);
 
     torch::Tensor normalized_obs;
     torch::Tensor actions;
@@ -3303,11 +3327,11 @@ void VRPOTrainer::collect_rollout(
               output.policy_logits / std::max(config_.ppo.policy_temperature, 1.0e-6F), action_masks), -1);
       torch::Tensor v_from_q = (policy_probs * q_all).sum(-1);
 
-      all_values["q_taken"] = q_taken.to(torch::kCPU);
-      all_values["v_from_q"] = v_from_q.to(torch::kCPU);
+      all_values["q_taken"] = q_taken;
+      all_values["v_from_q"] = v_from_q;
     }
-    accumulated_sampled_value += sampled_value.sum().item<double>();
-    accumulated_value_count += sampled_value.numel();
+    sampled_value_sum = sampled_value_sum + sampled_value.to(torch::kFloat64).sum();
+    sampled_value_count += sampled_value.numel();
 
     std::unordered_map<std::string, torch::Tensor> all_rewards;
     all_rewards["extrinsic"] = extrinsic_rewards_host;
@@ -3337,6 +3361,8 @@ void VRPOTrainer::collect_rollout(
     local_collected_steps += learner_step_count;
     }
   }
+  accumulated_sampled_value += sampled_value_sum.to(torch::kCPU).item<double>();
+  accumulated_value_count += sampled_value_count;
   {
     PULSAR_TRACE_SCOPE_CAT("trainer", "bootstrap_forward");
     torch::NoGradGuard no_grad;
@@ -3485,6 +3511,10 @@ CheckpointMetadata VRPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
 }
 
 void VRPOTrainer::save_checkpoint(const std::filesystem::path& directory, std::int64_t global_step, int update_index, const std::string& wandb_run_id) const {
+  save_checkpoint_with_metadata(directory, make_checkpoint_metadata(global_step, update_index, wandb_run_id));
+}
+
+void VRPOTrainer::save_checkpoint_with_metadata(const std::filesystem::path& directory, const CheckpointMetadata& metadata) const {
   PULSAR_TRACE_SCOPE_CAT("trainer", "checkpoint_save");
   synchronize_cuda_if_needed(device_, "checkpoint save start");
   const std::filesystem::path staging = make_checkpoint_staging_directory(directory);
@@ -3492,7 +3522,7 @@ void VRPOTrainer::save_checkpoint(const std::filesystem::path& directory, std::i
   try {
     std::filesystem::create_directories(staging);
     save_experiment_config(config_, (staging / "config.json").string());
-    save_checkpoint_metadata(make_checkpoint_metadata(global_step, update_index, wandb_run_id), (staging / "metadata.json").string());
+    save_checkpoint_metadata(metadata, (staging / "metadata.json").string());
     save_training_state(staging / "state.pt");
     commit_checkpoint_directory(staging, directory);
     synchronize_cuda_if_needed(device_, "checkpoint save end");
@@ -3743,6 +3773,12 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
   std::int64_t coll_steps = 0;
   collect_rollout(rollout_, coll_metrics, &coll_steps, actor_snapshot_, actor_normalizer_);
   global_step += coll_steps;
+  std::future<void> checkpoint_future;
+  const auto wait_for_checkpoint = [&checkpoint_future]() {
+    if (checkpoint_future.valid()) {
+      checkpoint_future.get();
+    }
+  };
 
   for (int index = 0; train_forever || index < updates; ++index) {
     PULSAR_TRACE_SCOPE_CAT("trainer", "train_iteration");
@@ -3770,7 +3806,6 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     // backgrounds collection for the next rollout.
     TrainerMetrics train_metrics{};
     std::future<std::int64_t> collect_future;
-    bool discard_overlapped_rollout = false;
     if (overlap_collection_update) {
       collection_normalizer.emplace(actor_normalizer_.clone());
       collect_future = task_pool_->submit([&]() {
@@ -3778,10 +3813,12 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
         collect_rollout(rollout_B_, next_coll_metrics, &steps, actor_snapshot_, *collection_normalizer);
         return steps;
       });
+      wait_for_checkpoint();
       train_metrics = update_actor(rollout_, update_index);
       next_coll_steps = collect_future.get();
       actor_normalizer_ = collection_normalizer->clone();
     } else {
+      wait_for_checkpoint();
       train_metrics = update_actor(rollout_, update_index);
     }
 
@@ -3800,7 +3837,6 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       if (compute_actors_.size() > 0) {
         sync_actor_to_replicas(actor_, compute_actors_);
       }
-      discard_overlapped_rollout = discard_overlapped_rollout || overlap_collection_update;
     }
 
 
@@ -3808,7 +3844,7 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     // the previous snapshot has completed.
     VRPOActor new_snapshot{nullptr};
     if (has_next) {
-      synchronize_cuda_if_needed(device_, "snapshot clone");
+      synchronize_current_cuda_stream_if_needed(device_, "snapshot clone");
       new_snapshot = clone_vrpo_actor(actor_, device_);
       new_snapshot->eval();
       // Sync persistent collection actors
@@ -3824,7 +3860,7 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
 
     // 6. In the default memory-safe mode, collect after the update with the
     // fresh policy snapshot.
-    if (has_next && (!overlap_collection_update || discard_overlapped_rollout)) {
+    if (has_next && !overlap_collection_update) {
       next_coll_metrics = TrainerMetrics{};
       next_coll_steps = 0;
       collect_rollout(rollout_B_, next_coll_metrics, &next_coll_steps, new_snapshot, actor_normalizer_);
@@ -3865,7 +3901,9 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
             ? static_cast<double>(next_coll_steps) /
                   std::max(std::chrono::duration<double>(std::chrono::steady_clock::now() - iter_start).count(), 1.0e-9)
             : 0.0;
-    trim_released_host_memory();
+    if (update_index % 200 == 0) {
+      trim_released_host_memory();
+    }
     coll_metrics.process_rss_mb = current_process_rss_mb();
     coll_metrics.process_peak_rss_mb = current_process_peak_rss_mb();
     const CgroupMemoryStats cgroup_memory = current_cgroup_memory_stats();
@@ -4014,8 +4052,14 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       wandb.commit(global_step);
     }
     if (config_.ppo.checkpoint_interval > 0 && update_index % config_.ppo.checkpoint_interval == 0) {
-      save_checkpoint(std::filesystem::path(checkpoint_dir) / ("update_" + std::to_string(update_index)), global_step, update_index, wandb.run_id());
-      prune_old_checkpoints(checkpoint_dir);
+      const std::filesystem::path checkpoint_path =
+          std::filesystem::path(checkpoint_dir) / ("update_" + std::to_string(update_index));
+      const CheckpointMetadata checkpoint_metadata =
+          make_checkpoint_metadata(global_step, update_index, wandb.run_id());
+      checkpoint_future = task_pool_->submit([this, checkpoint_path, checkpoint_metadata, checkpoint_dir]() {
+        save_checkpoint_with_metadata(checkpoint_path, checkpoint_metadata);
+        prune_old_checkpoints(checkpoint_dir);
+      });
     }
 
     if (has_next) {
@@ -4025,6 +4069,7 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     }
     coll_steps = next_coll_steps;
   }
+  wait_for_checkpoint();
   save_checkpoint(std::filesystem::path(checkpoint_dir) / "final", global_step, static_cast<int>(resumed_update_index_) + updates, wandb.run_id());
   wandb.finish();
 }

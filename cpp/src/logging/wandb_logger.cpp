@@ -79,31 +79,11 @@ WandbLogger::WandbLogger(
   if (pipe_ == nullptr) {
     throw std::runtime_error("Failed to start wandb logging process.");
   }
+  worker_ = std::thread([this]() { worker_loop(); });
 }
 
 WandbLogger::~WandbLogger() {
   finish();
-}
-
-WandbLogger::WandbLogger(WandbLogger&& other) noexcept
-    : config_(std::move(other.config_)),
-      pipe_(other.pipe_),
-      enabled_(other.enabled_) {
-  other.pipe_ = nullptr;
-  other.enabled_ = false;
-}
-
-WandbLogger& WandbLogger::operator=(WandbLogger&& other) noexcept {
-  if (this == &other) {
-    return *this;
-  }
-  finish();
-  config_ = std::move(other.config_);
-  pipe_ = other.pipe_;
-  enabled_ = other.enabled_;
-  other.pipe_ = nullptr;
-  other.enabled_ = false;
-  return *this;
 }
 
 bool WandbLogger::enabled() const {
@@ -176,23 +156,63 @@ void WandbLogger::commit(std::int64_t global_step) {
 }
 
 void WandbLogger::log(const nlohmann::json& payload) {
-  if (!enabled_ || pipe_ == nullptr) {
+  if (!enabled_) {
     return;
   }
-  const std::string line = payload.dump();
-  const std::size_t written = std::fwrite(line.data(), 1, line.size(), pipe_);
-  if (written != line.size() || std::fwrite("\n", 1, 1, pipe_) != 1 || std::fflush(pipe_) != 0) {
-    std::cerr << "wandb logging pipe write failed (errno " << errno << "); disabling further logging\n";
-    enabled_ = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (stopping_ || worker_failed_) {
+      enabled_ = false;
+      return;
+    }
+    queue_.push_back(payload.dump());
+  }
+  cv_.notify_one();
+}
+
+void WandbLogger::worker_loop() {
+  for (;;) {
+    std::string line;
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      cv_.wait(lock, [this]() { return stopping_ || !queue_.empty(); });
+      if (queue_.empty()) {
+        if (stopping_) {
+          return;
+        }
+        continue;
+      }
+      line = std::move(queue_.front());
+      queue_.pop_front();
+    }
+
+    const std::size_t written = std::fwrite(line.data(), 1, line.size(), pipe_);
+    if (written != line.size() || std::fwrite("\n", 1, 1, pipe_) != 1 || std::fflush(pipe_) != 0) {
+      std::cerr << "wandb logging pipe write failed (errno " << errno << "); disabling further logging\n";
+      std::lock_guard<std::mutex> lock(mutex_);
+      worker_failed_ = true;
+      queue_.clear();
+      return;
+    }
   }
 }
 
 void WandbLogger::finish() {
+  if (worker_.joinable()) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stopping_ = true;
+    }
+    cv_.notify_one();
+    worker_.join();
+  }
   if (pipe_ == nullptr) {
+    enabled_ = false;
     return;
   }
   const int status = pclose(pipe_);
   pipe_ = nullptr;
+  enabled_ = false;
   if (status != 0) {
     std::cerr << "wandb logging process exited with status " << status << '\n';
   }

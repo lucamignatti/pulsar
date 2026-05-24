@@ -182,6 +182,7 @@ class VRPOTrainer {
  private:
   void maybe_initialize_from_checkpoint();
   void save_checkpoint(const std::filesystem::path& directory, std::int64_t global_step, int update_index, const std::string& wandb_run_id) const;
+  void save_checkpoint_with_metadata(const std::filesystem::path& directory, const CheckpointMetadata& metadata) const;
   void save_training_state(const std::filesystem::path& path) const;
   void load_training_state(const std::filesystem::path& path);
   void prune_old_checkpoints(const std::filesystem::path& checkpoint_dir) const;

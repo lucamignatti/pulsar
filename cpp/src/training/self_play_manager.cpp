@@ -78,6 +78,10 @@ std::optional<std::int64_t> parse_snapshot_step(const std::filesystem::path& pat
   }
 }
 
+bool uses_snapshot_opponents(const ExperimentConfig& config) {
+  return config.self_play_league.training_opponent_policy.rfind("snapshot", 0) == 0;
+}
+
 }  // namespace
 
 void update_elo_ratings(double& winner, double& loser, double k_factor) {
@@ -224,7 +228,9 @@ void SelfPlayManager::infer_opponent_actions(
   }
 
   torch::NoGradGuard no_grad;
-  const bool deterministic = config_.self_play_league.training_opponent_policy != "stochastic";
+  const bool deterministic =
+      config_.self_play_league.training_opponent_policy != "stochastic" &&
+      config_.self_play_league.training_opponent_policy != "snapshot_stochastic";
   for (std::size_t snapshot_index = 0; snapshot_index < grouped.size(); ++snapshot_index) {
     if (grouped[snapshot_index].empty()) {
       continue;
@@ -258,7 +264,8 @@ SelfPlayMetrics SelfPlayManager::on_update(
     return metrics;
   }
 
-  if (config_.self_play_league.snapshot_interval_updates > 0 &&
+  if (uses_snapshot_opponents(config_) &&
+      config_.self_play_league.snapshot_interval_updates > 0 &&
       update_index % config_.self_play_league.snapshot_interval_updates == 0) {
     add_snapshot(current_model, current_normalizer, global_step, update_index);
   }

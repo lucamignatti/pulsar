@@ -180,6 +180,26 @@ class SparseRewardPredictorImpl : public torch::nn::Module {
     return torch::clamp(non_const_net->forward(x), -10.0, 10.0);
   }
 
+  const torch::nn::LayerNormImpl& input_norm() const {
+    auto* non_const_net = const_cast<torch::nn::SequentialImpl*>(net_.get());
+    return non_const_net->at<torch::nn::LayerNormImpl>(0);
+  }
+
+  const torch::nn::LinearImpl& input_linear() const {
+    auto* non_const_net = const_cast<torch::nn::SequentialImpl*>(net_.get());
+    return non_const_net->at<torch::nn::LinearImpl>(1);
+  }
+
+  const torch::nn::LayerNormImpl& hidden_norm() const {
+    auto* non_const_net = const_cast<torch::nn::SequentialImpl*>(net_.get());
+    return non_const_net->at<torch::nn::LayerNormImpl>(3);
+  }
+
+  const torch::nn::LinearImpl& output_linear() const {
+    auto* non_const_net = const_cast<torch::nn::SequentialImpl*>(net_.get());
+    return non_const_net->at<torch::nn::LinearImpl>(4);
+  }
+
  private:
   torch::nn::Sequential net_{nullptr};
 };
