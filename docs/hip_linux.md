@@ -27,7 +27,6 @@ python3.12 -m venv .venv
 pip install --index-url https://download.pytorch.org/whl/rocm6.1 torch
 pip install pybind11
 pip install -e .[viz]
-pip install -e .[offline]
 
 git submodule update --init --recursive
 python3 scripts/collision_mesh_downloader.py
@@ -56,7 +55,7 @@ After dependencies are installed, the minimum validation pass should include:
 
 ```bash
 ctest --test-dir build/release --output-on-failure
-./build/release/pulsar_bench 20 configs/2v2_appo.json hip:0
+./build/release/pulsar_bench 20 configs/2v2_vrpo.json hip:0
 ```
 
 If the Torch targets are enabled, also validate:

@@ -202,7 +202,7 @@ if(PULSAR_ENABLE_TORCH)
     add_executable(pulsar_vrpo_train cpp/src/apps/train_main.cpp)
     pulsar_link_torch_whole_core(pulsar_vrpo_train)
   else()
-    message(WARNING "Torch not found; skipping pulsar_torch and APPO training targets.")
+    message(WARNING "Torch not found; skipping pulsar_torch and VRPO training targets.")
   endif()
 endif()
 
@@ -330,7 +330,7 @@ if(PULSAR_ENABLE_TESTS AND PULSAR_ENABLE_CUDA_SMOKE AND TARGET pulsar_vrpo_train
       ${CMAKE_CURRENT_SOURCE_DIR}/scripts/cuda_smoke.py
       ${CMAKE_CURRENT_SOURCE_DIR}
       $<TARGET_FILE:pulsar_vrpo_train>
-      ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_appo.json
+      ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_vrpo.json
   )
   set_tests_properties(pulsar_cuda_smoke PROPERTIES LABELS "cuda;smoke" SKIP_RETURN_CODE 77)
 ENDIF()
@@ -343,7 +343,7 @@ if(PULSAR_ENABLE_TESTS AND TARGET pulsar_vrpo_train AND Python3_EXECUTABLE)
       ${CMAKE_CURRENT_SOURCE_DIR}/scripts/cpu_smoke.py
       ${CMAKE_CURRENT_SOURCE_DIR}
       $<TARGET_FILE:pulsar_vrpo_train>
-      ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_appo.json
+      ${CMAKE_CURRENT_SOURCE_DIR}/configs/2v2_vrpo.json
   )
   set_tests_properties(pulsar_cpu_smoke PROPERTIES LABELS "cpu;smoke")
 endif()

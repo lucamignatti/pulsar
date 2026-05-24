@@ -182,7 +182,7 @@ int main() {
     pulsar::test::require(caught, "collection_shards > num_envs should throw");
 
     // Test 14: load production config
-    auto config_path = pulsar::test::find_repo_path("configs") / "2v2_appo.json";
+    auto config_path = pulsar::test::find_repo_path("configs") / "2v2_vrpo.json";
     if (std::filesystem::exists(config_path)) {
       auto prod = pulsar::load_experiment_config(config_path.string());
       pulsar::validate_experiment_config(prod);
@@ -249,7 +249,7 @@ int main() {
       meta.obs_schema_version = 2;
       meta.config_hash = "abc123";
       meta.action_table_hash = "def456";
-      meta.architecture_name = "mamba2_goal_appo";
+      meta.architecture_name = "mamba2_goal_vrpo";
       meta.device = "cpu";
       meta.global_step = 1000;
       meta.update_index = 50;

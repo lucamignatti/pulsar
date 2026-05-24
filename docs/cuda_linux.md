@@ -1,6 +1,6 @@
 # Linux + CUDA Notes
 
-`Pulsar` targets NVIDIA CUDA systems for production APPO training. H100 is the high-throughput target, but CUDA validation runs on any CUDA-capable GPU. The intended deployment stack is:
+`Pulsar` targets NVIDIA CUDA systems for production VRPO training. H100 is the high-throughput target, but CUDA validation runs on any CUDA-capable GPU. The intended deployment stack is:
 
 - NVIDIA driver with CUDA 12.x support
 - CUDA-enabled PyTorch
@@ -25,7 +25,6 @@ python3.12 -m venv .venv
 pip install --index-url https://download.pytorch.org/whl/cu124 torch
 pip install pybind11
 pip install -e .[viz]
-pip install -e .[offline]
 
 git submodule update --init --recursive
 python3 scripts/collision_mesh_downloader.py
@@ -41,9 +40,9 @@ cmake --build build/release --parallel
 
 ## Runtime Defaults
 
-- Use `ppo.device = "cuda"` or `"cuda:0"` in APPO configs.
+- Use `ppo.device = "cuda"` or `"cuda:0"` in VRPO configs.
 - CUDA pinned host buffers are enabled for collector-to-GPU transfers when the runtime device is CUDA.
-- The CUDA smoke test enables TF32 matmul and cuDNN paths through PyTorch when supported before running the APPO train slice.
+- The CUDA smoke test enables TF32 matmul and cuDNN paths through PyTorch when supported before running the VRPO train slice.
 
 ## Expected External Inputs
 
@@ -60,11 +59,11 @@ After dependencies are installed, the minimum validation pass should include:
 ```bash
 ctest --test-dir build/release --output-on-failure
 ctest --test-dir build/release -L cuda --output-on-failure
-./build/release/pulsar_bench 20 configs/2v2_appo.json cuda:0
+./build/release/pulsar_bench 20 configs/2v2_vrpo.json cuda:0
 ```
 
 If the Torch targets are enabled, also validate:
 
-- `pulsar_appo_train` runs end-to-end with a CUDA device (the `cuda_smoke` test exercises this with a downsized config and verifies finite metrics + checkpoint output).
+- `pulsar_vrpo_train` runs end-to-end with a CUDA device (the `cuda_smoke` test exercises this with a downsized config and verifies finite metrics + checkpoint output).
 - The CUDA smoke test is skipped (exit code 77) when no CUDA device is available or PyTorch is not CUDA-enabled.
 - Python bindings are optional. If `Python3 Development.Module` is unavailable, CMake skips `pulsar_native` without blocking the C++ trainer build.

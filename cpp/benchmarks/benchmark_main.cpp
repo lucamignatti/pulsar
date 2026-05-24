@@ -103,7 +103,7 @@ void apply_benchmark_override(pulsar::ExperimentConfig& config, const std::strin
 int main(int argc, char** argv) {
   const int updates = positive_arg_or(argc, argv, 1, 3);
   const std::filesystem::path config_path =
-      argc > 2 ? std::filesystem::path(argv[2]) : std::filesystem::path{"configs/2v2_appo.json"};
+      argc > 2 ? std::filesystem::path(argv[2]) : std::filesystem::path{"configs/2v2_vrpo.json"};
 
   try {
     pulsar::ExperimentConfig config = pulsar::load_experiment_config(config_path.string());

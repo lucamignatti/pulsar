@@ -116,7 +116,7 @@ int main() {
         .obs_schema_version = config.obs_schema_version,
         .config_hash = pulsar::config_hash(config),
         .action_table_hash = pulsar::action_table_hash(config.action_table),
-        .architecture_name = "mamba2_goal_appo",
+        .architecture_name = "mamba2_goal_vrpo",
         .device = "cpu",
         .global_step = 12,
         .update_index = 3,
@@ -135,7 +135,7 @@ int main() {
     require(roundtripped.self_play_league.enabled, "self-play config should round-trip");
     std::filesystem::remove(config_path);
 
-    const auto production_config_path = pulsar::test::find_repo_path("configs/2v2_appo.json");
+    const auto production_config_path = pulsar::test::find_repo_path("configs/2v2_vrpo.json");
     const auto production_config = pulsar::load_experiment_config(production_config_path.string());
     pulsar::validate_experiment_config(production_config);
     require(production_config.schema_version == 6, "production config schema should be v6");

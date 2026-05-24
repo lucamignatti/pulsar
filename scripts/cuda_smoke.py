@@ -25,12 +25,12 @@ def cuda_device_name() -> str:
 def main() -> int:
     if len(sys.argv) != 4:
         raise SystemExit(
-            "usage: cuda_smoke.py <repo_root> <pulsar_appo_train> <appo_base_config>"
+            "usage: cuda_smoke.py <repo_root> <pulsar_vrpo_train> <vrpo_base_config>"
         )
 
     repo_root = Path(sys.argv[1]).resolve()
     train_binary = Path(sys.argv[2]).resolve()
-    appo_base_config_path = Path(sys.argv[3]).resolve()
+    vrpo_base_config_path = Path(sys.argv[3]).resolve()
 
     if not torch.cuda.is_available():
         return skip("CUDA smoke requires an available CUDA device")
@@ -46,7 +46,7 @@ def main() -> int:
         checkpoint_dir = tmp_dir / "checkpoints"
         config_path = tmp_dir / "config.json"
 
-        config = json.loads(appo_base_config_path.read_text(encoding="utf-8"))
+        config = json.loads(vrpo_base_config_path.read_text(encoding="utf-8"))
         config["env"]["collision_meshes_path"] = str((repo_root / "collision_meshes").resolve())
         config["model"].update({
             "encoder_dim": 64,

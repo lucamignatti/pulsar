@@ -12,7 +12,7 @@ import tempfile
 from .api import (
     ensure_checkpoint_config_matches,
     load_config,
-    load_ppo_actor,
+    load_vrpo_actor,
     make_eval_env,
     run_viz_episode,
 )
@@ -111,7 +111,7 @@ def main() -> None:
         parser.error(f"Unsupported policy mode: {policy_mode}")
 
     _resolve_collision_meshes(config, original_cwd)
-    model = load_ppo_actor(checkpoint_path, args.device)
+    model = load_vrpo_actor(checkpoint_path, args.device)
     if args.renderer == "rocketsimvis":
         print(
             "RocketSimVis backend selected. Start the external RocketSimVis viewer separately; "

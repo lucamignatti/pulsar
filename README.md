@@ -68,19 +68,19 @@ For CUDA setup, see [docs/cuda_linux.md](docs/cuda_linux.md). For AMD ROCm/HIP s
 
 ```bash
 ctest --test-dir build/release --output-on-failure
-./build/release/pulsar_bench 20 configs/2v2_appo.json cpu
+./build/release/pulsar_bench 20 configs/2v2_vrpo.json cpu
 ```
 
 ## Training
 
 ```bash
-./build/release/pulsar_vrpo_train configs/2v2_appo.json /path/to/run_outputs
+./build/release/pulsar_vrpo_train configs/2v2_vrpo.json /path/to/run_outputs
 ```
 
 To run a bounded number of updates:
 
 ```bash
-./build/release/pulsar_vrpo_train configs/2v2_appo.json /path/to/run_outputs 100
+./build/release/pulsar_vrpo_train configs/2v2_vrpo.json /path/to/run_outputs 100
 ```
 
 ## Visualizing a Checkpoint

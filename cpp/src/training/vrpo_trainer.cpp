@@ -1999,7 +1999,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
           if (sanitized.changed) {
             grad_norm = clip_existing_gradients(*actor_, config_.ppo.max_grad_norm);
             if (std::isfinite(grad_norm)) {
-              std::cerr << "zeroed non-finite APPO gradient entries in "
+              std::cerr << "zeroed non-finite VRPO gradient entries in "
                         << sanitized.first_parameter
                         << "; recovered preclip grad_norm=" << grad_norm << '\n';
             }
@@ -2015,13 +2015,13 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
           stepped_optimizer = true;
         } else if (std::isfinite(grad_norm)) {
           ++metrics.grad_norm_guard_skips;
-          std::cerr << "skipping APPO optimizer step with preclip grad_norm="
+          std::cerr << "skipping VRPO optimizer step with preclip grad_norm="
                     << grad_norm
                     << " max_preclip_grad_norm=" << config_.ppo.max_preclip_grad_norm
                     << '\n';
         } else {
           ++metrics.nonfinite_grad_norm_skips;
-          std::cerr << "skipping APPO optimizer step with non-finite grad_norm=" << grad_norm << '\n';
+          std::cerr << "skipping VRPO optimizer step with non-finite grad_norm=" << grad_norm << '\n';
         }
       }
       actor_optimizer_.zero_grad();
@@ -3553,7 +3553,7 @@ CheckpointMetadata VRPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
       .obs_schema_version = config_.obs_schema_version,
       .config_hash = config_hash(config_),
       .action_table_hash = action_table_hash(config_.action_table),
-      .architecture_name = "mamba2_goal_appo",
+      .architecture_name = "mamba2_goal_vrpo",
       .device = config_.ppo.device,
       .global_step = global_step,
       .update_index = update_index,
@@ -3829,7 +3829,7 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
   const bool train_forever = updates <= 0;
   std::cout << "train_start\n";
   std::filesystem::create_directories(checkpoint_dir);
-  WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "dappo_train");
+  WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "vrpo_train");
   std::int64_t global_step = resumed_global_step_;
 
   sync_self_play_assignments_to_collectors();

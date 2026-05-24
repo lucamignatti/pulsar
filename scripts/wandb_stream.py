@@ -296,7 +296,7 @@ def main() -> int:
         import wandb
     except ImportError as exc:
         raise SystemExit(
-            "wandb is required for Pulsar W&B logging. Install it with `pip install wandb` or `pip install -e .[offline]`."
+            "wandb is required for Pulsar W&B logging. Install it with `pip install wandb` or `pip install -e .`."
         ) from exc
 
     run = wandb.init(

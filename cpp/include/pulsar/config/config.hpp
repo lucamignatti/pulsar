@@ -237,7 +237,7 @@ struct CheckpointMetadata {
   int obs_schema_version = 2;
   std::string config_hash{};
   std::string action_table_hash{};
-  std::string architecture_name = "mamba2_goal_appo";
+  std::string architecture_name = "mamba2_goal_vrpo";
   std::string device = "cpu";
   std::int64_t global_step = 0;
   std::int64_t update_index = 0;
