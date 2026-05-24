@@ -17,6 +17,7 @@ PredictorTrainer::PredictorTrainer(
     : config_(config), device_(device) {
   ema_losses_.assign(kSparseEventChannelCount, -1.0F);
   deltas_.assign(kSparseEventChannelCount, std::numeric_limits<float>::infinity());
+  consecutive_low_delta_.assign(kSparseEventChannelCount, 0);
 }
 
 void PredictorTrainer::initialize_optimizers(VRPOActor& actor) {
@@ -264,6 +265,7 @@ void PredictorTrainer::process_convergence(
                                   double positive_rate,
                                   float& ema_loss,
                                   float& delta,
+                                  int& low_delta_streak,
                                   std::uint8_t& active,
                                   const PredictorChannelConfig& channel,
                                   const char* channel_name) {
@@ -278,21 +280,34 @@ void PredictorTrainer::process_convergence(
       delta = std::abs(next_ema - ema_loss);
       ema_loss = next_ema;
     }
+
+    // Track sustained stability: require N consecutive updates whose delta is
+    // below threshold. A single low-delta update can come from transient noise
+    // or from a still-learning loss whose per-step change happens to be small.
+    if (std::isfinite(delta) && delta <= channel.convergence_threshold) {
+      ++low_delta_streak;
+    } else {
+      low_delta_streak = 0;
+    }
+
     if (active == 0 &&
         update_index >= channel.warmup_updates &&
         positive_rate > 0.0 &&
-        std::isfinite(delta) &&
-        delta <= channel.convergence_threshold) {
+        low_delta_streak >= kRequiredConsecutiveStableUpdates) {
       active = 1;
       std::cout << "predictor_enabled channel=" << channel_name
                 << " update=" << update_index
                 << " ema_loss=" << ema_loss
                 << " delta=" << delta
+                << " streak=" << low_delta_streak
                 << " positive_rate=" << positive_rate
                 << '\n';
     }
   };
 
+  if (consecutive_low_delta_.size() < kSparseEventChannelCount) {
+    consecutive_low_delta_.resize(kSparseEventChannelCount, 0);
+  }
   for (std::size_t channel_index = 0; channel_index < kSparseEventChannelCount; ++channel_index) {
     const std::string channel_name(kSparseEventChannels[channel_index].name);
     const auto& channel = config_.predictor.channels.at(channel_name);
@@ -306,6 +321,7 @@ void PredictorTrainer::process_convergence(
         positive_rate,
         ema_losses_[channel_index],
         deltas_[channel_index],
+        consecutive_low_delta_[channel_index],
         actor->predictor_active_[channel_index],
         channel,
         channel_name.c_str());

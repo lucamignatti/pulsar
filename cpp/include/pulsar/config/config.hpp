@@ -215,6 +215,20 @@ struct WandbConfig {
   std::string run_id{};
 };
 
+struct CurriculumModeConfig {
+  std::string mode;           // "1v1", "2v2", or "3v3"
+  int shards = 1;
+  int num_envs = 0;           // total envs for this mode, distributed across shards
+  int collection_workers = 0; // 0 = derive from ppo.collection_workers proportionally
+};
+
+struct CurriculumConfig {
+  // Non-empty enables concurrent multi-mode training; each entry gets its own
+  // shard group so all modes collect simultaneously. Empty = single-mode from
+  // env.team_size (backward-compatible).
+  std::vector<CurriculumModeConfig> modes;
+};
+
 struct ExperimentConfig {
   int schema_version = 6;
   int obs_schema_version = 2;
@@ -230,6 +244,7 @@ struct ExperimentConfig {
   ESLoraConfig es_lora{};
   SelfPlayLeagueConfig self_play_league{};
   WandbConfig wandb{};
+  CurriculumConfig curriculum{};
 };
 
 struct CheckpointMetadata {
@@ -275,6 +290,10 @@ void to_json(nlohmann::json& j, const SelfPlayLeagueConfig& value);
 void from_json(const nlohmann::json& j, SelfPlayLeagueConfig& value);
 void to_json(nlohmann::json& j, const WandbConfig& value);
 void from_json(const nlohmann::json& j, WandbConfig& value);
+void to_json(nlohmann::json& j, const CurriculumModeConfig& value);
+void from_json(const nlohmann::json& j, CurriculumModeConfig& value);
+void to_json(nlohmann::json& j, const CurriculumConfig& value);
+void from_json(const nlohmann::json& j, CurriculumConfig& value);
 void to_json(nlohmann::json& j, const ExperimentConfig& value);
 void from_json(const nlohmann::json& j, ExperimentConfig& value);
 void to_json(nlohmann::json& j, const CheckpointMetadata& value);

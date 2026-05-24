@@ -130,7 +130,10 @@ void WandbLogger::add_table(
   table["columns"] = columns;
   table["data"] = data;
 
-  sections_[key] = "Tables";
+  // Tables render as native wandb.Table widgets in the run's Tables tab.
+  // Do NOT register them in sections_: the workspace organizer in
+  // wandb_stream.py would otherwise create a phantom line-plot panel for the
+  // key, and wandb would render the non-numeric table values as NaN.
   payload_[key] = std::move(table);
 }
 

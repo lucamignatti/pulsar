@@ -86,6 +86,11 @@ class PredictorTrainer {
   std::vector<std::unique_ptr<torch::optim::Adam>> optimizers_{};
   std::vector<float> ema_losses_{};
   std::vector<float> deltas_{};
+  // Count of consecutive updates with delta <= convergence_threshold. A
+  // predictor activates only once this exceeds kRequiredConsecutiveStableUpdates,
+  // which filters out both transient noise and slow-but-still-learning losses.
+  std::vector<int> consecutive_low_delta_{};
+  static constexpr int kRequiredConsecutiveStableUpdates = 10;
 
   // Hindsight weighting state
   static constexpr int kGoalChannelIndex = 0;

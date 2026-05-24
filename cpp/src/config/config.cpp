@@ -481,6 +481,30 @@ void from_json(const json& j, WandbConfig& value) {
   value.run_id = j.value("run_id", std::string{});
 }
 
+void to_json(json& j, const CurriculumModeConfig& value) {
+  j = json{
+      {"mode", value.mode},
+      {"shards", value.shards},
+      {"num_envs", value.num_envs},
+      {"collection_workers", value.collection_workers},
+  };
+}
+
+void from_json(const json& j, CurriculumModeConfig& value) {
+  value.mode = j.at("mode").get<std::string>();
+  value.shards = j.value("shards", 1);
+  value.num_envs = j.value("num_envs", 0);
+  value.collection_workers = j.value("collection_workers", 0);
+}
+
+void to_json(json& j, const CurriculumConfig& value) {
+  j = json{{"modes", value.modes}};
+}
+
+void from_json(const json& j, CurriculumConfig& value) {
+  value.modes = j.value("modes", std::vector<CurriculumModeConfig>{});
+}
+
 void to_json(json& j, const ExperimentConfig& value) {
   j = json{
       {"schema_version", value.schema_version},
@@ -497,6 +521,7 @@ void to_json(json& j, const ExperimentConfig& value) {
       {"es_lora", value.es_lora},
       {"self_play_league", value.self_play_league},
       {"wandb", value.wandb},
+      {"curriculum", value.curriculum},
   };
 }
 
@@ -533,6 +558,7 @@ void from_json(const json& j, ExperimentConfig& value) {
   value.es_lora = j.value("es_lora", ESLoraConfig{});
   value.self_play_league = j.value("self_play_league", SelfPlayLeagueConfig{});
   value.wandb = j.value("wandb", WandbConfig{});
+  value.curriculum = j.value("curriculum", CurriculumConfig{});
 }
 
 void to_json(json& j, const CheckpointMetadata& value) {
