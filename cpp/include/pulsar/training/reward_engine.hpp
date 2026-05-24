@@ -36,6 +36,10 @@ struct AgentRewardState {
   bool was_on_ceiling = false;
   bool ball_hit_backboard = false;
   int last_toucher_id = -1;
+  float flip_start_action_pitch = 0.0F;
+  bool prev_has_double_jumped = false;
+  bool prev_handbrake_active = false;
+  bool ball_near_own_backboard = false;
 };
 
 struct EnvRewardState {
@@ -103,6 +107,20 @@ class RewardEngine {
   static constexpr int kChainDashWindowTicks = 30;
   static constexpr int kDoubleTapWindowTicks = 30;
   static constexpr float kCeilingThreshold = 1800.0F;
+  static constexpr float kOnCeilingZ = 1950.0F;
+  static constexpr float kWallTouchDistX = 400.0F;
+  static constexpr float kWallTouchDistY = 400.0F;
+  static constexpr float kSaveVelocityThreshold = 300.0F;
+  static constexpr float kClearOwnHalfThreshold = 3500.0F;
+  static constexpr float kOwnBackboardY = 4800.0F;
+  static constexpr float kBackflipPitchThreshold = -0.4F;
+  static constexpr float kFlipCancelPitchThreshold = 0.3F;
+  static constexpr float kFastAerialVzThreshold = 300.0F;
+  static constexpr float kLandingRecoveryMinSpeed = 500.0F;
+  static constexpr float kLandingRecoveryMaxAngVel = 2.0F;
+  static constexpr float kPowerslideMinAngVelZ = 2.5F;
+  static constexpr float kShotGoalDirThreshold = 0.5F;
+  static constexpr float kShotMinSpeed = 800.0F;
 };
 
 }  // namespace pulsar

@@ -11,7 +11,7 @@ struct SparseEventChannelSpec {
   int default_horizon;
 };
 
-inline constexpr std::array<SparseEventChannelSpec, 20> kSparseEventChannels{{
+inline constexpr std::array<SparseEventChannelSpec, 34> kSparseEventChannels{{
     {"goal", 40},
     {"ball_touch", 15},
     {"air_touch", 20},
@@ -32,6 +32,20 @@ inline constexpr std::array<SparseEventChannelSpec, 20> kSparseEventChannels{{
     {"pogo", 35},
     {"pinch", 35},
     {"kickoff_50_50", 20},
+    {"save", 35},
+    {"clear", 30},
+    {"boost_steal", 25},
+    {"half_flip", 30},
+    {"fast_aerial", 30},
+    {"flip_cancel", 25},
+    {"chain_dash", 25},
+    {"landing_recovery", 20},
+    {"powerslide_turn", 20},
+    {"off_wall_touch", 20},
+    {"wall_shot", 30},
+    {"off_wall_clear", 30},
+    {"backboard_save", 40},
+    {"shot", 30},
 }};
 
 inline constexpr std::size_t kSparseEventChannelCount = kSparseEventChannels.size();

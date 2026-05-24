@@ -111,6 +111,9 @@ void RewardEngine::detect_sparse_events(
       env.ball.velocity.z - prev.prev_ball_velocity.z,
   };
   const float ball_delta_mag = vec3_magnitude(ball_delta);
+  const float post_mag = vec3_magnitude(env.ball.velocity);
+  const float goal_dir = (car.team == Team::Blue) ? 1.0F : -1.0F;
+  const float own_goal_dir = -goal_dir;
 
   if (done && outcome_label == 0) {
     set_event(events_out, "goal");
@@ -149,10 +152,18 @@ void RewardEngine::detect_sparse_events(
   const bool landing_dash = car.on_ground && !prev.prev_on_ground && prev.prev_is_flipping &&
       (prev.prev_car_position_z - kGroundZ) < kWavedashZThreshold;
   if (landing_dash) {
+    const bool is_half_flip = prev.flip_start_action_pitch < kBackflipPitchThreshold;
     const bool near_wall =
         std::abs(car.position.x) > (kArenaExtentX - kWallDashDist) ||
         std::abs(car.position.y) > (kArenaExtentY - kWallDashDist);
-    set_event(events_out, near_wall ? "wall_dash" : "wavedash");
+    if (is_half_flip) {
+      set_event(events_out, "half_flip");
+    } else {
+      set_event(events_out, near_wall ? "wall_dash" : "wavedash");
+    }
+    if ((global_tick - prev.last_wavedash_tick) <= kChainDashWindowTicks) {
+      set_event(events_out, "chain_dash");
+    }
     agent_state.last_wavedash_tick = global_tick;
   } else {
     agent_state.last_wavedash_tick = prev.last_wavedash_tick;
@@ -173,7 +184,7 @@ void RewardEngine::detect_sparse_events(
     agent_state.consecutive_air_touches = prev.consecutive_air_touches;
   }
 
-  agent_state.was_on_ceiling = prev.was_on_ceiling || car.position.z > kCeilingThreshold;
+  agent_state.was_on_ceiling = prev.was_on_ceiling || (car.on_ground && car.position.z > kOnCeilingZ);
   if (agent_state.was_on_ceiling && car.position.z < kCeilingThreshold - 100.0F &&
       touch_edge && !car.on_ground) {
     set_event(events_out, "ceiling_shot");
@@ -200,11 +211,19 @@ void RewardEngine::detect_sparse_events(
 
   if (!prev.prev_is_flipping && car.is_flipping) {
     agent_state.flip_start_tick = global_tick;
+    agent_state.flip_start_action_pitch = car.last_action.pitch;
   } else {
     agent_state.flip_start_tick = prev.flip_start_tick;
+    agent_state.flip_start_action_pitch = prev.flip_start_action_pitch;
   }
   if (car.is_flipping && touch_edge && prev.flip_start_tick >= 0) {
     set_event(events_out, "preflip");
+    agent_state.flip_start_tick = -1;
+  }
+  if (car.is_flipping && !car.on_ground && prev.flip_start_tick >= 0 &&
+      prev.flip_start_action_pitch < -kFlipCancelPitchThreshold &&
+      car.last_action.pitch > kFlipCancelPitchThreshold) {
+    set_event(events_out, "flip_cancel");
     agent_state.flip_start_tick = -1;
   }
   if (!car.is_flipping) {
@@ -213,18 +232,16 @@ void RewardEngine::detect_sparse_events(
 
   if (touch_edge) {
     const float prev_mag = vec3_magnitude(prev.prev_ball_velocity);
-    const float post_mag = vec3_magnitude(env.ball.velocity);
     if (prev_mag > 100.0F && post_mag > 100.0F) {
       const float dot = clamp(vec3_dot(prev.prev_ball_velocity, env.ball.velocity) / (prev_mag * post_mag), -1.0F, 1.0F);
       const float angle_deg = std::acos(dot) * (180.0F / 3.14159265358979323846F);
-      const float goal_dir = (car.team == Team::Blue) ? 1.0F : -1.0F;
       if (angle_deg >= 30.0F && (env.ball.velocity.y / post_mag) * goal_dir > 0.3F) {
         set_event(events_out, "redirect");
       }
     }
   }
 
-  if (!prev.prev_on_ground && car.on_ground && !car.is_jumping && prev.prev_car_velocity_z > 200.0F) {
+  if (!prev.prev_on_ground && car.on_ground && !car.is_jumping && prev.prev_car_velocity_z < -200.0F) {
     set_event(events_out, "pogo");
   }
 
@@ -238,6 +255,85 @@ void RewardEngine::detect_sparse_events(
     if (post_ball_speed - prev_ball_speed > kPinchVelocityDelta) {
       set_event(events_out, "pinch");
     }
+  }
+
+  // --- new mechanics ---
+
+  // save: ball threatening own goal, agent touches it
+  if (touch_edge &&
+      prev.prev_ball_velocity.y * own_goal_dir > kSaveVelocityThreshold &&
+      env.ball.position.y * own_goal_dir > 2500.0F) {
+    set_event(events_out, "save");
+  }
+
+  // clear: touch from own third sending ball away from own goal
+  if (touch_edge &&
+      car.position.y * own_goal_dir > kClearOwnHalfThreshold &&
+      env.ball.velocity.y * own_goal_dir < -200.0F &&
+      post_mag > 500.0F) {
+    set_event(events_out, "clear");
+  }
+
+  // boost_steal: big pad pickup on opponent's half
+  if (boost_delta >= 50.0F && car.position.y * goal_dir > 500.0F) {
+    set_event(events_out, "boost_steal");
+  }
+
+  // fast_aerial: double jump (not flip) in air while boosting and moving up
+  if (!prev.prev_has_double_jumped && car.has_double_jumped &&
+      !car.is_flipping && !car.on_ground &&
+      car.is_boosting && car.velocity.z > kFastAerialVzThreshold) {
+    set_event(events_out, "fast_aerial");
+  }
+
+  // landing_recovery: clean landing — fast horizontal speed, low spin
+  if (!prev.prev_on_ground && car.on_ground && !car.is_flipping && !car.is_jumping) {
+    const float hspeed = std::sqrt(car.velocity.x * car.velocity.x + car.velocity.y * car.velocity.y);
+    if (hspeed > kLandingRecoveryMinSpeed && vec3_magnitude(car.angular_velocity) < kLandingRecoveryMaxAngVel) {
+      set_event(events_out, "landing_recovery");
+    }
+  }
+
+  // powerslide_turn: rising edge of handbrake on ground with significant yaw rotation
+  const bool handbrake_active = car.handbrake > 0.5F;
+  if (!prev.prev_handbrake_active && handbrake_active &&
+      car.on_ground && std::abs(car.angular_velocity.z) > kPowerslideMinAngVelZ) {
+    set_event(events_out, "powerslide_turn");
+  }
+  agent_state.prev_handbrake_active = handbrake_active;
+
+  // off_wall_touch / wall_shot / off_wall_clear
+  const bool near_side_wall = std::abs(car.position.x) > (kArenaExtentX - kWallTouchDistX);
+  const bool near_end_wall  = std::abs(car.position.y) > (kArenaExtentY - kWallTouchDistY);
+  const bool near_any_wall  = !car.on_ground && (near_side_wall || near_end_wall);
+  if (touch_edge && near_any_wall) {
+    set_event(events_out, "off_wall_touch");
+    if (post_mag > 0.0F && env.ball.velocity.y * goal_dir / post_mag > 0.35F) {
+      set_event(events_out, "wall_shot");
+    }
+    if (prev.prev_ball_velocity.y * own_goal_dir > 200.0F &&
+        env.ball.velocity.y * own_goal_dir < 0.0F) {
+      set_event(events_out, "off_wall_clear");
+    }
+  }
+
+  // backboard_save: touch while ball was near own backboard and threatening own goal
+  agent_state.ball_near_own_backboard =
+      prev.ball_near_own_backboard ||
+      (env.ball.position.y * own_goal_dir > kOwnBackboardY);
+  if (touch_edge && prev.ball_near_own_backboard &&
+      prev.prev_ball_velocity.y * own_goal_dir > kSaveVelocityThreshold) {
+    set_event(events_out, "backboard_save");
+    agent_state.ball_near_own_backboard = false;
+  }
+  if (env.ball.position.y * own_goal_dir <= kOwnBackboardY - 200.0F) {
+    agent_state.ball_near_own_backboard = false;
+  }
+
+  // shot: touch sending ball toward opponent goal at significant speed
+  if (touch_edge && post_mag > kShotMinSpeed &&
+      post_mag > 0.0F && env.ball.velocity.y * goal_dir / post_mag > kShotGoalDirThreshold) {
+    set_event(events_out, "shot");
   }
 
   bool kickoff_opponent_touch = false;
@@ -296,6 +392,7 @@ void RewardEngine::detect_sparse_events(
   agent_state.prev_has_flip_reset = car.has_flip_reset;
   agent_state.prev_ball_touched = car.ball_touched;
   agent_state.prev_env_last_touch_agent = env.last_touch_agent;
+  agent_state.prev_has_double_jumped = car.has_double_jumped;
 }
 
 }  // namespace pulsar
