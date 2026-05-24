@@ -63,6 +63,17 @@ torch::Tensor compute_q_boosted_gae_cuda(
     const torch::Tensor& bootstrap_mask,
     const torch::Tensor& bootstrap_v_from_q);
 
+torch::Tensor compute_centered_expected_sarsa_gae_cuda(
+    const torch::Tensor& q_values_taken,
+    const torch::Tensor& v_from_q,
+    const torch::Tensor& rewards,
+    const torch::Tensor& dones,
+    float gamma,
+    float gae_lambda,
+    const torch::Tensor& next_v_from_q,
+    const torch::Tensor& bootstrap_mask,
+    const torch::Tensor& bootstrap_v_from_q);
+
 torch::Tensor normalize_advantage_cuda(const torch::Tensor& advantages, const torch::Tensor& active_mask);
 
 std::vector<torch::Tensor> sample_masked_actions_cuda(
@@ -114,6 +125,17 @@ torch::Tensor compute_gae_hip(
     const torch::Tensor& bootstrap_values);
 
 torch::Tensor compute_q_boosted_gae_hip(
+    const torch::Tensor& q_values_taken,
+    const torch::Tensor& v_from_q,
+    const torch::Tensor& rewards,
+    const torch::Tensor& dones,
+    float gamma,
+    float gae_lambda,
+    const torch::Tensor& next_v_from_q,
+    const torch::Tensor& bootstrap_mask,
+    const torch::Tensor& bootstrap_v_from_q);
+
+torch::Tensor compute_centered_expected_sarsa_gae_hip(
     const torch::Tensor& q_values_taken,
     const torch::Tensor& v_from_q,
     const torch::Tensor& rewards,
@@ -473,6 +495,78 @@ torch::Tensor compute_q_boosted_gae(
         ? torch::where(bootstrap_mask[t] > 0.5F, torch::ones_like(dones[t]), non_terminal)
         : non_terminal;
     const torch::Tensor delta = rewards[t] + gamma * next_v * delta_mult - q_values_taken[t];
+    last_gae = delta + gamma * gae_lambda * non_terminal * last_gae;
+    advantages[t] = q_values_taken[t] - v_from_q[t] + last_gae;
+  }
+  return advantages;
+}
+
+torch::Tensor compute_centered_expected_sarsa_gae(
+    const torch::Tensor& q_values_taken,
+    const torch::Tensor& v_from_q,
+    const torch::Tensor& rewards,
+    const torch::Tensor& dones,
+    float gamma,
+    float gae_lambda,
+    const torch::Tensor& next_v_from_q,
+    const torch::Tensor& bootstrap_mask,
+    const torch::Tensor& bootstrap_v_from_q) {
+  PULSAR_TRACE_SCOPE_CAT("vrpo_math", "compute_centered_expected_sarsa_gae");
+  if (can_use_ppo_math_accel(q_values_taken) &&
+      v_from_q.is_cuda() &&
+      rewards.is_cuda() &&
+      dones.is_cuda() &&
+      v_from_q.scalar_type() == torch::kFloat32 &&
+      rewards.scalar_type() == torch::kFloat32 &&
+      dones.scalar_type() == torch::kFloat32 &&
+      (!next_v_from_q.defined() || (next_v_from_q.is_cuda() && next_v_from_q.scalar_type() == torch::kFloat32)) &&
+      (!bootstrap_mask.defined() || (bootstrap_mask.is_cuda() && bootstrap_mask.scalar_type() == torch::kFloat32)) &&
+      (!bootstrap_v_from_q.defined() || (bootstrap_v_from_q.is_cuda() && bootstrap_v_from_q.scalar_type() == torch::kFloat32))) {
+#ifdef PULSAR_HAS_PPO_MATH_CUDA_KERNELS
+    return compute_centered_expected_sarsa_gae_cuda(
+        q_values_taken.contiguous(),
+        v_from_q.contiguous(),
+        rewards.contiguous(),
+        dones.contiguous(),
+        gamma,
+        gae_lambda,
+        next_v_from_q.defined() ? next_v_from_q.contiguous() : torch::Tensor{},
+        bootstrap_mask.defined() ? bootstrap_mask.contiguous() : torch::Tensor{},
+        bootstrap_v_from_q.defined() ? bootstrap_v_from_q.contiguous() : torch::Tensor{});
+#endif
+#ifdef PULSAR_HAS_PPO_MATH_HIP_KERNELS
+    return compute_centered_expected_sarsa_gae_hip(
+        q_values_taken.contiguous(),
+        v_from_q.contiguous(),
+        rewards.contiguous(),
+        dones.contiguous(),
+        gamma,
+        gae_lambda,
+        next_v_from_q.defined() ? next_v_from_q.contiguous() : torch::Tensor{},
+        bootstrap_mask.defined() ? bootstrap_mask.contiguous() : torch::Tensor{},
+        bootstrap_v_from_q.defined() ? bootstrap_v_from_q.contiguous() : torch::Tensor{});
+#endif
+  }
+  const int64_t steps = q_values_taken.size(0);
+  const int64_t agents = q_values_taken.size(1);
+  torch::Tensor advantages = torch::zeros({steps, agents}, q_values_taken.options());
+  torch::Tensor last_gae = torch::zeros({agents}, q_values_taken.options());
+
+  const torch::Tensor boundary_v_from_q = next_v_from_q.defined()
+      ? next_v_from_q.to(q_values_taken.device()).to(q_values_taken.dtype())
+      : torch::zeros({agents}, q_values_taken.options());
+
+  for (int64_t t = steps - 1; t >= 0; --t) {
+    torch::Tensor next_v = (t < steps - 1) ? v_from_q[t + 1] : boundary_v_from_q;
+    if (bootstrap_v_from_q.defined()) {
+      next_v = torch::where(bootstrap_mask[t] > 0.5F, bootstrap_v_from_q[t], next_v);
+    }
+    const torch::Tensor non_terminal = 1.0F - dones[t];
+    const torch::Tensor delta_mult = bootstrap_mask.defined()
+        ? torch::where(bootstrap_mask[t] > 0.5F, torch::ones_like(dones[t]), non_terminal)
+        : non_terminal;
+    // Centered residual: subtract V(s) instead of Q(s, a_t).
+    const torch::Tensor delta = rewards[t] + gamma * next_v * delta_mult - v_from_q[t];
     last_gae = delta + gamma * gae_lambda * non_terminal * last_gae;
     advantages[t] = q_values_taken[t] - v_from_q[t] + last_gae;
   }

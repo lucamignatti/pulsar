@@ -100,6 +100,8 @@ struct GoalCriticConfig {
   int contrastive_batch_size = 2048;
   int max_future_horizon = 256;
   float temperature = 0.1F;
+  // Adaptive Centered Expected SARSA: eff = base * (1 + gain * alpha).
+  float gcrl_actor_alpha_gain = 2.0F;
 };
 
 struct VRPOConfig {
@@ -129,6 +131,10 @@ struct ESLoraConfig {
   float max_kl_mean = 0.01F;
   bool require_fitness_signal = true;
   float min_fitness_std = 1.0e-6F;
+  // Adaptive Centered Expected SARSA: eff_sigma = sigma_ES * (1 + gain * alpha),
+  // eff_interval shrinks from es_interval toward es_interval_min as alpha rises.
+  float sigma_alpha_gain = 1.0F;
+  int es_interval_min = 20;
 };
 
 struct PPOConfig {
@@ -171,6 +177,10 @@ struct PPOConfig {
   bool popart_enabled = false;
   double popart_beta = 0.0001;
   double popart_epsilon = 1e-4;
+  // Adaptive Centered Expected SARSA: minimum decay floor for effective entropy coef.
+  float ent_coef_min = 0.025F;
+  // Rolling buffer length over recent update entropies, used by the feedback controller.
+  int entropy_window = 10;
 };
 
 struct SelfPlayLeagueConfig {

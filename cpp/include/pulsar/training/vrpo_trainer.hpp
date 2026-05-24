@@ -119,6 +119,14 @@ struct TrainerMetrics {
   double q_critic_loss = 0.0;
   double advantage_std = 0.0;
 
+  // Adaptive Centered Expected SARSA controller signals.
+  double entropy_rolling_mean = 0.0;
+  double entropy_deficit_alpha = 0.0;
+  double eff_gcrl_actor_coef = 0.0;
+  double eff_es_sigma = 0.0;
+  int eff_es_interval = 0;
+  int steps_since_last_es = 0;
+
   std::map<std::string, double> predictor_loss{};
   std::map<std::string, double> predictor_delta{};
   std::map<std::string, double> predictor_positive{};
@@ -195,7 +203,7 @@ class VRPOTrainer {
   TrainerMetrics update_actor(RolloutStorage& rollout, int update_index);
   CheckpointMetadata make_checkpoint_metadata(std::int64_t global_step, int update_index, const std::string& wandb_run_id) const;
 
-  void run_es_lora_update(int update_index, TrainerMetrics& metrics);
+  void run_es_lora_update(int update_index, TrainerMetrics& metrics, float effective_sigma = -1.0F);
   std::pair<torch::Tensor, torch::Tensor> compute_es_deltas();
 
   void rebuild_collectors();
@@ -213,7 +221,8 @@ class VRPOTrainer {
       const torch::Tensor& A_stack,
       const torch::Tensor& B_stack,
       int update_index,
-      int wave_index);
+      int wave_index,
+      float effective_sigma = -1.0F);
 
   ExperimentConfig config_{};
   std::vector<std::unique_ptr<BatchedRocketSimCollector>> collectors_{};
@@ -244,6 +253,15 @@ class VRPOTrainer {
   std::atomic<bool> es_deltas_ready_{false};
   torch::Tensor es_delta_A_;
   torch::Tensor es_delta_B_;
+
+  // Adaptive Centered Expected SARSA: feedback controller state.
+  std::deque<double> entropy_window_{};
+  int steps_since_last_es_ = 0;
+  double last_alpha_ = 0.0;
+  double last_eff_gcrl_coef_ = 0.0;
+  double last_eff_es_sigma_ = 0.0;
+  int last_eff_es_interval_ = 0;
+  double last_entropy_mean_ = 0.0;
 
   // Modular trainers
   std::unique_ptr<PredictorTrainer> predictor_trainer_{nullptr};

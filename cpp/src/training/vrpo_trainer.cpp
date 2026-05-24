@@ -478,6 +478,12 @@ void append_metrics_line(
       {"self_play_snapshot_count", metrics.self_play_snapshot_count},
       {"q_critic_loss", metrics.q_critic_loss},
       {"advantage_std", metrics.advantage_std},
+      {"entropy_rolling_mean", metrics.entropy_rolling_mean},
+      {"entropy_deficit_alpha", metrics.entropy_deficit_alpha},
+      {"eff_gcrl_actor_coef", metrics.eff_gcrl_actor_coef},
+      {"eff_es_sigma", metrics.eff_es_sigma},
+      {"eff_es_interval", metrics.eff_es_interval},
+      {"steps_since_last_es", metrics.steps_since_last_es},
   };
   for (const auto& [channel, value] : metrics.predictor_loss) {
     line["predictor_loss_" + channel] = value;
@@ -1107,8 +1113,28 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
   const int rollout_steps = rollout.rollout_length();
   const auto& all_rewards = rollout.all_rewards();
 
-  float effective_entropy_coef = config_.ppo.entropy_coef;
+  // Adaptive Centered Expected SARSA: closed-loop exploration controller.
+  // Compute the entropy deficit fraction alpha from the rolling buffer of past
+  // update entropies; alpha drives GCRL coef, ES sigma, ES interval, and the
+  // entropy coef floor for this update.
+  const double H_floor = static_cast<double>(config_.ppo.entropy_floor);
+  double H_mean = 0.0;
+  if (!entropy_window_.empty()) {
+    for (double e : entropy_window_) H_mean += e;
+    H_mean /= static_cast<double>(entropy_window_.size());
+  }
+  const double entropy_deficit = std::max(0.0, H_floor - H_mean);
+  const double alpha = (H_floor > 0.0) ? std::min(1.0, entropy_deficit / H_floor) : 0.0;
+  last_alpha_ = alpha;
+  last_entropy_mean_ = H_mean;
+
+  float effective_entropy_coef =
+      std::max(config_.ppo.ent_coef_min, config_.ppo.entropy_coef);
   float effective_entropy_floor_coef = config_.ppo.entropy_floor_coef;
+
+  const float eff_gcrl_actor_coef = config_.goal_critic.lambda_goal_actor
+      * (1.0F + config_.goal_critic.gcrl_actor_alpha_gain * static_cast<float>(alpha));
+  last_eff_gcrl_coef_ = static_cast<double>(eff_gcrl_actor_coef);
 
   const int seq_len = std::max(1, config_.ppo.rollout_length);
   const size_t num_update_gpus = compute_devices_.size();
@@ -1322,7 +1348,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
 
     const auto q_taken = all_values.at("q_taken").narrow(0, 0, rollout_steps).to(device_);
     const auto v_from_q = all_values.at("v_from_q").narrow(0, 0, rollout_steps).to(device_);
-    sparse_advantages = compute_q_boosted_gae(
+    sparse_advantages = compute_centered_expected_sarsa_gae(
         q_taken,
         v_from_q,
         shaped_rewards,
@@ -1649,8 +1675,10 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
                 if (config_.ppo.entropy_floor > 0.0F && effective_entropy_floor_coef > 0.0F) {
                   const torch::Tensor entropy_floor_mask = active_masks.to(torch::kFloat32).sum(-1) > 1.0F;
                   const torch::Tensor entropy_floor_count = entropy_floor_mask.to(torch::kFloat32).sum().clamp_min(1.0F);
+                  // Adaptive Centered Expected SARSA: linear (not quadratic) floor penalty so
+                  // the restoring gradient stays constant near the boundary.
                   const torch::Tensor entropy_floor_penalty =
-                      torch::relu(config_.ppo.entropy_floor - entropy_values).square()
+                      torch::relu(config_.ppo.entropy_floor - entropy_values)
                           * entropy_floor_mask.to(torch::kFloat32);
                   entropy_floor_loss = effective_entropy_floor_coef * entropy_floor_penalty.sum() / entropy_floor_count;
                 }
@@ -1739,7 +1767,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
                 if (use_pcgrad_local) {
                   const torch::Tensor weighted_task_loss = task_loss * sample_weight;
                   const torch::Tensor weighted_goal_critic_loss = config_.goal_critic.lambda_Zg * goal_loss * sample_weight;
-                  const torch::Tensor weighted_goal_actor_loss = config_.goal_critic.lambda_goal_actor * actor_goal_loss * sample_weight;
+                  const torch::Tensor weighted_goal_actor_loss = eff_gcrl_actor_coef * actor_goal_loss * sample_weight;
                   const int effective_accum = 1;
                   // Collect all active objectives for this chunk.
                   std::vector<std::pair<torch::Tensor, std::vector<CapturedGrad>*>> objective_losses;
@@ -1765,7 +1793,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
                   }
                 } else {
                   const torch::Tensor loss =
-                      task_loss + config_.goal_critic.lambda_Zg * goal_loss + config_.goal_critic.lambda_goal_actor * actor_goal_loss;
+                      task_loss + config_.goal_critic.lambda_Zg * goal_loss + eff_gcrl_actor_coef * actor_goal_loss;
                   (loss * sample_weight / static_cast<double>(optimizer_accumulation_steps_local) * cuda_amp_loss_scale_local).backward();
                   result.has_backward = true;
                 }
@@ -2048,6 +2076,22 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
     metrics.q_critic_loss = q_critic_loss_sum / denom;
   }
   metrics.effective_entropy_coef = static_cast<double>(effective_entropy_coef);
+
+  // Adaptive Centered Expected SARSA: push this update's mean entropy into the
+  // rolling window for the next controller pass, and surface controller signals.
+  if (metric_steps > 0 && config_.ppo.entropy_window > 0) {
+    entropy_window_.push_back(metrics.entropy);
+    while (static_cast<int>(entropy_window_.size()) > config_.ppo.entropy_window) {
+      entropy_window_.pop_front();
+    }
+  }
+  metrics.entropy_rolling_mean = last_entropy_mean_;
+  metrics.entropy_deficit_alpha = last_alpha_;
+  metrics.eff_gcrl_actor_coef = last_eff_gcrl_coef_;
+  metrics.eff_es_sigma = last_eff_es_sigma_;
+  metrics.eff_es_interval = last_eff_es_interval_;
+  metrics.steps_since_last_es = steps_since_last_es_;
+
   metrics.update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count();
 #ifdef PULSAR_HAS_CUDA
   if (prev_train_stream.has_value()) {
@@ -2061,7 +2105,10 @@ VRPOTrainer::ESPopulationFitness VRPOTrainer::evaluate_es_population(
     const torch::Tensor& A_stack,
     const torch::Tensor& B_stack,
     int update_index,
-    int wave_index) {
+    int wave_index,
+    float effective_sigma) {
+  const float sigma_used =
+      (effective_sigma > 0.0F) ? effective_sigma : config_.es_lora.sigma_ES;
   PULSAR_TRACE_SCOPE_CAT("trainer", "es_evaluate");
   torch::NoGradGuard no_grad_guard;
   const auto& es_cfg = config_.es_lora;
@@ -2346,7 +2393,7 @@ VRPOTrainer::ESPopulationFitness VRPOTrainer::evaluate_es_population(
                 &recurrent_state,
                 goal_values);
             torch::Tensor perturbed_logits = shard_actor->policy_eggroll_logits(
-                output.features, A_shard, B_shard, es_cfg.sigma_ES, goal_values);
+                output.features, A_shard, B_shard, sigma_used, goal_values);
 
             torch::Tensor base_actions = sample_masked_actions(
                 output.policy_logits, action_masks, true, nullptr, config_.ppo.policy_temperature);
@@ -2462,10 +2509,15 @@ VRPOTrainer::ESPopulationFitness VRPOTrainer::evaluate_es_population(
   return result;
 }
 
-void VRPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) {
+void VRPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics, float effective_sigma) {
   PULSAR_TRACE_SCOPE_CAT("trainer", "es_update");
   const auto es_start = std::chrono::steady_clock::now();
   const auto& es_cfg = config_.es_lora;
+  // Adaptive Centered Expected SARSA: use the alpha-scaled mutation noise if the
+  // caller computed one; otherwise fall back to the configured sigma_ES.
+  const float es_sigma_used =
+      (effective_sigma > 0.0F) ? effective_sigma : es_cfg.sigma_ES;
+  last_eff_es_sigma_ = static_cast<double>(es_sigma_used);
   const int pop = es_cfg.population_size;
   const int waves = es_cfg.virtual_population_waves;
   const int rank = es_cfg.rank;
@@ -2504,7 +2556,7 @@ void VRPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
       A_stack = torch::randn({pop, rank, in_features}, tensor_options);
       B_stack = torch::randn({pop, out_features, rank}, tensor_options);
     }
-    ESPopulationFitness wave_population = evaluate_es_population(A_stack, B_stack, update_index, wave);
+    ESPopulationFitness wave_population = evaluate_es_population(A_stack, B_stack, update_index, wave, es_sigma_used);
     population.fitness.insert(population.fitness.end(), wave_population.fitness.begin(), wave_population.fitness.end());
     population.reward.insert(population.reward.end(), wave_population.reward.begin(), wave_population.reward.end());
     population.winrate.insert(population.winrate.end(), wave_population.winrate.begin(), wave_population.winrate.end());
@@ -2616,7 +2668,7 @@ void VRPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) 
         weights.view({pop, 1, 1});
     delta_weight += weighted_updates.sum(0);
   }
-  delta_weight *= (es_cfg.eta_ES / es_cfg.sigma_ES) * perturb_scale / static_cast<float>(total_members);
+  delta_weight *= (es_cfg.eta_ES / es_sigma_used) * perturb_scale / static_cast<float>(total_members);
 
   double update_norm = static_cast<double>(delta_weight.norm().item<float>());
   double update_scale = 1.0;
@@ -3595,13 +3647,26 @@ TrainerBenchmarkMetrics VRPOTrainer::benchmark(int updates) {
         collection_actors_[i]->eval();
       }
     }
-    // Run ES-LoRA update.  In benchmark mode we ignore curriculum stage
-    // and purely follow es_interval so the user can dial ES frequency directly.
+    // Run ES-LoRA update.  Adaptive Centered Expected SARSA: the trigger is an
+    // accumulator over updates, and the effective interval shrinks toward
+    // es_interval_min as the entropy deficit alpha rises (the controller fires
+    // ES more frequently when the policy is collapsing).
     const int update_index = index + 1;
-    if (config_.es_lora.es_interval > 0 && update_index % config_.es_lora.es_interval == 0) {
+    const int es_base_bench = config_.es_lora.es_interval;
+    const int es_min_bench = std::min(es_base_bench, std::max(1, config_.es_lora.es_interval_min));
+    const int eff_es_interval_bench = std::max(
+        es_min_bench,
+        static_cast<int>(std::round(
+            static_cast<double>(es_base_bench) - last_alpha_ * (es_base_bench - es_min_bench))));
+    last_eff_es_interval_ = eff_es_interval_bench;
+    const float eff_es_sigma_bench = config_.es_lora.sigma_ES
+        * (1.0F + config_.es_lora.sigma_alpha_gain * static_cast<float>(last_alpha_));
+    steps_since_last_es_ += 1;
+    if (es_base_bench > 0 && steps_since_last_es_ >= eff_es_interval_bench) {
       TrainerMetrics es_metrics{};
       std::cout << "bench_es_update_start update=" << update_index << '/' << bounded_updates << '\n' << std::flush;
-      run_es_lora_update(update_index, es_metrics);
+      run_es_lora_update(update_index, es_metrics, eff_es_sigma_bench);
+      steps_since_last_es_ = 0;
       // Sync ES-LoRA weight changes to replica actors.
       if (compute_actors_.size() > 0) {
         sync_actor_to_replicas(actor_, compute_actors_);
@@ -3831,13 +3896,31 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       coll_metrics.self_play_snapshot_count = self_play_metrics.snapshot_count;
     }
 
-    if (config_.es_lora.es_interval > 0 && update_index % config_.es_lora.es_interval == 0) {
-      run_es_lora_update(update_index, coll_metrics);
+    // Adaptive Centered Expected SARSA: accumulator-based ES trigger with
+    // alpha-scaled interval and sigma.
+    const int es_base_main = config_.es_lora.es_interval;
+    const int es_min_main = std::min(es_base_main, std::max(1, config_.es_lora.es_interval_min));
+    const int eff_es_interval_main = std::max(
+        es_min_main,
+        static_cast<int>(std::round(
+            static_cast<double>(es_base_main) - last_alpha_ * (es_base_main - es_min_main))));
+    last_eff_es_interval_ = eff_es_interval_main;
+    const float eff_es_sigma_main = config_.es_lora.sigma_ES
+        * (1.0F + config_.es_lora.sigma_alpha_gain * static_cast<float>(last_alpha_));
+    steps_since_last_es_ += 1;
+    const bool es_fired_this_update =
+        (es_base_main > 0) && (steps_since_last_es_ >= eff_es_interval_main);
+    if (es_fired_this_update) {
+      run_es_lora_update(update_index, coll_metrics, eff_es_sigma_main);
+      steps_since_last_es_ = 0;
       // Sync ES-LoRA weight changes to replica actors.
       if (compute_actors_.size() > 0) {
         sync_actor_to_replicas(actor_, compute_actors_);
       }
     }
+    coll_metrics.eff_es_interval = last_eff_es_interval_;
+    coll_metrics.eff_es_sigma = last_eff_es_sigma_;
+    coll_metrics.steps_since_last_es = steps_since_last_es_;
 
 
     // 5. Clone snapshot for next iteration's collection after all work using
@@ -3872,6 +3955,9 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     coll_metrics.value_loss = train_metrics.value_loss;
     coll_metrics.entropy = train_metrics.entropy;
     coll_metrics.effective_entropy_coef = train_metrics.effective_entropy_coef;
+    coll_metrics.entropy_rolling_mean = train_metrics.entropy_rolling_mean;
+    coll_metrics.entropy_deficit_alpha = train_metrics.entropy_deficit_alpha;
+    coll_metrics.eff_gcrl_actor_coef = train_metrics.eff_gcrl_actor_coef;
     coll_metrics.grad_norm = train_metrics.grad_norm;
     coll_metrics.policy_approx_kl = train_metrics.policy_approx_kl;
     coll_metrics.policy_clip_fraction = train_metrics.policy_clip_fraction;
@@ -3973,6 +4059,14 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       wandb.add_metric("Optimization", "q_critic_loss", coll_metrics.q_critic_loss);
       wandb.add_metric("Optimization", "advantage_std", coll_metrics.advantage_std);
 
+      // Adaptive Centered Expected SARSA feedback controller signals.
+      wandb.add_metric("Exploration", "entropy_rolling_mean", coll_metrics.entropy_rolling_mean);
+      wandb.add_metric("Exploration", "entropy_deficit_alpha", coll_metrics.entropy_deficit_alpha);
+      wandb.add_metric("Exploration", "eff_gcrl_actor_coef", coll_metrics.eff_gcrl_actor_coef);
+      wandb.add_metric("Exploration", "eff_es_sigma", coll_metrics.eff_es_sigma);
+      wandb.add_metric("Exploration", "eff_es_interval", coll_metrics.eff_es_interval);
+      wandb.add_metric("Exploration", "steps_since_last_es", coll_metrics.steps_since_last_es);
+
       wandb.add_metric("System", "process_rss_mb", coll_metrics.process_rss_mb);
       wandb.add_metric("System", "process_peak_rss_mb", coll_metrics.process_peak_rss_mb);
       wandb.add_metric("System", "cgroup_memory_current_mb", coll_metrics.cgroup_memory_current_mb);
@@ -4029,7 +4123,7 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       for (const auto& [mode, count] : coll_metrics.mode_completed_episodes) {
         wandb.add_metric(mode, "mode_" + mode + "_completed_episodes", count);
       }
-      if (config_.es_lora.es_interval > 0 && update_index % config_.es_lora.es_interval == 0) {
+      if (es_fired_this_update) {
         wandb.add_metric("ES-LoRA", "es_fitness_mean", coll_metrics.es_fitness_mean);
         wandb.add_metric("ES-LoRA", "es_fitness_std", coll_metrics.es_fitness_std);
         wandb.add_metric("ES-LoRA", "es_fitness_best", coll_metrics.es_fitness_best);

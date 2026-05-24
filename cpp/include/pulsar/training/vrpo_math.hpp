@@ -49,6 +49,21 @@ torch::Tensor compute_q_boosted_gae(
     const torch::Tensor& bootstrap_mask = {},
     const torch::Tensor& bootstrap_v_from_q = {});
 
+// Adaptive Centered Expected SARSA(lambda) trace: identical recursion to compute_q_boosted_gae
+// except the TD residual subtracts V(s) instead of Q(s, a_t), centering the trace around the
+// action-independent baseline. The final advantage still adds the single-step Q(s,a) - V(s) gap
+// so the actor receives a low-variance multi-step trace plus the policy-weighted action advantage.
+torch::Tensor compute_centered_expected_sarsa_gae(
+    const torch::Tensor& q_values_taken,
+    const torch::Tensor& v_from_q,
+    const torch::Tensor& rewards,
+    const torch::Tensor& dones,
+    float gamma,
+    float gae_lambda,
+    const torch::Tensor& next_v_from_q = {},
+    const torch::Tensor& bootstrap_mask = {},
+    const torch::Tensor& bootstrap_v_from_q = {});
+
 // Renamed clipped VRPO policy objective
 torch::Tensor clipped_vrpo_policy_loss(
     const torch::Tensor& current_log_probs,

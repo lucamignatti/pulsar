@@ -230,6 +230,7 @@ void to_json(json& j, const GoalCriticConfig& value) {
       {"contrastive_batch_size", value.contrastive_batch_size},
       {"max_future_horizon", value.max_future_horizon},
       {"temperature", value.temperature},
+      {"gcrl_actor_alpha_gain", value.gcrl_actor_alpha_gain},
   };
 }
 
@@ -243,6 +244,7 @@ void from_json(const json& j, GoalCriticConfig& value) {
   value.contrastive_batch_size = j.value("contrastive_batch_size", 2048);
   value.max_future_horizon = j.value("max_future_horizon", 256);
   value.temperature = j.value("temperature", 0.1F);
+  value.gcrl_actor_alpha_gain = j.value("gcrl_actor_alpha_gain", 2.0F);
 }
 
 void to_json(json& j, const VRPOConfig& value) {
@@ -280,6 +282,8 @@ void to_json(json& j, const ESLoraConfig& value) {
       {"max_kl_mean", value.max_kl_mean},
       {"require_fitness_signal", value.require_fitness_signal},
       {"min_fitness_std", value.min_fitness_std},
+      {"sigma_alpha_gain", value.sigma_alpha_gain},
+      {"es_interval_min", value.es_interval_min},
   };
 }
 
@@ -312,6 +316,8 @@ void from_json(const json& j, ESLoraConfig& value) {
   value.min_fitness_std = j.value(
       "min_fitness_std",
       j.value("min_winrate_std", 1.0e-6F));
+  value.sigma_alpha_gain = j.value("sigma_alpha_gain", 1.0F);
+  value.es_interval_min = j.value("es_interval_min", 20);
 }
 
 void to_json(json& j, const PPOConfig& value) {
@@ -356,6 +362,8 @@ void to_json(json& j, const PPOConfig& value) {
       {"popart_enabled", value.popart_enabled},
       {"popart_beta", value.popart_beta},
       {"popart_epsilon", value.popart_epsilon},
+      {"ent_coef_min", value.ent_coef_min},
+      {"entropy_window", value.entropy_window},
   };
 }
 
@@ -400,6 +408,8 @@ void from_json(const json& j, PPOConfig& value) {
   value.popart_enabled = j.value("popart_enabled", false);
   value.popart_beta = j.value("popart_beta", 0.0001);
   value.popart_epsilon = j.value("popart_epsilon", 1e-4);
+  value.ent_coef_min = j.value("ent_coef_min", 0.025F);
+  value.entropy_window = j.value("entropy_window", 10);
 }
 
 void to_json(json& j, const SelfPlayLeagueConfig& value) {

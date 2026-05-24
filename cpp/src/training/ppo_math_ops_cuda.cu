@@ -227,6 +227,45 @@ __global__ void q_boosted_gae_kernel(
   }
 }
 
+__global__ void centered_expected_sarsa_gae_kernel(
+    const float* __restrict__ q_values_taken,
+    const float* __restrict__ v_from_q,
+    const float* __restrict__ rewards,
+    const float* __restrict__ dones,
+    const float* __restrict__ next_v_from_q,
+    const float* __restrict__ bootstrap_mask,
+    const float* __restrict__ bootstrap_v_from_q,
+    float* __restrict__ advantages,
+    int steps,
+    int agents,
+    float gamma,
+    float lambda,
+    bool has_next_v_from_q,
+    bool has_bootstrap_mask,
+    bool has_bootstrap_v_from_q) {
+  const int a = blockIdx.x * blockDim.x + threadIdx.x;
+  if (a >= agents) return;
+  float last_gae = 0.0F;
+  const float boundary = has_next_v_from_q ? next_v_from_q[a] : 0.0F;
+  for (int t = steps - 1; t >= 0; --t) {
+    const int idx = t * agents + a;
+    float next_v = (t + 1 < steps) ? v_from_q[idx + agents] : boundary;
+    const float done = dones[idx];
+    const float non_terminal = 1.0F - done;
+    float delta_mult = non_terminal;
+    if (has_bootstrap_mask && bootstrap_mask[idx] > 0.5F) {
+      if (has_bootstrap_v_from_q) {
+        next_v = bootstrap_v_from_q[idx];
+      }
+      delta_mult = 1.0F;
+    }
+    // Centered residual: subtract V(s) instead of Q(s, a_t).
+    const float delta = rewards[idx] + gamma * next_v * delta_mult - v_from_q[idx];
+    last_gae = delta + gamma * lambda * non_terminal * last_gae;
+    advantages[idx] = q_values_taken[idx] - v_from_q[idx] + last_gae;
+  }
+}
+
 __global__ void normalize_partial_kernel(
     const float* __restrict__ advantages,
     const float* __restrict__ active,
@@ -427,6 +466,41 @@ at::Tensor compute_q_boosted_gae_cuda(
   at::Tensor advantages = at::empty_like(q_values_taken);
   constexpr int kThreads = 256;
   q_boosted_gae_kernel<<<blocks_for(agents, kThreads), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+      q_values_taken.data_ptr<float>(),
+      v_from_q.data_ptr<float>(),
+      rewards.data_ptr<float>(),
+      dones.data_ptr<float>(),
+      next_v_from_q.defined() ? next_v_from_q.data_ptr<float>() : nullptr,
+      bootstrap_mask.defined() ? bootstrap_mask.data_ptr<float>() : nullptr,
+      bootstrap_v_from_q.defined() ? bootstrap_v_from_q.data_ptr<float>() : nullptr,
+      advantages.data_ptr<float>(),
+      steps,
+      agents,
+      gamma,
+      gae_lambda,
+      next_v_from_q.defined(),
+      bootstrap_mask.defined(),
+      bootstrap_v_from_q.defined());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return advantages;
+}
+
+at::Tensor compute_centered_expected_sarsa_gae_cuda(
+    const at::Tensor& q_values_taken,
+    const at::Tensor& v_from_q,
+    const at::Tensor& rewards,
+    const at::Tensor& dones,
+    float gamma,
+    float gae_lambda,
+    const at::Tensor& next_v_from_q,
+    const at::Tensor& bootstrap_mask,
+    const at::Tensor& bootstrap_v_from_q) {
+  const c10::cuda::CUDAGuard guard(q_values_taken.device());
+  const int steps = static_cast<int>(q_values_taken.size(0));
+  const int agents = static_cast<int>(q_values_taken.size(1));
+  at::Tensor advantages = at::empty_like(q_values_taken);
+  constexpr int kThreads = 256;
+  centered_expected_sarsa_gae_kernel<<<blocks_for(agents, kThreads), kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
       q_values_taken.data_ptr<float>(),
       v_from_q.data_ptr<float>(),
       rewards.data_ptr<float>(),
