@@ -3109,7 +3109,8 @@ void VRPOTrainer::collect_rollout(
             q_all = q_normalizer_.denormalize(q_all);
           }
           torch::Tensor policy_probs = torch::softmax(
-              apply_action_mask_to_logits(final_output.policy_logits, final_masks), -1);
+              apply_action_mask_to_logits(
+                  final_output.policy_logits / std::max(config_.ppo.policy_temperature, 1.0e-6F), final_masks), -1);
           torch::Tensor v_from_q = (policy_probs * q_all).sum(-1);
           final_v_from_q.push_back(v_from_q.to(device_));
         }
@@ -3164,19 +3165,6 @@ void VRPOTrainer::collect_rollout(
           goal_values);
       actions = sample_masked_actions(
           output.policy_logits, action_masks, false, &action_log_probs, config_.ppo.policy_temperature);
-      if (self_play_manager_ && self_play_manager_->has_snapshots()) {
-        torch::Tensor snapshot_actions;
-        self_play_manager_->infer_opponent_actions(
-            rollout_actor,
-            raw_obs,
-            action_masks,
-            episode_starts,
-            snapshot_ids,
-            output.encoded,
-            &snapshot_actions,
-            nullptr);
-        actions = torch::where(snapshot_ids >= 0, snapshot_actions.to(actions.device()), actions);
-      }
     }
     if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
       torch::cuda::synchronize();

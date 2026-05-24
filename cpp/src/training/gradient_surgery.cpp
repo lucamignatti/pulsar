@@ -252,20 +252,21 @@ void apply_pcgrad_multi(std::vector<std::vector<CapturedGrad>>& groups) {
     flats.push_back(torch::cat(parts, 0));
   }
 
+  const std::vector<torch::Tensor> orig_flats = flats;
   for (size_t i = 0; i < groups.size(); ++i) {
     for (size_t j = 0; j < groups.size(); ++j) {
       if (i == j) continue;
-      const torch::Tensor dot = flats[i].dot(flats[j]);
+      const torch::Tensor dot = flats[i].dot(orig_flats[j]);
       if (!torch::isfinite(dot).item<bool>()) {
         continue;
       }
       if (dot.item<float>() < 0.0F) {
-        const torch::Tensor norm_j_sq = flats[j].dot(flats[j]).clamp_min(1.0e-12F);
+        const torch::Tensor norm_j_sq = orig_flats[j].dot(orig_flats[j]).clamp_min(1.0e-12F);
         if (!torch::isfinite(norm_j_sq).item<bool>()) {
           continue;
         }
         const torch::Tensor coeff = dot / norm_j_sq;
-        flats[i] = flats[i] - coeff * flats[j];
+        flats[i] = flats[i] - coeff * orig_flats[j];
       }
     }
   }

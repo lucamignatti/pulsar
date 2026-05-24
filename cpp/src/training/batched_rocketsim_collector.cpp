@@ -172,7 +172,7 @@ void BatchedRocketSimCollector::set_self_play_assignment_fn(AssignmentFn assignm
   for (std::size_t env_idx = 0; env_idx < envs_.size(); ++env_idx) {
     assign_env(env_idx, envs_[env_idx].reset_seed);
   }
-  current_buffers_.episode_starts.zero_();
+  current_buffers_.episode_starts.fill_(1.0F);
   rebuild_host_buffers(current_buffers_, nullptr);
 }
 
@@ -529,7 +529,7 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         dones_ptr[global_idx] = done ? 1.0F : 0.0F;
         terminated_ptr[global_idx] = is_terminated ? 1.0F : 0.0F;
         truncated_ptr[global_idx] = is_truncated ? 1.0F : 0.0F;
-        host_bootstrap_truncated_.data_ptr<float>()[global_idx] = (is_truncated && !is_terminated) ? 1.0F : 0.0F;
+        host_bootstrap_truncated_.data_ptr<float>()[global_idx] = 0.0F;
         reset_needed = reset_needed || done;
       }
 

@@ -3563,7 +3563,8 @@ void APPOTrainer::collect_rollout(
             }
             torch::Tensor q_taken = q_all.gather(1, actions.unsqueeze(1)).squeeze(1);
             torch::Tensor policy_probs = torch::softmax(
-                apply_action_mask_to_logits(output.policy_logits, action_masks), -1);
+                apply_action_mask_to_logits(
+                    output.policy_logits / std::max(config_.ppo.policy_temperature, 1.0e-6F), action_masks), -1);
             torch::Tensor v_from_q = (policy_probs * q_all).sum(-1);
 
             all_values["q_taken"] = q_taken.to(torch::kCPU);
@@ -3701,7 +3702,8 @@ void APPOTrainer::collect_rollout(
             q_all = q_normalizer_.denormalize(q_all);
           }
           torch::Tensor policy_probs = torch::softmax(
-              apply_action_mask_to_logits(final_output.policy_logits, final_masks), -1);
+              apply_action_mask_to_logits(
+                  final_output.policy_logits / std::max(config_.ppo.policy_temperature, 1.0e-6F), final_masks), -1);
           torch::Tensor v_from_q = (policy_probs * q_all).sum(-1);
           final_v_from_q.push_back(v_from_q.to(device_));
         }
@@ -3755,19 +3757,6 @@ void APPOTrainer::collect_rollout(
           &rollout_recurrent_states[0],
           goal_values);
       actions = sample_masked_actions(output.policy_logits, action_masks, false, &action_log_probs);
-      if (self_play_manager_ && self_play_manager_->has_snapshots()) {
-        torch::Tensor snapshot_actions;
-        self_play_manager_->infer_opponent_actions(
-            rollout_actor,
-            raw_obs,
-            action_masks,
-            episode_starts,
-            snapshot_ids,
-            output.encoded,
-            &snapshot_actions,
-            nullptr);
-        actions = torch::where(snapshot_ids >= 0, snapshot_actions.to(actions.device()), actions);
-      }
     }
     if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
       torch::cuda::synchronize();
@@ -3902,7 +3891,8 @@ void APPOTrainer::collect_rollout(
       }
       torch::Tensor q_taken = q_all.gather(1, actions.unsqueeze(1)).squeeze(1);
       torch::Tensor policy_probs = torch::softmax(
-          apply_action_mask_to_logits(output.policy_logits, action_masks), -1);
+          apply_action_mask_to_logits(
+              output.policy_logits / std::max(config_.ppo.policy_temperature, 1.0e-6F), action_masks), -1);
       torch::Tensor v_from_q = (policy_probs * q_all).sum(-1);
 
       all_values["q_taken"] = q_taken.to(torch::kCPU);
@@ -3962,7 +3952,8 @@ void APPOTrainer::collect_rollout(
         q_all = q_normalizer_.denormalize(q_all);
       }
       torch::Tensor policy_probs = torch::softmax(
-          apply_action_mask_to_logits(final_output.policy_logits, final_masks), -1);
+          apply_action_mask_to_logits(
+              final_output.policy_logits / std::max(config_.ppo.policy_temperature, 1.0e-6F), final_masks), -1);
       torch::Tensor v_from_q = (policy_probs * q_all).sum(-1);
       bootstrap_values["v_from_q"] = v_from_q;
     }
