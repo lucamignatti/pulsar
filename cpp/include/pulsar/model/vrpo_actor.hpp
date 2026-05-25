@@ -23,8 +23,6 @@ struct ActorStepOutput {
   torch::Tensor value_win_logits;
   torch::Tensor features;
   torch::Tensor q_values;
-  torch::Tensor value_win_logits_sparse;
-  torch::Tensor q_values_sparse;
 };
 
 struct ActorSequenceOutput {
@@ -33,8 +31,6 @@ struct ActorSequenceOutput {
   torch::Tensor value_win_logits;
   torch::Tensor features;
   torch::Tensor q_values;
-  torch::Tensor value_win_logits_sparse;
-  torch::Tensor q_values_sparse;
 };
 
 /**
@@ -247,8 +243,6 @@ class VRPOActorImpl : public torch::nn::Module {
   [[nodiscard]] std::vector<std::string> enabled_critic_heads() const;
   torch::Tensor value_head_forward(const torch::Tensor& encoded);
   torch::Tensor q_head_forward(const torch::Tensor& encoded);
-  torch::Tensor value_head_sparse_forward(const torch::Tensor& encoded);
-  torch::Tensor q_head_sparse_forward(const torch::Tensor& encoded);
   torch::Tensor policy_head_forward(const torch::Tensor& features);
   SparseRewardPredictor& predictor_head(std::size_t channel_index);
   const SparseRewardPredictor& predictor_head(std::size_t channel_index) const;
@@ -280,7 +274,6 @@ class VRPOActorImpl : public torch::nn::Module {
   LoRALinear policy_lora_{nullptr};
 
   torch::nn::Sequential q_head_{nullptr};
-  torch::nn::Sequential q_head_sparse_{nullptr};
   GoalCritic goal_critic_{nullptr};
 
   std::vector<SparseRewardPredictor> predictor_heads_{};

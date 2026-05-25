@@ -254,7 +254,6 @@ void to_json(json& j, const VRPOConfig& value) {
       {"q_critic_coef", value.q_critic_coef},
       {"q_value_abs_cap", value.q_value_abs_cap},
       {"q_target_abs_cap", value.q_target_abs_cap},
-      {"value_coef_sparse", value.value_coef_sparse},
   };
 }
 
@@ -263,7 +262,6 @@ void from_json(const json& j, VRPOConfig& value) {
   value.q_critic_coef = j.value("q_critic_coef", 0.5F);
   value.q_value_abs_cap = j.value("q_value_abs_cap", 50.0F);
   value.q_target_abs_cap = j.value("q_target_abs_cap", 50.0F);
-  value.value_coef_sparse = j.value("value_coef_sparse", 0.5F);
 }
 
 void to_json(json& j, const ESLoraConfig& value) {
@@ -761,9 +759,6 @@ void validate_experiment_config(const ExperimentConfig& config) {
   }
   if (config.vrpo.q_target_abs_cap <= 0.0F) {
     throw std::invalid_argument("vrpo.q_target_abs_cap must be positive.");
-  }
-  if (config.vrpo.value_coef_sparse < 0.0F) {
-    throw std::invalid_argument("vrpo.value_coef_sparse must be non-negative.");
   }
   if (config.env.team_size <= 0 || config.env.team_size > 4) {
     throw std::invalid_argument("env.team_size must be between 1 and 4.");

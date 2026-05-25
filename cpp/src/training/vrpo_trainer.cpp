@@ -338,7 +338,7 @@ RolloutStorage make_rollout_storage(
     int num_agents,
     int action_dim,
     bool pin_memory) {
-  std::vector<std::string> heads = {"extrinsic", "q_taken", "v_from_q", "gameplay", "mechanic", "v_from_q_sparse", "q_taken_sparse"};
+  std::vector<std::string> heads = {"extrinsic", "q_taken", "v_from_q", "gameplay", "mechanic"};
   return RolloutStorage(
       config.ppo.rollout_length,
       num_agents,
@@ -488,7 +488,6 @@ void append_metrics_line(
       {"effective_entropy_coef", metrics.effective_entropy_coef},
       {"self_play_snapshot_count", metrics.self_play_snapshot_count},
       {"q_critic_loss", metrics.q_critic_loss},
-      {"q_critic_loss_sparse", metrics.q_critic_loss_sparse},
       {"advantage_std", metrics.advantage_std},
       {"entropy_rolling_mean", metrics.entropy_rolling_mean},
       {"entropy_deficit_alpha", metrics.entropy_deficit_alpha},
@@ -1217,7 +1216,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
   double policy_clip_fraction_sum = 0.0;
   double goal_critic_loss_sum = 0.0;
   double q_critic_loss_sum = 0.0;
-  double q_critic_loss_sparse_sum = 0.0;
   double goal_score_sum = 0.0;
   double sampled_goal_distance_sum = 0.0;
   double policy_log_ratio_abs_max = 0.0;
@@ -1329,14 +1327,10 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
   const torch::Tensor rollout_bootstrap_truncated = rollout.bootstrap_truncated.narrow(0, 0, rollout_steps).to(device_);
 
   torch::Tensor active_mask = rollout.learner_active.narrow(0, 0, rollout_steps).to(device_) > 0.5F;
-  torch::Tensor sparse_advantages;
   torch::Tensor normalized_advantages;
   torch::Tensor bounded_q_taken;
   torch::Tensor bounded_v_from_q;
-  torch::Tensor bounded_q_taken_sparse;
-  torch::Tensor bounded_v_from_q_sparse;
   torch::Tensor q_returns;
-  torch::Tensor q_returns_sparse;
   {
     PULSAR_TRACE_SCOPE_CAT("trainer", "update_gae");
     const auto gae_start = std::chrono::steady_clock::now();
@@ -1344,7 +1338,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
       std::cout << "bench_update_gae_start\n" << std::flush;
     }
     torch::Tensor terminal_v_from_q;
-    torch::Tensor terminal_v_from_q_sparse;
     const float q_target_abs_cap = config_.vrpo.q_target_abs_cap;
     if (rollout_bootstrap_truncated.any().item<bool>()) {
       torch::NoGradGuard no_grad;
@@ -1353,7 +1346,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
       const int total_term_samples = rollout_steps * total_agents;
       const int max_term_batch = effective_max_forward_samples(config_.model, device_);
       std::vector<torch::Tensor> term_v_from_q_chunks;
-      std::vector<torch::Tensor> term_v_from_q_sparse_chunks;
       for (int offset = 0; offset < total_term_samples; offset += max_term_batch) {
         int batch = std::min(max_term_batch, total_term_samples - offset);
         auto chunk = actor_normalizer_.normalize(term_flat.slice(0, offset, offset + batch).to(device_));
@@ -1361,28 +1353,19 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
         auto chunk_out = actor_->forward_step(chunk, chunk_goal);
         auto term_logits = chunk_out.policy_logits;
         auto term_q = chunk_out.q_values;
-        auto term_q_sparse = chunk_out.q_values_sparse;
         auto term_probs = torch::softmax(term_logits / std::max(config_.ppo.policy_temperature, 1.0e-6F), -1);
         auto term_v = (term_probs * term_q).sum(-1);
-        auto term_v_sparse = (term_probs * term_q_sparse).sum(-1);
         if (config_.ppo.popart_enabled) {
           term_v = q_normalizer_.denormalize(term_v);
-          term_v_sparse = q_normalizer_.denormalize(term_v_sparse);
         }
         term_v_from_q_chunks.push_back(bound_vrpo_q_target(term_v, q_target_abs_cap));
-        term_v_from_q_sparse_chunks.push_back(bound_vrpo_q_target(term_v_sparse, q_target_abs_cap));
       }
       auto term_v_from_q_flat = torch::cat(term_v_from_q_chunks, 0);
-      auto term_v_from_q_sparse_flat = torch::cat(term_v_from_q_sparse_chunks, 0);
       terminal_v_from_q = term_v_from_q_flat.reshape({rollout_steps, total_agents});
-      terminal_v_from_q_sparse = term_v_from_q_sparse_flat.reshape({rollout_steps, total_agents});
     }
     auto final_values_map = rollout.final_values();
     torch::Tensor final_v_from_q = final_values_map.count("v_from_q") && final_values_map.at("v_from_q").defined()
         ? bound_vrpo_q_target(final_values_map.at("v_from_q").to(device_), q_target_abs_cap)
-        : torch::Tensor{};
-    torch::Tensor final_v_from_q_sparse = final_values_map.count("v_from_q_sparse") && final_values_map.at("v_from_q_sparse").defined()
-        ? bound_vrpo_q_target(final_values_map.at("v_from_q_sparse").to(device_), q_target_abs_cap)
         : torch::Tensor{};
 
     bounded_q_taken = bound_vrpo_q_target(
@@ -1392,14 +1375,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
         all_values.at("v_from_q").narrow(0, 0, rollout_steps).to(device_),
         q_target_abs_cap);
 
-    bounded_q_taken_sparse = bound_vrpo_q_target(
-        all_values.at("q_taken_sparse").narrow(0, 0, rollout_steps).to(device_),
-        q_target_abs_cap);
-    bounded_v_from_q_sparse = bound_vrpo_q_target(
-        all_values.at("v_from_q_sparse").narrow(0, 0, rollout_steps).to(device_),
-        q_target_abs_cap);
-
-    // 1. Critic GAE (shaped)
     torch::Tensor shaped_advantages = compute_centered_expected_sarsa_gae(
         bounded_q_taken,
         bounded_v_from_q,
@@ -1411,25 +1386,11 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
         rollout_bootstrap_truncated,
         terminal_v_from_q);
     shaped_advantages = bound_vrpo_q_target(shaped_advantages, q_target_abs_cap);
+    normalized_advantages = normalize_advantage(shaped_advantages, active_mask);
     q_returns = bound_vrpo_q_target(shaped_advantages + bounded_v_from_q.detach(), config_.vrpo.q_target_abs_cap);
 
-    // 2. Actor GAE (sparse)
-    sparse_advantages = compute_centered_expected_sarsa_gae(
-        bounded_q_taken_sparse,
-        bounded_v_from_q_sparse,
-        extrinsic_rewards,
-        rollout_dones,
-        config_.ppo.gamma,
-        config_.ppo.gae_lambda,
-        final_v_from_q_sparse,
-        rollout_bootstrap_truncated,
-        terminal_v_from_q_sparse);
-    sparse_advantages = bound_vrpo_q_target(sparse_advantages, q_target_abs_cap);
-    normalized_advantages = normalize_advantage(sparse_advantages, active_mask);
-    q_returns_sparse = bound_vrpo_q_target(sparse_advantages + bounded_v_from_q_sparse.detach(), config_.vrpo.q_target_abs_cap);
-
     if (active_mask.any().item<bool>()) {
-      metrics.advantage_std = sparse_advantages.index({active_mask}).std().item<double>();
+      metrics.advantage_std = shaped_advantages.index({active_mask}).std().item<double>();
     } else {
       metrics.advantage_std = 0.0;
     }
@@ -1439,7 +1400,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
       std::cout << "bench_update_gae_done seconds=" << gae_seconds << '\n' << std::flush;
     }
   }
-  torch::Tensor sparse_returns = sparse_advantages + extrinsic_values.detach();
 
   int completed_minibatches = 0;
   for (int epoch = 0; epoch < config_.ppo.update_epochs; ++epoch) {
@@ -1560,7 +1520,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
           double goal_score = 0.0;
           double sampled_goal_dist = 0.0;
           double q_critic_loss_sum = 0.0;
-          double q_critic_loss_sparse_sum = 0.0;
           double fwd_bwd_seconds = 0.0;
           bool has_backward = false;
           std::int64_t active_count = 0;
@@ -1584,7 +1543,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
           const torch::Device gpu_dev = compute_devices_[g];
           VRPOActor gpu_act = (g == 0) ? actor_ : compute_actors_[g - 1];
 
-          gpu_futures.push_back(task_pool_->submit([=, &rollout, &normalized_advantages, &sparse_returns, &q_returns, &q_returns_sparse, &bounded_q_taken_sparse,
+          gpu_futures.push_back(task_pool_->submit([=, &rollout, &normalized_advantages, &q_returns,
               &mode_agent_indices, &effective_entropy_coef, &effective_entropy_floor_coef, this]() mutable -> GpuTaskResult {
             GpuTaskResult result;
             std::vector<CapturedGrad>& gpu_task_group = result.task_group;
@@ -1600,7 +1559,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
             torch::Tensor goal_score_metric;
             torch::Tensor sampled_goal_dist_metric;
             torch::Tensor q_critic_loss_metric;
-            torch::Tensor q_critic_loss_sparse_metric;
             auto add_metric = [](torch::Tensor& dst, const torch::Tensor& value, double weight) {
               const torch::Tensor term = value.detach().to(torch::kFloat32) * weight;
               dst = dst.defined() ? dst + term : term;
@@ -1652,13 +1610,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
               if (gpu_dev != device_) {
                 mode_gpu_advantages_mb = mode_gpu_advantages_mb.to(gpu_dev);
               }
-              torch::Tensor mode_gpu_returns_mb = index_select_on_source_device(
-                  sparse_returns.narrow(0, 0, rollout_steps_local),
-                  1,
-                  gpu_micro_indices);
-              if (gpu_dev != device_) {
-                mode_gpu_returns_mb = mode_gpu_returns_mb.to(gpu_dev);
-              }
               torch::Tensor mode_gpu_q_returns_mb = index_select_on_source_device(
                   q_returns.narrow(0, 0, rollout_steps_local),
                   1,
@@ -1668,18 +1619,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
               }
               torch::Tensor mode_gpu_old_q_taken_mb = index_select_on_source_device(
                   bounded_q_taken.narrow(0, 0, rollout_steps_local),
-                  1,
-                  gpu_micro_indices).to(gpu_dev);
-
-              torch::Tensor mode_gpu_q_returns_sparse_mb = index_select_on_source_device(
-                  q_returns_sparse.narrow(0, 0, rollout_steps_local),
-                  1,
-                  gpu_micro_indices);
-              if (gpu_dev != device_) {
-                mode_gpu_q_returns_sparse_mb = mode_gpu_q_returns_sparse_mb.to(gpu_dev);
-              }
-              torch::Tensor mode_gpu_old_q_taken_sparse_mb = index_select_on_source_device(
-                  bounded_q_taken_sparse.narrow(0, 0, rollout_steps_local),
                   1,
                   gpu_micro_indices).to(gpu_dev);
 
@@ -1797,37 +1736,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
                 }
                 add_metric(q_critic_loss_metric, value_loss, active_samples);
 
-                torch::Tensor chunk_q_returns_sparse = mode_gpu_q_returns_sparse_mb.narrow(0, chunk_start, loss_steps).reshape({samples});
-                torch::Tensor active_q_returns_sparse = all_active ? chunk_q_returns_sparse.to(torch::kFloat32) : chunk_q_returns_sparse.index({flat_active}).to(torch::kFloat32);
-
-                torch::Tensor q_all_new_sparse = output.q_values_sparse.reshape({samples, config_.model.action_dim});
-                torch::Tensor active_q_all_sparse = all_active ? q_all_new_sparse.to(torch::kFloat32) : q_all_new_sparse.index({flat_active}).to(torch::kFloat32);
-                torch::Tensor active_q_taken_sparse = active_q_all_sparse.gather(1, active_actions.unsqueeze(1)).squeeze(1);
-
-                torch::Tensor chunk_old_q_taken_sparse = mode_gpu_old_q_taken_sparse_mb.narrow(0, chunk_start, loss_steps).reshape({samples});
-                torch::Tensor active_old_q_taken_sparse = all_active ? chunk_old_q_taken_sparse.to(torch::kFloat32) : chunk_old_q_taken_sparse.index({flat_active}).to(torch::kFloat32);
-
-                torch::Tensor target_q_sparse = active_q_returns_sparse;
-                torch::Tensor old_q_taken_sparse = active_old_q_taken_sparse;
-                if (config_.ppo.popart_enabled) {
-                  target_q_sparse = q_normalizer_.normalize(target_q_sparse);
-                  old_q_taken_sparse = q_normalizer_.normalize(old_q_taken_sparse);
-                }
-
-                torch::Tensor value_loss_sparse;
-                if (config_.ppo.value_clipping) {
-                  torch::Tensor loss_unclipped = elementwise_smooth_l1_loss(active_q_taken_sparse, target_q_sparse, config_.ppo.value_loss_delta);
-                  torch::Tensor clipped_q_taken_sparse = old_q_taken_sparse + torch::clamp(
-                      active_q_taken_sparse - old_q_taken_sparse,
-                      -config_.ppo.value_clip_range,
-                      config_.ppo.value_clip_range);
-                  torch::Tensor loss_clipped = elementwise_smooth_l1_loss(clipped_q_taken_sparse, target_q_sparse, config_.ppo.value_loss_delta);
-                  value_loss_sparse = torch::maximum(loss_unclipped, loss_clipped).mean();
-                } else {
-                  value_loss_sparse = smooth_l1_value_loss(active_q_taken_sparse, target_q_sparse, config_.ppo.value_loss_delta);
-                }
-                add_metric(q_critic_loss_sparse_metric, value_loss_sparse, active_samples);
-
                 torch::Tensor goal_loss = torch::zeros({}, active_advantages.options());
                 torch::Tensor actor_goal_loss = torch::zeros({}, active_advantages.options());
                 torch::Tensor chunk_goal_score = torch::zeros({}, active_advantages.options());
@@ -1876,7 +1784,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
                 }
 
                 const auto sample_weight = active_samples / mode_total_active_local;
-                const torch::Tensor task_loss = policy_loss + config_.vrpo.q_critic_coef * value_loss + config_.vrpo.value_coef_sparse * value_loss_sparse + entropy_floor_loss - effective_entropy_coef * entropy;
+                const torch::Tensor task_loss = policy_loss + config_.vrpo.q_critic_coef * value_loss + entropy_floor_loss - effective_entropy_coef * entropy;
 
                 // Guard the gradient accumulator from NaN/Inf losses.  Even with
                 // bounded Q targets, clamped log-ratios and capped Q-head outputs,
@@ -1950,7 +1858,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
                 scalar_or_zero(goal_score_metric),
                 scalar_or_zero(sampled_goal_dist_metric),
                 scalar_or_zero(q_critic_loss_metric),
-                scalar_or_zero(q_critic_loss_sparse_metric),
             }).to(torch::kCPU);
             const float* metric_data = packed_metrics.data_ptr<float>();
             result.policy_loss_sum = metric_data[0];
@@ -1963,7 +1870,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
             result.goal_score = metric_data[7];
             result.sampled_goal_dist = metric_data[8];
             result.q_critic_loss_sum = metric_data[9];
-            result.q_critic_loss_sparse_sum = metric_data[10];
             result.fwd_bwd_seconds =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - task_compute_start).count();
             return result;
@@ -1990,7 +1896,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
           goal_score_sum += task_result.goal_score;
           sampled_goal_distance_sum += task_result.sampled_goal_dist;
           q_critic_loss_sum += task_result.q_critic_loss_sum;
-          q_critic_loss_sparse_sum += task_result.q_critic_loss_sparse_sum;
           metrics.forward_backward_seconds += task_result.fwd_bwd_seconds;
           accumulated_has_backward = accumulated_has_backward || task_result.has_backward;
           metric_steps += task_result.active_count;
@@ -2208,7 +2113,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
     metrics.mean_goal_score = goal_score_sum / denom;
     metrics.mean_sampled_goal_distance = sampled_goal_distance_sum / denom;
     metrics.q_critic_loss = q_critic_loss_sum / denom;
-    metrics.q_critic_loss_sparse = q_critic_loss_sparse_sum / denom;
   }
   metrics.effective_entropy_coef = static_cast<double>(effective_entropy_coef);
 
@@ -3229,23 +3133,17 @@ void VRPOTrainer::collect_rollout(
           all_values["extrinsic"] = sampled_value;
           {
             torch::Tensor q_all = output.q_values;
-            torch::Tensor q_all_sparse = output.q_values_sparse;
             if (config_.ppo.popart_enabled) {
               q_all = q_normalizer_.denormalize(q_all);
-              q_all_sparse = q_normalizer_.denormalize(q_all_sparse);
             }
             torch::Tensor q_taken = q_all.gather(1, actions.unsqueeze(1)).squeeze(1);
-            torch::Tensor q_taken_sparse = q_all_sparse.gather(1, actions.unsqueeze(1)).squeeze(1);
             torch::Tensor policy_probs = torch::softmax(
                 apply_action_mask_to_logits(
                     output.policy_logits / std::max(config_.ppo.policy_temperature, 1.0e-6F), action_masks), -1);
             torch::Tensor v_from_q = (policy_probs * q_all).sum(-1);
-            torch::Tensor v_from_q_sparse = (policy_probs * q_all_sparse).sum(-1);
 
             all_values["q_taken"] = q_taken;
             all_values["v_from_q"] = v_from_q;
-            all_values["q_taken_sparse"] = q_taken_sparse;
-            all_values["v_from_q_sparse"] = v_from_q_sparse;
           }
           std::unordered_map<std::string, torch::Tensor> all_rewards;
           all_rewards["extrinsic"] = extrinsic_rewards_host;
@@ -3564,23 +3462,17 @@ void VRPOTrainer::collect_rollout(
     all_values["extrinsic"] = sampled_value;
     {
       torch::Tensor q_all = output.q_values;
-      torch::Tensor q_all_sparse = output.q_values_sparse;
       if (config_.ppo.popart_enabled) {
         q_all = q_normalizer_.denormalize(q_all);
-        q_all_sparse = q_normalizer_.denormalize(q_all_sparse);
       }
       torch::Tensor q_taken = q_all.gather(1, actions.unsqueeze(1)).squeeze(1);
-      torch::Tensor q_taken_sparse = q_all_sparse.gather(1, actions.unsqueeze(1)).squeeze(1);
       torch::Tensor policy_probs = torch::softmax(
           apply_action_mask_to_logits(
               output.policy_logits / std::max(config_.ppo.policy_temperature, 1.0e-6F), action_masks), -1);
       torch::Tensor v_from_q = (policy_probs * q_all).sum(-1);
-      torch::Tensor v_from_q_sparse = (policy_probs * q_all_sparse).sum(-1);
 
       all_values["q_taken"] = q_taken;
       all_values["v_from_q"] = v_from_q;
-      all_values["q_taken_sparse"] = q_taken_sparse;
-      all_values["v_from_q_sparse"] = v_from_q_sparse;
     }
     sampled_value_sum = sampled_value_sum + sampled_value.to(torch::kFloat64).sum();
     sampled_value_count += sampled_value.numel();
@@ -4176,7 +4068,6 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     coll_metrics.mean_goal_score = train_metrics.mean_goal_score;
     coll_metrics.mean_sampled_goal_distance = train_metrics.mean_sampled_goal_distance;
     coll_metrics.q_critic_loss = train_metrics.q_critic_loss;
-    coll_metrics.q_critic_loss_sparse = train_metrics.q_critic_loss_sparse;
     coll_metrics.advantage_std = train_metrics.advantage_std;
     coll_metrics.predictor_loss = train_metrics.predictor_loss;
     coll_metrics.predictor_delta = train_metrics.predictor_delta;
@@ -4268,7 +4159,6 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       wandb.add_metric("Optimization", "effective_entropy_coef", coll_metrics.effective_entropy_coef);
       wandb.add_metric("Optimization", "self_play_snapshot_count", coll_metrics.self_play_snapshot_count);
       wandb.add_metric("Optimization", "q_critic_loss", coll_metrics.q_critic_loss);
-      wandb.add_metric("Optimization", "q_critic_loss_sparse", coll_metrics.q_critic_loss_sparse);
       wandb.add_metric("Optimization", "advantage_std", coll_metrics.advantage_std);
 
       // Adaptive Centered Expected SARSA feedback controller signals.

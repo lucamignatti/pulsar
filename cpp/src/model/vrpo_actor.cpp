@@ -513,13 +513,6 @@ VRPOActorImpl::VRPOActorImpl(
           torch::nn::Linear(vrpo_config_.q_critic_hidden_dim, config_.action_dim)
       ));
 
-  q_head_sparse_ = register_module("q_head_sparse",
-      torch::nn::Sequential(
-          torch::nn::Linear(feature_dim_, vrpo_config_.q_critic_hidden_dim),
-          torch::nn::SiLU(),
-          torch::nn::Linear(vrpo_config_.q_critic_hidden_dim, config_.action_dim)
-      ));
-
   goal_critic_ = GoalCritic(feature_dim_, config_.action_dim, goal_critic_config_.embedding_dim, goal_critic_config_.hidden_dim, goal_critic_config_.goal_dim);
   register_module("goal_critic", goal_critic_);
 
@@ -622,12 +615,9 @@ ActorStepOutput VRPOActorImpl::forward_step(
 
   torch::Tensor q_values = compute_value ? q_head_forward(encoded) : torch::Tensor{};
   torch::Tensor expected_value;
-  torch::Tensor q_values_sparse = compute_value ? q_head_sparse_forward(encoded) : torch::Tensor{};
-  torch::Tensor expected_value_sparse;
   if (compute_value) {
     torch::Tensor policy_probs = torch::softmax(policy_logits, -1);
     expected_value = (policy_probs * q_values).sum(-1, true);
-    expected_value_sparse = (policy_probs * q_values_sparse).sum(-1, true);
   }
 
   return {
@@ -636,8 +626,6 @@ ActorStepOutput VRPOActorImpl::forward_step(
       expected_value,
       encoded,
       q_values,
-      expected_value_sparse,
-      q_values_sparse,
   };
 }
 
@@ -660,12 +648,9 @@ ActorStepOutput VRPOActorImpl::forward_step_stateful(
 
   torch::Tensor q_values = compute_value ? q_head_forward(encoded) : torch::Tensor{};
   torch::Tensor expected_value;
-  torch::Tensor q_values_sparse = compute_value ? q_head_sparse_forward(encoded) : torch::Tensor{};
-  torch::Tensor expected_value_sparse;
   if (compute_value) {
     torch::Tensor policy_probs = torch::softmax(policy_logits, -1);
     expected_value = (policy_probs * q_values).sum(-1, true);
-    expected_value_sparse = (policy_probs * q_values_sparse).sum(-1, true);
   }
 
   return {
@@ -674,8 +659,6 @@ ActorStepOutput VRPOActorImpl::forward_step_stateful(
       expected_value,
       encoded,
       q_values,
-      expected_value_sparse,
-      q_values_sparse,
   };
 }
 
@@ -689,19 +672,6 @@ torch::Tensor VRPOActorImpl::value_head_forward(const torch::Tensor& encoded) {
 torch::Tensor VRPOActorImpl::q_head_forward(const torch::Tensor& encoded) {
   const float q_value_abs_cap = std::max(vrpo_config_.q_value_abs_cap, 1.0e-6F);
   const torch::Tensor raw_q = q_head_->forward(encoded);
-  return torch::tanh(raw_q / q_value_abs_cap) * q_value_abs_cap;
-}
-
-torch::Tensor VRPOActorImpl::value_head_sparse_forward(const torch::Tensor& encoded) {
-  auto policy_logits = policy_head_forward(encoded);
-  auto q_values = q_head_sparse_forward(encoded);
-  auto policy_probs = torch::softmax(policy_logits, -1);
-  return (policy_probs * q_values).sum(-1, true);
-}
-
-torch::Tensor VRPOActorImpl::q_head_sparse_forward(const torch::Tensor& encoded) {
-  const float q_value_abs_cap = std::max(vrpo_config_.q_value_abs_cap, 1.0e-6F);
-  const torch::Tensor raw_q = q_head_sparse_->forward(encoded);
   return torch::tanh(raw_q / q_value_abs_cap) * q_value_abs_cap;
 }
 
@@ -732,12 +702,9 @@ ActorSequenceOutput VRPOActorImpl::forward_sequence(
 
   torch::Tensor q_values = compute_value ? q_head_forward(encoded) : torch::Tensor{};
   torch::Tensor expected_value;
-  torch::Tensor q_values_sparse = compute_value ? q_head_sparse_forward(encoded) : torch::Tensor{};
-  torch::Tensor expected_value_sparse;
   if (compute_value) {
     torch::Tensor policy_probs = torch::softmax(policy_logits, -1);
     expected_value = (policy_probs * q_values).sum(-1, true).reshape({time, batch, 1});
-    expected_value_sparse = (policy_probs * q_values_sparse).sum(-1, true).reshape({time, batch, 1});
   }
 
   return {
@@ -746,8 +713,6 @@ ActorSequenceOutput VRPOActorImpl::forward_sequence(
       expected_value,
       encoded_seq,
       compute_value ? q_values.reshape({time, batch, config_.action_dim}) : torch::Tensor{},
-      expected_value_sparse,
-      compute_value ? q_values_sparse.reshape({time, batch, config_.action_dim}) : torch::Tensor{},
   };
 }
 
