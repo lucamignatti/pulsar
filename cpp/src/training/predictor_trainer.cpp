@@ -217,7 +217,7 @@ void PredictorTrainer::apply_reward_shaping(
   const torch::Tensor goal_probs = torch::softmax(goal_logits, -1);
   const torch::Tensor p_goal = goal_probs.select(1, 1).reshape({rollout_steps, count});
 
-  constexpr float kAlpha = 0.95F;
+  constexpr float kAlpha = 0.99F;
   const torch::Tensor shaped_view = shaped_rewards.narrow(1, agent_offset, count);
 
   for (std::size_t channel_index = 1; channel_index < kSparseEventChannelCount; ++channel_index) {
@@ -269,9 +269,12 @@ void PredictorTrainer::apply_reward_shaping(
       if (advantage < 0.0F) advantage = 0.0F;
     }
 
-    // Dynamic weight = P_goal * (1 + advantage)
-    // Events that happen when P_goal is high and that historically correlate with goals get more reward
-    const torch::Tensor dynamic_weight = p_goal_flat * (1.0F + advantage);
+    // Dynamic weight = max(P_goal * (1 + advantage), kMinDynamicWeight)
+    // Floor ensures events always carry meaningful signal even when goals are rare
+    // (P_goal → 0 would otherwise silence all shaping reward and starve the policy of gradient)
+    constexpr float kMinDynamicWeight = 0.5F;
+    const torch::Tensor dynamic_weight = torch::clamp_min(
+        p_goal_flat * (1.0F + advantage), kMinDynamicWeight);
     // Clamp per-channel contribution to [0, 2]: the theoretical max of dynamic_weight * event.
     // Guards against malformed predictor outputs propagating into Q-targets.
     const torch::Tensor hindsight_reward = torch::clamp(
