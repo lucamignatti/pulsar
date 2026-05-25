@@ -1121,6 +1121,42 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
   const auto update_start = std::chrono::steady_clock::now();
   TrainerMetrics metrics{};
 
+  // Sanitise non-finite parameters in actor before any forward/backward passes
+  {
+    bool changed = false;
+    std::string first_param;
+    for (auto& item : actor_->named_parameters(true)) {
+      torch::Tensor param = item.value();
+      if (param.defined() && !torch::isfinite(param).all().item<bool>()) {
+        if (!changed) {
+          first_param = item.key();
+          changed = true;
+        }
+        std::cerr << "Warning: repairing non-finite actor parameter " << item.key() << '\n';
+        torch::NoGradGuard no_grad;
+        const torch::Tensor finite = torch::isfinite(param);
+        const bool is_weight =
+            item.key().size() >= std::string(".weight").size() &&
+            item.key().compare(
+                item.key().size() - std::string(".weight").size(),
+                std::string(".weight").size(),
+                ".weight") == 0;
+        const bool default_to_one = item.key().find("norm") != std::string::npos && is_weight;
+        const torch::Tensor replacement = default_to_one ? torch::ones_like(param) : torch::zeros_like(param);
+        param.copy_(torch::where(finite, param, replacement));
+        // Reset optimizer state for this parameter
+        actor_optimizer_.state().erase(param.unsafeGetTensorImpl());
+      }
+    }
+    if (changed) {
+      std::cerr << "Successfully repaired non-finite actor parameters starting with " << first_param << "; cleared affected optimizer state.\n";
+      // Sync weights to compute replica actors
+      if (compute_devices_.size() > 1) {
+        sync_actor_to_replicas(actor_, compute_actors_);
+      }
+    }
+  }
+
   const int total_agents = rollout.num_agents();
   const int rollout_steps = rollout.rollout_length();
   const auto& all_rewards = rollout.all_rewards();
@@ -1843,6 +1879,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
                       1,
                       gpu_micro_indices).to(gpu_dev);
                   torch::Tensor future_goal_pos = sample_future_goal_positions(chunk_goal_pos, chunk_dones, chunk_ep_starts, config_.goal_critic.max_future_horizon);
+                  future_goal_pos = torch::where(torch::isfinite(future_goal_pos), future_goal_pos, torch::zeros_like(future_goal_pos));
                   torch::Tensor flat_future_goal_pos = future_goal_pos.reshape({samples, config_.goal_critic.goal_dim});
                   torch::Tensor active_future_goal_pos = all_active ? flat_future_goal_pos : flat_future_goal_pos.index({flat_active});
 
@@ -2794,7 +2831,11 @@ void VRPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics, 
     update_norm *= update_scale;
   }
 
-  {
+  const bool delta_weight_finite = torch::isfinite(delta_weight).all().item<bool>();
+  if (!delta_weight_finite) {
+    std::cerr << "Warning: skipping ES-LoRA update because delta_weight contains non-finite values!\n";
+    update_norm = 0.0;
+  } else {
     torch::NoGradGuard no_grad;
     actor_->apply_policy_eggroll_update(delta_weight);
     torch::Tensor policy_weight = actor_->policy_lora()->base->weight;
