@@ -238,6 +238,24 @@ int main() {
       require_finite(future.to(torch::kCPU), "accelerated future goals finite");
     }
 
+    // 6d. VRPO Q head output is bounded before it can seed expected-SARSA targets.
+    {
+      auto model_cfg = tiny_model_config();
+      pulsar::VRPOConfig vrpo_cfg;
+      vrpo_cfg.q_value_abs_cap = 7.0F;
+      auto actor = pulsar::VRPOActor(model_cfg, pulsar::GoalCriticConfig{}, pulsar::ESLoraConfig{}, vrpo_cfg);
+      {
+        torch::NoGradGuard no_grad;
+        auto& final_layer = actor->q_head_->at<torch::nn::LinearImpl>(2);
+        final_layer.weight.fill_(1000.0F);
+        final_layer.bias.fill_(1000.0F);
+      }
+      const auto encoded = torch::ones({3, actor->feature_dim()}, torch::kFloat32);
+      const auto q_values = actor->q_head_forward(encoded);
+      require_finite(q_values, "bounded Q head");
+      require(q_values.abs().max().item<float>() <= vrpo_cfg.q_value_abs_cap + kTolerance, "Q head must honor q_value_abs_cap");
+    }
+
     // 7. Config validation
     {
       pulsar::ExperimentConfig config = pulsar::test::make_test_config();
@@ -259,6 +277,16 @@ int main() {
         caught = true;
       }
       require(caught, "rollout_length <= 1 should throw");
+
+      bad_config = config;
+      bad_config.vrpo.q_target_abs_cap = 0.0F;
+      caught = false;
+      try {
+        pulsar::validate_experiment_config(bad_config);
+      } catch (const std::invalid_argument&) {
+        caught = true;
+      }
+      require(caught, "non-positive VRPO Q target cap should throw");
     }
 
     // 8. Future goal sampling

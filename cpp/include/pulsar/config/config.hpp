@@ -107,6 +107,8 @@ struct GoalCriticConfig {
 struct VRPOConfig {
   int q_critic_hidden_dim = 384;
   float q_critic_coef = 0.5F;
+  float q_value_abs_cap = 50.0F;
+  float q_target_abs_cap = 50.0F;
 };
 
 struct ESLoraConfig {

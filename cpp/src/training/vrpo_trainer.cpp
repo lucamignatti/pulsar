@@ -53,6 +53,15 @@ bool uses_snapshot_opponents(const ExperimentConfig& config) {
   return config.self_play_league.training_opponent_policy.rfind("snapshot", 0) == 0;
 }
 
+torch::Tensor bound_vrpo_q_target(const torch::Tensor& tensor, float abs_cap) {
+  if (!tensor.defined()) {
+    return tensor;
+  }
+  const float cap = std::max(abs_cap, 1.0e-6F);
+  const torch::Tensor finite = torch::where(torch::isfinite(tensor), tensor, torch::zeros_like(tensor));
+  return torch::clamp(finite, -cap, cap);
+}
+
 double current_process_rss_mb() {
 #if defined(__linux__)
   std::ifstream statm("/proc/self/statm");
@@ -1316,6 +1325,8 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
   torch::Tensor active_mask = rollout.learner_active.narrow(0, 0, rollout_steps).to(device_) > 0.5F;
   torch::Tensor sparse_advantages;
   torch::Tensor normalized_advantages;
+  torch::Tensor bounded_q_taken;
+  torch::Tensor bounded_v_from_q;
   {
     PULSAR_TRACE_SCOPE_CAT("trainer", "update_gae");
     const auto gae_start = std::chrono::steady_clock::now();
@@ -1323,6 +1334,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
       std::cout << "bench_update_gae_start\n" << std::flush;
     }
     torch::Tensor terminal_v_from_q;
+    const float q_target_abs_cap = config_.vrpo.q_target_abs_cap;
     if (rollout_bootstrap_truncated.any().item<bool>()) {
       torch::NoGradGuard no_grad;
       torch::Tensor term_obs = rollout.terminal_observations.narrow(0, 0, rollout_steps);
@@ -1342,21 +1354,25 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
         if (config_.ppo.popart_enabled) {
           term_v = q_normalizer_.denormalize(term_v);
         }
-        term_v_from_q_chunks.push_back(term_v);
+        term_v_from_q_chunks.push_back(bound_vrpo_q_target(term_v, q_target_abs_cap));
       }
       auto term_v_from_q_flat = torch::cat(term_v_from_q_chunks, 0);
       terminal_v_from_q = term_v_from_q_flat.reshape({rollout_steps, total_agents});
     }
     auto final_values_map = rollout.final_values();
     torch::Tensor final_v_from_q = final_values_map.count("v_from_q") && final_values_map.at("v_from_q").defined()
-        ? final_values_map.at("v_from_q").to(device_)
+        ? bound_vrpo_q_target(final_values_map.at("v_from_q").to(device_), q_target_abs_cap)
         : torch::Tensor{};
 
-    const auto q_taken = all_values.at("q_taken").narrow(0, 0, rollout_steps).to(device_);
-    const auto v_from_q = all_values.at("v_from_q").narrow(0, 0, rollout_steps).to(device_);
+    bounded_q_taken = bound_vrpo_q_target(
+        all_values.at("q_taken").narrow(0, 0, rollout_steps).to(device_),
+        q_target_abs_cap);
+    bounded_v_from_q = bound_vrpo_q_target(
+        all_values.at("v_from_q").narrow(0, 0, rollout_steps).to(device_),
+        q_target_abs_cap);
     sparse_advantages = compute_centered_expected_sarsa_gae(
-        q_taken,
-        v_from_q,
+        bounded_q_taken,
+        bounded_v_from_q,
         shaped_rewards,
         rollout_dones,
         config_.ppo.gamma,
@@ -1364,6 +1380,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
         final_v_from_q,
         rollout_bootstrap_truncated,
         terminal_v_from_q);
+    sparse_advantages = bound_vrpo_q_target(sparse_advantages, q_target_abs_cap);
     normalized_advantages = normalize_advantage(sparse_advantages, active_mask);
     if (active_mask.any().item<bool>()) {
       metrics.advantage_std = sparse_advantages.index({active_mask}).std().item<double>();
@@ -1377,7 +1394,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
     }
   }
   torch::Tensor sparse_returns = sparse_advantages + extrinsic_values.detach();
-  torch::Tensor q_returns = sparse_advantages + all_values.at("v_from_q").narrow(0, 0, rollout_steps).to(device_).detach();
+  torch::Tensor q_returns = bound_vrpo_q_target(sparse_advantages + bounded_v_from_q.detach(), config_.vrpo.q_target_abs_cap);
 
   int completed_minibatches = 0;
   for (int epoch = 0; epoch < config_.ppo.update_epochs; ++epoch) {
@@ -1602,7 +1619,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
                 mode_gpu_q_returns_mb = mode_gpu_q_returns_mb.to(gpu_dev);
               }
               torch::Tensor mode_gpu_old_q_taken_mb = index_select_on_source_device(
-                  all_values.at("q_taken").narrow(0, 0, rollout_steps_local),
+                  bounded_q_taken.narrow(0, 0, rollout_steps_local),
                   1,
                   gpu_micro_indices).to(gpu_dev);
 

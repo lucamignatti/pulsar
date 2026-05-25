@@ -670,9 +670,9 @@ torch::Tensor VRPOActorImpl::value_head_forward(const torch::Tensor& encoded) {
 }
 
 torch::Tensor VRPOActorImpl::q_head_forward(const torch::Tensor& encoded) {
-  constexpr float kQValueAbsCap = 100.0F;
+  const float q_value_abs_cap = std::max(vrpo_config_.q_value_abs_cap, 1.0e-6F);
   const torch::Tensor raw_q = q_head_->forward(encoded);
-  return torch::tanh(raw_q / kQValueAbsCap) * kQValueAbsCap;
+  return torch::tanh(raw_q / q_value_abs_cap) * q_value_abs_cap;
 }
 
 torch::Tensor VRPOActorImpl::policy_head_forward(const torch::Tensor& features) {

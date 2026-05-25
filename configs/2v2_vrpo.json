@@ -234,7 +234,9 @@
   },
   "vrpo": {
     "q_critic_hidden_dim": 384,
-    "q_critic_coef": 0.5
+    "q_critic_coef": 0.5,
+    "q_value_abs_cap": 50.0,
+    "q_target_abs_cap": 50.0
   },
   "es_lora": {
     "rank": 4,
