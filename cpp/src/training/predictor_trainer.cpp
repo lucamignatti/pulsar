@@ -112,10 +112,24 @@ void PredictorTrainer::update_predictors(
         .narrow(1, agent_offset, count)
         .select(2, static_cast<int64_t>(channel_index))
         .reshape({rollout_steps * count});
-    channel_positive_sums[channel_index].add_((targets > 0).to(torch::kFloat64).sum());
+
+    // Compute dynamic class weighting for target imbalance
+    const double pos_sum = (targets > 0).to(torch::kFloat64).sum().item<double>();
+    channel_positive_sums[channel_index].add_(pos_sum);
     channel_positive_sample_counts[channel_index] += samples;
+
+    const double batch_pos_rate = pos_sum / static_cast<double>(targets.numel());
+    float w1 = 1.0F;
+    if (batch_pos_rate > 1e-6) {
+      w1 = std::max(1.0F, std::min(50.0F, static_cast<float>((1.0 - batch_pos_rate) / (batch_pos_rate + 1e-6))));
+    }
+
     torch::Tensor logits = logits_all.select(1, static_cast<int64_t>(channel_index));
-    torch::Tensor loss = torch::nn::functional::cross_entropy(logits, targets);
+    torch::Tensor weight = torch::tensor({1.0F, w1}, logits.options());
+    torch::Tensor loss = torch::nn::functional::cross_entropy(
+        logits,
+        targets,
+        torch::nn::functional::CrossEntropyFuncOptions().weight(weight));
 
     losses.push_back(loss);
     loss_channels.push_back(channel_index);
@@ -292,7 +306,7 @@ void PredictorTrainer::process_convergence(
 
     if (active == 0 &&
         update_index >= channel.warmup_updates &&
-        positive_rate > 0.0 &&
+        positive_rate >= 0.0005 &&
         low_delta_streak >= kRequiredConsecutiveStableUpdates) {
       active = 1;
       std::cout << "predictor_enabled channel=" << channel_name
