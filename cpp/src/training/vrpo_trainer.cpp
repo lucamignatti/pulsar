@@ -1122,6 +1122,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
 #endif
   const auto update_start = std::chrono::steady_clock::now();
   TrainerMetrics metrics{};
+  sanitize_actor_parameters(); // Guarantee clean parameters before PPO epochs
 
 
   const int total_agents = rollout.num_agents();
@@ -2207,6 +2208,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
   metrics.eff_es_interval = last_eff_es_interval_;
   metrics.steps_since_last_es = steps_since_last_es_;
   metrics.update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count();
+  sanitize_actor_parameters(); // Guarantee actor is 100% clean and finite before returning (and cloning snapshot)
   return metrics;
 }
 
