@@ -204,6 +204,7 @@ class VRPOTrainer {
       VRPOActor rollout_actor,
       ObservationNormalizer& normalizer);
   TrainerMetrics update_actor(RolloutStorage& rollout, int update_index);
+  void sanitize_actor_parameters();
   CheckpointMetadata make_checkpoint_metadata(std::int64_t global_step, int update_index, const std::string& wandb_run_id) const;
 
   void run_es_lora_update(int update_index, TrainerMetrics& metrics, float effective_sigma = -1.0F);

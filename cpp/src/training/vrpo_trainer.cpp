@@ -760,6 +760,7 @@ VRPOTrainer::VRPOTrainer(
   }
 
   maybe_initialize_from_checkpoint();
+  sanitize_actor_parameters();
   actor_snapshot_ = clone_vrpo_actor(actor_, device_);
   actor_snapshot_->eval();
 
@@ -1075,6 +1076,7 @@ void VRPOTrainer::maybe_initialize_from_checkpoint() {
     torch::serialize::InputArchive actor_archive;
     actor_archive.load_from((base / "model.pt").string(), device_);
     actor_->load(actor_archive);
+    sanitize_actor_parameters();
     actor_normalizer_.load(actor_archive);
     actor_->to(device_);
     actor_normalizer_.to(device_);
@@ -1121,41 +1123,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
   const auto update_start = std::chrono::steady_clock::now();
   TrainerMetrics metrics{};
 
-  // Sanitise non-finite parameters in actor before any forward/backward passes
-  {
-    bool changed = false;
-    std::string first_param;
-    for (auto& item : actor_->named_parameters(true)) {
-      torch::Tensor param = item.value();
-      if (param.defined() && !torch::isfinite(param).all().item<bool>()) {
-        if (!changed) {
-          first_param = item.key();
-          changed = true;
-        }
-        std::cerr << "Warning: repairing non-finite actor parameter " << item.key() << '\n';
-        torch::NoGradGuard no_grad;
-        const torch::Tensor finite = torch::isfinite(param);
-        const bool is_weight =
-            item.key().size() >= std::string(".weight").size() &&
-            item.key().compare(
-                item.key().size() - std::string(".weight").size(),
-                std::string(".weight").size(),
-                ".weight") == 0;
-        const bool default_to_one = item.key().find("norm") != std::string::npos && is_weight;
-        const torch::Tensor replacement = default_to_one ? torch::ones_like(param) : torch::zeros_like(param);
-        param.copy_(torch::where(finite, param, replacement));
-        // Reset optimizer state for this parameter
-        actor_optimizer_.state().erase(param.unsafeGetTensorImpl());
-      }
-    }
-    if (changed) {
-      std::cerr << "Successfully repaired non-finite actor parameters starting with " << first_param << "; cleared affected optimizer state.\n";
-      // Sync weights to compute replica actors
-      if (compute_devices_.size() > 1) {
-        sync_actor_to_replicas(actor_, compute_actors_);
-      }
-    }
-  }
 
   const int total_agents = rollout.num_agents();
   const int rollout_steps = rollout.rollout_length();
@@ -1879,7 +1846,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
                       1,
                       gpu_micro_indices).to(gpu_dev);
                   torch::Tensor future_goal_pos = sample_future_goal_positions(chunk_goal_pos, chunk_dones, chunk_ep_starts, config_.goal_critic.max_future_horizon);
-                  future_goal_pos = torch::where(torch::isfinite(future_goal_pos), future_goal_pos, torch::zeros_like(future_goal_pos));
                   torch::Tensor flat_future_goal_pos = future_goal_pos.reshape({samples, config_.goal_critic.goal_dim});
                   torch::Tensor active_future_goal_pos = all_active ? flat_future_goal_pos : flat_future_goal_pos.index({flat_active});
 
@@ -2144,6 +2110,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
         grad_norm = clip_existing_gradients(*actor_, config_.ppo.max_grad_norm);
         const bool nonfinite_before_sanitize = !std::isfinite(grad_norm);
         if (nonfinite_before_sanitize) {
+          sanitize_actor_parameters(); // Repair if we got a non-finite gradient
           const GradientSanitizeResult sanitized = zero_nonfinite_gradients(*actor_);
           ++metrics.nonfinite_grad_norm_skips;
           std::cerr << "skipping VRPO optimizer step with non-finite gradient entries";
@@ -2239,14 +2206,61 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
   metrics.eff_es_sigma = last_eff_es_sigma_;
   metrics.eff_es_interval = last_eff_es_interval_;
   metrics.steps_since_last_es = steps_since_last_es_;
-
   metrics.update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count();
-#ifdef PULSAR_HAS_CUDA
-  if (prev_train_stream.has_value()) {
-    c10::cuda::setCurrentCUDAStream(*prev_train_stream);
-  }
-#endif
   return metrics;
+}
+
+void VRPOTrainer::sanitize_actor_parameters() {
+  PULSAR_TRACE_SCOPE_CAT("trainer", "sanitize_actor_params");
+  
+  // Fast batched check: check if ALL parameters are finite using exactly 1 host-device synchronization
+  bool actor_params_finite = true;
+  std::vector<torch::Tensor> flat_params;
+  for (auto& p : actor_->parameters()) {
+    if (p.defined()) {
+      flat_params.push_back(p.reshape({-1}));
+    }
+  }
+  if (!flat_params.empty()) {
+    actor_params_finite = torch::isfinite(torch::cat(flat_params)).all().item<bool>();
+  }
+  
+  if (actor_params_finite) {
+    return;
+  }
+
+  // Fallback: detailed in-place repair and optimizer state clearance
+  bool changed = false;
+  std::string first_param;
+  for (auto& item : actor_->named_parameters(true)) {
+    torch::Tensor param = item.value();
+    if (param.defined() && !torch::isfinite(param).all().item<bool>()) {
+      if (!changed) {
+        first_param = item.key();
+        changed = true;
+      }
+      std::cerr << "Warning: repairing non-finite actor parameter " << item.key() << '\n';
+      torch::NoGradGuard no_grad;
+      const torch::Tensor finite = torch::isfinite(param);
+      const bool is_weight =
+          item.key().size() >= std::string(".weight").size() &&
+          item.key().compare(
+              item.key().size() - std::string(".weight").size(),
+              std::string(".weight").size(),
+              ".weight") == 0;
+      const bool default_to_one = item.key().find("norm") != std::string::npos && is_weight;
+      const torch::Tensor replacement = default_to_one ? torch::ones_like(param) : torch::zeros_like(param);
+      param.copy_(torch::where(finite, param, replacement));
+      // Reset optimizer state for this parameter
+      actor_optimizer_.state().erase(param.unsafeGetTensorImpl());
+    }
+  }
+  if (changed) {
+    std::cerr << "Successfully repaired non-finite actor parameters starting with " << first_param << "; cleared affected optimizer state.\n";
+    if (compute_devices_.size() > 1) {
+      sync_actor_to_replicas(actor_, compute_actors_);
+    }
+  }
 }
 
 VRPOTrainer::ESPopulationFitness VRPOTrainer::evaluate_es_population(
@@ -2840,6 +2854,7 @@ void VRPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics, 
     actor_->apply_policy_eggroll_update(delta_weight);
     torch::Tensor policy_weight = actor_->policy_lora()->base->weight;
     actor_optimizer_.state().erase(policy_weight.unsafeGetTensorImpl());
+    sanitize_actor_parameters();
   }
 
   metrics.es_fitness_mean = mu;
@@ -3915,6 +3930,7 @@ void VRPOTrainer::load_training_state(const std::filesystem::path& path) {
   torch::serialize::InputArchive archive;
   archive.load_from(path.string(), device_);
   actor_->load(archive);
+  sanitize_actor_parameters();
   actor_normalizer_.load(archive);
   try {
     actor_optimizer_.load(archive);
