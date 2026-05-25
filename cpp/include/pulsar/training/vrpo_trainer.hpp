@@ -119,6 +119,7 @@ struct TrainerMetrics {
   int self_play_snapshot_count = 0;
 
   double q_critic_loss = 0.0;
+  double q_critic_loss_sparse = 0.0;
   double advantage_std = 0.0;
 
   // Adaptive Centered Expected SARSA controller signals.
