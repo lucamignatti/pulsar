@@ -1564,6 +1564,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
           double fwd_bwd_seconds = 0.0;
           bool has_backward = false;
           std::int64_t active_count = 0;
+          std::int64_t nonfinite_loss_skips = 0;
         };
         std::vector<std::future<GpuTaskResult>> gpu_futures;
         gpu_futures.reserve(num_update_gpus);
@@ -1877,7 +1878,24 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
                 const auto sample_weight = active_samples / mode_total_active_local;
                 const torch::Tensor task_loss = policy_loss + config_.vrpo.q_critic_coef * value_loss + config_.vrpo.value_coef_sparse * value_loss_sparse + entropy_floor_loss - effective_entropy_coef * entropy;
 
-                if (use_pcgrad_local) {
+                // Guard the gradient accumulator from NaN/Inf losses.  Even with
+                // bounded Q targets, clamped log-ratios and capped Q-head outputs,
+                // a single degenerate sample can still drive one of the loss
+                // components non-finite (e.g. softmax over near-all-masked logits
+                // followed by a long backward chain).  Calling .backward() on a
+                // non-finite loss writes NaN gradients into every parameter,
+                // which is exactly what the post-backward grad_norm check is
+                // catching and skipping the optimizer step for.  Skip backward
+                // here instead so the rest of the minibatch can still step.
+                const torch::Tensor combined_finite_check = task_loss
+                    + config_.goal_critic.lambda_Zg * goal_loss
+                    + eff_gcrl_actor_coef * actor_goal_loss;
+                const bool losses_finite =
+                    torch::isfinite(combined_finite_check).item<bool>();
+
+                if (!losses_finite) {
+                  ++result.nonfinite_loss_skips;
+                } else if (use_pcgrad_local) {
                   const torch::Tensor weighted_task_loss = task_loss * sample_weight;
                   const torch::Tensor weighted_goal_critic_loss = config_.goal_critic.lambda_Zg * goal_loss * sample_weight;
                   const torch::Tensor weighted_goal_actor_loss = eff_gcrl_actor_coef * actor_goal_loss * sample_weight;
@@ -1976,6 +1994,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
           metrics.forward_backward_seconds += task_result.fwd_bwd_seconds;
           accumulated_has_backward = accumulated_has_backward || task_result.has_backward;
           metric_steps += task_result.active_count;
+          metrics.nonfinite_loss_skips += task_result.nonfinite_loss_skips;
         }
 
         if (use_pcgrad) {
