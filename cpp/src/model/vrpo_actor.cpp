@@ -613,7 +613,7 @@ ActorStepOutput VRPOActorImpl::forward_step(
     policy_logits = policy_lora_->forward(encoded);
   }
 
-  torch::Tensor q_values = compute_value ? q_head_->forward(encoded) : torch::Tensor{};
+  torch::Tensor q_values = compute_value ? q_head_forward(encoded) : torch::Tensor{};
   torch::Tensor expected_value;
   if (compute_value) {
     torch::Tensor policy_probs = torch::softmax(policy_logits, -1);
@@ -646,7 +646,7 @@ ActorStepOutput VRPOActorImpl::forward_step_stateful(
     policy_logits = policy_lora_->forward(encoded);
   }
 
-  torch::Tensor q_values = compute_value ? q_head_->forward(encoded) : torch::Tensor{};
+  torch::Tensor q_values = compute_value ? q_head_forward(encoded) : torch::Tensor{};
   torch::Tensor expected_value;
   if (compute_value) {
     torch::Tensor policy_probs = torch::softmax(policy_logits, -1);
@@ -670,7 +670,9 @@ torch::Tensor VRPOActorImpl::value_head_forward(const torch::Tensor& encoded) {
 }
 
 torch::Tensor VRPOActorImpl::q_head_forward(const torch::Tensor& encoded) {
-  return q_head_->forward(encoded);
+  constexpr float kQValueAbsCap = 100.0F;
+  const torch::Tensor raw_q = q_head_->forward(encoded);
+  return torch::tanh(raw_q / kQValueAbsCap) * kQValueAbsCap;
 }
 
 torch::Tensor VRPOActorImpl::policy_head_forward(const torch::Tensor& features) {
@@ -698,7 +700,7 @@ ActorSequenceOutput VRPOActorImpl::forward_sequence(
     policy_logits = policy_lora_->forward(encoded);
   }
 
-  torch::Tensor q_values = compute_value ? q_head_->forward(encoded) : torch::Tensor{};
+  torch::Tensor q_values = compute_value ? q_head_forward(encoded) : torch::Tensor{};
   torch::Tensor expected_value;
   if (compute_value) {
     torch::Tensor policy_probs = torch::softmax(policy_logits, -1);

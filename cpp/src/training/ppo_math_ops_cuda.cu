@@ -336,7 +336,9 @@ __global__ void normalize_finish_kernel(
   const float count = stats[2];
   for (int i = threadIdx.x; i < elements; i += blockDim.x) {
     const float value = count > 1.0F ? (advantages[i] - mean) * inv_std : advantages[i] - mean;
-    normalized[i] = fminf(fmaxf(value, -kAdvantageAbsCap), kAdvantageAbsCap);
+    normalized[i] = isfinite(value)
+        ? fminf(fmaxf(value, -kAdvantageAbsCap), kAdvantageAbsCap)
+        : value;
   }
 }
 

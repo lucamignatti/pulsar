@@ -43,6 +43,8 @@ struct TrainerMetrics {
   double value_loss = 0.0;
   double entropy = 0.0;
   double grad_norm = 0.0;
+  int64_t grad_norm_valid_steps = 0;
+  int64_t optimizer_steps = 0;
   double policy_approx_kl = 0.0;
   double policy_clip_fraction = 0.0;
   double policy_log_ratio_abs_max = 0.0;

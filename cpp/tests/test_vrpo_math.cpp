@@ -141,7 +141,15 @@ int main() {
       require(normalized.abs().max().item<float>() < 1.0e-4F, "near-constant advantage normalization should stay bounded");
     }
 
-    // 6b. CUDA/HIP VRPO math parity when available.
+    // 6b. Non-finite active advantages must not be converted into capped finite policy targets.
+    {
+      const auto adv = torch::tensor({0.0F, NAN, 1.0F}, torch::kFloat32);
+      const auto mask = torch::ones({3}, torch::kFloat32);
+      const auto normalized = pulsar::normalize_advantage(adv, mask);
+      require(!torch::isfinite(normalized).all().item<bool>(), "non-finite advantage normalization should remain non-finite");
+    }
+
+    // 6c. CUDA/HIP VRPO math parity when available.
     if (torch::cuda::is_available()) {
       auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
       auto values_cpu = torch::randn({7, 5}, torch::kFloat32);
@@ -194,6 +202,11 @@ int main() {
       auto norm_expected = pulsar::normalize_advantage(expected, active_cpu);
       auto norm_actual = pulsar::normalize_advantage(expected.to(opts), active_cpu.to(opts)).to(torch::kCPU);
       require(torch::allclose(norm_actual, norm_expected, 1.0e-5, 1.0e-5), "accelerated advantage normalization parity");
+
+      auto nan_adv = torch::tensor({0.0F, NAN, 1.0F}, torch::kFloat32);
+      auto nan_mask = torch::ones({3}, torch::kFloat32);
+      auto nan_norm = pulsar::normalize_advantage(nan_adv.to(opts), nan_mask.to(opts)).to(torch::kCPU);
+      require(!torch::isfinite(nan_norm).all().item<bool>(), "accelerated non-finite advantage normalization should remain non-finite");
 
       auto logits_cpu = torch::tensor({{1.0F, 2.0F, -1.0F}, {0.25F, -0.5F, 0.75F}}, torch::kFloat32);
       auto masks_cpu = torch::tensor({{true, false, true}, {true, true, true}}, torch::kBool);

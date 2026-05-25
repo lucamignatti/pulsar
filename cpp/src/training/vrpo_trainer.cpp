@@ -404,7 +404,9 @@ void append_metrics_line(
       {"policy_loss", metrics.policy_loss},
       {"value_loss", metrics.value_loss},
       {"entropy", metrics.entropy},
-      {"grad_norm", metrics.grad_norm},
+      {"grad_norm", metrics.grad_norm_valid_steps > 0 ? nlohmann::json(metrics.grad_norm) : nlohmann::json(nullptr)},
+      {"grad_norm_valid_steps", metrics.grad_norm_valid_steps},
+      {"optimizer_steps", metrics.optimizer_steps},
       {"policy_approx_kl", metrics.policy_approx_kl},
       {"kl_divergence", metrics.policy_approx_kl},
       {"policy_clip_fraction", metrics.policy_clip_fraction},
@@ -1998,24 +2000,21 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
         scale_existing_gradients(*actor_, cuda_amp_loss_scale);
         grad_norm = clip_existing_gradients(*actor_, config_.ppo.max_grad_norm);
         const bool nonfinite_before_sanitize = !std::isfinite(grad_norm);
-        if (!std::isfinite(grad_norm)) {
+        if (nonfinite_before_sanitize) {
           const GradientSanitizeResult sanitized = zero_nonfinite_gradients(*actor_);
+          ++metrics.nonfinite_grad_norm_skips;
+          std::cerr << "skipping VRPO optimizer step with non-finite gradient entries";
           if (sanitized.changed) {
-            grad_norm = clip_existing_gradients(*actor_, config_.ppo.max_grad_norm);
-            if (std::isfinite(grad_norm)) {
-              std::cerr << "zeroed non-finite VRPO gradient entries in "
-                        << sanitized.first_parameter
-                        << "; recovered preclip grad_norm=" << grad_norm << '\n';
-            }
+            std::cerr << " in " << sanitized.first_parameter;
           }
-        }
-        const bool grad_guard_hit =
-            config_.ppo.max_preclip_grad_norm > 0.0F &&
-            grad_norm > static_cast<double>(config_.ppo.max_preclip_grad_norm);
-        if (std::isfinite(grad_norm) && !grad_guard_hit) {
+          std::cerr << "; preclip grad_norm=" << grad_norm << '\n';
+        } else if (std::isfinite(grad_norm) &&
+            !(config_.ppo.max_preclip_grad_norm > 0.0F &&
+              grad_norm > static_cast<double>(config_.ppo.max_preclip_grad_norm))) {
           grad_norm_sum += grad_norm;
           ++grad_norm_steps;
           actor_optimizer_.step();
+          ++metrics.optimizer_steps;
           stepped_optimizer = true;
         } else if (std::isfinite(grad_norm)) {
           ++metrics.grad_norm_guard_skips;
@@ -2071,6 +2070,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
     metrics.value_loss = value_loss_sum / denom;
     metrics.entropy = entropy_sum / denom;
     metrics.grad_norm = grad_norm_steps > 0 ? grad_norm_sum / static_cast<double>(grad_norm_steps) : 0.0;
+    metrics.grad_norm_valid_steps = grad_norm_steps;
     metrics.policy_approx_kl = policy_approx_kl_sum / denom;
     metrics.policy_clip_fraction = policy_clip_fraction_sum / denom;
     metrics.policy_log_ratio_abs_max = policy_log_ratio_abs_max;
@@ -3963,6 +3963,8 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     coll_metrics.entropy_deficit_alpha = train_metrics.entropy_deficit_alpha;
     coll_metrics.eff_gcrl_actor_coef = train_metrics.eff_gcrl_actor_coef;
     coll_metrics.grad_norm = train_metrics.grad_norm;
+    coll_metrics.grad_norm_valid_steps = train_metrics.grad_norm_valid_steps;
+    coll_metrics.optimizer_steps = train_metrics.optimizer_steps;
     coll_metrics.policy_approx_kl = train_metrics.policy_approx_kl;
     coll_metrics.policy_clip_fraction = train_metrics.policy_clip_fraction;
     coll_metrics.policy_log_ratio_abs_max = train_metrics.policy_log_ratio_abs_max;
@@ -4008,6 +4010,8 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
               << " value_loss=" << coll_metrics.value_loss
               << " entropy=" << coll_metrics.entropy
               << " grad_norm=" << coll_metrics.grad_norm
+              << " grad_norm_valid_steps=" << coll_metrics.grad_norm_valid_steps
+              << " optimizer_steps=" << coll_metrics.optimizer_steps
               << " policy_approx_kl=" << coll_metrics.policy_approx_kl
               << " clip_frac=" << coll_metrics.policy_clip_fraction
               << " max_log_ratio=" << coll_metrics.policy_log_ratio_abs_max
@@ -4048,7 +4052,12 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       wandb.add_metric("Optimization", "policy_loss", coll_metrics.policy_loss);
       wandb.add_metric("Optimization", "value_loss", coll_metrics.value_loss);
       wandb.add_metric("Optimization", "entropy", coll_metrics.entropy);
-      wandb.add_metric("Optimization", "grad_norm", coll_metrics.grad_norm);
+      wandb.add_metric(
+          "Optimization",
+          "grad_norm",
+          coll_metrics.grad_norm_valid_steps > 0 ? nlohmann::json(coll_metrics.grad_norm) : nlohmann::json(nullptr));
+      wandb.add_metric("Optimization", "grad_norm_valid_steps", coll_metrics.grad_norm_valid_steps);
+      wandb.add_metric("Optimization", "optimizer_steps", coll_metrics.optimizer_steps);
       wandb.add_metric("Optimization", "policy_approx_kl", coll_metrics.policy_approx_kl);
       wandb.add_metric("Optimization", "kl_divergence", coll_metrics.policy_approx_kl);
       wandb.add_metric("Optimization", "policy_clip_fraction", coll_metrics.policy_clip_fraction);
