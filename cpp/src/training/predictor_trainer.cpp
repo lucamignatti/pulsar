@@ -18,6 +18,7 @@ PredictorTrainer::PredictorTrainer(
   ema_losses_.assign(kSparseEventChannelCount, -1.0F);
   deltas_.assign(kSparseEventChannelCount, std::numeric_limits<float>::infinity());
   consecutive_low_delta_.assign(kSparseEventChannelCount, 0);
+  ema_pos_rate_.assign(kSparseEventChannelCount, -1.0F);
 }
 
 void PredictorTrainer::initialize_optimizers(VRPOActor& actor) {
@@ -92,8 +93,8 @@ void PredictorTrainer::update_predictors(
     optimizers_[channel_index]->zero_grad();
   }
 
-  // 2. Forward pass all predictors
-  torch::Tensor logits_all = finite_or_zero(actor->forward_all_predictors(flat_features));
+  // 2. Forward pass all predictors — detach so predictor gradients stay local to predictor heads
+  torch::Tensor logits_all = finite_or_zero(actor->forward_all_predictors(flat_features.detach()));
 
   std::vector<torch::Tensor> losses;
   losses.reserve(kSparseEventChannelCount);
@@ -118,11 +119,17 @@ void PredictorTrainer::update_predictors(
     channel_positive_sums[channel_index].add_(pos_sum);
     channel_positive_sample_counts[channel_index] += samples;
 
-    const double batch_pos_rate = pos_sum / static_cast<double>(targets.numel());
-    float w1 = 1.0F;
-    if (batch_pos_rate > 1e-6) {
-      w1 = std::max(1.0F, std::min(50.0F, static_cast<float>((1.0 - batch_pos_rate) / (batch_pos_rate + 1e-6))));
+    // EMA-smooth the positive rate so a single low-density batch can't spike w1 to 50.
+    constexpr float kPosRateAlpha = 0.9F;
+    const float batch_pos_rate = static_cast<float>(pos_sum / static_cast<double>(targets.numel()));
+    if (ema_pos_rate_[channel_index] < 0.0F) {
+      ema_pos_rate_[channel_index] = batch_pos_rate;
+    } else {
+      ema_pos_rate_[channel_index] = kPosRateAlpha * ema_pos_rate_[channel_index] +
+                                     (1.0F - kPosRateAlpha) * batch_pos_rate;
     }
+    const float smoothed_pos_rate = std::max(1e-4F, ema_pos_rate_[channel_index]);
+    const float w1 = std::max(1.0F, std::min(50.0F, (1.0F - smoothed_pos_rate) / smoothed_pos_rate));
 
     torch::Tensor logits = logits_all.select(1, static_cast<int64_t>(channel_index));
     torch::Tensor weight = torch::tensor({1.0F, w1}, logits.options());
@@ -265,8 +272,12 @@ void PredictorTrainer::apply_reward_shaping(
     // Dynamic weight = P_goal * (1 + advantage)
     // Events that happen when P_goal is high and that historically correlate with goals get more reward
     const torch::Tensor dynamic_weight = p_goal_flat * (1.0F + advantage);
-    const torch::Tensor hindsight_reward = dynamic_weight.reshape({rollout_steps, count}) *
-        events_flat.reshape({rollout_steps, count});
+    // Clamp per-channel contribution to [0, 2]: the theoretical max of dynamic_weight * event.
+    // Guards against malformed predictor outputs propagating into Q-targets.
+    const torch::Tensor hindsight_reward = torch::clamp(
+        dynamic_weight.reshape({rollout_steps, count}) *
+            events_flat.reshape({rollout_steps, count}),
+        0.0F, 2.0F);
     shaped_view.add_(hindsight_reward);
   }
 }

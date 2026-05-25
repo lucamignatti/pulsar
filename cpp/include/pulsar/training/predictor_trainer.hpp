@@ -97,6 +97,9 @@ class PredictorTrainer {
   std::vector<float> ema_p_goal_given_event_{};
   std::vector<float> ema_p_goal_given_no_event_{};
   bool hindsight_initialized_ = false;
+
+  // Smoothed positive rate for stable class weighting (fix 2)
+  std::vector<float> ema_pos_rate_{};
 };
 
 }  // namespace pulsar
