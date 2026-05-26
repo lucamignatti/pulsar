@@ -152,8 +152,6 @@ void BatchedRocketSimCollector::initialize(
   host_rewards_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   host_gameplay_rewards_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   host_mechanic_rewards_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
-  host_sparse_events_ = torch::zeros(
-      {static_cast<long>(total_agents_), static_cast<long>(kSparseEventChannelCount)}, u8);
   host_env_touched_ = torch::zeros({static_cast<long>(envs_.size())}, f32);
   host_env_multi_touched_ = torch::zeros({static_cast<long>(envs_.size())}, f32);
   host_bootstrap_truncated_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
@@ -223,7 +221,6 @@ void BatchedRocketSimCollector::reset_all(CollectorTimings* timings) {
   host_rewards_.zero_();
   host_gameplay_rewards_.zero_();
   host_mechanic_rewards_.zero_();
-  host_sparse_events_.zero_();
   host_env_touched_.zero_();
   host_env_multi_touched_.zero_();
   host_bootstrap_truncated_.zero_();
@@ -263,7 +260,6 @@ void BatchedRocketSimCollector::reset_es_episode(int update_index, int episode_i
   host_rewards_.zero_();
   host_gameplay_rewards_.zero_();
   host_mechanic_rewards_.zero_();
-  host_sparse_events_.zero_();
   host_env_touched_.zero_();
   host_env_multi_touched_.zero_();
   host_bootstrap_truncated_.zero_();
@@ -475,7 +471,6 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
   host_rewards_.zero_();
   host_gameplay_rewards_.zero_();
   host_mechanic_rewards_.zero_();
-  host_sparse_events_.zero_();
   host_env_touched_.zero_();
   host_env_multi_touched_.zero_();
   host_bootstrap_truncated_.zero_();
@@ -483,7 +478,6 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
   float* host_env_touched_ptr = host_env_touched_.data_ptr<float>();
   float* host_env_multi_touched_ptr = host_env_multi_touched_.data_ptr<float>();
   const float* learner_ptr = current_buffers_.learner_active.data_ptr<float>();
-  std::uint8_t* sparse_events_ptr = host_sparse_events_.data_ptr<std::uint8_t>();
 
   executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
     for (std::size_t env_idx = begin; env_idx < end; ++env_idx) {
@@ -554,18 +548,6 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         if (done) {
           labels_ptr[global_idx] = label;
         }
-
-        reward_engine_.detect_sparse_events(
-            current_state.tick,
-            car,
-            current_state,
-            idx,
-            std::span<const AgentRewardState>(previous_agent_states.data(), previous_agent_states.size()),
-            agent_reward_states_[global_idx],
-            env_reward_states_[env_idx],
-            done,
-            label,
-            sparse_events_ptr + global_idx * kSparseEventChannelCount);
 
         RewardBreakdown breakdown = reward_engine_.compute(
             current_state.tick, car, current_state,
@@ -760,7 +742,6 @@ void BatchedRocketSimCollector::step_after_physics_prefix(
   float* reward_ptr = host_rewards_.data_ptr<float>();
   float* gp_reward_ptr = host_gameplay_rewards_.data_ptr<float>();
   float* mech_reward_ptr = host_mechanic_rewards_.data_ptr<float>();
-  std::uint8_t* sparse_events_ptr = host_sparse_events_.data_ptr<std::uint8_t>();
   float* env_touch_ptr = host_env_touched_.data_ptr<float>();
   float* env_multi_touch_ptr = host_env_multi_touched_.data_ptr<float>();
   float* bootstrap_truncated_ptr = host_bootstrap_truncated_.data_ptr<float>();
@@ -872,18 +853,6 @@ void BatchedRocketSimCollector::step_after_physics_prefix(
                 : (team_touch_count[ti] > 0.5F ? 2 : 3))
             : -1;
         labels_ptr[gi] = static_cast<std::int64_t>(label);
-
-        reward_engine_.detect_sparse_events(
-            current_state.tick,
-            car,
-            current_state,
-            idx,
-            std::span<const AgentRewardState>(previous_agent_states.data(), previous_agent_states.size()),
-            agent_reward_states_[gi],
-            env_reward_states_[env_idx],
-            done,
-            label,
-            sparse_events_ptr + gi * kSparseEventChannelCount);
 
         RewardBreakdown bd = reward_engine_.compute(
             current_state.tick, car, current_state,
@@ -1134,10 +1103,6 @@ const torch::Tensor& BatchedRocketSimCollector::host_gameplay_rewards() const {
 
 const torch::Tensor& BatchedRocketSimCollector::host_mechanic_rewards() const {
   return host_mechanic_rewards_;
-}
-
-const torch::Tensor& BatchedRocketSimCollector::host_sparse_events() const {
-  return host_sparse_events_;
 }
 
 const torch::Tensor& BatchedRocketSimCollector::host_env_touched() const {

@@ -3,7 +3,6 @@
 #ifdef PULSAR_HAS_TORCH
 
 #include <atomic>
-#include <deque>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -17,13 +16,12 @@
 #include "pulsar/core/work_stealing_thread_pool.hpp"
 #include "pulsar/logging/wandb_logger.hpp"
 #include "pulsar/model/normalizer.hpp"
-#include "pulsar/model/vrpo_actor.hpp"
+#include "pulsar/model/actor.hpp"
 #include "pulsar/rl/action_table.hpp"
 #include "pulsar/training/batched_rocketsim_collector.hpp"
 #include "pulsar/training/rollout_storage.hpp"
 #include "pulsar/training/self_play_manager.hpp"
-#include "pulsar/training/gradient_surgery.hpp"
-#include "pulsar/training/predictor_trainer.hpp"
+#include "pulsar/training/gradient_ops.hpp"
 #include "pulsar/training/gcrl_trainer.hpp"
 #include "pulsar/training/optimizers.hpp"
 
@@ -115,24 +113,8 @@ struct TrainerMetrics {
   double truncated_episode_rate = 0.0;
   double touch_episode_rate = 0.0;
   double multi_touch_episode_rate = 0.0;
-  double effective_entropy_coef = 0.0;
   int self_play_snapshot_count = 0;
-
-  double q_critic_loss = 0.0;
   double advantage_std = 0.0;
-
-  // Adaptive Centered Expected SARSA controller signals.
-  double entropy_rolling_mean = 0.0;
-  double entropy_deficit_alpha = 0.0;
-  double eff_gcrl_actor_coef = 0.0;
-  double eff_es_sigma = 0.0;
-  int eff_es_interval = 0;
-  int steps_since_last_es = 0;
-
-  std::map<std::string, double> predictor_loss{};
-  std::map<std::string, double> predictor_delta{};
-  std::map<std::string, double> predictor_positive{};
-  std::map<std::string, double> predictor_active{};
 
   std::map<std::string, double> elo_ratings{};
   std::map<std::string, double> mode_touch_rates{};
@@ -169,21 +151,21 @@ struct TrainerBenchmarkMetrics {
   double es_policy_update_norm = 0.0;
 };
 
-class VRPOTrainer {
+class Trainer {
  public:
-  VRPOTrainer(
+  Trainer(
       ExperimentConfig config,
       std::unique_ptr<BatchedRocketSimCollector> collector,
       std::unique_ptr<SelfPlayManager> self_play_manager,
       std::filesystem::path run_output_root = {},
       bool log_initialization = true);
-  VRPOTrainer(
+  Trainer(
       ExperimentConfig config,
       std::vector<std::unique_ptr<BatchedRocketSimCollector>> collectors,
       std::unique_ptr<SelfPlayManager> self_play_manager,
       std::filesystem::path run_output_root = {},
       bool log_initialization = true);
-  ~VRPOTrainer();
+  ~Trainer();
 
   void train(int updates, const std::string& checkpoint_dir, const std::string& config_path = "");
   TrainerBenchmarkMetrics benchmark(int updates);
@@ -200,13 +182,13 @@ class VRPOTrainer {
       RolloutStorage& dest,
       TrainerMetrics& metrics,
       std::int64_t* collected_agent_steps,
-      VRPOActor rollout_actor,
+      Actor rollout_actor,
       ObservationNormalizer& normalizer);
   TrainerMetrics update_actor(RolloutStorage& rollout, int update_index);
   void sanitize_actor_parameters();
   CheckpointMetadata make_checkpoint_metadata(std::int64_t global_step, int update_index, const std::string& wandb_run_id) const;
 
-  void run_es_lora_update(int update_index, TrainerMetrics& metrics, float effective_sigma = -1.0F);
+  void run_es_lora_update(int update_index, TrainerMetrics& metrics);
   std::pair<torch::Tensor, torch::Tensor> compute_es_deltas();
 
   void rebuild_collectors();
@@ -224,24 +206,22 @@ class VRPOTrainer {
       const torch::Tensor& A_stack,
       const torch::Tensor& B_stack,
       int update_index,
-      int wave_index,
-      float effective_sigma = -1.0F);
+      int wave_index);
 
   ExperimentConfig config_{};
   std::vector<std::unique_ptr<BatchedRocketSimCollector>> collectors_{};
   std::unique_ptr<SelfPlayManager> self_play_manager_{};
   ControllerActionTable action_table_{};
-  VRPOActor actor_{nullptr};
-  VRPOActor actor_snapshot_{nullptr};
-  std::vector<VRPOActor> compute_actors_;
+  Actor actor_{nullptr};
+  Actor actor_snapshot_{nullptr};
+  std::vector<Actor> compute_actors_;
   ObservationNormalizer actor_normalizer_;
   MagSGD actor_optimizer_;
   std::unique_ptr<WorkStealingThreadPool> task_pool_;
-  PopArtNormalizer q_normalizer_{};
   torch::Device device_{torch::kCPU};
   std::vector<torch::Device> compute_devices_{};
   std::vector<torch::Device> shard_devices_{};
-  std::vector<VRPOActor> collection_actors_;
+  std::vector<Actor> collection_actors_;
   RolloutStorage rollout_;
   RolloutStorage rollout_B_;
   std::filesystem::path run_output_root_{};
@@ -253,26 +233,12 @@ class VRPOTrainer {
   std::vector<torch::Tensor> shard_action_buffers_cpu_{};
   bool use_pinned_host_buffers_ = false;
   bool benchmark_progress_ = false;
+  int steps_since_last_es_ = 0;
   std::atomic<bool> es_deltas_ready_{false};
   torch::Tensor es_delta_A_;
   torch::Tensor es_delta_B_;
 
-  // Adaptive Centered Expected SARSA: feedback controller state.
-  std::deque<double> entropy_window_{};
-  int steps_since_last_es_ = 0;
-  double last_alpha_ = 0.0;
-  double last_eff_gcrl_coef_ = 0.0;
-  double last_eff_es_sigma_ = 0.0;
-  int last_eff_es_interval_ = 0;
-  double last_entropy_mean_ = 0.0;
-
-  // Modular trainers
-  std::unique_ptr<PredictorTrainer> predictor_trainer_{nullptr};
   std::unique_ptr<GCRLTrainer> gcrl_trainer_{nullptr};
-
-  std::vector<torch::Tensor> predictor_ema_loss_{};
-  std::vector<torch::Tensor> predictor_delta_{};
-  torch::Tensor predictor_horizons_device_;
 
 #ifdef PULSAR_HAS_CUDA
   std::vector<c10::cuda::CUDAStream> shard_collection_streams_;

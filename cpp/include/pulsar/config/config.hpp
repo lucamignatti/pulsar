@@ -8,7 +8,6 @@
 #include <nlohmann/json.hpp>
 
 #include "pulsar/core/types.hpp"
-#include "pulsar/training/sparse_event_channels.hpp"
 
 namespace pulsar {
 
@@ -20,29 +19,6 @@ struct OutcomeConfig {
   float team_spirit = 0.0F;
   float step_penalty = 0.0F;
 };
-
-struct PredictorChannelConfig {
-  bool enabled = true;
-  int horizon = 40;
-  float learning_rate = 0.005F;
-  float convergence_threshold = 0.002F;
-  int warmup_updates = 15;
-};
-
-struct PredictorConfig {
-  PredictorConfig() {
-    for (const auto& spec : kSparseEventChannels) {
-      PredictorChannelConfig channel{};
-      channel.horizon = spec.default_horizon;
-      channels.emplace(std::string(spec.name), channel);
-    }
-  }
-
-  bool enabled = true;
-  std::map<std::string, PredictorChannelConfig> channels{};
-};
-
-
 
 struct ActionTableConfig {
   std::string builtin = "rlgym_lookup_v1";
@@ -100,15 +76,6 @@ struct GoalCriticConfig {
   int contrastive_batch_size = 2048;
   int max_future_horizon = 256;
   float temperature = 0.1F;
-  // Adaptive Centered Expected SARSA: eff = base * (1 + gain * alpha).
-  float gcrl_actor_alpha_gain = 2.0F;
-};
-
-struct VRPOConfig {
-  int q_critic_hidden_dim = 384;
-  float q_critic_coef = 0.5F;
-  float q_value_abs_cap = 50.0F;
-  float q_target_abs_cap = 50.0F;
 };
 
 struct ESLoraConfig {
@@ -133,10 +100,6 @@ struct ESLoraConfig {
   float max_kl_mean = 0.01F;
   bool require_fitness_signal = true;
   float min_fitness_std = 1.0e-6F;
-  // Adaptive Centered Expected SARSA: eff_sigma = sigma_ES * (1 + gain * alpha),
-  // eff_interval shrinks from es_interval toward es_interval_min as alpha rises.
-  float sigma_alpha_gain = 1.0F;
-  int es_interval_min = 20;
 };
 
 struct PPOConfig {
@@ -150,8 +113,6 @@ struct PPOConfig {
   int optimizer_accumulation_steps = 1;
   float clip_range = 0.2F;
   float entropy_coef = 0.01F;
-  float entropy_floor = 0.0F;
-  float entropy_floor_coef = 0.0F;
   float value_coef = 1.0F;
   float value_loss_delta = 10.0F;
   float gamma = 0.99F;
@@ -165,13 +126,8 @@ struct PPOConfig {
   int max_rolling_checkpoints = 5;
   bool synchronize_cuda_timing = false;
   bool cuda_amp = false;
-  bool adaptive_entropy = false;
-  float entropy_decay_score = 0.60F;
-  float entropy_low_coef = 0.005F;
   float max_policy_log_ratio = 5.0F;
   float target_kl = 0.0F;
-  float max_preclip_grad_norm = 0.0F;
-  bool pcgrad = false;
   bool overlap_collection_update = false;
   bool value_clipping = false;
   float value_clip_range = 0.2F;
@@ -179,10 +135,6 @@ struct PPOConfig {
   bool popart_enabled = false;
   double popart_beta = 0.0001;
   double popart_epsilon = 1e-4;
-  // Adaptive Centered Expected SARSA: minimum decay floor for effective entropy coef.
-  float ent_coef_min = 0.025F;
-  // Rolling buffer length over recent update entropies, used by the feedback controller.
-  int entropy_window = 10;
 };
 
 struct SelfPlayLeagueConfig {
@@ -236,13 +188,11 @@ struct ExperimentConfig {
   int obs_schema_version = 2;
   EnvConfig env{};
   OutcomeConfig outcome{};
-  PredictorConfig predictor{};
   ActionTableConfig action_table{};
   ModelConfig model{};
   PPOConfig ppo{};
   GoalMappingConfig goal_mapping{};
   GoalCriticConfig goal_critic{};
-  VRPOConfig vrpo{};
   ESLoraConfig es_lora{};
   SelfPlayLeagueConfig self_play_league{};
   WandbConfig wandb{};
@@ -254,7 +204,7 @@ struct CheckpointMetadata {
   int obs_schema_version = 2;
   std::string config_hash{};
   std::string action_table_hash{};
-  std::string architecture_name = "mamba2_goal_vrpo";
+  std::string architecture_name = "mamba2_goal";
   std::string device = "cpu";
   std::int64_t global_step = 0;
   std::int64_t update_index = 0;
@@ -268,10 +218,6 @@ void from_json(const nlohmann::json& j, ControllerState& value);
 void to_json(nlohmann::json& j, const OutcomeConfig& value);
 void from_json(const nlohmann::json& j, OutcomeConfig& value);
 
-void to_json(nlohmann::json& j, const PredictorChannelConfig& value);
-void from_json(const nlohmann::json& j, PredictorChannelConfig& value);
-void to_json(nlohmann::json& j, const PredictorConfig& value);
-void from_json(const nlohmann::json& j, PredictorConfig& value);
 void to_json(nlohmann::json& j, const ActionTableConfig& value);
 void from_json(const nlohmann::json& j, ActionTableConfig& value);
 void to_json(nlohmann::json& j, const EnvConfig& value);
@@ -282,8 +228,6 @@ void to_json(nlohmann::json& j, const GoalMappingConfig& value);
 void from_json(const nlohmann::json& j, GoalMappingConfig& value);
 void to_json(nlohmann::json& j, const GoalCriticConfig& value);
 void from_json(const nlohmann::json& j, GoalCriticConfig& value);
-void to_json(nlohmann::json& j, const VRPOConfig& value);
-void from_json(const nlohmann::json& j, VRPOConfig& value);
 void to_json(nlohmann::json& j, const ESLoraConfig& value);
 void from_json(const nlohmann::json& j, ESLoraConfig& value);
 void to_json(nlohmann::json& j, const PPOConfig& value);

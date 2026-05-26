@@ -11,7 +11,7 @@
 #include "pulsar/checkpoint/checkpoint.hpp"
 #include "pulsar/env/done.hpp"
 #include "pulsar/env/obs_builder.hpp"
-#include "pulsar/model/vrpo_actor.hpp"
+#include "pulsar/model/actor.hpp"
 #include "pulsar/rl/action_table.hpp"
 #include "pulsar/training/batched_rocketsim_collector.hpp"
 #include "pulsar/training/self_play_manager.hpp"
@@ -45,7 +45,7 @@ void test_snapshot_save_load_trim_and_assignment() {
   auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
-  pulsar::VRPOActor model(config.model, config.goal_critic);
+  pulsar::Actor model(config.model, config.goal_critic);
   pulsar::ObservationNormalizer normalizer(config.model.observation_dim);
   normalizer.update(torch::randn({16, config.model.observation_dim}));
 
@@ -101,7 +101,7 @@ void test_opponent_inference_and_elo_math() {
   auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
-  pulsar::VRPOActor model(config.model, config.goal_critic);
+  pulsar::Actor model(config.model, config.goal_critic);
   pulsar::ObservationNormalizer normalizer(config.model.observation_dim);
   normalizer.update(torch::randn({8, config.model.observation_dim}));
   {
@@ -224,7 +224,7 @@ void test_snapshot_reload_preserves_actor_config() {
   auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
-  pulsar::VRPOActor model(config.model, config.goal_critic);
+  pulsar::Actor model(config.model, config.goal_critic);
   pulsar::ObservationNormalizer normalizer(config.model.observation_dim);
   normalizer.update(torch::randn({16, config.model.observation_dim}));
 
@@ -247,7 +247,7 @@ void test_snapshot_reload_preserves_actor_config() {
     }
     pulsar::test::require(has_extrinsic, "snapshot metadata must list extrinsic head");
 
-    pulsar::VRPOActor snapshot_model = pulsar::load_vrpo_actor(
+    pulsar::Actor snapshot_model = pulsar::load_actor(
         (root / "10").string(), "cpu");
     
     auto output = snapshot_model->forward_step(
@@ -284,7 +284,7 @@ void test_self_play_eval_is_skipped_and_loaded_snapshots_are_bounded() {
   auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
-  pulsar::VRPOActor model(config.model, config.goal_critic);
+  pulsar::Actor model(config.model, config.goal_critic);
   pulsar::ObservationNormalizer normalizer(config.model.observation_dim);
   normalizer.update(torch::randn({16, config.model.observation_dim}));
 
@@ -319,7 +319,7 @@ void test_checkpoint_metadata_validation() {
     meta.obs_schema_version = config.obs_schema_version;
     meta.config_hash = pulsar::config_hash(config);
     meta.action_table_hash = pulsar::action_table_hash(config.action_table);
-    meta.architecture_name = "mamba2_goal_vrpo";
+    meta.architecture_name = "mamba2_goal";
     meta.device = "cpu";
     meta.global_step = 0;
     meta.update_index = 0;
@@ -419,7 +419,7 @@ void test_rng_state_round_trip() {
   auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
-  pulsar::VRPOActor model(config.model, config.goal_critic);
+  pulsar::Actor model(config.model, config.goal_critic);
   pulsar::ObservationNormalizer normalizer(config.model.observation_dim);
   normalizer.update(torch::randn({16, config.model.observation_dim}));
 
@@ -500,7 +500,7 @@ void test_snapshot_mode_is_preserved() {
   auto obs_builder = std::make_shared<pulsar::PulsarObsBuilder>(config.env);
   auto action_parser =
       std::make_shared<pulsar::DiscreteActionParser>(pulsar::ControllerActionTable(config.action_table));
-  pulsar::VRPOActor model(config.model, config.goal_critic);
+  pulsar::Actor model(config.model, config.goal_critic);
   pulsar::ObservationNormalizer normalizer(config.model.observation_dim);
   normalizer.update(torch::randn({16, config.model.observation_dim}));
 

@@ -1,4 +1,4 @@
-#include "pulsar/model/vrpo_actor.hpp"
+#include "pulsar/model/actor.hpp"
 
 #include "pulsar/model/layernorm_ops.hpp"
 
@@ -38,7 +38,7 @@ torch::Tensor eggroll_lora_perturb_hip(
 
 namespace {
 
-void copy_module_tensors_to(const VRPOActor& source, VRPOActor& target, const torch::Device&) {
+void copy_module_tensors_to(const Actor& source, Actor& target, const torch::Device&) {
   torch::NoGradGuard no_grad;
 
   const auto source_params = source->named_parameters(true);
@@ -477,15 +477,13 @@ torch::Tensor GoalCriticImpl::goal_embedding(const torch::Tensor& goal_values) {
   return normalize_goal_embedding(goal_encoder_->forward(goal_values.to(torch::kFloat32)));
 }
 
-VRPOActorImpl::VRPOActorImpl(
+ActorImpl::ActorImpl(
     ModelConfig config,
     const GoalCriticConfig& goal_critic_config,
-    const ESLoraConfig& es_lora_config,
-    const VRPOConfig& vrpo_config)
+    const ESLoraConfig& es_lora_config)
     : config_(std::move(config)),
       goal_critic_config_(goal_critic_config),
-      es_lora_config_(es_lora_config),
-      vrpo_config_(vrpo_config) {
+      es_lora_config_(es_lora_config) {
   validate_model_config(config_);
   validate_es_lora_config(es_lora_config_);
 
@@ -506,130 +504,31 @@ VRPOActorImpl::VRPOActorImpl(
   }
   register_module("policy_lora", policy_lora_);
 
-  q_head_ = register_module("q_head",
+  value_head_ = register_module("value_head",
       torch::nn::Sequential(
-          torch::nn::Linear(feature_dim_, vrpo_config_.q_critic_hidden_dim),
+          torch::nn::Linear(feature_dim_, config_.value_hidden_dim),
           torch::nn::SiLU(),
-          torch::nn::Linear(vrpo_config_.q_critic_hidden_dim, config_.action_dim)
+          torch::nn::Linear(config_.value_hidden_dim, 1)
       ));
 
   goal_critic_ = GoalCritic(feature_dim_, config_.action_dim, goal_critic_config_.embedding_dim, goal_critic_config_.hidden_dim, goal_critic_config_.goal_dim);
   register_module("goal_critic", goal_critic_);
-
-  predictor_heads_.clear();
-  predictor_heads_.reserve(kSparseEventChannelCount);
-  predictor_active_.assign(kSparseEventChannelCount, 0);
-  for (const auto& channel : kSparseEventChannels) {
-    SparseRewardPredictor head(feature_dim_);
-    register_module("predictor_" + std::string(channel.name), head);
-    predictor_heads_.push_back(head);
-  }
 }
 
-SparseRewardPredictor& VRPOActorImpl::predictor_head(std::size_t channel_index) {
-  if (channel_index >= predictor_heads_.size()) {
-    throw std::out_of_range("predictor channel index is out of range");
-  }
-  return predictor_heads_[channel_index];
-}
-
-const SparseRewardPredictor& VRPOActorImpl::predictor_head(std::size_t channel_index) const {
-  if (channel_index >= predictor_heads_.size()) {
-    throw std::out_of_range("predictor channel index is out of range");
-  }
-  return predictor_heads_[channel_index];
-}
-
-torch::Tensor VRPOActorImpl::forward_all_predictors(const torch::Tensor& features) const {
-  if (predictor_heads_.empty()) {
-    return torch::empty({features.size(0), 0, 2}, features.options());
-  }
-
-  std::vector<torch::Tensor> input_norm_weights;
-  std::vector<torch::Tensor> input_norm_biases;
-  std::vector<torch::Tensor> input_linear_weights;
-  std::vector<torch::Tensor> input_linear_biases;
-  std::vector<torch::Tensor> hidden_norm_weights;
-  std::vector<torch::Tensor> hidden_norm_biases;
-  std::vector<torch::Tensor> output_linear_weights;
-  std::vector<torch::Tensor> output_linear_biases;
-  input_norm_weights.reserve(predictor_heads_.size());
-  input_norm_biases.reserve(predictor_heads_.size());
-  input_linear_weights.reserve(predictor_heads_.size());
-  input_linear_biases.reserve(predictor_heads_.size());
-  hidden_norm_weights.reserve(predictor_heads_.size());
-  hidden_norm_biases.reserve(predictor_heads_.size());
-  output_linear_weights.reserve(predictor_heads_.size());
-  output_linear_biases.reserve(predictor_heads_.size());
-
-  for (const auto& head : predictor_heads_) {
-    const auto& input_norm = head->input_norm();
-    const auto& input_linear = head->input_linear();
-    const auto& hidden_norm = head->hidden_norm();
-    const auto& output_linear = head->output_linear();
-    input_norm_weights.push_back(input_norm.weight);
-    input_norm_biases.push_back(input_norm.bias);
-    input_linear_weights.push_back(input_linear.weight);
-    input_linear_biases.push_back(input_linear.bias);
-    hidden_norm_weights.push_back(hidden_norm.weight);
-    hidden_norm_biases.push_back(hidden_norm.bias);
-    output_linear_weights.push_back(output_linear.weight);
-    output_linear_biases.push_back(output_linear.bias);
-  }
-
-  constexpr double kLayerNormEps = 1.0e-5;
-  auto normalize_last_dim = [](const torch::Tensor& input) {
-    const torch::Tensor mean = input.mean(-1, true);
-    const torch::Tensor centered = input - mean;
-    const torch::Tensor variance = centered.square().mean(-1, true);
-    return centered * torch::rsqrt(variance + kLayerNormEps);
-  };
-
-  const torch::Tensor input_normalized = normalize_last_dim(features);
-  torch::Tensor hidden = input_normalized.unsqueeze(0) * torch::stack(input_norm_weights).unsqueeze(1) +
-      torch::stack(input_norm_biases).unsqueeze(1);
-  hidden = torch::bmm(hidden, torch::stack(input_linear_weights).transpose(1, 2)) +
-      torch::stack(input_linear_biases).unsqueeze(1);
-  hidden = torch::relu(hidden);
-  hidden = normalize_last_dim(hidden);
-  hidden = hidden * torch::stack(hidden_norm_weights).unsqueeze(1) +
-      torch::stack(hidden_norm_biases).unsqueeze(1);
-  torch::Tensor logits = torch::bmm(hidden, torch::stack(output_linear_weights).transpose(1, 2)) +
-      torch::stack(output_linear_biases).unsqueeze(1);
-  return torch::clamp(logits.permute({1, 0, 2}), -10.0, 10.0);
-}
-
-ActorStepOutput VRPOActorImpl::forward_step(
+ActorStepOutput ActorImpl::forward_step(
     torch::Tensor obs,
     torch::Tensor goal_values,
     bool compute_value) {
   PULSAR_TRACE_SCOPE_CAT("actor", "forward_step");
   torch::Tensor encoded = mamba2_encoder_->forward(obs);
 
-  torch::Tensor policy_logits;
-  if (!policy_hidden_.is_empty()) {
-    policy_logits = policy_lora_->forward(policy_hidden_->forward(encoded));
-  } else {
-    policy_logits = policy_lora_->forward(encoded);
-  }
+  torch::Tensor policy_logits = policy_head_forward(encoded);
+  torch::Tensor value = compute_value ? value_head_forward(encoded) : torch::Tensor{};
 
-  torch::Tensor q_values = compute_value ? q_head_forward(encoded) : torch::Tensor{};
-  torch::Tensor expected_value;
-  if (compute_value) {
-    torch::Tensor policy_probs = torch::softmax(policy_logits, -1);
-    expected_value = (policy_probs * q_values).sum(-1, true);
-  }
-
-  return {
-      policy_logits,
-      encoded,
-      expected_value,
-      encoded,
-      q_values,
-  };
+  return {policy_logits, encoded, value, encoded};
 }
 
-ActorStepOutput VRPOActorImpl::forward_step_stateful(
+ActorStepOutput ActorImpl::forward_step_stateful(
     torch::Tensor obs,
     torch::Tensor state,
     torch::Tensor episode_starts,
@@ -639,50 +538,24 @@ ActorStepOutput VRPOActorImpl::forward_step_stateful(
   PULSAR_TRACE_SCOPE_CAT("actor", "forward_step_stateful");
   torch::Tensor encoded = mamba2_encoder_->forward_step(obs, state, episode_starts, next_state);
 
-  torch::Tensor policy_logits;
-  if (!policy_hidden_.is_empty()) {
-    policy_logits = policy_lora_->forward(policy_hidden_->forward(encoded));
-  } else {
-    policy_logits = policy_lora_->forward(encoded);
-  }
+  torch::Tensor policy_logits = policy_head_forward(encoded);
+  torch::Tensor value = compute_value ? value_head_forward(encoded) : torch::Tensor{};
 
-  torch::Tensor q_values = compute_value ? q_head_forward(encoded) : torch::Tensor{};
-  torch::Tensor expected_value;
-  if (compute_value) {
-    torch::Tensor policy_probs = torch::softmax(policy_logits, -1);
-    expected_value = (policy_probs * q_values).sum(-1, true);
-  }
-
-  return {
-      policy_logits,
-      encoded,
-      expected_value,
-      encoded,
-      q_values,
-  };
+  return {policy_logits, encoded, value, encoded};
 }
 
-torch::Tensor VRPOActorImpl::value_head_forward(const torch::Tensor& encoded) {
-  auto policy_logits = policy_head_forward(encoded);
-  auto q_values = q_head_forward(encoded);
-  auto policy_probs = torch::softmax(policy_logits, -1);
-  return (policy_probs * q_values).sum(-1, true);
+torch::Tensor ActorImpl::value_head_forward(const torch::Tensor& encoded) {
+  return value_head_->forward(encoded);
 }
 
-torch::Tensor VRPOActorImpl::q_head_forward(const torch::Tensor& encoded) {
-  const float q_value_abs_cap = std::max(vrpo_config_.q_value_abs_cap, 1.0e-6F);
-  const torch::Tensor raw_q = q_head_->forward(encoded);
-  return torch::tanh(raw_q / q_value_abs_cap) * q_value_abs_cap;
-}
-
-torch::Tensor VRPOActorImpl::policy_head_forward(const torch::Tensor& features) {
+torch::Tensor ActorImpl::policy_head_forward(const torch::Tensor& features) {
   if (!policy_hidden_.is_empty()) {
     return policy_lora_->forward(policy_hidden_->forward(features));
   }
   return policy_lora_->forward(features);
 }
 
-ActorSequenceOutput VRPOActorImpl::forward_sequence(
+ActorSequenceOutput ActorImpl::forward_sequence(
     torch::Tensor obs_seq,
     torch::Tensor goal_values,
     torch::Tensor episode_starts,
@@ -693,66 +566,53 @@ ActorSequenceOutput VRPOActorImpl::forward_sequence(
   torch::Tensor encoded_seq = mamba2_encoder_->forward_sequence(obs_seq, episode_starts);
   torch::Tensor encoded = encoded_seq.reshape({time * batch, config_.encoder_dim});
 
-  torch::Tensor policy_logits;
-  if (!policy_hidden_.is_empty()) {
-    policy_logits = policy_lora_->forward(policy_hidden_->forward(encoded));
-  } else {
-    policy_logits = policy_lora_->forward(encoded);
-  }
-
-  torch::Tensor q_values = compute_value ? q_head_forward(encoded) : torch::Tensor{};
-  torch::Tensor expected_value;
+  torch::Tensor policy_logits = policy_head_forward(encoded);
+  torch::Tensor value;
   if (compute_value) {
-    torch::Tensor policy_probs = torch::softmax(policy_logits, -1);
-    expected_value = (policy_probs * q_values).sum(-1, true).reshape({time, batch, 1});
+    value = value_head_forward(encoded).reshape({time, batch, 1});
   }
 
   return {
       policy_logits.reshape({time, batch, config_.action_dim}),
       encoded_seq,
-      expected_value,
+      value,
       encoded_seq,
-      compute_value ? q_values.reshape({time, batch, config_.action_dim}) : torch::Tensor{},
   };
 }
 
-torch::Tensor VRPOActorImpl::initial_recurrent_state(int64_t batch, const torch::Device& device) const {
+torch::Tensor ActorImpl::initial_recurrent_state(int64_t batch, const torch::Device& device) const {
   return mamba2_encoder_->initial_state(batch, device);
 }
 
-int VRPOActorImpl::feature_dim() const {
+int ActorImpl::feature_dim() const {
   return feature_dim_;
 }
 
-const ModelConfig& VRPOActorImpl::config() const {
+const ModelConfig& ActorImpl::config() const {
   return config_;
 }
 
-const GoalCriticConfig& VRPOActorImpl::goal_critic_config() const {
+const GoalCriticConfig& ActorImpl::goal_critic_config() const {
   return goal_critic_config_;
 }
 
-const ESLoraConfig& VRPOActorImpl::es_lora_config() const {
+const ESLoraConfig& ActorImpl::es_lora_config() const {
   return es_lora_config_;
 }
 
-const VRPOConfig& VRPOActorImpl::vrpo_config() const {
-  return vrpo_config_;
-}
-
-std::vector<torch::Tensor> VRPOActorImpl::es_lora_parameters() const {
+std::vector<torch::Tensor> ActorImpl::es_lora_parameters() const {
   return policy_lora_->lora_parameters();
 }
 
-std::vector<torch::Tensor> VRPOActorImpl::es_lora_parameters_flat() const {
+std::vector<torch::Tensor> ActorImpl::es_lora_parameters_flat() const {
   return policy_lora_->lora_parameters_flat();
 }
 
-void VRPOActorImpl::restore_es_lora_parameters(const std::vector<torch::Tensor>& params) {
+void ActorImpl::restore_es_lora_parameters(const std::vector<torch::Tensor>& params) {
   policy_lora_->restore_lora_parameters(params);
 }
 
-void VRPOActorImpl::apply_lora_perturbation(
+void ActorImpl::apply_lora_perturbation(
     const std::vector<torch::Tensor>& perturbation, float sigma) {
   torch::NoGradGuard no_grad;
   auto params = es_lora_parameters();
@@ -761,7 +621,7 @@ void VRPOActorImpl::apply_lora_perturbation(
   }
 }
 
-torch::Tensor VRPOActorImpl::policy_eggroll_logits(
+torch::Tensor ActorImpl::policy_eggroll_logits(
     const torch::Tensor& features,
     const torch::Tensor& A_stack,
     const torch::Tensor& B_stack,
@@ -774,23 +634,23 @@ torch::Tensor VRPOActorImpl::policy_eggroll_logits(
   return policy_lora_->forward_eggroll_population(policy_input, A_stack, B_stack, sigma);
 }
 
-void VRPOActorImpl::apply_policy_eggroll_update(const torch::Tensor& delta_weight) {
+void ActorImpl::apply_policy_eggroll_update(const torch::Tensor& delta_weight) {
   policy_lora_->apply_base_weight_update(delta_weight);
 }
 
-const LoRALinear& VRPOActorImpl::policy_lora() const {
+const LoRALinear& ActorImpl::policy_lora() const {
   return policy_lora_;
 }
 
-GoalCritic& VRPOActorImpl::goal_critic() {
+GoalCritic& ActorImpl::goal_critic() {
   return goal_critic_;
 }
 
-std::vector<std::string> VRPOActorImpl::enabled_critic_heads() const {
-  return {"extrinsic", "q_critic"};
+std::vector<std::string> ActorImpl::enabled_critic_heads() const {
+  return {"extrinsic"};
 }
 
-VRPOActor load_vrpo_actor(const std::string& checkpoint_path, const std::string& device) {
+Actor load_actor(const std::string& checkpoint_path, const std::string& device) {
   namespace fs = std::filesystem;
   const fs::path base(checkpoint_path);
   const ExperimentConfig config = load_experiment_config((base / "config.json").string());
@@ -798,7 +658,7 @@ VRPOActor load_vrpo_actor(const std::string& checkpoint_path, const std::string&
   validate_inference_checkpoint_metadata(metadata, config);
 
   torch::Device torch_device(device);
-  auto model = VRPOActor(config.model, config.goal_critic, config.es_lora, config.vrpo);
+  auto model = Actor(config.model, config.goal_critic, config.es_lora);
   const fs::path state_path = base / "state.pt";
   if (fs::exists(state_path)) {
     torch::serialize::InputArchive archive;
@@ -814,23 +674,21 @@ VRPOActor load_vrpo_actor(const std::string& checkpoint_path, const std::string&
   return model;
 }
 
-VRPOActor clone_vrpo_actor(const VRPOActor& source, const torch::Device& device) {
+Actor clone_actor(const Actor& source, const torch::Device& device) {
   if (!source) {
     return nullptr;
   }
-  auto clone = VRPOActor(source->config(), source->goal_critic_config(), source->es_lora_config(), source->vrpo_config());
+  auto clone = Actor(source->config(), source->goal_critic_config(), source->es_lora_config());
   clone->to(device);
   copy_module_tensors_to(source, clone, device);
-  clone->predictor_active_ = source->predictor_active_;
   return clone;
 }
 
-void copy_vrpo_actor_tensors_to(const VRPOActor& source, VRPOActor& target, const torch::Device& device) {
+void copy_actor_tensors_to(const Actor& source, Actor& target, const torch::Device& device) {
   if (!source || !target) {
-    throw std::invalid_argument("copy_vrpo_actor_tensors_to requires non-null actors.");
+    throw std::invalid_argument("copy_actor_tensors_to requires non-null actors.");
   }
   copy_module_tensors_to(source, target, device);
-  target->predictor_active_ = source->predictor_active_;
 }
 
 }  // namespace pulsar

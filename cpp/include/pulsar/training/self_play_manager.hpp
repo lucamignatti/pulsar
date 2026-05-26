@@ -12,7 +12,7 @@
 
 #include "pulsar/config/config.hpp"
 #include "pulsar/model/normalizer.hpp"
-#include "pulsar/model/vrpo_actor.hpp"
+#include "pulsar/model/actor.hpp"
 #include "pulsar/training/batched_rocketsim_collector.hpp"
 
 namespace pulsar {
@@ -49,7 +49,7 @@ class SelfPlayManager {
   void restore_rng_state(const std::string& state);
 
   void infer_opponent_actions(
-      VRPOActor& current_model,
+      Actor& current_model,
       const torch::Tensor& raw_obs,
       const torch::Tensor& action_masks,
       const torch::Tensor& episode_starts,
@@ -59,7 +59,7 @@ class SelfPlayManager {
       double* inference_seconds);
 
   SelfPlayMetrics on_update(
-      VRPOActor& current_model,
+      Actor& current_model,
       const ObservationNormalizer& current_normalizer,
       std::int64_t global_step,
       int update_index);
@@ -73,7 +73,7 @@ class SelfPlayManager {
     int update_index = 0;
     int curriculum_stage = -1;
     std::string mode = "1v1";
-    VRPOActor model{nullptr};
+    Actor model{nullptr};
     ObservationNormalizer normalizer{0};
     std::map<std::string, double> ratings{};
   };
@@ -83,11 +83,11 @@ class SelfPlayManager {
   void trim_snapshots();
   void ensure_configured_rating_modes();
   void add_snapshot(
-      VRPOActor& current_model,
+      Actor& current_model,
       const ObservationNormalizer& current_normalizer,
       std::int64_t global_step,
       int update_index);
-  SelfPlayMetrics evaluate_current(VRPOActor& current_model, const ObservationNormalizer& current_normalizer);
+  SelfPlayMetrics evaluate_current(Actor& current_model, const ObservationNormalizer& current_normalizer);
   [[nodiscard]] std::string mode_name() const;
 
   ExperimentConfig config_{};

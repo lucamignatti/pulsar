@@ -7,7 +7,7 @@
 #include <utility>
 #include <torch/torch.h>
 
-#include "pulsar/model/vrpo_actor.hpp"
+#include "pulsar/model/actor.hpp"
 
 namespace pulsar {
 
@@ -38,8 +38,6 @@ void zero_existing_gradients(torch::nn::Module& module);
 
 bool gradients_are_finite(const torch::nn::Module& module);
 
-// Loss of Plasticity mitigations
-GradientSanitizeResult zero_nonfinite_parameters(torch::nn::Module& module);
 GradientSanitizeResult zero_nonfinite_gradients(torch::nn::Module& module);
 
 torch::Tensor finite_or_zero(const torch::Tensor& tensor);
@@ -52,21 +50,13 @@ bool captured_group_gradients_are_finite(const std::vector<CapturedGrad>& group)
 
 void scale_existing_gradients(torch::nn::Module& module, double scale);
 
-// Multi-group PCGrad: project each group's gradient against all others.
-void apply_pcgrad_multi(std::vector<std::vector<CapturedGrad>>& groups);
-
-void reduce_captured_grad_groups(
-    std::vector<std::vector<CapturedGrad>>& primary_groups,
-    const std::vector<std::vector<std::vector<CapturedGrad>>>& replica_groups_list,
-    const torch::Device& primary_device);
-
 void reduce_gradients_from_replicas(
-    VRPOActor& primary,
-    const std::vector<VRPOActor>& replicas);
+    Actor& primary,
+    const std::vector<Actor>& replicas);
 
 void sync_actor_to_replicas(
-    const VRPOActor& primary,
-    std::vector<VRPOActor>& replicas);
+    const Actor& primary,
+    std::vector<Actor>& replicas);
 
 torch::Tensor policy_goal_values_like(const torch::Tensor& obs, int goal_dim);
 

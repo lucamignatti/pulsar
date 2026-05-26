@@ -60,7 +60,6 @@ class RolloutStorage {
 
   void set_final_values(const std::unordered_map<std::string, torch::Tensor>& final_values);
   void set_rewards_at(int step, const std::unordered_map<std::string, torch::Tensor>& rewards_in);
-  void set_sparse_events_slice(int step, int agent_offset, const torch::Tensor& sparse_events_in);
   void mark_step_filled(int step);
   [[nodiscard]] const std::unordered_map<std::string, torch::Tensor>& final_values() const;
   void clear();
@@ -86,7 +85,6 @@ class RolloutStorage {
   torch::Tensor goal_positions;
   torch::Tensor terminal_outcome_labels;
   torch::Tensor terminal_observations;
-  torch::Tensor sparse_events;  // uint8, [rollout_length, num_agents, sparse_event_channels]
   torch::Tensor mode_ids;  // int8, [rollout_length, num_agents], 0=unknown 1=1v1 2=2v2 3=3v3
   torch::Tensor encoded_features;  // float32, [rollout_length, num_agents, encoder_dim]
   std::unordered_map<std::string, torch::Tensor> final_values_;

@@ -2,14 +2,12 @@
 
 #include <cstdint>
 #include <string>
-#include <span>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "pulsar/config/config.hpp"
 #include "pulsar/core/types.hpp"
-#include "pulsar/training/sparse_event_channels.hpp"
 
 namespace pulsar {
 
@@ -81,18 +79,6 @@ class RewardEngine {
       EnvRewardState& env_state,
       bool done,
       int outcome_label) const;
-
-  void detect_sparse_events(
-      int global_tick,
-      const CarState& car,
-      const EnvState& env,
-      std::size_t local_agent_index,
-      std::span<const AgentRewardState> previous_env_agent_states,
-      AgentRewardState& agent_state,
-      EnvRewardState& env_state,
-      bool done,
-      int outcome_label,
-      std::uint8_t* events_out) const;
 
  private:
   OutcomeConfig outcome_;

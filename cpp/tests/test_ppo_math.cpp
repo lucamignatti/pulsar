@@ -4,8 +4,7 @@
 #include <stdexcept>
 
 #include "pulsar/config/config.hpp"
-#include "pulsar/model/vrpo_actor.hpp"
-#include "pulsar/training/vrpo_math.hpp"
+#include "pulsar/training/ppo_math.hpp"
 #include "test_utils.hpp"
 
 namespace {
@@ -29,30 +28,20 @@ void require_finite(const torch::Tensor& t, const std::string& name) {
   require(torch::isfinite(t).all().item<bool>(), name + " has non-finite values");
 }
 
-pulsar::ModelConfig tiny_model_config() {
-  pulsar::ModelConfig cfg;
-  cfg.observation_dim = 8;
-  cfg.action_dim = 4;
-  cfg.use_layer_norm = false;
-  cfg.encoder_dim = 8;
-  cfg.value_hidden_dim = 16;
-  return cfg;
-}
-
 }  // namespace
 
 int main() {
   try {
-    // 1. VRPO clipped loss is per-sample
+    // 1. PPO clipped loss is per-sample
     {
       const auto cur = torch::tensor({-0.5F, -1.0F, -2.0F}, torch::kFloat32);
       const auto old = torch::tensor({-0.3F, -0.8F, -1.5F}, torch::kFloat32);
       const auto adv = torch::ones({3}, torch::kFloat32);
-      const auto loss = pulsar::clipped_vrpo_policy_loss(cur, old, adv, 0.2F);
-      require(loss.sizes() == cur.sizes(), "VRPO loss must be per-sample");
+      const auto loss = pulsar::clipped_ppo_policy_loss(cur, old, adv, 0.2F);
+      require(loss.sizes() == cur.sizes(), "PPO loss must be per-sample");
     }
 
-    // 2. VRPO clipping with positive advantage
+    // 2. PPO clipping with positive advantage
     {
       const float old_lp = 0.0F;
       const float cur_lp = std::log(1.5F);
@@ -61,14 +50,14 @@ int main() {
       const auto cur = torch::tensor({cur_lp}, torch::kFloat32);
       const auto old = torch::tensor({old_lp}, torch::kFloat32);
       const auto adv = torch::tensor({adv_val}, torch::kFloat32);
-      const auto loss = pulsar::clipped_vrpo_policy_loss(cur, old, adv, clip_range);
+      const auto loss = pulsar::clipped_ppo_policy_loss(cur, old, adv, clip_range);
       const float ratio = std::exp(cur_lp - old_lp);
       const float clipped = std::min(ratio, 1.0F + clip_range);
       const float expected = -clipped * adv_val;
-      require_close(loss.item<float>(), expected, "clipped VRPO with positive advantage");
+      require_close(loss.item<float>(), expected, "clipped PPO with positive advantage");
     }
 
-    // 3. VRPO clipping with negative advantage
+    // 3. PPO clipping with negative advantage
     {
       const float cur_lp = std::log(0.5F);
       const float old_lp = std::log(1.0F);
@@ -77,11 +66,11 @@ int main() {
       const auto cur = torch::tensor({cur_lp}, torch::kFloat32);
       const auto old = torch::tensor({old_lp}, torch::kFloat32);
       const auto adv = torch::tensor({adv_val}, torch::kFloat32);
-      const auto loss = pulsar::clipped_vrpo_policy_loss(cur, old, adv, clip_range);
+      const auto loss = pulsar::clipped_ppo_policy_loss(cur, old, adv, clip_range);
       const float ratio = std::exp(cur_lp - old_lp);
       const float clipped_ratio = std::clamp(ratio, 1.0F - clip_range, 1.0F + clip_range);
       const float expected = -std::min(ratio * adv_val, clipped_ratio * adv_val);
-      require_close(loss.item<float>(), expected, "clipped VRPO with negative advantage");
+      require_close(loss.item<float>(), expected, "clipped PPO with negative advantage");
     }
 
     // 4. GAE final bootstrap
@@ -107,22 +96,6 @@ int main() {
       require_close(advantages[2].item<float>(), 1.0F, "GAE terminal mask step 2");
     }
  
-    // 5b. Q-boosted GAE numerical validation
-    {
-      const auto q_taken = torch::tensor({1.5F, 2.5F, 3.5F}, torch::kFloat32).unsqueeze(1);
-      const auto v_from_q = torch::tensor({1.0F, 2.0F, 3.0F}, torch::kFloat32).unsqueeze(1);
-      const auto rewards = torch::tensor({0.5F, 1.0F, 1.5F}, torch::kFloat32).unsqueeze(1);
-      const auto dones = torch::tensor({0.0F, 0.0F, 1.0F}, torch::kFloat32).unsqueeze(1);
-      const auto next_v_from_q = torch::tensor({4.0F}, torch::kFloat32);
-
-      const auto advantages = pulsar::compute_q_boosted_gae(
-          q_taken, v_from_q, rewards, dones, 0.9F, 0.95F, next_v_from_q);
-
-      require_close(advantages[2].item<float>(), -1.5F, "Q-boosted GAE step 2");
-      require_close(advantages[1].item<float>(), -0.01F, "Q-boosted GAE step 1");
-      require_close(advantages[0].item<float>(), 0.86395F, "Q-boosted GAE step 0");
-    }
-
     // 6. One-sample advantage normalization
     {
       const auto adv = torch::tensor({3.0F}, torch::kFloat32);
@@ -149,7 +122,7 @@ int main() {
       require(!torch::isfinite(normalized).all().item<bool>(), "non-finite advantage normalization should remain non-finite");
     }
 
-    // 6c. CUDA/HIP VRPO math parity when available.
+    // 6c. CUDA/HIP PPO math parity when available.
     if (torch::cuda::is_available()) {
       auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
       auto values_cpu = torch::randn({7, 5}, torch::kFloat32);
@@ -171,31 +144,6 @@ int main() {
           boot_cpu.to(opts),
           boot_values_cpu.to(opts)).to(torch::kCPU);
       require(torch::allclose(actual, expected, 1.0e-5, 1.0e-5), "accelerated GAE parity");
-
-      auto q_cpu = torch::randn({7, 5}, torch::kFloat32);
-      auto v_from_q_cpu = torch::randn({7, 5}, torch::kFloat32);
-      auto next_v_from_q_cpu = torch::randn({5}, torch::kFloat32);
-      auto expected_q_boosted = pulsar::compute_q_boosted_gae(
-          q_cpu,
-          v_from_q_cpu,
-          rewards_cpu,
-          dones_cpu,
-          0.97F,
-          0.91F,
-          next_v_from_q_cpu,
-          boot_cpu,
-          boot_values_cpu);
-      auto actual_q_boosted = pulsar::compute_q_boosted_gae(
-          q_cpu.to(opts),
-          v_from_q_cpu.to(opts),
-          rewards_cpu.to(opts),
-          dones_cpu.to(opts),
-          0.97F,
-          0.91F,
-          next_v_from_q_cpu.to(opts),
-          boot_cpu.to(opts),
-          boot_values_cpu.to(opts)).to(torch::kCPU);
-      require(torch::allclose(actual_q_boosted, expected_q_boosted, 1.0e-5, 1.0e-5), "accelerated Q-boosted GAE parity");
 
       auto active_cpu = torch::ones({7, 5}, torch::kFloat32);
       active_cpu[0][0] = 0.0F;
@@ -224,36 +172,18 @@ int main() {
       auto cur_cpu = torch::tensor({std::log(1.1F), std::log(1.4F), std::log(0.7F)}, torch::kFloat32).set_requires_grad(true);
       auto old_lp_cpu = torch::zeros({3}, torch::kFloat32);
       auto adv_cpu = torch::tensor({1.0F, 1.0F, -1.0F}, torch::kFloat32);
-      auto loss_cpu = pulsar::clipped_vrpo_policy_loss(cur_cpu, old_lp_cpu, adv_cpu, 0.2F).sum();
+      auto loss_cpu = pulsar::clipped_ppo_policy_loss(cur_cpu, old_lp_cpu, adv_cpu, 0.2F).sum();
       loss_cpu.backward();
       auto cur_gpu = cur_cpu.detach().to(opts).set_requires_grad(true);
-      auto loss_gpu = pulsar::clipped_vrpo_policy_loss(cur_gpu, old_lp_cpu.to(opts), adv_cpu.to(opts), 0.2F).sum();
+      auto loss_gpu = pulsar::clipped_ppo_policy_loss(cur_gpu, old_lp_cpu.to(opts), adv_cpu.to(opts), 0.2F).sum();
       loss_gpu.backward();
-      require(torch::allclose(loss_gpu.detach().to(torch::kCPU), loss_cpu.detach(), 1.0e-5, 1.0e-5), "accelerated clipped VRPO loss parity");
-      require(torch::allclose(cur_gpu.grad().to(torch::kCPU), cur_cpu.grad(), 1.0e-5, 1.0e-5), "accelerated clipped VRPO grad parity");
+      require(torch::allclose(loss_gpu.detach().to(torch::kCPU), loss_cpu.detach(), 1.0e-5, 1.0e-5), "accelerated clipped PPO loss parity");
+      require(torch::allclose(cur_gpu.grad().to(torch::kCPU), cur_cpu.grad(), 1.0e-5, 1.0e-5), "accelerated clipped PPO grad parity");
 
       auto goals = torch::randn({7, 5, 3}, opts);
       auto future = pulsar::sample_future_goal_positions(goals, dones_cpu.to(opts), boot_cpu.to(opts), 4);
       require(future.sizes() == torch::IntArrayRef({7, 5, 3}), "accelerated future goals shape");
       require_finite(future.to(torch::kCPU), "accelerated future goals finite");
-    }
-
-    // 6d. VRPO Q head output is bounded before it can seed expected-SARSA targets.
-    {
-      auto model_cfg = tiny_model_config();
-      pulsar::VRPOConfig vrpo_cfg;
-      vrpo_cfg.q_value_abs_cap = 7.0F;
-      auto actor = pulsar::VRPOActor(model_cfg, pulsar::GoalCriticConfig{}, pulsar::ESLoraConfig{}, vrpo_cfg);
-      {
-        torch::NoGradGuard no_grad;
-        auto& final_layer = actor->q_head_->at<torch::nn::LinearImpl>(2);
-        final_layer.weight.fill_(1000.0F);
-        final_layer.bias.fill_(1000.0F);
-      }
-      const auto encoded = torch::ones({3, actor->feature_dim()}, torch::kFloat32);
-      const auto q_values = actor->q_head_forward(encoded);
-      require_finite(q_values, "bounded Q head");
-      require(q_values.abs().max().item<float>() <= vrpo_cfg.q_value_abs_cap + kTolerance, "Q head must honor q_value_abs_cap");
     }
 
     // 7. Config validation
@@ -277,16 +207,6 @@ int main() {
         caught = true;
       }
       require(caught, "rollout_length <= 1 should throw");
-
-      bad_config = config;
-      bad_config.vrpo.q_target_abs_cap = 0.0F;
-      caught = false;
-      try {
-        pulsar::validate_experiment_config(bad_config);
-      } catch (const std::invalid_argument&) {
-        caught = true;
-      }
-      require(caught, "non-positive VRPO Q target cap should throw");
     }
 
     // 8. Future goal sampling
@@ -399,119 +319,10 @@ int main() {
       require_finite(entropy, "masked entropy finite");
     }
 
-    // 12. Live Predictors: Target Computation lookahead, horizons, and done-boundary masking
-    {
-      const int T = 5;
-      const int N = 2;
-      const int C = 3;
-      auto sparse_events = torch::zeros({T, N, C}, torch::kUInt8);
-      auto dones = torch::zeros({T, N}, torch::kFloat32);
-      auto horizons = torch::tensor({2, 3, 4}, torch::kInt32);
-
-      // Event for Agent 0 at timestep 3, Channel 0 (horizon = 2)
-      sparse_events[3][0][0] = 1;
-
-      // Event for Agent 1 at timestep 4, Channel 1 (horizon = 3)
-      sparse_events[4][1][1] = 1;
-
-      const auto targets = pulsar::compute_sparse_event_soon_targets(sparse_events, dones, horizons);
-      require(targets.sizes() == torch::IntArrayRef({T, N, C}), "compute_sparse_event_soon_targets shape mismatch");
-
-      // Verify lookahead for Agent 0, Channel 0 (horizon = 2)
-      // Timestep 0, 1 -> 0
-      // Timestep 2 -> 1 (sees event at 3 because lookahead is [2, 3])
-      // Timestep 3 -> 1 (sees event at 3 because lookahead is [3, 4])
-      // Timestep 4 -> 0
-      require(targets[0][0][0].item<int64_t>() == 0, "lookahead target mismatch");
-      require(targets[1][0][0].item<int64_t>() == 0, "lookahead target mismatch");
-      require(targets[2][0][0].item<int64_t>() == 1, "lookahead target mismatch");
-      require(targets[3][0][0].item<int64_t>() == 1, "lookahead target mismatch");
-      require(targets[4][0][0].item<int64_t>() == 0, "lookahead target mismatch");
-
-      // Verify lookahead for Agent 1, Channel 1 (horizon = 3)
-      // Timestep 0, 1 -> 0
-      // Timestep 2 -> 1 (sees event at 4 because lookahead is [2, 3, 4])
-      // Timestep 3 -> 1 (sees event at 4 because lookahead is [3, 4, 5])
-      // Timestep 4 -> 1 (sees event at 4 because lookahead is [4, 5, 6])
-      require(targets[0][1][1].item<int64_t>() == 0, "lookahead target mismatch");
-      require(targets[1][1][1].item<int64_t>() == 0, "lookahead target mismatch");
-      require(targets[2][1][1].item<int64_t>() == 1, "lookahead target mismatch");
-      require(targets[3][1][1].item<int64_t>() == 1, "lookahead target mismatch");
-      require(targets[4][1][1].item<int64_t>() == 1, "lookahead target mismatch");
-
-      // Test done-boundary truncation
-      // If done occurs at timestep 2 for Agent 0, lookahead at timestep 1 must terminate
-      // at timestep 2 and not see the event at timestep 3.
-      dones[2][0] = 1.0F;
-      const auto truncated_targets = pulsar::compute_sparse_event_soon_targets(sparse_events, dones, horizons);
-      require(truncated_targets[1][0][0].item<int64_t>() == 0, "done truncation lookahead mismatch");
-    }
-
-    // 13. Live Predictors: Convergence State Machine, Warm-up, Positive Rate, and NaN resilience
-    {
-      float ema_loss = -1.0F;
-      float delta = 1.0F;
-      std::uint8_t active = 0;
-      
-      const float warmup_updates = 3;
-      const float convergence_threshold = 0.01F;
-
-      auto run_mock_update = [&](double mean_loss, double positive_rate, int update_index) {
-        if (mean_loss <= 0.0 || !std::isfinite(mean_loss)) {
-          return;
-        }
-        if (ema_loss < 0.0F) {
-          ema_loss = static_cast<float>(mean_loss);
-          delta = std::numeric_limits<float>::infinity();
-        } else {
-          const float next_ema = 0.9F * ema_loss + 0.1F * static_cast<float>(mean_loss);
-          delta = std::abs(next_ema - ema_loss);
-          ema_loss = next_ema;
-        }
-        if (active == 0 &&
-            update_index >= warmup_updates &&
-            positive_rate > 0.0 &&
-            std::isfinite(delta) &&
-            delta <= convergence_threshold) {
-          active = 1;
-        }
-      };
-
-      // Update 1: First update initializes the EMA loss
-      run_mock_update(1.0, 0.1, 1);
-      require_close(ema_loss, 1.0F, "state machine EMA initialization");
-      require(std::isinf(delta), "initial delta should be infinite");
-      require(active == 0, "should not activate on first update");
-
-      // Update 2: Delta becomes small, but update_index (2) < warmup (3)
-      run_mock_update(0.9, 0.1, 2); // next_ema = 0.99, delta = 0.01
-      require_close(ema_loss, 0.99F, "EMA update");
-      require_close(delta, 0.01F, "delta calculation");
-      require(active == 0, "should not activate before warmup updates");
-
-      // Update 3: Within warmup, but positive_rate = 0.0 (no occurrences observed)
-      run_mock_update(0.99, 0.0, 3); // delta = 0.0
-      require(active == 0, "should not activate when positive_rate is 0");
-
-      // Update 4: Valid convergence and positive rate
-      run_mock_update(0.99, 0.1, 4); // delta = 0.0
-      require(active == 1, "predictor should activate when all conditions are satisfied");
-
-      // Test NaN loss resilience: updating with NaN should leave state unaffected
-      const float saved_ema = ema_loss;
-      const float saved_delta = delta;
-      const std::uint8_t saved_active = active;
-
-      run_mock_update(std::numeric_limits<double>::quiet_NaN(), 0.1, 5);
-      require_close(ema_loss, saved_ema, "NaN loss should not affect EMA loss");
-      require_close(delta, saved_delta, "NaN loss should not affect delta");
-      require(active == saved_active, "NaN loss should not affect active flag");
-    }
-
-    std::cout << "pulsar_vrpo_math_tests passed\n";
+    std::cout << "pulsar_ppo_math_tests passed\n";
     return EXIT_SUCCESS;
   } catch (const std::exception& exc) {
-    std::cerr << "pulsar_vrpo_math_tests FAILED: " << exc.what() << '\n';
+    std::cerr << "pulsar_ppo_math_tests FAILED: " << exc.what() << '\n';
     return EXIT_FAILURE;
   }
 }

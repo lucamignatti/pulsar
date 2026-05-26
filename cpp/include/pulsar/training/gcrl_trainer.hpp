@@ -5,8 +5,8 @@
 #include <torch/torch.h>
 
 #include "pulsar/config/config.hpp"
-#include "pulsar/model/vrpo_actor.hpp"
-#include "pulsar/training/gradient_surgery.hpp"
+#include "pulsar/model/actor.hpp"
+#include "pulsar/training/gradient_ops.hpp"
 
 namespace pulsar {
 

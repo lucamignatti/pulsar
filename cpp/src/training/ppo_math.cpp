@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <vector>
 
-#include "pulsar/training/vrpo_math.hpp"
+#include "pulsar/training/ppo_math.hpp"
 #include "pulsar/tracing/tracing.hpp"
 
 #ifdef PULSAR_HAS_TORCH
@@ -52,28 +52,6 @@ torch::Tensor compute_gae_cuda(
     const torch::Tensor& bootstrap_mask,
     const torch::Tensor& bootstrap_values);
 
-torch::Tensor compute_q_boosted_gae_cuda(
-    const torch::Tensor& q_values_taken,
-    const torch::Tensor& v_from_q,
-    const torch::Tensor& rewards,
-    const torch::Tensor& dones,
-    float gamma,
-    float gae_lambda,
-    const torch::Tensor& next_v_from_q,
-    const torch::Tensor& bootstrap_mask,
-    const torch::Tensor& bootstrap_v_from_q);
-
-torch::Tensor compute_centered_expected_sarsa_gae_cuda(
-    const torch::Tensor& q_values_taken,
-    const torch::Tensor& v_from_q,
-    const torch::Tensor& rewards,
-    const torch::Tensor& dones,
-    float gamma,
-    float gae_lambda,
-    const torch::Tensor& next_v_from_q,
-    const torch::Tensor& bootstrap_mask,
-    const torch::Tensor& bootstrap_v_from_q);
-
 torch::Tensor normalize_advantage_cuda(const torch::Tensor& advantages, const torch::Tensor& active_mask);
 
 std::vector<torch::Tensor> sample_masked_actions_cuda(
@@ -105,11 +83,6 @@ torch::Tensor sample_future_goal_positions_cuda(
     const torch::Tensor& episode_starts,
     int max_future,
     std::uint32_t seed);
-
-torch::Tensor compute_sparse_event_soon_targets_cuda(
-    const torch::Tensor& sparse_events,
-    const torch::Tensor& dones,
-    const torch::Tensor& horizons);
 #endif
 
 #ifdef PULSAR_HAS_PPO_MATH_HIP_KERNELS
@@ -123,28 +96,6 @@ torch::Tensor compute_gae_hip(
     const torch::Tensor& next_values,
     const torch::Tensor& bootstrap_mask,
     const torch::Tensor& bootstrap_values);
-
-torch::Tensor compute_q_boosted_gae_hip(
-    const torch::Tensor& q_values_taken,
-    const torch::Tensor& v_from_q,
-    const torch::Tensor& rewards,
-    const torch::Tensor& dones,
-    float gamma,
-    float gae_lambda,
-    const torch::Tensor& next_v_from_q,
-    const torch::Tensor& bootstrap_mask,
-    const torch::Tensor& bootstrap_v_from_q);
-
-torch::Tensor compute_centered_expected_sarsa_gae_hip(
-    const torch::Tensor& q_values_taken,
-    const torch::Tensor& v_from_q,
-    const torch::Tensor& rewards,
-    const torch::Tensor& dones,
-    float gamma,
-    float gae_lambda,
-    const torch::Tensor& next_v_from_q,
-    const torch::Tensor& bootstrap_mask,
-    const torch::Tensor& bootstrap_v_from_q);
 
 torch::Tensor normalize_advantage_hip(const torch::Tensor& advantages, const torch::Tensor& active_mask);
 
@@ -177,11 +128,6 @@ torch::Tensor sample_future_goal_positions_hip(
     const torch::Tensor& episode_starts,
     int max_future,
     std::uint32_t seed);
-
-torch::Tensor compute_sparse_event_soon_targets_hip(
-    const torch::Tensor& sparse_events,
-    const torch::Tensor& dones,
-    const torch::Tensor& horizons);
 #endif
 
 void seed_everything(std::uint64_t seed) {
@@ -232,71 +178,6 @@ bool can_use_action_accel(const torch::Tensor& logits, const torch::Tensor& acti
 
 }  // namespace
 
-torch::Tensor compute_sparse_event_soon_targets(
-    const torch::Tensor& sparse_events,
-    const torch::Tensor& dones,
-    const torch::Tensor& horizons) {
-  if (!sparse_events.defined() || sparse_events.dim() != 3) {
-    throw std::invalid_argument("compute_sparse_event_soon_targets expects [T,N,C] sparse_events.");
-  }
-  if (!dones.defined() || dones.dim() != 2 ||
-      dones.size(0) != sparse_events.size(0) ||
-      dones.size(1) != sparse_events.size(1)) {
-    throw std::invalid_argument("compute_sparse_event_soon_targets dones shape must be [T,N].");
-  }
-  if (!horizons.defined() || horizons.dim() != 1 ||
-      horizons.size(0) != sparse_events.size(2)) {
-    throw std::invalid_argument("compute_sparse_event_soon_targets horizons shape must be [C].");
-  }
-#if defined(PULSAR_HAS_PPO_MATH_CUDA_KERNELS)
-  if (sparse_events.is_cuda()) {
-    return compute_sparse_event_soon_targets_cuda(
-        sparse_events.contiguous(),
-        dones.contiguous(),
-        horizons.to(torch::TensorOptions().device(sparse_events.device()).dtype(torch::kInt32)).contiguous());
-  }
-#elif defined(PULSAR_HAS_PPO_MATH_HIP_KERNELS)
-  if (sparse_events.is_cuda()) {
-    return compute_sparse_event_soon_targets_hip(
-        sparse_events.contiguous(),
-        dones.contiguous(),
-        horizons.to(torch::TensorOptions().device(sparse_events.device()).dtype(torch::kInt32)).contiguous());
-  }
-#endif
-  const torch::Tensor events_cpu = sparse_events.to(torch::kCPU).contiguous();
-  const torch::Tensor dones_cpu = dones.to(torch::kCPU).contiguous();
-  const torch::Tensor horizons_cpu =
-      horizons.to(torch::TensorOptions().device(torch::kCPU).dtype(torch::kInt32)).contiguous();
-  const int T = static_cast<int>(events_cpu.size(0));
-  const int N = static_cast<int>(events_cpu.size(1));
-  const int C = static_cast<int>(events_cpu.size(2));
-  torch::Tensor targets = torch::zeros({T, N, C}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
-  const auto* events_ptr = events_cpu.data_ptr<std::uint8_t>();
-  const auto* dones_ptr = dones_cpu.data_ptr<float>();
-  const auto* horizons_ptr = horizons_cpu.data_ptr<int>();
-  auto* targets_ptr = targets.data_ptr<std::int64_t>();
-  for (int t = 0; t < T; ++t) {
-    for (int n = 0; n < N; ++n) {
-      for (int c = 0; c < C; ++c) {
-        const int horizon = std::max(1, horizons_ptr[c]);
-        for (int k = 0; k < horizon; ++k) {
-          const int look = t + k;
-          if (look >= T) break;
-          const int event_index = (look * N + n) * C + c;
-          if (events_ptr[event_index] != 0) {
-            targets_ptr[(t * N + n) * C + c] = 1;
-            break;
-          }
-          if (dones_ptr[look * N + n] > 0.5F) {
-            break;
-          }
-        }
-      }
-    }
-  }
-  return targets.to(sparse_events.device());
-}
-
 torch::Tensor apply_action_mask_to_logits(const torch::Tensor& logits, const torch::Tensor& action_masks) {
   return logits.masked_fill(action_masks.logical_not(), kMaskedLogit);
 }
@@ -346,7 +227,7 @@ torch::Tensor sample_masked_actions(
 }
 
 torch::Tensor masked_action_entropy(const torch::Tensor& logits, const torch::Tensor& action_masks, float temperature) {
-  PULSAR_TRACE_SCOPE_CAT("vrpo_math", "entropy");
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "entropy");
   const float safe_temperature = std::max(temperature, 1.0e-6F);
   if (!logits.requires_grad() && can_use_action_accel(logits, action_masks) && logits.dim() == 2) {
 #if defined(PULSAR_HAS_PPO_MATH_CUDA_KERNELS)
@@ -373,7 +254,7 @@ torch::Tensor compute_gae(
     const torch::Tensor& next_values,
     const torch::Tensor& bootstrap_mask,
     const torch::Tensor& bootstrap_values) {
-  PULSAR_TRACE_SCOPE_CAT("vrpo_math", "compute_gae");
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "compute_gae");
   if (can_use_ppo_math_accel(values) &&
       rewards.is_cuda() &&
       dones.is_cuda() &&
@@ -426,149 +307,6 @@ torch::Tensor compute_gae(
     const torch::Tensor delta = rewards[t] + gamma * next_value * delta_mult - values[t];
     last_gae = delta + gamma * gae_lambda * non_terminal * last_gae;
     advantages[t] = last_gae.clone();
-  }
-  return advantages;
-}
-
-torch::Tensor compute_q_boosted_gae(
-    const torch::Tensor& q_values_taken,
-    const torch::Tensor& v_from_q,
-    const torch::Tensor& rewards,
-    const torch::Tensor& dones,
-    float gamma,
-    float gae_lambda,
-    const torch::Tensor& next_v_from_q,
-    const torch::Tensor& bootstrap_mask,
-    const torch::Tensor& bootstrap_v_from_q) {
-  PULSAR_TRACE_SCOPE_CAT("vrpo_math", "compute_q_boosted_gae");
-  if (can_use_ppo_math_accel(q_values_taken) &&
-      v_from_q.is_cuda() &&
-      rewards.is_cuda() &&
-      dones.is_cuda() &&
-      v_from_q.scalar_type() == torch::kFloat32 &&
-      rewards.scalar_type() == torch::kFloat32 &&
-      dones.scalar_type() == torch::kFloat32 &&
-      (!next_v_from_q.defined() || (next_v_from_q.is_cuda() && next_v_from_q.scalar_type() == torch::kFloat32)) &&
-      (!bootstrap_mask.defined() || (bootstrap_mask.is_cuda() && bootstrap_mask.scalar_type() == torch::kFloat32)) &&
-      (!bootstrap_v_from_q.defined() || (bootstrap_v_from_q.is_cuda() && bootstrap_v_from_q.scalar_type() == torch::kFloat32))) {
-#ifdef PULSAR_HAS_PPO_MATH_CUDA_KERNELS
-    return compute_q_boosted_gae_cuda(
-        q_values_taken.contiguous(),
-        v_from_q.contiguous(),
-        rewards.contiguous(),
-        dones.contiguous(),
-        gamma,
-        gae_lambda,
-        next_v_from_q.defined() ? next_v_from_q.contiguous() : torch::Tensor{},
-        bootstrap_mask.defined() ? bootstrap_mask.contiguous() : torch::Tensor{},
-        bootstrap_v_from_q.defined() ? bootstrap_v_from_q.contiguous() : torch::Tensor{});
-#endif
-#ifdef PULSAR_HAS_PPO_MATH_HIP_KERNELS
-    return compute_q_boosted_gae_hip(
-        q_values_taken.contiguous(),
-        v_from_q.contiguous(),
-        rewards.contiguous(),
-        dones.contiguous(),
-        gamma,
-        gae_lambda,
-        next_v_from_q.defined() ? next_v_from_q.contiguous() : torch::Tensor{},
-        bootstrap_mask.defined() ? bootstrap_mask.contiguous() : torch::Tensor{},
-        bootstrap_v_from_q.defined() ? bootstrap_v_from_q.contiguous() : torch::Tensor{});
-#endif
-  }
-  const int64_t steps = q_values_taken.size(0);
-  const int64_t agents = q_values_taken.size(1);
-  torch::Tensor advantages = torch::zeros({steps, agents}, q_values_taken.options());
-  torch::Tensor last_gae = torch::zeros({agents}, q_values_taken.options());
-
-  const torch::Tensor boundary_v_from_q = next_v_from_q.defined()
-      ? next_v_from_q.to(q_values_taken.device()).to(q_values_taken.dtype())
-      : torch::zeros({agents}, q_values_taken.options());
-
-  for (int64_t t = steps - 1; t >= 0; --t) {
-    torch::Tensor next_v = (t < steps - 1) ? v_from_q[t + 1] : boundary_v_from_q;
-    if (bootstrap_v_from_q.defined()) {
-      next_v = torch::where(bootstrap_mask[t] > 0.5F, bootstrap_v_from_q[t], next_v);
-    }
-    const torch::Tensor non_terminal = 1.0F - dones[t];
-    const torch::Tensor delta_mult = bootstrap_mask.defined()
-        ? torch::where(bootstrap_mask[t] > 0.5F, torch::ones_like(dones[t]), non_terminal)
-        : non_terminal;
-    const torch::Tensor delta = rewards[t] + gamma * next_v * delta_mult - q_values_taken[t];
-    last_gae = delta + gamma * gae_lambda * non_terminal * last_gae;
-    advantages[t] = q_values_taken[t] - v_from_q[t] + last_gae;
-  }
-  return advantages;
-}
-
-torch::Tensor compute_centered_expected_sarsa_gae(
-    const torch::Tensor& q_values_taken,
-    const torch::Tensor& v_from_q,
-    const torch::Tensor& rewards,
-    const torch::Tensor& dones,
-    float gamma,
-    float gae_lambda,
-    const torch::Tensor& next_v_from_q,
-    const torch::Tensor& bootstrap_mask,
-    const torch::Tensor& bootstrap_v_from_q) {
-  PULSAR_TRACE_SCOPE_CAT("vrpo_math", "compute_centered_expected_sarsa_gae");
-  if (can_use_ppo_math_accel(q_values_taken) &&
-      v_from_q.is_cuda() &&
-      rewards.is_cuda() &&
-      dones.is_cuda() &&
-      v_from_q.scalar_type() == torch::kFloat32 &&
-      rewards.scalar_type() == torch::kFloat32 &&
-      dones.scalar_type() == torch::kFloat32 &&
-      (!next_v_from_q.defined() || (next_v_from_q.is_cuda() && next_v_from_q.scalar_type() == torch::kFloat32)) &&
-      (!bootstrap_mask.defined() || (bootstrap_mask.is_cuda() && bootstrap_mask.scalar_type() == torch::kFloat32)) &&
-      (!bootstrap_v_from_q.defined() || (bootstrap_v_from_q.is_cuda() && bootstrap_v_from_q.scalar_type() == torch::kFloat32))) {
-#ifdef PULSAR_HAS_PPO_MATH_CUDA_KERNELS
-    return compute_centered_expected_sarsa_gae_cuda(
-        q_values_taken.contiguous(),
-        v_from_q.contiguous(),
-        rewards.contiguous(),
-        dones.contiguous(),
-        gamma,
-        gae_lambda,
-        next_v_from_q.defined() ? next_v_from_q.contiguous() : torch::Tensor{},
-        bootstrap_mask.defined() ? bootstrap_mask.contiguous() : torch::Tensor{},
-        bootstrap_v_from_q.defined() ? bootstrap_v_from_q.contiguous() : torch::Tensor{});
-#endif
-#ifdef PULSAR_HAS_PPO_MATH_HIP_KERNELS
-    return compute_centered_expected_sarsa_gae_hip(
-        q_values_taken.contiguous(),
-        v_from_q.contiguous(),
-        rewards.contiguous(),
-        dones.contiguous(),
-        gamma,
-        gae_lambda,
-        next_v_from_q.defined() ? next_v_from_q.contiguous() : torch::Tensor{},
-        bootstrap_mask.defined() ? bootstrap_mask.contiguous() : torch::Tensor{},
-        bootstrap_v_from_q.defined() ? bootstrap_v_from_q.contiguous() : torch::Tensor{});
-#endif
-  }
-  const int64_t steps = q_values_taken.size(0);
-  const int64_t agents = q_values_taken.size(1);
-  torch::Tensor advantages = torch::zeros({steps, agents}, q_values_taken.options());
-  torch::Tensor last_gae = torch::zeros({agents}, q_values_taken.options());
-
-  const torch::Tensor boundary_v_from_q = next_v_from_q.defined()
-      ? next_v_from_q.to(q_values_taken.device()).to(q_values_taken.dtype())
-      : torch::zeros({agents}, q_values_taken.options());
-
-  for (int64_t t = steps - 1; t >= 0; --t) {
-    torch::Tensor next_v = (t < steps - 1) ? v_from_q[t + 1] : boundary_v_from_q;
-    if (bootstrap_v_from_q.defined()) {
-      next_v = torch::where(bootstrap_mask[t] > 0.5F, bootstrap_v_from_q[t], next_v);
-    }
-    const torch::Tensor non_terminal = 1.0F - dones[t];
-    const torch::Tensor delta_mult = bootstrap_mask.defined()
-        ? torch::where(bootstrap_mask[t] > 0.5F, torch::ones_like(dones[t]), non_terminal)
-        : non_terminal;
-    // Centered residual: subtract V(s) instead of Q(s, a_t).
-    const torch::Tensor delta = rewards[t] + gamma * next_v * delta_mult - v_from_q[t];
-    last_gae = delta + gamma * gae_lambda * non_terminal * last_gae;
-    advantages[t] = q_values_taken[t] - v_from_q[t] + last_gae;
   }
   return advantages;
 }
@@ -644,12 +382,12 @@ bool can_use_clipped_loss_accel(
 
 }  // namespace
 
-torch::Tensor clipped_vrpo_policy_loss(
+torch::Tensor clipped_ppo_policy_loss(
     const torch::Tensor& current_log_probs,
     const torch::Tensor& old_log_probs,
     const torch::Tensor& advantages,
     float clip_range) {
-  PULSAR_TRACE_SCOPE_CAT("vrpo_math", "clipped_vrpo_loss");
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "clipped_ppo_loss");
   if (can_use_clipped_loss_accel(current_log_probs, old_log_probs, advantages)) {
 #if defined(PULSAR_HAS_PPO_MATH_CUDA_KERNELS) || defined(PULSAR_HAS_PPO_MATH_HIP_KERNELS)
     return ClippedVrpoPolicyLossAccelFunction::apply(
@@ -664,7 +402,7 @@ torch::Tensor clipped_vrpo_policy_loss(
   return -torch::min(ratio * advantages, clipped_ratio * advantages);
 }
 
-torch::Tensor clipped_vrpo_policy_loss(
+torch::Tensor clipped_ppo_policy_loss(
     const torch::Tensor& current_log_probs,
     const torch::Tensor& old_log_probs,
     const torch::Tensor& advantages,
@@ -675,7 +413,7 @@ torch::Tensor clipped_vrpo_policy_loss(
 }
 
 torch::Tensor normalize_advantage(const torch::Tensor& advantages, const torch::Tensor& active_mask) {
-  PULSAR_TRACE_SCOPE_CAT("vrpo_math", "normalize_advantage");
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "normalize_advantage");
   if (can_use_ppo_math_accel(advantages) && active_mask.defined() && active_mask.is_cuda()) {
     const torch::Tensor active_arg = active_mask.scalar_type() == torch::kFloat32
         ? active_mask.contiguous()
@@ -705,7 +443,7 @@ torch::Tensor sample_future_goal_positions(
     const torch::Tensor& dones,
     const torch::Tensor& episode_starts,
     int max_future) {
-  PULSAR_TRACE_SCOPE_CAT("vrpo_math", "sample_future_goal_positions");
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "sample_future_goal_positions");
   if (can_use_ppo_math_accel(goal_positions) &&
       (!dones.defined() || (dones.is_cuda() && dones.scalar_type() == torch::kFloat32)) &&
       (!episode_starts.defined() || (episode_starts.is_cuda() && episode_starts.scalar_type() == torch::kFloat32))) {
@@ -783,7 +521,7 @@ torch::Tensor compute_pairwise_negative_l2_logits(
     const torch::Tensor& lhs_embeddings,
     const torch::Tensor& rhs_embeddings,
     float temperature) {
-  PULSAR_TRACE_SCOPE_CAT("vrpo_math", "infonce_logits");
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "infonce_logits");
   constexpr float kMaxSquaredDistance = 1.0e6F;
   const torch::Tensor lhs = lhs_embeddings.to(torch::kFloat32);
   const torch::Tensor rhs = rhs_embeddings.to(torch::kFloat32);
@@ -797,7 +535,7 @@ torch::Tensor compute_pairwise_negative_l2_logits(
 torch::Tensor compute_symmetric_infonce_loss(
     const torch::Tensor& logits,
     float logsumexp_penalty_coeff) {
-  PULSAR_TRACE_SCOPE_CAT("vrpo_math", "infonce_loss");
+  PULSAR_TRACE_SCOPE_CAT("ppo_math", "infonce_loss");
   constexpr float kFiniteLogitClamp = 1.0e6F;
   const torch::Tensor logits_f32 = logits.to(torch::kFloat32).clamp(-kFiniteLogitClamp, kFiniteLogitClamp);
   const torch::Tensor diag = logits_f32.diagonal();

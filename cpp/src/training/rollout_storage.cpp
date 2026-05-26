@@ -5,8 +5,7 @@
 #include <algorithm>
 #include <stdexcept>
 
-#include "pulsar/training/vrpo_math.hpp"
-#include "pulsar/training/sparse_event_channels.hpp"
+#include "pulsar/training/ppo_math.hpp"
 
 namespace pulsar {
 namespace {
@@ -49,9 +48,6 @@ RolloutStorage::RolloutStorage(
       {rollout_length, num_agents}, 2,
       opts.dtype(torch::kInt64));
   terminal_observations = torch::zeros({rollout_length, num_agents, obs_dim}, opts);
-  sparse_events = torch::zeros(
-      {rollout_length, num_agents, static_cast<long>(kSparseEventChannelCount)},
-      opts.dtype(torch::kUInt8));
   mode_ids = torch::zeros({rollout_length, num_agents}, opts.dtype(torch::kInt8));
   encoded_features = torch::zeros({rollout_length, num_agents, encoder_dim}, opts);
 
@@ -251,20 +247,6 @@ void RolloutStorage::set_rewards_at(
       copy_detached(it->second[step], tensor);
     }
   }
-}
-
-void RolloutStorage::set_sparse_events_slice(
-    int step,
-    int agent_offset,
-    const torch::Tensor& sparse_events_in) {
-  if (step < 0 || step >= rollout_length_) {
-    throw std::out_of_range("RolloutStorage::set_sparse_events_slice step is outside rollout capacity.");
-  }
-  const int agent_count = static_cast<int>(sparse_events_in.size(0));
-  if (agent_offset < 0 || agent_count < 0 || agent_offset + agent_count > num_agents_) {
-    throw std::out_of_range("RolloutStorage::set_sparse_events_slice agent range is outside rollout capacity.");
-  }
-  copy_detached(sparse_events[step].narrow(0, agent_offset, agent_count), sparse_events_in);
 }
 
 }  // namespace pulsar

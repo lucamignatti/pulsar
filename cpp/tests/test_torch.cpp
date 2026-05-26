@@ -7,7 +7,7 @@
 
 #include "pulsar/model/normalizer.hpp"
 #include "pulsar/model/mamba2_ops.hpp"
-#include "pulsar/model/vrpo_actor.hpp"
+#include "pulsar/model/actor.hpp"
 
 namespace {
 
@@ -115,7 +115,7 @@ int main() {
   try {
     const pulsar::ModelConfig model_config = small_model_config();
     const pulsar::GoalCriticConfig gc_cfg = default_goal_critic_config();
-    pulsar::VRPOActor actor(model_config, gc_cfg);
+    pulsar::Actor actor(model_config, gc_cfg);
 
     const auto output = actor->forward_step(
         torch::randn({4, model_config.observation_dim}));
@@ -128,27 +128,6 @@ int main() {
     }
     if (output.features.sizes() != torch::IntArrayRef({4, actor->feature_dim()})) {
       throw std::runtime_error("actor feature shape mismatch");
-    }
-    {
-      if (actor->predictor_heads_.size() != pulsar::kSparseEventChannelCount) {
-        throw std::runtime_error("predictor channel count mismatch");
-      }
-      torch::Tensor all_logits = actor->forward_all_predictors(output.features);
-      if (all_logits.sizes() != torch::IntArrayRef({4, static_cast<int64_t>(pulsar::kSparseEventChannelCount), 2})) {
-        throw std::runtime_error("forward_all_predictors output shape mismatch");
-      }
-      for (std::size_t i = 0; i < pulsar::kSparseEventChannelCount; ++i) {
-        const torch::Tensor logits = actor->predictor_head(i)->forward(output.features);
-        if (logits.sizes() != torch::IntArrayRef({4, 2})) {
-          throw std::runtime_error("binary predictor output shape mismatch");
-        }
-        if (logits.abs().max().item<float>() > 10.0F) {
-          throw std::runtime_error("predictor logits should be clamped for stability");
-        }
-        if (!torch::allclose(all_logits.select(1, static_cast<int64_t>(i)), logits, 1.0e-5, 1.0e-5)) {
-          throw std::runtime_error("forward_all_predictors output mismatch with individual head forward");
-        }
-      }
     }
     {
       const torch::Tensor projected = torch::randn({3, 5, 20}, torch::requires_grad());
@@ -349,7 +328,7 @@ int main() {
       throw std::runtime_error("produced non-finite features");
     }
 
-    const auto actor_clone = pulsar::clone_vrpo_actor(actor, torch::kCPU);
+    const auto actor_clone = pulsar::clone_actor(actor, torch::kCPU);
     const auto source_params = actor->named_parameters(true);
     const auto clone_params = actor_clone->named_parameters(true);
     for (const auto& item : source_params) {
@@ -423,7 +402,7 @@ int main() {
       pulsar::ESLoraConfig es_cfg;
       es_cfg.rank = 2;
       es_cfg.lora_alpha = 6.0F;
-      pulsar::VRPOActor custom_actor(model_config, gc_cfg, es_cfg);
+      pulsar::Actor custom_actor(model_config, gc_cfg, es_cfg);
       if (custom_actor->policy_lora()->rank() != es_cfg.rank) {
         throw std::runtime_error("configured LoRA rank was not applied");
       }
@@ -476,7 +455,7 @@ int main() {
       if (torch::cuda::is_available()) {
         pulsar::ESLoraConfig gpu_es_cfg;
         gpu_es_cfg.rank = rank;
-        pulsar::VRPOActor gpu_actor(model_config, gc_cfg, gpu_es_cfg);
+        pulsar::Actor gpu_actor(model_config, gc_cfg, gpu_es_cfg);
         gpu_actor->to(torch::kCUDA);
         torch::NoGradGuard no_grad;
         const auto opts = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
@@ -589,114 +568,6 @@ int main() {
       torch::Tensor expected = torch::tensor({0.125F, 0.125F, 0.5F, 1.5F});
       if (!torch::allclose(loss, expected, 1e-6, 1e-6)) {
         throw std::runtime_error("element-wise smooth L1 loss values check failed");
-      }
-    }
-
-    // 14. Live Predictors: Optimization, NaN loss resilience, skipping, gradient clearing, and parameter recovery
-    {
-      const pulsar::ModelConfig model_config = small_model_config();
-      const pulsar::GoalCriticConfig gc_cfg = default_goal_critic_config();
-      pulsar::VRPOActor actor(model_config, gc_cfg);
-
-      const int batch = 4;
-      torch::Tensor features = torch::randn({batch, actor->feature_dim()}, torch::kFloat32);
-      torch::Tensor targets = torch::tensor({0, 1, 0, 1}, torch::kLong);
-
-      // Verify forward pass shape and clamping on predictor indices
-      torch::Tensor logits = actor->predictor_head(0)->forward(features);
-      if (logits.sizes() != torch::IntArrayRef({batch, 2})) {
-        throw std::runtime_error("predictor forward pass shape mismatch");
-      }
-
-      // Verify cross-entropy loss computation
-      torch::Tensor loss = torch::nn::functional::cross_entropy(logits, targets);
-      if (!torch::isfinite(loss).item<bool>()) {
-        throw std::runtime_error("predictor initial loss is non-finite");
-      }
-
-      // Verify backward pass gradient propagation
-      loss.backward();
-      auto params = actor->predictor_head(0)->parameters();
-      if (!params[0].grad().defined()) {
-        throw std::runtime_error("predictor gradients undefined after backward pass");
-      }
-      if (params[0].grad().abs().sum().item<float>() == 0.0F) {
-        throw std::runtime_error("predictor gradients should be non-zero after backward pass");
-      }
-
-      // Verify Adam optimizer step updates the weights
-      torch::Tensor initial_weights = params[0].clone();
-      torch::optim::Adam optimizer(actor->predictor_head(0)->parameters(), torch::optim::AdamOptions(0.05));
-      optimizer.step();
-      torch::Tensor updated_weights = params[0].clone();
-      if (torch::allclose(initial_weights, updated_weights, 1e-6, 1e-6)) {
-        throw std::runtime_error("weights should be modified after optimizer step");
-      }
-
-      // --- Test NaN Gradient Resilience ---
-      optimizer.zero_grad();
-      // Manually inject a NaN into the parameter's gradient to simulate a numerical anomaly
-      params[0].mutable_grad() = torch::full_like(params[0], std::numeric_limits<float>::quiet_NaN());
-
-      // Emulate zero_nonfinite_gradients helper logic
-      bool grad_changed = false;
-      for (auto& p : actor->predictor_head(0)->parameters()) {
-        torch::Tensor grad = p.mutable_grad();
-        if (grad.defined()) {
-          const torch::Tensor finite = torch::isfinite(grad);
-          if (!finite.all().item<bool>()) {
-            grad.masked_fill_(finite.logical_not(), 0.0);
-            grad_changed = true;
-          }
-        }
-      }
-
-      if (!grad_changed) {
-        throw std::runtime_error("NaN gradient sanitizer failed to detect non-finite values");
-      }
-      if (!torch::isfinite(params[0].grad()).all().item<bool>()) {
-        throw std::runtime_error("NaN gradient sanitizer failed to clear non-finite values");
-      }
-      if (params[0].grad().abs().sum().item<float>() != 0.0F) {
-        throw std::runtime_error("NaN gradient should be fully cleared to 0.0");
-      }
-
-      // --- Test NaN Parameter Resilience ---
-      // Manually corrupt the parameter's actual weights with NaN to simulate overflow
-      params[0].data().fill_(std::numeric_limits<float>::quiet_NaN());
-
-      // Emulate zero_nonfinite_parameters helper logic
-      bool param_changed = false;
-      for (auto& p : actor->predictor_head(0)->parameters()) {
-        if (p.defined()) {
-          const torch::Tensor finite = torch::isfinite(p);
-          if (!finite.all().item<bool>()) {
-            torch::NoGradGuard no_grad;
-            p.copy_(torch::where(finite, p, torch::zeros_like(p)));
-            param_changed = true;
-          }
-        }
-      }
-
-      if (!param_changed) {
-        throw std::runtime_error("NaN parameter sanitizer failed to detect corrupted weights");
-      }
-      if (!torch::isfinite(params[0]).all().item<bool>()) {
-        throw std::runtime_error("NaN parameter sanitizer failed to restore weights to finite values");
-      }
-      if (params[0].abs().sum().item<float>() != 0.0F) {
-        throw std::runtime_error("corrupted weights should be fully reset to 0.0");
-      }
-
-      // --- Test Graceful Recovery ---
-      // Now verify that a subsequent clean forward, backward, and optimization step works flawlessly
-      logits = actor->predictor_head(0)->forward(features);
-      loss = torch::nn::functional::cross_entropy(logits, targets);
-      loss.backward();
-      optimizer.step();
-
-      if (!torch::isfinite(params[0]).all().item<bool>()) {
-        throw std::runtime_error("predictor failed to recover gracefully after NaN corruption");
       }
     }
 

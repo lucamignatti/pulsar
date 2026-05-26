@@ -8,7 +8,7 @@
 #include <torch/torch.h>
 
 #include "pulsar/config/config.hpp"
-#include "pulsar/model/vrpo_actor.hpp"
+#include "pulsar/model/actor.hpp"
 
 namespace pulsar {
 
@@ -37,40 +37,13 @@ torch::Tensor compute_gae(
     const torch::Tensor& bootstrap_mask = {},
     const torch::Tensor& bootstrap_values = {});
 
-// Q-boosted GAE formulation (Variance-Reduced Expected SARSA(lambda) trace) from Fan & Farina (2026)
-torch::Tensor compute_q_boosted_gae(
-    const torch::Tensor& q_values_taken,
-    const torch::Tensor& v_from_q,
-    const torch::Tensor& rewards,
-    const torch::Tensor& dones,
-    float gamma,
-    float gae_lambda,
-    const torch::Tensor& next_v_from_q = {},
-    const torch::Tensor& bootstrap_mask = {},
-    const torch::Tensor& bootstrap_v_from_q = {});
-
-// Adaptive Centered Expected SARSA(lambda) trace: identical recursion to compute_q_boosted_gae
-// except the TD residual subtracts V(s) instead of Q(s, a_t), centering the trace around the
-// action-independent baseline. The final advantage still adds the single-step Q(s,a) - V(s) gap
-// so the actor receives a low-variance multi-step trace plus the policy-weighted action advantage.
-torch::Tensor compute_centered_expected_sarsa_gae(
-    const torch::Tensor& q_values_taken,
-    const torch::Tensor& v_from_q,
-    const torch::Tensor& rewards,
-    const torch::Tensor& dones,
-    float gamma,
-    float gae_lambda,
-    const torch::Tensor& next_v_from_q = {},
-    const torch::Tensor& bootstrap_mask = {},
-    const torch::Tensor& bootstrap_v_from_q = {});
-
-// Renamed clipped VRPO policy objective
-torch::Tensor clipped_vrpo_policy_loss(
+// Clipped PPO policy objective
+torch::Tensor clipped_ppo_policy_loss(
     const torch::Tensor& current_log_probs,
     const torch::Tensor& old_log_probs,
     const torch::Tensor& advantages,
     float clip_range);
-torch::Tensor clipped_vrpo_policy_loss(
+torch::Tensor clipped_ppo_policy_loss(
     const torch::Tensor& current_log_probs,
     const torch::Tensor& old_log_probs,
     const torch::Tensor& advantages,
@@ -83,11 +56,6 @@ torch::Tensor sample_future_goal_positions(
     const torch::Tensor& dones,
     const torch::Tensor& episode_starts,
     int max_future);
-
-torch::Tensor compute_sparse_event_soon_targets(
-    const torch::Tensor& sparse_events,
-    const torch::Tensor& dones,
-    const torch::Tensor& horizons);
 
 torch::Tensor compute_pairwise_negative_l2_logits(
     const torch::Tensor& lhs_embeddings,

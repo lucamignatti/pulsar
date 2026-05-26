@@ -14,7 +14,7 @@
 #include "pulsar/env/done.hpp"
 #include "pulsar/env/obs_builder.hpp"
 #include "pulsar/rl/action_table.hpp"
-#include "pulsar/training/vrpo_trainer.hpp"
+#include "pulsar/training/trainer.hpp"
 #include "pulsar/training/batched_rocketsim_collector.hpp"
 #include "pulsar/training/self_play_manager.hpp"
 
@@ -71,8 +71,6 @@ void apply_benchmark_override(pulsar::ExperimentConfig& config, const std::strin
     config.ppo.update_epochs = std::stoi(value);
   } else if (key == "max_forward_samples") {
     config.model.max_forward_samples = std::stoi(value);
-  } else if (key == "pcgrad") {
-    config.ppo.pcgrad = parse_bool_override(value);
   } else if (key == "es_interval") {
     config.es_lora.es_interval = std::stoi(value);
   } else if (key == "es_population_size") {
@@ -103,7 +101,7 @@ void apply_benchmark_override(pulsar::ExperimentConfig& config, const std::strin
 int main(int argc, char** argv) {
   const int updates = positive_arg_or(argc, argv, 1, 3);
   const std::filesystem::path config_path =
-      argc > 2 ? std::filesystem::path(argv[2]) : std::filesystem::path{"configs/2v2_vrpo.json"};
+      argc > 2 ? std::filesystem::path(argv[2]) : std::filesystem::path{"configs/2v2.json"};
 
   try {
     pulsar::ExperimentConfig config = pulsar::load_experiment_config(config_path.string());
@@ -152,7 +150,7 @@ int main(int argc, char** argv) {
     }
 
     std::unique_ptr<pulsar::SelfPlayManager> self_play_manager;
-    pulsar::VRPOTrainer trainer(
+    pulsar::Trainer trainer(
         config,
         std::move(collectors),
         std::move(self_play_manager),
@@ -174,7 +172,6 @@ int main(int argc, char** argv) {
     std::cout << "minibatch_size=" << config.ppo.minibatch_size << '\n';
     std::cout << "update_epochs=" << config.ppo.update_epochs << '\n';
     std::cout << "max_forward_samples=" << config.model.max_forward_samples << '\n';
-    std::cout << "pcgrad=" << (config.ppo.pcgrad ? 1 : 0) << '\n';
     std::cout << "updates=" << metrics.updates << '\n';
     std::cout << "agent_steps=" << metrics.agent_steps << '\n';
     std::cout << "total_seconds=" << metrics.total_seconds << '\n';

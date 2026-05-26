@@ -1,4 +1,4 @@
-#include "pulsar/training/gradient_surgery.hpp"
+#include "pulsar/training/gradient_ops.hpp"
 
 #include <cmath>
 #include <limits>
@@ -89,34 +89,6 @@ bool gradients_are_finite(const torch::nn::Module& module) {
     }
   }
   return true;
-}
-
-GradientSanitizeResult zero_nonfinite_parameters(torch::nn::Module& module) {
-  GradientSanitizeResult result;
-  for (auto& item : module.named_parameters(true)) {
-    torch::Tensor param = item.value();
-    if (!param.defined()) {
-      continue;
-    }
-    const torch::Tensor finite = torch::isfinite(param);
-    if (!finite.all().item<bool>()) {
-      if (!result.changed) {
-        result.first_parameter = item.key();
-      }
-      torch::NoGradGuard no_grad;
-      const bool is_weight =
-          item.key().size() >= std::string(".weight").size() &&
-          item.key().compare(
-              item.key().size() - std::string(".weight").size(),
-              std::string(".weight").size(),
-              ".weight") == 0;
-      const bool default_to_one = item.key().find("norm") != std::string::npos && is_weight;
-      const torch::Tensor replacement = default_to_one ? torch::ones_like(param) : torch::zeros_like(param);
-      param.copy_(torch::where(finite, param, replacement));
-      result.changed = true;
-    }
-  }
-  return result;
 }
 
 GradientSanitizeResult zero_nonfinite_gradients(torch::nn::Module& module) {
@@ -222,94 +194,9 @@ void scale_existing_gradients(torch::nn::Module& module, double scale) {
   }
 }
 
-void apply_pcgrad_multi(std::vector<std::vector<CapturedGrad>>& groups) {
-  if (groups.size() < 2) return;
-
-  std::vector<torch::Tensor> flats;
-  std::vector<std::pair<size_t, int64_t>> layout;
-  std::vector<bool> active_params(groups[0].size(), false);
-  flats.reserve(groups.size());
-  layout.reserve(groups[0].size());
-
-  for (size_t i = 0; i < groups[0].size(); ++i) {
-    layout.push_back({i, groups[0][i].param.numel()});
-  }
-  std::vector<torch::Tensor> zero_parts(groups[0].size());
-  for (auto& group : groups) {
-    std::vector<torch::Tensor> parts;
-    parts.reserve(group.size());
-    for (size_t i = 0; i < groups[0].size(); ++i) {
-      if (group[i].grad.defined()) {
-        active_params[i] = true;
-        parts.push_back(group[i].grad.view({-1}));
-      } else {
-        if (!zero_parts[i].defined()) {
-          zero_parts[i] = torch::zeros({group[i].param.numel()}, group[i].param.options());
-        }
-        parts.push_back(zero_parts[i]);
-      }
-    }
-    flats.push_back(torch::cat(parts, 0));
-  }
-
-  const std::vector<torch::Tensor> orig_flats = flats;
-  for (size_t i = 0; i < groups.size(); ++i) {
-    for (size_t j = 0; j < groups.size(); ++j) {
-      if (i == j) continue;
-      const torch::Tensor dot = flats[i].dot(orig_flats[j]);
-      if (!torch::isfinite(dot).item<bool>()) {
-        continue;
-      }
-      if (dot.item<float>() < 0.0F) {
-        const torch::Tensor norm_j_sq = orig_flats[j].dot(orig_flats[j]).clamp_min(1.0e-12F);
-        if (!torch::isfinite(norm_j_sq).item<bool>()) {
-          continue;
-        }
-        const torch::Tensor coeff = dot / norm_j_sq;
-        flats[i] = flats[i] - coeff * orig_flats[j];
-      }
-    }
-  }
-
-  for (size_t g = 0; g < groups.size(); ++g) {
-    int64_t offset = 0;
-    for (const auto& [param_idx, sz] : layout) {
-      if (active_params[param_idx]) {
-        groups[g][param_idx].grad =
-            flats[g].slice(0, offset, offset + sz).view(groups[g][param_idx].param.sizes()).clone();
-      } else {
-        groups[g][param_idx].grad = torch::Tensor{};
-      }
-      offset += sz;
-    }
-  }
-}
-
-void reduce_captured_grad_groups(
-    std::vector<std::vector<CapturedGrad>>& primary_groups,
-    const std::vector<std::vector<std::vector<CapturedGrad>>>& replica_groups_list,
-    const torch::Device& primary_device) {
-  for (const auto& replica_groups : replica_groups_list) {
-    if (replica_groups.empty()) continue;
-    for (size_t g = 0; g < replica_groups.size(); ++g) {
-      if (g >= primary_groups.size()) break;
-      for (size_t p = 0; p < replica_groups[g].size(); ++p) {
-        if (p >= primary_groups[g].size()) break;
-        if (replica_groups[g][p].grad.defined()) {
-          if (primary_groups[g][p].grad.defined()) {
-            primary_groups[g][p].grad.add_(replica_groups[g][p].grad.to(primary_device));
-          } else {
-            primary_groups[g][p].grad = replica_groups[g][p].grad.to(primary_device);
-          }
-        }
-      }
-    }
-  }
-}
-
 void reduce_gradients_from_replicas(
-    VRPOActor& primary,
-    const std::vector<VRPOActor>& replicas) {
+    Actor& primary,
+    const std::vector<Actor>& replicas) {
   if (!primary) return;
   auto primary_params = primary->named_parameters(true);
   if (primary_params.size() == 0) return;
@@ -333,12 +220,12 @@ void reduce_gradients_from_replicas(
 }
 
 void sync_actor_to_replicas(
-    const VRPOActor& primary,
-    std::vector<VRPOActor>& replicas) {
+    const Actor& primary,
+    std::vector<Actor>& replicas) {
   if (!primary) return;
   for (auto& replica : replicas) {
     if (replica) {
-      copy_vrpo_actor_tensors_to(primary, replica, replica->parameters().front().device());
+      copy_actor_tensors_to(primary, replica, replica->parameters().front().device());
     }
   }
 }

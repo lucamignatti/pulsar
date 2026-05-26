@@ -7,7 +7,6 @@
 #include <vector>
 
 #include "pulsar/config/config.hpp"
-#include "pulsar/training/sparse_event_channels.hpp"
 
 #ifdef PULSAR_HAS_TORCH
 #include <torch/torch.h>
@@ -22,7 +21,6 @@ struct ActorStepOutput {
   torch::Tensor encoded;
   torch::Tensor value_win_logits;
   torch::Tensor features;
-  torch::Tensor q_values;
 };
 
 struct ActorSequenceOutput {
@@ -30,7 +28,6 @@ struct ActorSequenceOutput {
   torch::Tensor encoded;
   torch::Tensor value_win_logits;
   torch::Tensor features;
-  torch::Tensor q_values;
 };
 
 /**
@@ -157,66 +154,15 @@ class Mamba2EncoderImpl : public torch::nn::Module {
 TORCH_MODULE(Mamba2Encoder);
 
 /**
- * @brief SparseRewardPredictor live online auxiliary MLP.
+ * @brief ActorImpl: Mamba-2 sequence encoder + EGGROLL LoRA policy head + direct V-head.
+ * Trained with standard async PPO + GCRL auxiliary loss.
  */
-class SparseRewardPredictorImpl : public torch::nn::Module {
+class ActorImpl : public torch::nn::Module {
  public:
-  explicit SparseRewardPredictorImpl(int feature_dim) {
-    net_ = torch::nn::Sequential(
-        torch::nn::LayerNorm(torch::nn::LayerNormOptions({feature_dim})),
-        torch::nn::Linear(feature_dim, 128),
-        torch::nn::ReLU(),
-        torch::nn::LayerNorm(torch::nn::LayerNormOptions({128})),
-        torch::nn::Linear(128, 2)
-    );
-    register_module("net", net_);
-    auto& output = net_->at<torch::nn::LinearImpl>(4);
-    torch::nn::init::normal_(output.weight, 0.0, 0.01);
-    torch::nn::init::constant_(output.bias, 0.0);
-  }
-
-  torch::Tensor forward(torch::Tensor x) const {
-    auto* non_const_net = const_cast<torch::nn::SequentialImpl*>(net_.get());
-    return torch::clamp(non_const_net->forward(x), -10.0, 10.0);
-  }
-
-  const torch::nn::LayerNormImpl& input_norm() const {
-    auto* non_const_net = const_cast<torch::nn::SequentialImpl*>(net_.get());
-    return non_const_net->at<torch::nn::LayerNormImpl>(0);
-  }
-
-  const torch::nn::LinearImpl& input_linear() const {
-    auto* non_const_net = const_cast<torch::nn::SequentialImpl*>(net_.get());
-    return non_const_net->at<torch::nn::LinearImpl>(1);
-  }
-
-  const torch::nn::LayerNormImpl& hidden_norm() const {
-    auto* non_const_net = const_cast<torch::nn::SequentialImpl*>(net_.get());
-    return non_const_net->at<torch::nn::LayerNormImpl>(3);
-  }
-
-  const torch::nn::LinearImpl& output_linear() const {
-    auto* non_const_net = const_cast<torch::nn::SequentialImpl*>(net_.get());
-    return non_const_net->at<torch::nn::LinearImpl>(4);
-  }
-
- private:
-  torch::nn::Sequential net_{nullptr};
-};
-
-TORCH_MODULE(SparseRewardPredictor);
-
-/**
- * @brief VRPOActorImpl is a unified network for Variance-Reduced Policy Optimization.
- * Houses the SSD sequence encoder, the EGGROLL-perturbed LoRA policy head, and centralized Q-head.
- */
-class VRPOActorImpl : public torch::nn::Module {
- public:
-  explicit VRPOActorImpl(
+  explicit ActorImpl(
       ModelConfig config,
       const GoalCriticConfig& goal_critic_config = {},
-      const ESLoraConfig& es_lora_config = {},
-      const VRPOConfig& vrpo_config = {});
+      const ESLoraConfig& es_lora_config = {});
 
   ActorStepOutput forward_step(
       torch::Tensor obs,
@@ -239,14 +185,9 @@ class VRPOActorImpl : public torch::nn::Module {
   [[nodiscard]] const ModelConfig& config() const;
   [[nodiscard]] const GoalCriticConfig& goal_critic_config() const;
   [[nodiscard]] const ESLoraConfig& es_lora_config() const;
-  [[nodiscard]] const VRPOConfig& vrpo_config() const;
   [[nodiscard]] std::vector<std::string> enabled_critic_heads() const;
   torch::Tensor value_head_forward(const torch::Tensor& encoded);
-  torch::Tensor q_head_forward(const torch::Tensor& encoded);
   torch::Tensor policy_head_forward(const torch::Tensor& features);
-  SparseRewardPredictor& predictor_head(std::size_t channel_index);
-  const SparseRewardPredictor& predictor_head(std::size_t channel_index) const;
-  torch::Tensor forward_all_predictors(const torch::Tensor& features) const;
 
   // EGGROLL Evolutionary LoRA Perturbations
   [[nodiscard]] std::vector<torch::Tensor> es_lora_parameters() const;
@@ -266,34 +207,30 @@ class VRPOActorImpl : public torch::nn::Module {
   ModelConfig config_{};
   GoalCriticConfig goal_critic_config_{};
   ESLoraConfig es_lora_config_{};
-  VRPOConfig vrpo_config_{};
   int feature_dim_ = 0;
   Mamba2Encoder mamba2_encoder_{nullptr};
 
   torch::nn::Sequential policy_hidden_{nullptr};
   LoRALinear policy_lora_{nullptr};
 
-  torch::nn::Sequential q_head_{nullptr};
+  torch::nn::Sequential value_head_{nullptr};
   GoalCritic goal_critic_{nullptr};
-
-  std::vector<SparseRewardPredictor> predictor_heads_{};
-  std::vector<std::uint8_t> predictor_active_{};
 };
 
-TORCH_MODULE(VRPOActor);
+TORCH_MODULE(Actor);
 
-VRPOActor load_vrpo_actor(const std::string& checkpoint_path, const std::string& device);
-VRPOActor clone_vrpo_actor(const VRPOActor& source, const torch::Device& device);
-void copy_vrpo_actor_tensors_to(const VRPOActor& source, VRPOActor& target, const torch::Device& device);
+Actor load_actor(const std::string& checkpoint_path, const std::string& device);
+Actor clone_actor(const Actor& source, const torch::Device& device);
+void copy_actor_tensors_to(const Actor& source, Actor& target, const torch::Device& device);
 
 #else
 
 struct ActorStepOutput {};
 struct ActorSequenceOutput {};
 
-class VRPOActor {
+class Actor {
  public:
-  VRPOActor() = default;
+  Actor() = default;
 };
 
 #endif

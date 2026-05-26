@@ -12,20 +12,20 @@
 #include "pulsar/checkpoint/checkpoint.hpp"
 #include "pulsar/config/config.hpp"
 #include "pulsar/model/normalizer.hpp"
-#include "pulsar/model/vrpo_actor.hpp"
+#include "pulsar/model/actor.hpp"
 
 namespace py = pybind11;
 
 namespace pulsar {
 
-class PyVRPOActor {
+class PyActor {
  public:
-  PyVRPOActor(std::string checkpoint_dir, std::string device)
+  PyActor(std::string checkpoint_dir, std::string device)
       : checkpoint_dir_(std::move(checkpoint_dir)),
         device_(std::move(device)),
         config_(load_experiment_config(checkpoint_dir_ + "/config.json")),
         metadata_(load_checkpoint_metadata(checkpoint_dir_ + "/metadata.json")),
-        model_(load_vrpo_actor(checkpoint_dir_, device_)),
+        model_(load_actor(checkpoint_dir_, device_)),
         normalizer_(config_.model.observation_dim),
         torch_device_(device_) {
     validate_inference_checkpoint_metadata(metadata_, config_);
@@ -97,7 +97,7 @@ class PyVRPOActor {
   std::string device_{};
   ExperimentConfig config_{};
   CheckpointMetadata metadata_{};
-  VRPOActor model_{nullptr};
+  Actor model_{nullptr};
   ObservationNormalizer normalizer_;
   torch::Device torch_device_;
 };
@@ -105,18 +105,18 @@ class PyVRPOActor {
 }  // namespace pulsar
 
 PYBIND11_MODULE(pulsar_native, m) {
-  py::class_<pulsar::PyVRPOActor>(m, "VRPOActor")
-      .def("forward", &pulsar::PyVRPOActor::forward, py::arg("obs"))
+  py::class_<pulsar::PyActor>(m, "Actor")
+      .def("forward", &pulsar::PyActor::forward, py::arg("obs"))
       .def(
           "forward_batch",
-          &pulsar::PyVRPOActor::forward_batch,
+          &pulsar::PyActor::forward_batch,
           py::arg("obs_batch"),
           py::arg("episode_starts") = std::vector<float>{});
 
   m.def(
-      "load_vrpo_actor",
+      "load_actor",
       [](const std::string& checkpoint_dir, const std::string& device) {
-        return pulsar::PyVRPOActor(checkpoint_dir, device);
+        return pulsar::PyActor(checkpoint_dir, device);
       },
       py::arg("checkpoint_dir"),
       py::arg("device") = "cpu");

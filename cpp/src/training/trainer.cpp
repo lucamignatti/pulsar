@@ -1,4 +1,4 @@
-#include "pulsar/training/vrpo_trainer.hpp"
+#include "pulsar/training/trainer.hpp"
 
 #ifdef PULSAR_HAS_TORCH
 
@@ -34,7 +34,7 @@
 #include "pulsar/env/rocketsim_engine.hpp"
 #include "pulsar/training/cuda_utils.hpp"
 #include "pulsar/training/optimizers.hpp"
-#include "pulsar/training/vrpo_math.hpp"
+#include "pulsar/training/ppo_math.hpp"
 #include "pulsar/tracing/tracing.hpp"
 
 #ifdef PULSAR_HAS_CUDA
@@ -51,15 +51,6 @@ constexpr int kTrainerStateVersion = 2;
 
 bool uses_snapshot_opponents(const ExperimentConfig& config) {
   return config.self_play_league.training_opponent_policy.rfind("snapshot", 0) == 0;
-}
-
-torch::Tensor bound_vrpo_q_target(const torch::Tensor& tensor, float abs_cap) {
-  if (!tensor.defined()) {
-    return tensor;
-  }
-  const float cap = std::max(abs_cap, 1.0e-6F);
-  const torch::Tensor finite = torch::where(torch::isfinite(tensor), tensor, torch::zeros_like(tensor));
-  return torch::clamp(finite, -cap, cap);
 }
 
 double current_process_rss_mb() {
@@ -99,13 +90,9 @@ double current_process_peak_rss_mb() {
 #endif
 }
 
-std::vector<torch::Tensor> actor_policy_parameters(const VRPOActor& actor) {
+std::vector<torch::Tensor> actor_policy_parameters(const Actor& actor) {
   std::vector<torch::Tensor> parameters;
   for (const auto& named_param : actor->named_parameters(/*recurse=*/true)) {
-    const std::string& name = named_param.key();
-    if (name.rfind("predictor_", 0) == 0) {
-      continue;
-    }
     parameters.push_back(named_param.value());
   }
   return parameters;
@@ -338,7 +325,7 @@ RolloutStorage make_rollout_storage(
     int num_agents,
     int action_dim,
     bool pin_memory) {
-  std::vector<std::string> heads = {"extrinsic", "q_taken", "v_from_q", "gameplay", "mechanic"};
+  std::vector<std::string> heads = {"extrinsic", "gameplay", "mechanic"};
   return RolloutStorage(
       config.ppo.rollout_length,
       num_agents,
@@ -356,7 +343,7 @@ void require_finite(const torch::Tensor& tensor, const std::string& name) {
   }
 }
 
-// All CapturedGrad, pcgrad, and goal critic loss helpers are modularized in gradient_surgery.cpp and gcrl_trainer.cpp.
+// All CapturedGrad and goal critic loss helpers are modularized in gradient_ops.cpp and gcrl_trainer.cpp.
 
 int cuda_mamba2_autograd_forward_sample_cap(const ModelConfig& config) {
   constexpr std::int64_t kProjectedActivationBudgetBytes = 2LL * 1024LL * 1024LL * 1024LL;
@@ -485,29 +472,9 @@ void append_metrics_line(
       {"truncated_episode_rate", metrics.truncated_episode_rate},
       {"touch_episode_rate", metrics.touch_episode_rate},
       {"multi_touch_episode_rate", metrics.multi_touch_episode_rate},
-      {"effective_entropy_coef", metrics.effective_entropy_coef},
       {"self_play_snapshot_count", metrics.self_play_snapshot_count},
-      {"q_critic_loss", metrics.q_critic_loss},
       {"advantage_std", metrics.advantage_std},
-      {"entropy_rolling_mean", metrics.entropy_rolling_mean},
-      {"entropy_deficit_alpha", metrics.entropy_deficit_alpha},
-      {"eff_gcrl_actor_coef", metrics.eff_gcrl_actor_coef},
-      {"eff_es_sigma", metrics.eff_es_sigma},
-      {"eff_es_interval", metrics.eff_es_interval},
-      {"steps_since_last_es", metrics.steps_since_last_es},
   };
-  for (const auto& [channel, value] : metrics.predictor_loss) {
-    line["predictor_loss_" + channel] = value;
-  }
-  for (const auto& [channel, value] : metrics.predictor_delta) {
-    line["predictor_delta_" + channel] = value;
-  }
-  for (const auto& [channel, value] : metrics.predictor_positive) {
-    line["predictor_positive_" + channel] = value;
-  }
-  for (const auto& [channel, value] : metrics.predictor_active) {
-    line["predictor_active_" + channel] = value;
-  }
   for (const auto& [mode, rate] : metrics.mode_touch_rates) {
     line["mode_" + mode + "_touch_episode_rate"] = rate;
   }
@@ -655,20 +622,20 @@ void accumulate_timings(CollectorTimings& dst, const CollectorTimings& src) {
 
 }  // namespace
 
-VRPOTrainer::VRPOTrainer(
+Trainer::Trainer(
     ExperimentConfig config,
     std::unique_ptr<BatchedRocketSimCollector> collector,
     std::unique_ptr<SelfPlayManager> self_play_manager,
     std::filesystem::path run_output_root,
     bool log_initialization)
-    : VRPOTrainer(
+    : Trainer(
           std::move(config),
           make_collector_vector(std::move(collector)),
           std::move(self_play_manager),
           std::move(run_output_root),
           log_initialization) {}
 
-VRPOTrainer::VRPOTrainer(
+Trainer::Trainer(
     ExperimentConfig config,
     std::vector<std::unique_ptr<BatchedRocketSimCollector>> collectors,
     std::unique_ptr<SelfPlayManager> self_play_manager,
@@ -678,13 +645,12 @@ VRPOTrainer::VRPOTrainer(
       collectors_(std::move(collectors)),
       self_play_manager_(std::move(self_play_manager)),
       action_table_(config_.action_table),
-      actor_(VRPOActor(config_.model, config_.goal_critic, config_.es_lora, config_.vrpo)),
+      actor_(Actor(config_.model, config_.goal_critic, config_.es_lora)),
       actor_normalizer_(config_.model.observation_dim),
       actor_optimizer_(
           actor_policy_parameters(actor_),
           torch::optim::SGDOptions(config_.ppo.learning_rate).weight_decay(config_.ppo.weight_decay)),
       task_pool_(std::make_unique<WorkStealingThreadPool>()),
-      q_normalizer_(config_.ppo.popart_beta, config_.ppo.popart_epsilon),
       device_(resolve_runtime_device(config_.ppo.device)),
       compute_devices_(resolve_runtime_devices(config_.ppo.device)),
       shard_devices_(assign_shard_devices(compute_devices_, collectors_.size())),
@@ -708,7 +674,7 @@ VRPOTrainer::VRPOTrainer(
 #endif
   }
   if (collectors_.empty()) {
-    throw std::invalid_argument("VRPOTrainer requires at least one collector.");
+    throw std::invalid_argument("Trainer requires at least one collector.");
   }
   if (actor_->policy_lora()->out_features() != action_dim_for_collectors(collectors_)) {
     throw std::invalid_argument("model.action_dim must match the action table size.");
@@ -718,7 +684,7 @@ VRPOTrainer::VRPOTrainer(
   }
   total_agents_ = total_agents_for_collectors(collectors_);
   if (total_agents_ == 0) {
-    throw std::invalid_argument("VRPOTrainer collectors must contain agents.");
+    throw std::invalid_argument("Trainer collectors must contain agents.");
   }
   seed_everything(config_.env.seed);
   const torch::Device primary_device = compute_devices_.front();
@@ -742,30 +708,18 @@ VRPOTrainer::VRPOTrainer(
   actor_->to(primary_device);
   actor_normalizer_.to(primary_device);
 
-  if (config_.predictor.enabled) {
-    predictor_trainer_ = std::make_unique<PredictorTrainer>(config_, device_);
-    predictor_trainer_->initialize_optimizers(actor_);
-    std::vector<std::int32_t> horizons(kSparseEventChannelCount, 1);
-    for (std::size_t i = 0; i < kSparseEventChannelCount; ++i) {
-      const std::string name(kSparseEventChannels[i].name);
-      horizons[i] = static_cast<std::int32_t>(std::max(1, config_.predictor.channels.at(name).horizon));
-    }
-    predictor_horizons_device_ = torch::tensor(
-        horizons,
-        torch::TensorOptions().dtype(torch::kInt32).device(device_));
-  }
   if (config_.goal_critic.lambda_Zg > 0.0F || config_.goal_critic.lambda_goal_actor > 0.0F) {
     gcrl_trainer_ = std::make_unique<GCRLTrainer>(config_.goal_critic, device_);
   }
 
   maybe_initialize_from_checkpoint();
   sanitize_actor_parameters();
-  actor_snapshot_ = clone_vrpo_actor(actor_, device_);
+  actor_snapshot_ = clone_actor(actor_, device_);
   actor_snapshot_->eval();
 
   // Clone actor replicas to each additional compute GPU for data-parallel updates.
   for (size_t i = 1; i < compute_devices_.size(); ++i) {
-    auto replica = clone_vrpo_actor(actor_, compute_devices_[i]);
+    auto replica = clone_actor(actor_, compute_devices_[i]);
     replica->train();
     compute_actors_.push_back(std::move(replica));
   }
@@ -775,7 +729,7 @@ VRPOTrainer::VRPOTrainer(
     if (shard_devices_[i] == device_) {
       collection_actors_.push_back(actor_snapshot_);  // shared, don't clone
     } else {
-      collection_actors_.push_back(clone_vrpo_actor(actor_snapshot_, shard_devices_[i]));
+      collection_actors_.push_back(clone_actor(actor_snapshot_, shard_devices_[i]));
       collection_actors_.back()->eval();
     }
   }
@@ -784,7 +738,7 @@ VRPOTrainer::VRPOTrainer(
   std::int64_t agent_offset = 0;
   for (const auto& collector : collectors_) {
     if (!collector) {
-      throw std::invalid_argument("VRPOTrainer collectors must be non-null.");
+      throw std::invalid_argument("Trainer collectors must be non-null.");
     }
     shard_agent_offsets_.push_back(agent_offset);
     const auto shard_agents = static_cast<std::int64_t>(collector->total_agents());
@@ -801,11 +755,11 @@ VRPOTrainer::VRPOTrainer(
   sync_self_play_assignments_to_collectors();
 }
 
-VRPOTrainer::~VRPOTrainer() {
+Trainer::~Trainer() {
   synchronize_cuda_if_needed(compute_devices_, "trainer shutdown");
 }
 
-std::int64_t VRPOTrainer::model_parameter_count() const {
+std::int64_t Trainer::model_parameter_count() const {
   std::int64_t total = 0;
   for (const auto& param : actor_->parameters()) {
     total += param.numel();
@@ -813,7 +767,7 @@ std::int64_t VRPOTrainer::model_parameter_count() const {
   return total;
 }
 
-void VRPOTrainer::sync_self_play_assignments_to_collectors() {
+void Trainer::sync_self_play_assignments_to_collectors() {
   for (auto& collector : collectors_) {
     if (!collector) {
       continue;
@@ -840,7 +794,7 @@ int agents_per_env_from_mode(const std::string& mode) {
   return 2 * team_size_from_mode(mode);
 }
 
-void VRPOTrainer::rebuild_collectors() {
+void Trainer::rebuild_collectors() {
   std::vector<std::pair<std::string, float>> alloc = {{std::to_string(config_.env.team_size) + "v" + std::to_string(config_.env.team_size), 1.0F}};
 
   // compute max team size
@@ -971,7 +925,7 @@ void VRPOTrainer::rebuild_collectors() {
     if (shard_devices_[i] == device_) {
       collection_actors_.push_back(actor_snapshot_);
     } else {
-      collection_actors_.push_back(clone_vrpo_actor(actor_snapshot_, shard_devices_[i]));
+      collection_actors_.push_back(clone_actor(actor_snapshot_, shard_devices_[i]));
       collection_actors_.back()->eval();
     }
   }
@@ -1014,7 +968,7 @@ void VRPOTrainer::rebuild_collectors() {
             << " rollout_length=" << config_.ppo.rollout_length << '\n';
 }
 
-void VRPOTrainer::maybe_initialize_from_checkpoint() {
+void Trainer::maybe_initialize_from_checkpoint() {
   std::filesystem::path base;
   const bool explicit_checkpoint = !config_.ppo.init_checkpoint.empty();
   if (explicit_checkpoint) {
@@ -1110,7 +1064,7 @@ void VRPOTrainer::maybe_initialize_from_checkpoint() {
   }
 }
 
-TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_index) {
+TrainerMetrics Trainer::update_actor(RolloutStorage& rollout, int update_index) {
   PULSAR_TRACE_SCOPE_CAT("trainer", "update_actor");
 #ifdef PULSAR_HAS_CUDA
   std::optional<c10::cuda::CUDAStream> prev_train_stream;
@@ -1128,31 +1082,8 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
   const int rollout_steps = rollout.rollout_length();
   const auto& all_rewards = rollout.all_rewards();
 
-  // Adaptive Centered Expected SARSA: closed-loop exploration controller.
-  // Compute the entropy deficit fraction alpha from the rolling buffer of past
-  // update entropies; alpha drives GCRL coef, ES sigma, ES interval, and the
-  // entropy coef floor for this update.
-  const double H_floor = static_cast<double>(config_.ppo.entropy_floor);
-  double H_mean = 0.0;
-  if (!entropy_window_.empty()) {
-    for (double e : entropy_window_) H_mean += e;
-    H_mean /= static_cast<double>(entropy_window_.size());
-  }
-  const double entropy_deficit = std::max(0.0, H_floor - H_mean);
-  // No data yet: assume no deficit rather than maximum deficit.
-  const double alpha = (H_floor > 0.0 && !entropy_window_.empty())
-      ? std::min(1.0, entropy_deficit / H_floor)
-      : 0.0;
-  last_alpha_ = alpha;
-  last_entropy_mean_ = H_mean;
-
-  float effective_entropy_coef =
-      std::max(config_.ppo.ent_coef_min, config_.ppo.entropy_coef);
-  float effective_entropy_floor_coef = config_.ppo.entropy_floor_coef;
-
-  const float eff_gcrl_actor_coef = config_.goal_critic.lambda_goal_actor
-      * (1.0F + config_.goal_critic.gcrl_actor_alpha_gain * static_cast<float>(alpha));
-  last_eff_gcrl_coef_ = static_cast<double>(eff_gcrl_actor_coef);
+  const float effective_entropy_coef = config_.ppo.entropy_coef;
+  const float eff_gcrl_actor_coef = config_.goal_critic.lambda_goal_actor;
 
   const int seq_len = std::max(1, config_.ppo.rollout_length);
   const size_t num_update_gpus = compute_devices_.size();
@@ -1203,7 +1134,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
               << " optimizer_accumulation_steps=" << optimizer_accumulation_steps
               << " cuda_amp=" << (use_cuda_amp ? 1 : 0)
               << " loss_scale=" << cuda_amp_loss_scale
-              << " pcgrad=" << (config_.ppo.pcgrad ? 1 : 0)
               << '\n' << std::flush;
   }
   std::int64_t metric_steps = 0;
@@ -1215,7 +1145,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
   double policy_approx_kl_sum = 0.0;
   double policy_clip_fraction_sum = 0.0;
   double goal_critic_loss_sum = 0.0;
-  double q_critic_loss_sum = 0.0;
   double goal_score_sum = 0.0;
   double sampled_goal_distance_sum = 0.0;
   double policy_log_ratio_abs_max = 0.0;
@@ -1227,167 +1156,59 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
 
   const auto& all_values = rollout.all_values();
   if (rollout_steps <= 0) {
-    metrics.effective_entropy_coef = static_cast<double>(effective_entropy_coef);
     return metrics;
   }
   const torch::Tensor extrinsic_values = all_values.at("extrinsic").narrow(0, 0, rollout_steps).to(device_);
   const torch::Tensor extrinsic_rewards = all_rewards.at("extrinsic").narrow(0, 0, rollout_steps).to(device_);
 
   torch::Tensor shaped_rewards = extrinsic_rewards.clone();
-  if (config_.predictor.enabled) {
-    PULSAR_TRACE_SCOPE_CAT("trainer", "update_predictors");
-    const torch::Tensor sparse_events_device =
-        rollout.sparse_events.narrow(0, 0, rollout_steps).to(device_, use_pinned_host_buffers_);
-    const torch::Tensor rollout_dones_for_targets =
-        rollout.dones.narrow(0, 0, rollout_steps).to(device_, use_pinned_host_buffers_);
-    const torch::Tensor targets_all = compute_sparse_event_soon_targets(
-        sparse_events_device,
-        rollout_dones_for_targets,
-        predictor_horizons_device_);
-
-    std::vector<torch::Tensor> channel_loss_sums(kSparseEventChannelCount);
-    std::vector<torch::Tensor> channel_positive_sums(kSparseEventChannelCount);
-    std::vector<double> channel_sample_counts(kSparseEventChannelCount, 0.0);
-    std::vector<double> channel_positive_sample_counts(kSparseEventChannelCount, 0.0);
-    for (std::size_t i = 0; i < kSparseEventChannelCount; ++i) {
-      channel_loss_sums[i] = torch::zeros({}, torch::TensorOptions().device(device_).dtype(torch::kFloat64));
-      channel_positive_sums[i] = torch::zeros({}, torch::TensorOptions().device(device_).dtype(torch::kFloat64));
-    }
-
-    const int predictor_agents_per_batch = std::min(
-        total_agents,
-        std::max(1, max_forward_samples / std::max(1, rollout_steps)));
-    for (int agent_offset = 0; agent_offset < total_agents; agent_offset += predictor_agents_per_batch) {
-      const int count = std::min(predictor_agents_per_batch, total_agents - agent_offset);
-
-      torch::Tensor flat_features;
-      {
-        torch::NoGradGuard no_grad;
-        flat_features = rollout.encoded_features
-            .narrow(0, 0, rollout_steps)
-            .narrow(1, agent_offset, count)
-            .to(device_)
-            .reshape({rollout_steps * count, -1});
-        flat_features = finite_or_zero(flat_features);
-      }
-
-      if (predictor_trainer_) {
-        predictor_trainer_->update_predictors(
-            actor_,
-            flat_features,
-            targets_all,
-            rollout_steps,
-            count,
-            agent_offset,
-            update_index,
-            channel_loss_sums,
-            channel_sample_counts,
-            channel_positive_sums,
-            channel_positive_sample_counts);
-
-        predictor_trainer_->apply_reward_shaping(
-            actor_,
-            flat_features,
-            sparse_events_device,
-            shaped_rewards,
-            rollout_steps,
-            count,
-            agent_offset);
-      }
-    }
-
-    // Extract accumulated stats from GPU — single sync point
-    std::vector<PredictorUpdateStats> predictor_stats(kSparseEventChannelCount);
-    for (std::size_t channel_index = 0; channel_index < kSparseEventChannelCount; ++channel_index) {
-      predictor_stats[channel_index].loss_sum = channel_loss_sums[channel_index].item<double>();
-      predictor_stats[channel_index].samples = channel_sample_counts[channel_index];
-      predictor_stats[channel_index].positive_sum = channel_positive_sums[channel_index].item<double>();
-      predictor_stats[channel_index].positive_samples = channel_positive_sample_counts[channel_index];
-    }
-
-    if (predictor_trainer_) {
-      predictor_trainer_->process_convergence(actor_, predictor_stats, update_index);
-
-      const auto& ema_losses = predictor_trainer_->ema_losses();
-      const auto& deltas = predictor_trainer_->deltas();
-      for (std::size_t channel_index = 0; channel_index < kSparseEventChannelCount; ++channel_index) {
-        const std::string channel_name(kSparseEventChannels[channel_index].name);
-        const double mean_loss = predictor_stats[channel_index].mean_loss();
-        const double positive_rate = predictor_stats[channel_index].positive_rate();
-        metrics.predictor_loss[channel_name] = mean_loss;
-        metrics.predictor_positive[channel_name] = positive_rate;
-        metrics.predictor_delta[channel_name] =
-            std::isfinite(deltas[channel_index]) ? deltas[channel_index] : 0.0;
-        metrics.predictor_active[channel_name] = actor_->predictor_active_[channel_index] != 0 ? 1.0 : 0.0;
-      }
-    }
-  }
 
   const torch::Tensor rollout_dones = rollout.dones.narrow(0, 0, rollout_steps).to(device_);
   const torch::Tensor rollout_bootstrap_truncated = rollout.bootstrap_truncated.narrow(0, 0, rollout_steps).to(device_);
 
   torch::Tensor active_mask = rollout.learner_active.narrow(0, 0, rollout_steps).to(device_) > 0.5F;
   torch::Tensor normalized_advantages;
-  torch::Tensor bounded_q_taken;
-  torch::Tensor bounded_v_from_q;
-  torch::Tensor q_returns;
+  torch::Tensor returns;
   {
     PULSAR_TRACE_SCOPE_CAT("trainer", "update_gae");
     const auto gae_start = std::chrono::steady_clock::now();
     if (benchmark_progress_) {
       std::cout << "bench_update_gae_start\n" << std::flush;
     }
-    torch::Tensor terminal_v_from_q;
-    const float q_target_abs_cap = config_.vrpo.q_target_abs_cap;
+    torch::Tensor terminal_values;
     if (rollout_bootstrap_truncated.any().item<bool>()) {
       torch::NoGradGuard no_grad;
       torch::Tensor term_obs = rollout.terminal_observations.narrow(0, 0, rollout_steps);
       auto term_flat = term_obs.reshape({rollout_steps * total_agents, config_.model.observation_dim});
       const int total_term_samples = rollout_steps * total_agents;
       const int max_term_batch = effective_max_forward_samples(config_.model, device_);
-      std::vector<torch::Tensor> term_v_from_q_chunks;
+      std::vector<torch::Tensor> term_value_chunks;
       for (int offset = 0; offset < total_term_samples; offset += max_term_batch) {
         int batch = std::min(max_term_batch, total_term_samples - offset);
         auto chunk = actor_normalizer_.normalize(term_flat.slice(0, offset, offset + batch).to(device_));
         auto chunk_goal = policy_goal_values_like(chunk, config_.goal_critic.goal_dim);
         auto chunk_out = actor_->forward_step(chunk, chunk_goal);
-        auto term_logits = chunk_out.policy_logits;
-        auto term_q = chunk_out.q_values;
-        auto term_probs = torch::softmax(term_logits / std::max(config_.ppo.policy_temperature, 1.0e-6F), -1);
-        auto term_v = (term_probs * term_q).sum(-1);
-        if (config_.ppo.popart_enabled) {
-          term_v = q_normalizer_.denormalize(term_v);
-        }
-        term_v_from_q_chunks.push_back(bound_vrpo_q_target(term_v, q_target_abs_cap));
+        term_value_chunks.push_back(chunk_out.value_win_logits.squeeze(-1));
       }
-      auto term_v_from_q_flat = torch::cat(term_v_from_q_chunks, 0);
-      terminal_v_from_q = term_v_from_q_flat.reshape({rollout_steps, total_agents});
+      auto term_value_flat = torch::cat(term_value_chunks, 0);
+      terminal_values = term_value_flat.reshape({rollout_steps, total_agents});
     }
     auto final_values_map = rollout.final_values();
-    torch::Tensor final_v_from_q = final_values_map.count("v_from_q") && final_values_map.at("v_from_q").defined()
-        ? bound_vrpo_q_target(final_values_map.at("v_from_q").to(device_), q_target_abs_cap)
+    torch::Tensor final_values = final_values_map.count("extrinsic") && final_values_map.at("extrinsic").defined()
+        ? final_values_map.at("extrinsic").to(device_)
         : torch::Tensor{};
 
-    bounded_q_taken = bound_vrpo_q_target(
-        all_values.at("q_taken").narrow(0, 0, rollout_steps).to(device_),
-        q_target_abs_cap);
-    bounded_v_from_q = bound_vrpo_q_target(
-        all_values.at("v_from_q").narrow(0, 0, rollout_steps).to(device_),
-        q_target_abs_cap);
-
-    torch::Tensor shaped_advantages = compute_centered_expected_sarsa_gae(
-        bounded_q_taken,
-        bounded_v_from_q,
+    torch::Tensor shaped_advantages = compute_gae(
+        extrinsic_values,
         shaped_rewards,
         rollout_dones,
         config_.ppo.gamma,
         config_.ppo.gae_lambda,
-        final_v_from_q,
+        final_values,
         rollout_bootstrap_truncated,
-        terminal_v_from_q);
-    shaped_advantages = bound_vrpo_q_target(shaped_advantages, q_target_abs_cap);
+        terminal_values);
+    returns = shaped_advantages + extrinsic_values.detach();
     normalized_advantages = normalize_advantage(shaped_advantages, active_mask);
-    q_returns = bound_vrpo_q_target(shaped_advantages + bounded_v_from_q.detach(), config_.vrpo.q_target_abs_cap);
 
     if (active_mask.any().item<bool>()) {
       metrics.advantage_std = shaped_advantages.index({active_mask}).std().item<double>();
@@ -1417,49 +1238,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
       const int next_agent_offset = agent_offset + count;
       agent_offset = next_agent_offset;
 
-      // Determine if this minibatch spans multiple modes.
-      // Fast-path: if the entire rollout has only one mode (common in curriculum),
-      // skip expensive mode detection and splitting.
-      torch::Tensor agent_mode_ids = index_select_on_source_device(rollout.mode_ids[0], 0, agent_indices);
-      const bool use_pcgrad = config_.ppo.pcgrad;
-      int num_modes_present = 1;
-      bool has_1v1 = false, has_2v2 = false, has_3v3 = false;
-      bool split_modes_for_pcgrad = false;
-
-      // Only check mode splits if PCGrad is enabled AND multiple modes are possible
-      if (use_pcgrad) {
-        // Quick check: if first agent's mode matches all others (single-mode curriculum stage),
-        // skip the expensive per-mode .any() checks.
-        const auto first_mode = agent_mode_ids[0].item<std::int8_t>();
-        const bool all_same = (agent_mode_ids != first_mode).sum().item<int>() == 0;
-        if (!all_same) {
-          has_1v1 = (agent_mode_ids == 1).any().item<bool>();
-          has_2v2 = (agent_mode_ids == 2).any().item<bool>();
-          has_3v3 = (agent_mode_ids == 3).any().item<bool>();
-          num_modes_present = (has_1v1 ? 1 : 0) + (has_2v2 ? 1 : 0) + (has_3v3 ? 1 : 0);
-          split_modes_for_pcgrad = num_modes_present > 1;
-        }
-      }
-      std::vector<torch::Tensor> mode_agent_indices_list;
-      if (split_modes_for_pcgrad) {
-        if (has_1v1) {
-          torch::Tensor mask = agent_mode_ids == 1;
-          mode_agent_indices_list.push_back(agent_indices.index({mask}));
-        }
-        if (has_2v2) {
-          torch::Tensor mask = agent_mode_ids == 2;
-          mode_agent_indices_list.push_back(agent_indices.index({mask}));
-        }
-        if (has_3v3) {
-          torch::Tensor mask = agent_mode_ids == 3;
-          mode_agent_indices_list.push_back(agent_indices.index({mask}));
-        }
-      } else {
-        mode_agent_indices_list.push_back(agent_indices);
-      }
-
-      // Process each mode group (or the full batch if single mode).
-      std::vector<std::vector<CapturedGrad>> pcgrad_groups;
+      const std::vector<torch::Tensor> mode_agent_indices_list = {agent_indices};
       double combined_total_active = 0.0;
 
       for (const torch::Tensor& mode_agent_indices : mode_agent_indices_list) {
@@ -1483,33 +1262,13 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
         }
         combined_total_active += mode_total_active;
 
-        if (config_.ppo.popart_enabled) {
-          torch::Tensor mb_q_returns = index_select_on_source_device(q_returns, 1, mode_agent_indices);
-          torch::Tensor mb_active = index_select_on_source_device(
-              rollout.learner_active.narrow(0, 0, rollout_steps),
-              1,
-              mode_agent_indices).to(device_);
-          torch::Tensor mb_active_returns = mb_q_returns.index({mb_active > 0.5F});
-          if (mb_active_returns.numel() > 0) {
-            auto& final_layer = actor_->q_head_->at<torch::nn::LinearImpl>(2);
-            q_normalizer_.update(mb_active_returns, final_layer);
-            sync_actor_to_replicas(actor_, compute_actors_);
-          }
-        }
-
-        if (use_pcgrad || accumulated_minibatches == 0) {
+        if (accumulated_minibatches == 0) {
           actor_optimizer_.zero_grad();
         }
-        std::vector<CapturedGrad> mode_task_grad_group;
-        std::vector<CapturedGrad> mode_goal_critic_grad_group;
-        std::vector<CapturedGrad> mode_goal_actor_grad_group;
 
         // Launch one async task per GPU. Each task processes all micro-batches
         // for its chunk of agents, accumulating GPU-local CapturedGrad groups.
         struct GpuTaskResult {
-          std::vector<CapturedGrad> task_group;
-          std::vector<CapturedGrad> goal_critic_group;
-          std::vector<CapturedGrad> goal_actor_group;
           double policy_loss_sum = 0.0;
           double value_loss_sum = 0.0;
           double entropy_sum = 0.0;
@@ -1519,7 +1278,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
           double goal_critic_loss = 0.0;
           double goal_score = 0.0;
           double sampled_goal_dist = 0.0;
-          double q_critic_loss_sum = 0.0;
           double fwd_bwd_seconds = 0.0;
           bool has_backward = false;
           std::int64_t active_count = 0;
@@ -1534,21 +1292,17 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
         const int rollout_steps_local = rollout_steps;
         const double mode_total_active_local = mode_total_active;
         const bool mode_all_active_local = mode_all_active;
-        const bool use_pcgrad_local = use_pcgrad;
         const bool use_cuda_amp_local = use_cuda_amp;
         const double cuda_amp_loss_scale_local = cuda_amp_loss_scale;
         const int optimizer_accumulation_steps_local = optimizer_accumulation_steps;
 
         for (size_t g = 0; g < num_update_gpus; ++g) {
           const torch::Device gpu_dev = compute_devices_[g];
-          VRPOActor gpu_act = (g == 0) ? actor_ : compute_actors_[g - 1];
+          Actor gpu_act = (g == 0) ? actor_ : compute_actors_[g - 1];
 
-          gpu_futures.push_back(task_pool_->submit([=, &rollout, &normalized_advantages, &q_returns,
-              &mode_agent_indices, &effective_entropy_coef, &effective_entropy_floor_coef, this]() mutable -> GpuTaskResult {
+          gpu_futures.push_back(task_pool_->submit([=, &rollout, &normalized_advantages, &returns,
+              &mode_agent_indices, &effective_entropy_coef, this]() mutable -> GpuTaskResult {
             GpuTaskResult result;
-            std::vector<CapturedGrad>& gpu_task_group = result.task_group;
-            std::vector<CapturedGrad>& gpu_goal_critic_group = result.goal_critic_group;
-            std::vector<CapturedGrad>& gpu_goal_actor_group = result.goal_actor_group;
             torch::Tensor policy_loss_metric;
             torch::Tensor value_loss_metric;
             torch::Tensor entropy_metric;
@@ -1558,7 +1312,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
             torch::Tensor goal_critic_loss_metric;
             torch::Tensor goal_score_metric;
             torch::Tensor sampled_goal_dist_metric;
-            torch::Tensor q_critic_loss_metric;
             auto add_metric = [](torch::Tensor& dst, const torch::Tensor& value, double weight) {
               const torch::Tensor term = value.detach().to(torch::kFloat32) * weight;
               dst = dst.defined() ? dst + term : term;
@@ -1610,15 +1363,15 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
               if (gpu_dev != device_) {
                 mode_gpu_advantages_mb = mode_gpu_advantages_mb.to(gpu_dev);
               }
-              torch::Tensor mode_gpu_q_returns_mb = index_select_on_source_device(
-                  q_returns.narrow(0, 0, rollout_steps_local),
+              torch::Tensor mode_gpu_returns_mb = index_select_on_source_device(
+                  returns.narrow(0, 0, rollout_steps_local),
                   1,
                   gpu_micro_indices);
               if (gpu_dev != device_) {
-                mode_gpu_q_returns_mb = mode_gpu_q_returns_mb.to(gpu_dev);
+                mode_gpu_returns_mb = mode_gpu_returns_mb.to(gpu_dev);
               }
-              torch::Tensor mode_gpu_old_q_taken_mb = index_select_on_source_device(
-                  bounded_q_taken.narrow(0, 0, rollout_steps_local),
+              torch::Tensor mode_gpu_old_values_mb = index_select_on_source_device(
+                  extrinsic_values.narrow(0, 0, rollout_steps_local),
                   1,
                   gpu_micro_indices).to(gpu_dev);
 
@@ -1686,55 +1439,34 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
                   bounded_current_log_probs = active_old_log_probs + raw_log_ratio;
                 }
 
-                torch::Tensor policy_loss = clipped_vrpo_policy_loss(
+                torch::Tensor policy_loss = clipped_ppo_policy_loss(
                     bounded_current_log_probs,
                     active_old_log_probs,
                     active_advantages,
                     config_.ppo.clip_range).mean();
-                const torch::Tensor entropy_values = masked_action_entropy(active_logits, active_masks, policy_temperature);
-                const torch::Tensor entropy = entropy_values.mean();
-                torch::Tensor entropy_floor_loss = torch::zeros({}, active_advantages.options());
-                if (config_.ppo.entropy_floor > 0.0F && effective_entropy_floor_coef > 0.0F) {
-                  const torch::Tensor entropy_floor_mask = active_masks.to(torch::kFloat32).sum(-1) > 1.0F;
-                  const torch::Tensor entropy_floor_count = entropy_floor_mask.to(torch::kFloat32).sum().clamp_min(1.0F);
-                  // Adaptive Centered Expected SARSA: linear (not quadratic) floor penalty so
-                  // the restoring gradient stays constant near the boundary.
-                  const torch::Tensor entropy_floor_penalty =
-                      torch::relu(config_.ppo.entropy_floor - entropy_values)
-                          * entropy_floor_mask.to(torch::kFloat32);
-                  entropy_floor_loss = effective_entropy_floor_coef * entropy_floor_penalty.sum() / entropy_floor_count;
-                }
+                const torch::Tensor entropy = masked_action_entropy(active_logits, active_masks, policy_temperature).mean();
 
-                torch::Tensor chunk_q_returns = mode_gpu_q_returns_mb.narrow(0, chunk_start, loss_steps).reshape({samples});
-                torch::Tensor active_q_returns = all_active ? chunk_q_returns.to(torch::kFloat32) : chunk_q_returns.index({flat_active}).to(torch::kFloat32);
+                torch::Tensor chunk_returns = mode_gpu_returns_mb.narrow(0, chunk_start, loss_steps).reshape({samples});
+                torch::Tensor active_returns = all_active ? chunk_returns.to(torch::kFloat32) : chunk_returns.index({flat_active}).to(torch::kFloat32);
 
-                torch::Tensor q_all_new = output.q_values.reshape({samples, config_.model.action_dim});
-                torch::Tensor active_q_all = all_active ? q_all_new.to(torch::kFloat32) : q_all_new.index({flat_active}).to(torch::kFloat32);
-                torch::Tensor active_q_taken = active_q_all.gather(1, active_actions.unsqueeze(1)).squeeze(1);
+                torch::Tensor values_new = output.value_win_logits.reshape({samples});
+                torch::Tensor active_values = all_active ? values_new.to(torch::kFloat32) : values_new.index({flat_active}).to(torch::kFloat32);
 
-                torch::Tensor chunk_old_q_taken = mode_gpu_old_q_taken_mb.narrow(0, chunk_start, loss_steps).reshape({samples});
-                torch::Tensor active_old_q_taken = all_active ? chunk_old_q_taken.to(torch::kFloat32) : chunk_old_q_taken.index({flat_active}).to(torch::kFloat32);
-
-                torch::Tensor target_q = active_q_returns;
-                torch::Tensor old_q_taken = active_old_q_taken;
-                if (config_.ppo.popart_enabled) {
-                  target_q = q_normalizer_.normalize(target_q);
-                  old_q_taken = q_normalizer_.normalize(old_q_taken);
-                }
+                torch::Tensor chunk_old_values = mode_gpu_old_values_mb.narrow(0, chunk_start, loss_steps).reshape({samples});
+                torch::Tensor active_old_values = all_active ? chunk_old_values.to(torch::kFloat32) : chunk_old_values.index({flat_active}).to(torch::kFloat32);
 
                 torch::Tensor value_loss;
                 if (config_.ppo.value_clipping) {
-                  torch::Tensor loss_unclipped = elementwise_smooth_l1_loss(active_q_taken, target_q, config_.ppo.value_loss_delta);
-                  torch::Tensor clipped_q_taken = old_q_taken + torch::clamp(
-                      active_q_taken - old_q_taken,
+                  torch::Tensor loss_unclipped = elementwise_smooth_l1_loss(active_values, active_returns, config_.ppo.value_loss_delta);
+                  torch::Tensor clipped_values = active_old_values + torch::clamp(
+                      active_values - active_old_values,
                       -config_.ppo.value_clip_range,
                       config_.ppo.value_clip_range);
-                  torch::Tensor loss_clipped = elementwise_smooth_l1_loss(clipped_q_taken, target_q, config_.ppo.value_loss_delta);
+                  torch::Tensor loss_clipped = elementwise_smooth_l1_loss(clipped_values, active_returns, config_.ppo.value_loss_delta);
                   value_loss = torch::maximum(loss_unclipped, loss_clipped).mean();
                 } else {
-                  value_loss = smooth_l1_value_loss(active_q_taken, target_q, config_.ppo.value_loss_delta);
+                  value_loss = smooth_l1_value_loss(active_values, active_returns, config_.ppo.value_loss_delta);
                 }
-                add_metric(q_critic_loss_metric, value_loss, active_samples);
 
                 torch::Tensor goal_loss = torch::zeros({}, active_advantages.options());
                 torch::Tensor actor_goal_loss = torch::zeros({}, active_advantages.options());
@@ -1784,17 +1516,8 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
                 }
 
                 const auto sample_weight = active_samples / mode_total_active_local;
-                const torch::Tensor task_loss = policy_loss + config_.vrpo.q_critic_coef * value_loss + entropy_floor_loss - effective_entropy_coef * entropy;
+                const torch::Tensor task_loss = policy_loss + config_.ppo.value_coef * value_loss - effective_entropy_coef * entropy;
 
-                // Guard the gradient accumulator from NaN/Inf losses.  Even with
-                // bounded Q targets, clamped log-ratios and capped Q-head outputs,
-                // a single degenerate sample can still drive one of the loss
-                // components non-finite (e.g. softmax over near-all-masked logits
-                // followed by a long backward chain).  Calling .backward() on a
-                // non-finite loss writes NaN gradients into every parameter,
-                // which is exactly what the post-backward grad_norm check is
-                // catching and skipping the optimizer step for.  Skip backward
-                // here instead so the rest of the minibatch can still step.
                 const torch::Tensor combined_finite_check = task_loss
                     + config_.goal_critic.lambda_Zg * goal_loss
                     + eff_gcrl_actor_coef * actor_goal_loss;
@@ -1803,33 +1526,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
 
                 if (!losses_finite) {
                   ++result.nonfinite_loss_skips;
-                } else if (use_pcgrad_local) {
-                  const torch::Tensor weighted_task_loss = task_loss * sample_weight;
-                  const torch::Tensor weighted_goal_critic_loss = config_.goal_critic.lambda_Zg * goal_loss * sample_weight;
-                  const torch::Tensor weighted_goal_actor_loss = eff_gcrl_actor_coef * actor_goal_loss * sample_weight;
-                  const int effective_accum = 1;
-                  // Collect all active objectives for this chunk.
-                  std::vector<std::pair<torch::Tensor, std::vector<CapturedGrad>*>> objective_losses;
-                  objective_losses.push_back({weighted_task_loss / static_cast<double>(effective_accum), &gpu_task_group});
-                  if (config_.goal_critic.lambda_Zg > 0.0F && weighted_goal_critic_loss.requires_grad()) {
-                    objective_losses.push_back({weighted_goal_critic_loss / static_cast<double>(effective_accum), &gpu_goal_critic_group});
-                  }
-                  if (config_.goal_critic.lambda_goal_actor > 0.0F && weighted_goal_actor_loss.requires_grad()) {
-                    objective_losses.push_back({weighted_goal_actor_loss / static_cast<double>(effective_accum), &gpu_goal_actor_group});
-                  }
-
-                  // Compute every objective on every GPU chunk. The previous
-                  // implementation assigned one objective per GPU, which meant
-                  // single-GPU runs trained only the task objective and multi-GPU
-                  // runs trained each objective on different data shards. PCGrad
-                  // requires per-objective gradients for the same local batch.
-                  for (int obj_index = 0; obj_index < static_cast<int>(objective_losses.size()); ++obj_index) {
-                    zero_existing_gradients(*gpu_act);
-                    const bool retain_graph = obj_index + 1 < static_cast<int>(objective_losses.size());
-                    (objective_losses[obj_index].first * cuda_amp_loss_scale_local).backward({}, retain_graph);
-                    accumulate_gradients(*gpu_act, *objective_losses[obj_index].second);
-                    result.has_backward = true;
-                  }
                 } else {
                   const torch::Tensor loss =
                       task_loss + config_.goal_critic.lambda_Zg * goal_loss + eff_gcrl_actor_coef * actor_goal_loss;
@@ -1857,7 +1553,6 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
                 scalar_or_zero(goal_critic_loss_metric),
                 scalar_or_zero(goal_score_metric),
                 scalar_or_zero(sampled_goal_dist_metric),
-                scalar_or_zero(q_critic_loss_metric),
             }).to(torch::kCPU);
             const float* metric_data = packed_metrics.data_ptr<float>();
             result.policy_loss_sum = metric_data[0];
@@ -1869,20 +1564,15 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
             result.goal_critic_loss = metric_data[6];
             result.goal_score = metric_data[7];
             result.sampled_goal_dist = metric_data[8];
-            result.q_critic_loss_sum = metric_data[9];
             result.fwd_bwd_seconds =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - task_compute_start).count();
             return result;
           }));
         }
 
-        // Wait for all GPU tasks and reduce into primary mode groups.
+        // Wait for all GPU tasks and accumulate metrics.
         for (auto& fut : gpu_futures) {
           GpuTaskResult task_result = fut.get();
-
-          reduce_captured_gradients(*actor_, mode_task_grad_group, task_result.task_group, device_);
-          reduce_captured_gradients(*actor_, mode_goal_critic_grad_group, task_result.goal_critic_group, device_);
-          reduce_captured_gradients(*actor_, mode_goal_actor_grad_group, task_result.goal_actor_group, device_);
 
           policy_loss_sum += task_result.policy_loss_sum;
           value_loss_sum += task_result.value_loss_sum;
@@ -1895,96 +1585,18 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
           goal_critic_loss_sum += task_result.goal_critic_loss;
           goal_score_sum += task_result.goal_score;
           sampled_goal_distance_sum += task_result.sampled_goal_dist;
-          q_critic_loss_sum += task_result.q_critic_loss_sum;
           metrics.forward_backward_seconds += task_result.fwd_bwd_seconds;
           accumulated_has_backward = accumulated_has_backward || task_result.has_backward;
           metric_steps += task_result.active_count;
           metrics.nonfinite_loss_skips += task_result.nonfinite_loss_skips;
-        }
-
-        if (use_pcgrad) {
-          if (!mode_task_grad_group.empty() && captured_group_has_grad(mode_task_grad_group)) {
-            pcgrad_groups.push_back(std::move(mode_task_grad_group));
-          }
-          if (!mode_goal_critic_grad_group.empty() && captured_group_has_grad(mode_goal_critic_grad_group)) {
-            pcgrad_groups.push_back(std::move(mode_goal_critic_grad_group));
-          }
-          if (!mode_goal_actor_grad_group.empty() && captured_group_has_grad(mode_goal_actor_grad_group)) {
-            pcgrad_groups.push_back(std::move(mode_goal_actor_grad_group));
-          }
         }
       }
 
       accumulated_minibatches++;
       accumulated_total_active += combined_total_active;
 
-      // Apply PCGrad across mode/objective groups, then materialize their sum
-      // onto the primary actor's parameters.
-      if (use_pcgrad && !pcgrad_groups.empty()) {
-        auto removed = std::remove_if(
-            pcgrad_groups.begin(),
-            pcgrad_groups.end(),
-            [](const std::vector<CapturedGrad>& group) {
-              return !captured_group_has_grad(group) || !captured_group_gradients_are_finite(group);
-            });
-        if (removed != pcgrad_groups.end()) {
-          metrics.nonfinite_grad_norm_skips += std::distance(removed, pcgrad_groups.end());
-          pcgrad_groups.erase(removed, pcgrad_groups.end());
-        }
-      }
-      if (use_pcgrad && pcgrad_groups.empty()) {
-        accumulated_has_backward = false;
-      }
-      if (use_pcgrad && !pcgrad_groups.empty()) {
-        zero_existing_gradients(*actor_);
-        apply_pcgrad_multi(pcgrad_groups);
-
-        std::vector<torch::Tensor> combined_grads;
-        combined_grads.reserve(pcgrad_groups[0].size());
-        for (size_t i = 0; i < pcgrad_groups[0].size(); ++i) {
-          torch::Tensor combined;
-          bool has_any = false;
-          for (const auto& group : pcgrad_groups) {
-            if (group[i].grad.defined()) {
-              combined = has_any ? combined + group[i].grad : group[i].grad;
-              has_any = true;
-            }
-          }
-          if (has_any) {
-            combined_grads.push_back(combined.reshape({-1}));
-          }
-        }
-
-        bool combined_finite = true;
-        if (!combined_grads.empty()) {
-          combined_finite = torch::isfinite(torch::cat(combined_grads)).all().item<bool>();
-        }
-
-        if (combined_finite) {
-          for (size_t i = 0; i < pcgrad_groups[0].size(); ++i) {
-            torch::Tensor combined;
-            bool has_any = false;
-            for (const auto& group : pcgrad_groups) {
-              if (group[i].grad.defined()) {
-                combined = has_any ? combined + group[i].grad : group[i].grad;
-                has_any = true;
-              }
-            }
-            if (has_any) {
-              pcgrad_groups[0][i].param.mutable_grad() = combined;
-            }
-          }
-        } else {
-          ++metrics.nonfinite_grad_norm_skips;
-          pcgrad_groups.clear();
-          accumulated_has_backward = false;
-          zero_existing_gradients(*actor_);
-        }
-      }
-
       const bool at_epoch_end = agent_offset >= total_agents;
       const bool should_step_optimizer =
-          use_pcgrad ||
           accumulated_minibatches >= optimizer_accumulation_steps ||
           at_epoch_end;
       if (!should_step_optimizer) {
@@ -2020,9 +1632,7 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
         continue;
       }
 
-      // Reduce gradients from replica GPU actors into the primary actor before stepping.
-      // Skip when using PCGrad: gradients are already captured and combined via CapturedGrad groups.
-      if (num_update_gpus > 1 && !use_pcgrad) {
+      if (num_update_gpus > 1) {
         reduce_gradients_from_replicas(actor_, compute_actors_);
       }
 
@@ -2038,28 +1648,20 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
           sanitize_actor_parameters(); // Repair if we got a non-finite gradient
           const GradientSanitizeResult sanitized = zero_nonfinite_gradients(*actor_);
           ++metrics.nonfinite_grad_norm_skips;
-          std::cerr << "skipping VRPO optimizer step with non-finite gradient entries";
+          std::cerr << "skipping optimizer step with non-finite gradient entries";
           if (sanitized.changed) {
             std::cerr << " in " << sanitized.first_parameter;
           }
           std::cerr << "; preclip grad_norm=" << grad_norm << '\n';
-        } else if (std::isfinite(grad_norm) &&
-            !(config_.ppo.max_preclip_grad_norm > 0.0F &&
-              grad_norm > static_cast<double>(config_.ppo.max_preclip_grad_norm))) {
+        } else if (std::isfinite(grad_norm)) {
           grad_norm_sum += grad_norm;
           ++grad_norm_steps;
           actor_optimizer_.step();
           ++metrics.optimizer_steps;
           stepped_optimizer = true;
-        } else if (std::isfinite(grad_norm)) {
-          ++metrics.grad_norm_guard_skips;
-          std::cerr << "skipping VRPO optimizer step with preclip grad_norm="
-                    << grad_norm
-                    << " max_preclip_grad_norm=" << config_.ppo.max_preclip_grad_norm
-                    << '\n';
         } else {
           ++metrics.nonfinite_grad_norm_skips;
-          std::cerr << "skipping VRPO optimizer step with non-finite grad_norm=" << grad_norm << '\n';
+          std::cerr << "skipping optimizer step with non-finite grad_norm=" << grad_norm << '\n';
         }
       }
       actor_optimizer_.zero_grad();
@@ -2112,30 +1714,13 @@ TrainerMetrics VRPOTrainer::update_actor(RolloutStorage& rollout, int update_ind
     metrics.goal_critic_loss = goal_critic_loss_sum / denom;
     metrics.mean_goal_score = goal_score_sum / denom;
     metrics.mean_sampled_goal_distance = sampled_goal_distance_sum / denom;
-    metrics.q_critic_loss = q_critic_loss_sum / denom;
   }
-  metrics.effective_entropy_coef = static_cast<double>(effective_entropy_coef);
-
-  // Adaptive Centered Expected SARSA: push this update's mean entropy into the
-  // rolling window for the next controller pass, and surface controller signals.
-  if (metric_steps > 0 && config_.ppo.entropy_window > 0) {
-    entropy_window_.push_back(metrics.entropy);
-    while (static_cast<int>(entropy_window_.size()) > config_.ppo.entropy_window) {
-      entropy_window_.pop_front();
-    }
-  }
-  metrics.entropy_rolling_mean = last_entropy_mean_;
-  metrics.entropy_deficit_alpha = last_alpha_;
-  metrics.eff_gcrl_actor_coef = last_eff_gcrl_coef_;
-  metrics.eff_es_sigma = last_eff_es_sigma_;
-  metrics.eff_es_interval = last_eff_es_interval_;
-  metrics.steps_since_last_es = steps_since_last_es_;
   metrics.update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count();
   sanitize_actor_parameters(); // Guarantee actor is 100% clean and finite before returning (and cloning snapshot)
   return metrics;
 }
 
-void VRPOTrainer::sanitize_actor_parameters() {
+void Trainer::sanitize_actor_parameters() {
   PULSAR_TRACE_SCOPE_CAT("trainer", "sanitize_actor_params");
   
   // Fast batched check: check if ALL parameters are finite using exactly 1 host-device synchronization
@@ -2188,14 +1773,12 @@ void VRPOTrainer::sanitize_actor_parameters() {
   }
 }
 
-VRPOTrainer::ESPopulationFitness VRPOTrainer::evaluate_es_population(
+Trainer::ESPopulationFitness Trainer::evaluate_es_population(
     const torch::Tensor& A_stack,
     const torch::Tensor& B_stack,
     int update_index,
-    int wave_index,
-    float effective_sigma) {
-  const float sigma_used =
-      (effective_sigma > 0.0F) ? effective_sigma : config_.es_lora.sigma_ES;
+    int wave_index) {
+  const float sigma_used = config_.es_lora.sigma_ES;
   PULSAR_TRACE_SCOPE_CAT("trainer", "es_evaluate");
   torch::NoGradGuard no_grad_guard;
   const auto& es_cfg = config_.es_lora;
@@ -2398,7 +1981,7 @@ VRPOTrainer::ESPopulationFitness VRPOTrainer::evaluate_es_population(
         auto eval_collector = make_es_eval_collector(
             shard_config, shard_envs, eval_envs, update_index, wave_index, use_pinned_host_buffers_);
 
-        VRPOActor shard_actor = clone_vrpo_actor(actor_, spec.device);
+        Actor shard_actor = clone_actor(actor_, spec.device);
         shard_actor->eval();
         ObservationNormalizer shard_normalizer = actor_normalizer_.clone();
         shard_normalizer.to(spec.device);
@@ -2596,15 +2179,11 @@ VRPOTrainer::ESPopulationFitness VRPOTrainer::evaluate_es_population(
   return result;
 }
 
-void VRPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics, float effective_sigma) {
+void Trainer::run_es_lora_update(int update_index, TrainerMetrics& metrics) {
   PULSAR_TRACE_SCOPE_CAT("trainer", "es_update");
   const auto es_start = std::chrono::steady_clock::now();
   const auto& es_cfg = config_.es_lora;
-  // Adaptive Centered Expected SARSA: use the alpha-scaled mutation noise if the
-  // caller computed one; otherwise fall back to the configured sigma_ES.
-  const float es_sigma_used =
-      (effective_sigma > 0.0F) ? effective_sigma : es_cfg.sigma_ES;
-  last_eff_es_sigma_ = static_cast<double>(es_sigma_used);
+  const float es_sigma_used = es_cfg.sigma_ES;
   const int pop = es_cfg.population_size;
   const int waves = es_cfg.virtual_population_waves;
   const int rank = es_cfg.rank;
@@ -2643,7 +2222,7 @@ void VRPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics, 
       A_stack = torch::randn({pop, rank, in_features}, tensor_options);
       B_stack = torch::randn({pop, out_features, rank}, tensor_options);
     }
-    ESPopulationFitness wave_population = evaluate_es_population(A_stack, B_stack, update_index, wave, es_sigma_used);
+    ESPopulationFitness wave_population = evaluate_es_population(A_stack, B_stack, update_index, wave);
     population.fitness.insert(population.fitness.end(), wave_population.fitness.begin(), wave_population.fitness.end());
     population.reward.insert(population.reward.end(), wave_population.reward.begin(), wave_population.reward.end());
     population.winrate.insert(population.winrate.end(), wave_population.winrate.begin(), wave_population.winrate.end());
@@ -2804,15 +2383,15 @@ void VRPOTrainer::run_es_lora_update(int update_index, TrainerMetrics& metrics, 
   metrics.es_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - es_start).count();
 }
 
-void VRPOTrainer::collect_rollout(
+void Trainer::collect_rollout(
     RolloutStorage& dest,
     TrainerMetrics& metrics,
     std::int64_t* collected_agent_steps,
-    VRPOActor rollout_actor,
+    Actor rollout_actor,
     ObservationNormalizer& normalizer) {
   PULSAR_TRACE_SCOPE_CAT("trainer", "collect_rollout");
   if (!rollout_actor) {
-    throw std::invalid_argument("VRPOTrainer::collect_rollout requires a policy snapshot.");
+    throw std::invalid_argument("Trainer::collect_rollout requires a policy snapshot.");
   }
 #ifdef PULSAR_HAS_CUDA
   c10::cuda::CUDAStream prev_collect_stream = c10::cuda::getCurrentCUDAStream(device_.index());
@@ -2855,7 +2434,7 @@ void VRPOTrainer::collect_rollout(
   std::map<std::string, int> mode_scored;
   std::vector<torch::Tensor> rollout_recurrent_states;
   rollout_recurrent_states.reserve(collectors_.size());
-  std::vector<VRPOActor> rollout_actors;
+  std::vector<Actor> rollout_actors;
   rollout_actors.reserve(collectors_.size());
   std::vector<ObservationNormalizer> shard_normalizers;
   shard_normalizers.reserve(collectors_.size());
@@ -2874,7 +2453,7 @@ void VRPOTrainer::collect_rollout(
     } else if (shard_device == device_) {
       rollout_actors.push_back(rollout_actor);
     } else {
-      rollout_actors.push_back(clone_vrpo_actor(rollout_actor, shard_device));
+      rollout_actors.push_back(clone_actor(rollout_actor, shard_device));
       rollout_actors.back()->eval();
     }
     // NOTE: Cloned normalizers are thread-safe for parallel execution.
@@ -2942,7 +2521,7 @@ void VRPOTrainer::collect_rollout(
 
     for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
       BatchedRocketSimCollector* collector_ptr = collectors_[shard].get();
-      VRPOActor shard_actor = rollout_actors[shard];
+      Actor shard_actor = rollout_actors[shard];
       ObservationNormalizer* shard_normalizer = &shard_normalizers[shard];
       ObservationNormalizer* shard_normalizer_update = &shard_normalizer_updates[shard];
       torch::Tensor recurrent_state = rollout_recurrent_states[shard];
@@ -3131,20 +2710,6 @@ void VRPOTrainer::collect_rollout(
           result.sampled_value_count += sampled_value.numel();
           std::unordered_map<std::string, torch::Tensor> all_values;
           all_values["extrinsic"] = sampled_value;
-          {
-            torch::Tensor q_all = output.q_values;
-            if (config_.ppo.popart_enabled) {
-              q_all = q_normalizer_.denormalize(q_all);
-            }
-            torch::Tensor q_taken = q_all.gather(1, actions.unsqueeze(1)).squeeze(1);
-            torch::Tensor policy_probs = torch::softmax(
-                apply_action_mask_to_logits(
-                    output.policy_logits / std::max(config_.ppo.policy_temperature, 1.0e-6F), action_masks), -1);
-            torch::Tensor v_from_q = (policy_probs * q_all).sum(-1);
-
-            all_values["q_taken"] = q_taken;
-            all_values["v_from_q"] = v_from_q;
-          }
           std::unordered_map<std::string, torch::Tensor> all_rewards;
           all_rewards["extrinsic"] = extrinsic_rewards_host;
           all_rewards["gameplay"] = gameplay_r_host;
@@ -3168,8 +2733,6 @@ void VRPOTrainer::collect_rollout(
               terminal_labels,
               collector.host_terminal_observations(),
               output.encoded);
-          dest.set_sparse_events_slice(step, shard_step.agent_offset, collector.host_sparse_events());
-
           auto& coll = collector;
           dest.set_mode_ids_slice(step, shard_step.agent_offset, static_cast<int>(coll.total_agents()), coll.mode_id());
 
@@ -3242,11 +2805,9 @@ void VRPOTrainer::collect_rollout(
       torch::NoGradGuard no_grad;
       std::vector<torch::Tensor> final_values;
       final_values.reserve(collectors_.size());
-      std::vector<torch::Tensor> final_v_from_q;
-      final_v_from_q.reserve(collectors_.size());
       for (std::size_t shard = 0; shard < collectors_.size(); ++shard) {
         auto& collector = *collectors_[shard];
-        VRPOActor& shard_actor = rollout_actors[shard];
+        Actor& shard_actor = rollout_actors[shard];
         ObservationNormalizer& shard_normalizer = shard_normalizers[shard];
         const torch::Device shard_device = shard_devices_.empty() ? device_ : shard_devices_[shard];
 #ifdef PULSAR_HAS_CUDA
@@ -3269,22 +2830,9 @@ void VRPOTrainer::collect_rollout(
             nullptr,
             final_goal_values);
         final_values.push_back(final_output.value_win_logits.squeeze(-1).to(device_));
-        {
-          torch::Tensor final_masks = collector.host_action_masks().to(shard_device, use_pinned_host_buffers_);
-          torch::Tensor q_all = final_output.q_values;
-          if (config_.ppo.popart_enabled) {
-            q_all = q_normalizer_.denormalize(q_all);
-          }
-          torch::Tensor policy_probs = torch::softmax(
-              apply_action_mask_to_logits(
-                  final_output.policy_logits / std::max(config_.ppo.policy_temperature, 1.0e-6F), final_masks), -1);
-          torch::Tensor v_from_q = (policy_probs * q_all).sum(-1);
-          final_v_from_q.push_back(v_from_q.to(device_));
-        }
       }
       std::unordered_map<std::string, torch::Tensor> bootstrap_values;
       bootstrap_values["extrinsic"] = torch::cat(final_values, 0);
-      bootstrap_values["v_from_q"] = torch::cat(final_v_from_q, 0);
       dest.set_final_values(bootstrap_values);
     }
   } else {
@@ -3460,20 +3008,6 @@ void VRPOTrainer::collect_rollout(
     std::unordered_map<std::string, torch::Tensor> all_values;
     torch::Tensor sampled_value = output.value_win_logits.squeeze(-1);
     all_values["extrinsic"] = sampled_value;
-    {
-      torch::Tensor q_all = output.q_values;
-      if (config_.ppo.popart_enabled) {
-        q_all = q_normalizer_.denormalize(q_all);
-      }
-      torch::Tensor q_taken = q_all.gather(1, actions.unsqueeze(1)).squeeze(1);
-      torch::Tensor policy_probs = torch::softmax(
-          apply_action_mask_to_logits(
-              output.policy_logits / std::max(config_.ppo.policy_temperature, 1.0e-6F), action_masks), -1);
-      torch::Tensor v_from_q = (policy_probs * q_all).sum(-1);
-
-      all_values["q_taken"] = q_taken;
-      all_values["v_from_q"] = v_from_q;
-    }
     sampled_value_sum = sampled_value_sum + sampled_value.to(torch::kFloat64).sum();
     sampled_value_count += sampled_value.numel();
 
@@ -3499,7 +3033,6 @@ void VRPOTrainer::collect_rollout(
         terminal_labels,
         terminal_obs_host,
         output.encoded);
-    dest.set_sparse_events_slice(step, 0, collector_->host_sparse_events());
     dest.set_mode_ids_slice(step, 0, collector_->mode_id());
 
     local_collected_steps += learner_step_count;
@@ -3523,18 +3056,6 @@ void VRPOTrainer::collect_rollout(
 
     std::unordered_map<std::string, torch::Tensor> bootstrap_values;
     bootstrap_values["extrinsic"] = final_output.value_win_logits.squeeze(-1);
-    {
-      torch::Tensor final_masks = collector_->host_action_masks().to(device_, use_pinned_host_buffers_);
-      torch::Tensor q_all = final_output.q_values;
-      if (config_.ppo.popart_enabled) {
-        q_all = q_normalizer_.denormalize(q_all);
-      }
-      torch::Tensor policy_probs = torch::softmax(
-          apply_action_mask_to_logits(
-              final_output.policy_logits / std::max(config_.ppo.policy_temperature, 1.0e-6F), final_masks), -1);
-      torch::Tensor v_from_q = (policy_probs * q_all).sum(-1);
-      bootstrap_values["v_from_q"] = v_from_q;
-    }
     dest.set_final_values(bootstrap_values);
     }
   }
@@ -3626,7 +3147,7 @@ void VRPOTrainer::collect_rollout(
   *collected_agent_steps = local_collected_steps;
 }
 
-CheckpointMetadata VRPOTrainer::make_checkpoint_metadata(std::int64_t global_step, int update_index, const std::string& wandb_run_id) const {
+CheckpointMetadata Trainer::make_checkpoint_metadata(std::int64_t global_step, int update_index, const std::string& wandb_run_id) const {
   nlohmann::json extra = nlohmann::json::object();
   extra["trainer_state_version"] = kTrainerStateVersion;
   if (!wandb_run_id.empty()) {
@@ -3645,7 +3166,7 @@ CheckpointMetadata VRPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
       .obs_schema_version = config_.obs_schema_version,
       .config_hash = config_hash(config_),
       .action_table_hash = action_table_hash(config_.action_table),
-      .architecture_name = "mamba2_goal_vrpo",
+      .architecture_name = "mamba2_goal",
       .device = config_.ppo.device,
       .global_step = global_step,
       .update_index = update_index,
@@ -3654,11 +3175,11 @@ CheckpointMetadata VRPOTrainer::make_checkpoint_metadata(std::int64_t global_ste
   };
 }
 
-void VRPOTrainer::save_checkpoint(const std::filesystem::path& directory, std::int64_t global_step, int update_index, const std::string& wandb_run_id) const {
+void Trainer::save_checkpoint(const std::filesystem::path& directory, std::int64_t global_step, int update_index, const std::string& wandb_run_id) const {
   save_checkpoint_with_metadata(directory, make_checkpoint_metadata(global_step, update_index, wandb_run_id));
 }
 
-void VRPOTrainer::save_checkpoint_with_metadata(const std::filesystem::path& directory, const CheckpointMetadata& metadata) const {
+void Trainer::save_checkpoint_with_metadata(const std::filesystem::path& directory, const CheckpointMetadata& metadata) const {
   PULSAR_TRACE_SCOPE_CAT("trainer", "checkpoint_save");
   synchronize_cuda_if_needed(device_, "checkpoint save start");
   const std::filesystem::path staging = make_checkpoint_staging_directory(directory);
@@ -3676,7 +3197,7 @@ void VRPOTrainer::save_checkpoint_with_metadata(const std::filesystem::path& dir
   }
 }
 
-TrainerBenchmarkMetrics VRPOTrainer::benchmark(int updates) {
+TrainerBenchmarkMetrics Trainer::benchmark(int updates) {
   const int bounded_updates = std::max(1, updates);
   TrainerBenchmarkMetrics result{};
   result.updates = bounded_updates;
@@ -3728,49 +3249,37 @@ TrainerBenchmarkMetrics VRPOTrainer::benchmark(int updates) {
               << '\n' << std::flush;
 
     synchronize_cuda_if_needed(device_, "benchmark snapshot clone");
-    actor_snapshot_ = clone_vrpo_actor(actor_, device_);
+    actor_snapshot_ = clone_actor(actor_, device_);
     actor_snapshot_->eval();
     // Sync persistent collection actors with new snapshot
     for (size_t i = 0; i < collection_actors_.size(); ++i) {
       if (collection_actors_[i] && shard_devices_[i] == device_) {
         collection_actors_[i] = actor_snapshot_;
       } else if (collection_actors_[i]) {
-        collection_actors_[i] = clone_vrpo_actor(actor_snapshot_, shard_devices_[i]);
+        collection_actors_[i] = clone_actor(actor_snapshot_, shard_devices_[i]);
         collection_actors_[i]->eval();
       }
     }
-    // Run ES-LoRA update.  Adaptive Centered Expected SARSA: the trigger is an
-    // accumulator over updates, and the effective interval shrinks toward
-    // es_interval_min as the entropy deficit alpha rises (the controller fires
-    // ES more frequently when the policy is collapsing).
     const int update_index = index + 1;
     const int es_base_bench = config_.es_lora.es_interval;
-    const int es_min_bench = std::min(es_base_bench, std::max(1, config_.es_lora.es_interval_min));
-    const int eff_es_interval_bench = std::max(
-        es_min_bench,
-        static_cast<int>(std::round(
-            static_cast<double>(es_base_bench) - last_alpha_ * (es_base_bench - es_min_bench))));
-    last_eff_es_interval_ = eff_es_interval_bench;
-    const float eff_es_sigma_bench = config_.es_lora.sigma_ES
-        * (1.0F + config_.es_lora.sigma_alpha_gain * static_cast<float>(last_alpha_));
     steps_since_last_es_ += 1;
-    if (es_base_bench > 0 && steps_since_last_es_ >= eff_es_interval_bench) {
+    if (es_base_bench > 0 && steps_since_last_es_ >= es_base_bench) {
       TrainerMetrics es_metrics{};
       std::cout << "bench_es_update_start update=" << update_index << '/' << bounded_updates << '\n' << std::flush;
-      run_es_lora_update(update_index, es_metrics, eff_es_sigma_bench);
+      run_es_lora_update(update_index, es_metrics);
       steps_since_last_es_ = 0;
       // Sync ES-LoRA weight changes to replica actors.
       if (compute_actors_.size() > 0) {
         sync_actor_to_replicas(actor_, compute_actors_);
       }
       synchronize_cuda_if_needed(device_, "benchmark ES snapshot clone");
-      actor_snapshot_ = clone_vrpo_actor(actor_, device_);
+      actor_snapshot_ = clone_actor(actor_, device_);
       actor_snapshot_->eval();
       for (size_t i = 0; i < collection_actors_.size(); ++i) {
         if (collection_actors_[i] && shard_devices_[i] == device_) {
           collection_actors_[i] = actor_snapshot_;
         } else if (collection_actors_[i]) {
-          collection_actors_[i] = clone_vrpo_actor(actor_snapshot_, shard_devices_[i]);
+          collection_actors_[i] = clone_actor(actor_snapshot_, shard_devices_[i]);
           collection_actors_[i]->eval();
         }
       }
@@ -3812,34 +3321,16 @@ TrainerBenchmarkMetrics VRPOTrainer::benchmark(int updates) {
   return result;
 }
 
-void VRPOTrainer::save_training_state(const std::filesystem::path& path) const {
+void Trainer::save_training_state(const std::filesystem::path& path) const {
   torch::NoGradGuard no_grad;
   torch::serialize::OutputArchive archive;
   actor_->save(archive);
   actor_normalizer_.save(archive);
   actor_optimizer_.save(archive);
-  q_normalizer_.save(archive);
-  if (predictor_trainer_) {
-    predictor_trainer_->save_optimizers(archive);
-    const auto& ema = predictor_trainer_->ema_losses();
-    const auto& deltas = predictor_trainer_->deltas();
-    for (std::size_t i = 0; i < kSparseEventChannelCount; ++i) {
-      const std::string name(kSparseEventChannels[i].name);
-      if (i < ema.size()) {
-        write_scalar(archive, "predictor_ema_loss_" + name, ema[i]);
-      }
-      if (i < deltas.size()) {
-        write_scalar(archive, "predictor_delta_" + name, deltas[i]);
-      }
-      if (i < actor_->predictor_active_.size()) {
-        write_scalar(archive, "predictor_active_" + name, actor_->predictor_active_[i] ? 1.0F : 0.0F);
-      }
-    }
-  }
   archive.save_to(path.string());
 }
 
-void VRPOTrainer::load_training_state(const std::filesystem::path& path) {
+void Trainer::load_training_state(const std::filesystem::path& path) {
   torch::serialize::InputArchive archive;
   archive.load_from(path.string(), device_);
   actor_->load(archive);
@@ -3850,37 +3341,11 @@ void VRPOTrainer::load_training_state(const std::filesystem::path& path) {
   } catch (const std::exception& e) {
     std::cerr << "Warning: could not load actor optimizer state: " << e.what() << "\n";
   }
-  try {
-    q_normalizer_.load(archive);
-  } catch (const std::exception& e) {
-    std::cerr << "Warning: could not load PopArt stats from training state: " << e.what() << "\n";
-  }
-  if (actor_->predictor_active_.size() < kSparseEventChannelCount) {
-    actor_->predictor_active_.resize(kSparseEventChannelCount, 0);
-  }
-  if (predictor_trainer_) {
-    predictor_trainer_->load_optimizers(archive);
-    auto& ema = predictor_trainer_->mutable_ema_losses();
-    auto& deltas = predictor_trainer_->mutable_deltas();
-    for (std::size_t i = 0; i < kSparseEventChannelCount; ++i) {
-      const std::string name(kSparseEventChannels[i].name);
-      if (i < ema.size()) {
-        read_scalar(archive, "predictor_ema_loss_" + name, ema[i]);
-      }
-      if (i < deltas.size()) {
-        read_scalar(archive, "predictor_delta_" + name, deltas[i]);
-      }
-      float active = 0.0F;
-      if (read_scalar(archive, "predictor_active_" + name, active)) {
-        actor_->predictor_active_[i] = active > 0.5F ? 1 : 0;
-      }
-    }
-  }
   actor_->to(device_);
   actor_normalizer_.to(device_);
 }
 
-void VRPOTrainer::prune_old_checkpoints(const std::filesystem::path& checkpoint_dir) const {
+void Trainer::prune_old_checkpoints(const std::filesystem::path& checkpoint_dir) const {
   const int max_checkpoints = config_.ppo.max_rolling_checkpoints;
   if (max_checkpoints <= 0) {
     return;
@@ -3918,11 +3383,11 @@ void VRPOTrainer::prune_old_checkpoints(const std::filesystem::path& checkpoint_
   }
 }
 
-void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const std::string& config_path) {
+void Trainer::train(int updates, const std::string& checkpoint_dir, const std::string& config_path) {
   const bool train_forever = updates <= 0;
   std::cout << "train_start\n";
   std::filesystem::create_directories(checkpoint_dir);
-  WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "vrpo_train");
+  WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "train");
   std::int64_t global_step = resumed_global_step_;
 
   sync_self_play_assignments_to_collectors();
@@ -3989,46 +3454,33 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       coll_metrics.self_play_snapshot_count = self_play_metrics.snapshot_count;
     }
 
-    // Adaptive Centered Expected SARSA: accumulator-based ES trigger with
-    // alpha-scaled interval and sigma.
     const int es_base_main = config_.es_lora.es_interval;
-    const int es_min_main = std::min(es_base_main, std::max(1, config_.es_lora.es_interval_min));
-    const int eff_es_interval_main = std::max(
-        es_min_main,
-        static_cast<int>(std::round(
-            static_cast<double>(es_base_main) - last_alpha_ * (es_base_main - es_min_main))));
-    last_eff_es_interval_ = eff_es_interval_main;
-    const float eff_es_sigma_main = config_.es_lora.sigma_ES
-        * (1.0F + config_.es_lora.sigma_alpha_gain * static_cast<float>(last_alpha_));
     steps_since_last_es_ += 1;
     const bool es_fired_this_update =
-        (es_base_main > 0) && (steps_since_last_es_ >= eff_es_interval_main);
+        (es_base_main > 0) && (steps_since_last_es_ >= es_base_main);
     if (es_fired_this_update) {
-      run_es_lora_update(update_index, coll_metrics, eff_es_sigma_main);
+      run_es_lora_update(update_index, coll_metrics);
       steps_since_last_es_ = 0;
       // Sync ES-LoRA weight changes to replica actors.
       if (compute_actors_.size() > 0) {
         sync_actor_to_replicas(actor_, compute_actors_);
       }
     }
-    coll_metrics.eff_es_interval = last_eff_es_interval_;
-    coll_metrics.eff_es_sigma = last_eff_es_sigma_;
-    coll_metrics.steps_since_last_es = steps_since_last_es_;
 
 
     // 5. Clone snapshot for next iteration's collection after all work using
     // the previous snapshot has completed.
-    VRPOActor new_snapshot{nullptr};
+    Actor new_snapshot{nullptr};
     if (has_next) {
       synchronize_current_cuda_stream_if_needed(device_, "snapshot clone");
-      new_snapshot = clone_vrpo_actor(actor_, device_);
+      new_snapshot = clone_actor(actor_, device_);
       new_snapshot->eval();
       // Sync persistent collection actors
       for (size_t i = 0; i < collection_actors_.size(); ++i) {
         if (collection_actors_[i] && shard_devices_[i] == device_) {
           collection_actors_[i] = new_snapshot;
         } else if (collection_actors_[i]) {
-          collection_actors_[i] = clone_vrpo_actor(new_snapshot, shard_devices_[i]);
+          collection_actors_[i] = clone_actor(new_snapshot, shard_devices_[i]);
           collection_actors_[i]->eval();
         }
       }
@@ -4047,10 +3499,6 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     coll_metrics.policy_loss = train_metrics.policy_loss;
     coll_metrics.value_loss = train_metrics.value_loss;
     coll_metrics.entropy = train_metrics.entropy;
-    coll_metrics.effective_entropy_coef = train_metrics.effective_entropy_coef;
-    coll_metrics.entropy_rolling_mean = train_metrics.entropy_rolling_mean;
-    coll_metrics.entropy_deficit_alpha = train_metrics.entropy_deficit_alpha;
-    coll_metrics.eff_gcrl_actor_coef = train_metrics.eff_gcrl_actor_coef;
     coll_metrics.grad_norm = train_metrics.grad_norm;
     coll_metrics.grad_norm_valid_steps = train_metrics.grad_norm_valid_steps;
     coll_metrics.optimizer_steps = train_metrics.optimizer_steps;
@@ -4067,12 +3515,7 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
     coll_metrics.goal_critic_loss = train_metrics.goal_critic_loss;
     coll_metrics.mean_goal_score = train_metrics.mean_goal_score;
     coll_metrics.mean_sampled_goal_distance = train_metrics.mean_sampled_goal_distance;
-    coll_metrics.q_critic_loss = train_metrics.q_critic_loss;
     coll_metrics.advantage_std = train_metrics.advantage_std;
-    coll_metrics.predictor_loss = train_metrics.predictor_loss;
-    coll_metrics.predictor_delta = train_metrics.predictor_delta;
-    coll_metrics.predictor_positive = train_metrics.predictor_positive;
-    coll_metrics.predictor_active = train_metrics.predictor_active;
 
     coll_metrics.update_agent_steps_per_second =
         next_coll_steps > 0 ? static_cast<double>(next_coll_steps) / std::max(train_metrics.update_seconds, 1.0e-9) : 0.0;
@@ -4156,18 +3599,8 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       wandb.add_metric("Optimization", "kl_guard_skips", coll_metrics.kl_guard_skips);
       wandb.add_metric("Optimization", "grad_norm_guard_skips", coll_metrics.grad_norm_guard_skips);
       wandb.add_metric("Optimization", "rollout_steps", coll_metrics.rollout_steps);
-      wandb.add_metric("Optimization", "effective_entropy_coef", coll_metrics.effective_entropy_coef);
       wandb.add_metric("Optimization", "self_play_snapshot_count", coll_metrics.self_play_snapshot_count);
-      wandb.add_metric("Optimization", "q_critic_loss", coll_metrics.q_critic_loss);
       wandb.add_metric("Optimization", "advantage_std", coll_metrics.advantage_std);
-
-      // Adaptive Centered Expected SARSA feedback controller signals.
-      wandb.add_metric("Exploration", "entropy_rolling_mean", coll_metrics.entropy_rolling_mean);
-      wandb.add_metric("Exploration", "entropy_deficit_alpha", coll_metrics.entropy_deficit_alpha);
-      wandb.add_metric("Exploration", "eff_gcrl_actor_coef", coll_metrics.eff_gcrl_actor_coef);
-      wandb.add_metric("Exploration", "eff_es_sigma", coll_metrics.eff_es_sigma);
-      wandb.add_metric("Exploration", "eff_es_interval", coll_metrics.eff_es_interval);
-      wandb.add_metric("Exploration", "steps_since_last_es", coll_metrics.steps_since_last_es);
 
       wandb.add_metric("System", "process_rss_mb", coll_metrics.process_rss_mb);
       wandb.add_metric("System", "process_peak_rss_mb", coll_metrics.process_peak_rss_mb);
@@ -4203,15 +3636,6 @@ void VRPOTrainer::train(int updates, const std::string& checkpoint_dir, const st
       wandb.add_metric("GCRL", "mean_sampled_goal_distance", coll_metrics.mean_sampled_goal_distance);
       wandb.add_metric("GCRL", "mean_goal_distance", coll_metrics.mean_goal_distance);
       wandb.add_metric("GCRL", "min_goal_distance", coll_metrics.min_goal_distance);
-
-      if (predictor_trainer_) {
-        predictor_trainer_->log_metrics(
-            wandb,
-            coll_metrics.predictor_loss,
-            coll_metrics.predictor_delta,
-            coll_metrics.predictor_positive,
-            coll_metrics.predictor_active);
-      }
 
       for (const auto& [mode, rate] : coll_metrics.mode_touch_rates) {
         wandb.add_metric(mode, "mode_" + mode + "_touch_episode_rate", rate);

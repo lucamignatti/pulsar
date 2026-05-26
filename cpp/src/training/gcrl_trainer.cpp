@@ -4,7 +4,7 @@
 #include <limits>
 #include <cmath>
 
-#include "pulsar/training/vrpo_math.hpp"
+#include "pulsar/training/ppo_math.hpp"
 #include "pulsar/tracing/tracing.hpp"
 
 #ifdef PULSAR_HAS_TORCH

@@ -11,7 +11,6 @@
 #include <nlohmann/json.hpp>
 
 #include "pulsar/rl/action_table.hpp"
-#include "pulsar/training/sparse_event_channels.hpp"
 
 namespace pulsar {
 namespace {
@@ -76,54 +75,6 @@ void from_json(const json& j, OutcomeConfig& value) {
   value.neutral_no_touch = j.value("neutral_no_touch", -1.0F);
   value.team_spirit = j.value("team_spirit", 0.0F);
   value.step_penalty = j.value("step_penalty", 0.0F);
-}
-
-void to_json(json& j, const PredictorChannelConfig& value) {
-  j = json{
-      {"enabled", value.enabled},
-      {"horizon", value.horizon},
-      {"learning_rate", value.learning_rate},
-      {"convergence_threshold", value.convergence_threshold},
-      {"warmup_updates", value.warmup_updates},
-  };
-}
-
-void from_json(const json& j, PredictorChannelConfig& value) {
-  value.enabled = j.value("enabled", true);
-  value.horizon = j.value("horizon", 40);
-  value.learning_rate = j.value("learning_rate", 0.005F);
-  value.convergence_threshold = j.value("convergence_threshold", 0.002F);
-  value.warmup_updates = j.value("warmup_updates", 15);
-}
-
-void to_json(json& j, const PredictorConfig& value) {
-  j = json{{"enabled", value.enabled}, {"channels", value.channels}};
-}
-
-void from_json(const json& j, PredictorConfig& value) {
-  value.enabled = j.value("enabled", true);
-  value.channels.clear();
-  for (const auto& spec : kSparseEventChannels) {
-    PredictorChannelConfig channel{};
-    channel.horizon = spec.default_horizon;
-    value.channels.emplace(std::string(spec.name), channel);
-  }
-
-  if (j.contains("channels")) {
-    for (const auto& item : j.at("channels").items()) {
-      if (value.channels.find(item.key()) == value.channels.end()) {
-        throw std::runtime_error("Unknown predictor channel: " + item.key());
-      }
-      value.channels[item.key()] = item.value().get<PredictorChannelConfig>();
-    }
-  } else {
-    for (const auto& spec : kSparseEventChannels) {
-      const std::string name(spec.name);
-      if (j.contains(name)) {
-        value.channels[name] = j.at(name).get<PredictorChannelConfig>();
-      }
-    }
-  }
 }
 
 void to_json(json& j, const ActionTableConfig& value) {
@@ -231,7 +182,6 @@ void to_json(json& j, const GoalCriticConfig& value) {
       {"contrastive_batch_size", value.contrastive_batch_size},
       {"max_future_horizon", value.max_future_horizon},
       {"temperature", value.temperature},
-      {"gcrl_actor_alpha_gain", value.gcrl_actor_alpha_gain},
   };
 }
 
@@ -245,23 +195,6 @@ void from_json(const json& j, GoalCriticConfig& value) {
   value.contrastive_batch_size = j.value("contrastive_batch_size", 2048);
   value.max_future_horizon = j.value("max_future_horizon", 256);
   value.temperature = j.value("temperature", 0.1F);
-  value.gcrl_actor_alpha_gain = j.value("gcrl_actor_alpha_gain", 2.0F);
-}
-
-void to_json(json& j, const VRPOConfig& value) {
-  j = json{
-      {"q_critic_hidden_dim", value.q_critic_hidden_dim},
-      {"q_critic_coef", value.q_critic_coef},
-      {"q_value_abs_cap", value.q_value_abs_cap},
-      {"q_target_abs_cap", value.q_target_abs_cap},
-  };
-}
-
-void from_json(const json& j, VRPOConfig& value) {
-  value.q_critic_hidden_dim = j.value("q_critic_hidden_dim", 384);
-  value.q_critic_coef = j.value("q_critic_coef", 0.5F);
-  value.q_value_abs_cap = j.value("q_value_abs_cap", 50.0F);
-  value.q_target_abs_cap = j.value("q_target_abs_cap", 50.0F);
 }
 
 void to_json(json& j, const ESLoraConfig& value) {
@@ -287,8 +220,6 @@ void to_json(json& j, const ESLoraConfig& value) {
       {"max_kl_mean", value.max_kl_mean},
       {"require_fitness_signal", value.require_fitness_signal},
       {"min_fitness_std", value.min_fitness_std},
-      {"sigma_alpha_gain", value.sigma_alpha_gain},
-      {"es_interval_min", value.es_interval_min},
   };
 }
 
@@ -321,8 +252,6 @@ void from_json(const json& j, ESLoraConfig& value) {
   value.min_fitness_std = j.value(
       "min_fitness_std",
       j.value("min_winrate_std", 1.0e-6F));
-  value.sigma_alpha_gain = j.value("sigma_alpha_gain", 1.0F);
-  value.es_interval_min = j.value("es_interval_min", 20);
 }
 
 void to_json(json& j, const PPOConfig& value) {
@@ -337,8 +266,6 @@ void to_json(json& j, const PPOConfig& value) {
       {"optimizer_accumulation_steps", value.optimizer_accumulation_steps},
       {"clip_range", value.clip_range},
       {"entropy_coef", value.entropy_coef},
-      {"entropy_floor", value.entropy_floor},
-      {"entropy_floor_coef", value.entropy_floor_coef},
       {"value_coef", value.value_coef},
       {"value_loss_delta", value.value_loss_delta},
       {"gamma", value.gamma},
@@ -353,13 +280,8 @@ void to_json(json& j, const PPOConfig& value) {
 
       {"synchronize_cuda_timing", value.synchronize_cuda_timing},
       {"cuda_amp", value.cuda_amp},
-      {"adaptive_entropy", value.adaptive_entropy},
-      {"entropy_decay_score", value.entropy_decay_score},
-      {"entropy_low_coef", value.entropy_low_coef},
       {"max_policy_log_ratio", value.max_policy_log_ratio},
       {"target_kl", value.target_kl},
-      {"max_preclip_grad_norm", value.max_preclip_grad_norm},
-      {"pcgrad", value.pcgrad},
       {"overlap_collection_update", value.overlap_collection_update},
       {"value_clipping", value.value_clipping},
       {"value_clip_range", value.value_clip_range},
@@ -367,8 +289,6 @@ void to_json(json& j, const PPOConfig& value) {
       {"popart_enabled", value.popart_enabled},
       {"popart_beta", value.popart_beta},
       {"popart_epsilon", value.popart_epsilon},
-      {"ent_coef_min", value.ent_coef_min},
-      {"entropy_window", value.entropy_window},
   };
 }
 
@@ -383,8 +303,6 @@ void from_json(const json& j, PPOConfig& value) {
   value.optimizer_accumulation_steps = j.value("optimizer_accumulation_steps", 1);
   value.clip_range = j.value("clip_range", 0.2F);
   value.entropy_coef = j.value("entropy_coef", 0.01F);
-  value.entropy_floor = j.value("entropy_floor", 0.0F);
-  value.entropy_floor_coef = j.value("entropy_floor_coef", 0.0F);
   value.value_coef = j.value("value_coef", 1.0F);
   value.value_loss_delta = j.value("value_loss_delta", 10.0F);
   value.gamma = j.value("gamma", 0.99F);
@@ -399,13 +317,8 @@ void from_json(const json& j, PPOConfig& value) {
 
   value.synchronize_cuda_timing = j.value("synchronize_cuda_timing", false);
   value.cuda_amp = j.value("cuda_amp", false);
-  value.adaptive_entropy = j.value("adaptive_entropy", false);
-  value.entropy_decay_score = j.value("entropy_decay_score", 0.60F);
-  value.entropy_low_coef = j.value("entropy_low_coef", 0.005F);
   value.max_policy_log_ratio = j.value("max_policy_log_ratio", 5.0F);
   value.target_kl = j.value("target_kl", 0.0F);
-  value.max_preclip_grad_norm = j.value("max_preclip_grad_norm", 0.0F);
-  value.pcgrad = j.value("pcgrad", false);
   value.overlap_collection_update = j.value("overlap_collection_update", false);
   value.value_clipping = j.value("value_clipping", false);
   value.value_clip_range = j.value("value_clip_range", 0.2F);
@@ -413,8 +326,6 @@ void from_json(const json& j, PPOConfig& value) {
   value.popart_enabled = j.value("popart_enabled", false);
   value.popart_beta = j.value("popart_beta", 0.0001);
   value.popart_epsilon = j.value("popart_epsilon", 1e-4);
-  value.ent_coef_min = j.value("ent_coef_min", 0.025F);
-  value.entropy_window = j.value("entropy_window", 10);
 }
 
 void to_json(json& j, const SelfPlayLeagueConfig& value) {
@@ -515,13 +426,11 @@ void to_json(json& j, const ExperimentConfig& value) {
       {"obs_schema_version", value.obs_schema_version},
       {"env", value.env},
       {"outcome", value.outcome},
-      {"predictor", value.predictor},
       {"action_table", value.action_table},
       {"model", value.model},
       {"ppo", value.ppo},
       {"goal_mapping", value.goal_mapping},
       {"goal_critic", value.goal_critic},
-      {"vrpo", value.vrpo},
       {"es_lora", value.es_lora},
       {"self_play_league", value.self_play_league},
       {"wandb", value.wandb},
@@ -552,13 +461,11 @@ void from_json(const json& j, ExperimentConfig& value) {
   value.obs_schema_version = j.value("obs_schema_version", 2);
   value.env = j.value("env", EnvConfig{});
   value.outcome = j.value("outcome", OutcomeConfig{});
-  value.predictor = j.contains("predictor") ? j.at("predictor").get<PredictorConfig>() : json::object().get<PredictorConfig>();
   value.action_table = j.value("action_table", ActionTableConfig{});
   value.model = j.value("model", ModelConfig{});
   value.ppo = j.value("ppo", PPOConfig{});
   value.goal_mapping = j.value("goal_mapping", GoalMappingConfig{});
   value.goal_critic = j.value("goal_critic", GoalCriticConfig{});
-  value.vrpo = j.value("vrpo", VRPOConfig{});
   value.es_lora = j.value("es_lora", ESLoraConfig{});
   value.self_play_league = j.value("self_play_league", SelfPlayLeagueConfig{});
   value.wandb = j.value("wandb", WandbConfig{});
@@ -712,20 +619,11 @@ void validate_experiment_config(const ExperimentConfig& config) {
   if (config.ppo.max_grad_norm <= 0.0F) {
     throw std::invalid_argument("ppo.max_grad_norm must be positive.");
   }
-  if (config.ppo.entropy_floor < 0.0F) {
-    throw std::invalid_argument("ppo.entropy_floor must be non-negative.");
-  }
-  if (config.ppo.entropy_floor_coef < 0.0F) {
-    throw std::invalid_argument("ppo.entropy_floor_coef must be non-negative.");
-  }
   if (config.ppo.max_policy_log_ratio < 0.0F) {
     throw std::invalid_argument("ppo.max_policy_log_ratio must be non-negative.");
   }
   if (config.ppo.target_kl < 0.0F) {
     throw std::invalid_argument("ppo.target_kl must be non-negative.");
-  }
-  if (config.ppo.max_preclip_grad_norm < 0.0F) {
-    throw std::invalid_argument("ppo.max_preclip_grad_norm must be non-negative.");
   }
   if (config.ppo.value_loss_delta < 0.0F) {
     throw std::invalid_argument("ppo.value_loss_delta must be non-negative.");
@@ -748,56 +646,11 @@ void validate_experiment_config(const ExperimentConfig& config) {
   if (config.self_play_league.pfsp_sigma <= 0.0F) {
     throw std::invalid_argument("self_play_league.pfsp_sigma must be positive.");
   }
-  if (config.vrpo.q_critic_hidden_dim <= 0) {
-    throw std::invalid_argument("vrpo.q_critic_hidden_dim must be positive.");
-  }
-  if (config.vrpo.q_critic_coef < 0.0F) {
-    throw std::invalid_argument("vrpo.q_critic_coef must be non-negative.");
-  }
-  if (config.vrpo.q_value_abs_cap <= 0.0F) {
-    throw std::invalid_argument("vrpo.q_value_abs_cap must be positive.");
-  }
-  if (config.vrpo.q_target_abs_cap <= 0.0F) {
-    throw std::invalid_argument("vrpo.q_target_abs_cap must be positive.");
-  }
   if (config.env.team_size <= 0 || config.env.team_size > 4) {
     throw std::invalid_argument("env.team_size must be between 1 and 4.");
   }
   if (config.env.tick_rate != 120) {
     std::cerr << "Warning: env.tick_rate is currently ignored. Simulation hardcodes 120 Hz.\n";
-  }
-
-  if (config.predictor.enabled) {
-    auto validate_channel = [](const PredictorChannelConfig& chan, const std::string& name) {
-      if (chan.enabled) {
-        if (chan.horizon <= 0) {
-          throw std::invalid_argument("predictor." + name + ".horizon must be positive.");
-        }
-        if (chan.learning_rate <= 0.0F) {
-          throw std::invalid_argument("predictor." + name + ".learning_rate must be positive.");
-        }
-        if (chan.convergence_threshold <= 0.0F) {
-          throw std::invalid_argument("predictor." + name + ".convergence_threshold must be positive.");
-        }
-        if (chan.warmup_updates < 0) {
-          throw std::invalid_argument("predictor." + name + ".warmup_updates must be non-negative.");
-        }
-      }
-    };
-    for (const auto& spec : kSparseEventChannels) {
-      const std::string name(spec.name);
-      auto it = config.predictor.channels.find(name);
-      if (it == config.predictor.channels.end()) {
-        throw std::invalid_argument("predictor.channels missing required channel: " + name);
-      }
-      validate_channel(it->second, name);
-    }
-    for (const auto& [name, channel] : config.predictor.channels) {
-      if (sparse_event_channel_index(name) < 0) {
-        throw std::invalid_argument("predictor.channels contains unknown channel: " + name);
-      }
-      validate_channel(channel, name);
-    }
   }
 }
 

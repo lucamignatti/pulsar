@@ -6,7 +6,6 @@
 
 #include "pulsar/checkpoint/checkpoint.hpp"
 #include "pulsar/config/config.hpp"
-#include "pulsar/training/sparse_event_channels.hpp"
 #include "test_utils.hpp"
 
 int main() {
@@ -31,9 +30,6 @@ int main() {
     pulsar::test::require(loaded.ppo.rollout_length == 128, "round-trip rollout_length");
     pulsar::test::require(loaded.ppo.minibatch_size == 256, "round-trip minibatch");
     pulsar::test::require(loaded.ppo.target_kl == config.ppo.target_kl, "round-trip target_kl");
-    pulsar::test::require(
-        loaded.ppo.max_preclip_grad_norm == config.ppo.max_preclip_grad_norm,
-        "round-trip max_preclip_grad_norm");
     pulsar::test::require(loaded.ppo.cuda_amp == config.ppo.cuda_amp, "round-trip cuda_amp");
     pulsar::test::require(loaded.model.encoder_dim == 512, "round-trip encoder_dim");
     std::filesystem::remove(tmp);
@@ -128,12 +124,6 @@ int main() {
     try { pulsar::validate_experiment_config(bad); }
     catch (const std::invalid_argument&) { caught = true; }
     pulsar::test::require(caught, "negative target_kl should throw");
-    bad = config;
-    bad.ppo.max_preclip_grad_norm = -1.0f;
-    caught = false;
-    try { pulsar::validate_experiment_config(bad); }
-    catch (const std::invalid_argument&) { caught = true; }
-    pulsar::test::require(caught, "negative max_preclip_grad_norm should throw");
 
     // Test 13: reject invalid es_lora.population_size when antithetic
     bad = config;
@@ -182,22 +172,12 @@ int main() {
     pulsar::test::require(caught, "collection_shards > num_envs should throw");
 
     // Test 14: load production config
-    auto config_path = pulsar::test::find_repo_path("configs") / "2v2_vrpo.json";
+    auto config_path = pulsar::test::find_repo_path("configs") / "2v2.json";
     if (std::filesystem::exists(config_path)) {
       auto prod = pulsar::load_experiment_config(config_path.string());
       pulsar::validate_experiment_config(prod);
       pulsar::test::require(prod.schema_version == 6, "production config schema");
       pulsar::test::require(!prod.env.disable_truncation, "production config has truncation enabled");
-      pulsar::test::require(prod.predictor.enabled, "predictor enabled in production");
-      for (const auto& spec : pulsar::kSparseEventChannels) {
-        const std::string name(spec.name);
-        auto it = prod.predictor.channels.find(name);
-        pulsar::test::require(it != prod.predictor.channels.end(), "predictor channel present: " + name);
-        pulsar::test::require(it->second.enabled, "predictor channel enabled: " + name);
-      }
-      pulsar::test::require(prod.predictor.channels.at("goal").horizon == 40, "goal horizon check");
-      pulsar::test::require(prod.predictor.channels.at("ball_touch").horizon == 15, "ball_touch horizon check");
-      pulsar::test::require(prod.predictor.channels.at("flip_reset").horizon == 40, "flip_reset horizon check");
       pulsar::test::require(prod.ppo.device == "cuda", "production config should train on CUDA by default");
       pulsar::test::require(prod.self_play_league.enabled, "self_play_league enabled in production");
       pulsar::test::require(prod.self_play_league.max_snapshots == 4, "max_snapshots in production");
@@ -205,8 +185,6 @@ int main() {
                             "production PPO log-ratio guard should be non-negative");
       pulsar::test::require(prod.ppo.target_kl == 0.0f,
                             "production config should not skip PPO updates by KL guard");
-      pulsar::test::require(prod.ppo.max_preclip_grad_norm == 0.0f,
-                            "production config should rely on clipping instead of preclip update skips");
       pulsar::test::require(!prod.ppo.cuda_amp,
                             "production config should keep CUDA AMP disabled unless explicitly re-enabled");
       pulsar::test::require(prod.es_lora.require_fitness_signal,
@@ -226,12 +204,6 @@ int main() {
                                 prod.outcome.team_spirit == 0.1f &&
                                 prod.outcome.step_penalty == -0.01f,
                             "production base reward should use asymmetric zero-sum with team spirit");
-      pulsar::test::require(prod.predictor.channels.at("goal").horizon == 40 &&
-                                prod.predictor.channels.at("ball_touch").horizon == 15 &&
-                                prod.predictor.channels.at("flip_reset").horizon == 40 &&
-                                prod.predictor.channels.at("demo").enabled &&
-                                prod.predictor.channels.at("flick").enabled,
-                            "production predictor channels check");
     }
 
     // Test 15: stable_json is deterministic
@@ -250,7 +222,7 @@ int main() {
       meta.obs_schema_version = 2;
       meta.config_hash = "abc123";
       meta.action_table_hash = "def456";
-      meta.architecture_name = "mamba2_goal_vrpo";
+      meta.architecture_name = "mamba2_goal";
       meta.device = "cpu";
       meta.global_step = 1000;
       meta.update_index = 50;
