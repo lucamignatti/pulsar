@@ -15,6 +15,10 @@ namespace {
 constexpr float kAdvantageStdFloor = 1.0F;
 constexpr float kAdvantageAbsCap = 10.0F;
 
+inline int blocks_for(int elements, int threads) {
+  return (elements + threads - 1) / threads;
+}
+
 __device__ __forceinline__ float safe_logit_exp(float x) {
   return expf(fminf(fmaxf(x, -80.0F), 80.0F));
 }
@@ -30,6 +34,130 @@ __device__ __forceinline__ std::uint32_t mix_u32(std::uint32_t x) {
 
 __device__ __forceinline__ float uniform01_from_u32(std::uint32_t x) {
   return (static_cast<float>((x >> 8) + 1U)) * (1.0F / 16777217.0F);
+}
+
+__global__ void normalize_partial_kernel(
+    const float* __restrict__ advantages,
+    const float* __restrict__ active_mask,
+    double* __restrict__ partial_sum,
+    double* __restrict__ partial_sumsq,
+    float* __restrict__ partial_count,
+    int elements) {
+  __shared__ double block_sum[256];
+  __shared__ double block_sumsq[256];
+  __shared__ float block_count[256];
+
+  const int tid = threadIdx.x;
+  const int stride = gridDim.x * blockDim.x;
+  double local_sum = 0.0;
+  double local_sumsq = 0.0;
+  float local_count = 0.0F;
+  for (int i = blockIdx.x * blockDim.x + tid; i < elements; i += stride) {
+    if (active_mask[i] > 0.5F) {
+      const double value = static_cast<double>(advantages[i]);
+      local_sum += value;
+      local_sumsq += value * value;
+      local_count += 1.0F;
+    }
+  }
+
+  block_sum[tid] = local_sum;
+  block_sumsq[tid] = local_sumsq;
+  block_count[tid] = local_count;
+  __syncthreads();
+
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (tid < stride) {
+      block_sum[tid] += block_sum[tid + stride];
+      block_sumsq[tid] += block_sumsq[tid + stride];
+      block_count[tid] += block_count[tid + stride];
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    partial_sum[blockIdx.x] = block_sum[0];
+    partial_sumsq[blockIdx.x] = block_sumsq[0];
+    partial_count[blockIdx.x] = block_count[0];
+  }
+}
+
+__global__ void normalize_finish_kernel(
+    const float* __restrict__ advantages,
+    const double* __restrict__ partial_sum,
+    const double* __restrict__ partial_sumsq,
+    const float* __restrict__ partial_count,
+    float* __restrict__ normalized,
+    int elements,
+    int partials) {
+  __shared__ double mean;
+  __shared__ double inv_std;
+
+  if (threadIdx.x == 0) {
+    double total_sum = 0.0;
+    double total_sumsq = 0.0;
+    double total_count = 0.0;
+    for (int p = 0; p < partials; ++p) {
+      total_sum += partial_sum[p];
+      total_sumsq += partial_sumsq[p];
+      total_count += static_cast<double>(partial_count[p]);
+    }
+    if (total_count <= 0.0) {
+      mean = 0.0;
+      inv_std = 0.0;
+    } else {
+      mean = total_sum / total_count;
+      const double variance = fmax(total_sumsq / total_count - mean * mean, 0.0);
+      const double std_value = sqrt(fmax(variance, static_cast<double>(kAdvantageStdFloor * kAdvantageStdFloor)));
+      inv_std = 1.0 / std_value;
+    }
+  }
+  __syncthreads();
+
+  for (int i = threadIdx.x; i < elements; i += blockDim.x) {
+    if (inv_std == 0.0) {
+      normalized[i] = advantages[i];
+      continue;
+    }
+    const double value = static_cast<double>(advantages[i]);
+    const float normed = static_cast<float>((value - mean) * inv_std);
+    normalized[i] = fmaxf(-kAdvantageAbsCap, fminf(kAdvantageAbsCap, normed));
+  }
+}
+
+__global__ void sample_future_goal_kernel(
+    const float* __restrict__ goal_positions,
+    const float* __restrict__ dones,
+    const float* __restrict__ episode_starts,
+    float* __restrict__ sampled,
+    int steps,
+    int agents,
+    int dim,
+    int max_future,
+    std::uint32_t seed) {
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= steps * agents) return;
+
+  const int t = idx / agents;
+  const int a = idx % agents;
+
+  int horizon = 0;
+  for (int future_t = t + 1; future_t < steps && future_t <= t + max_future; ++future_t) {
+    const int future_idx = future_t * agents + a;
+    if (episode_starts != nullptr && episode_starts[future_idx] > 0.5F) break;
+    ++horizon;
+    if (dones != nullptr && dones[future_idx] > 0.5F) break;
+  }
+
+  const int offset = (horizon > 0)
+      ? (1 + static_cast<int>(mix_u32(seed ^ static_cast<std::uint32_t>(idx) * 0x9e3779b9U) % static_cast<std::uint32_t>(horizon)))
+      : 0;
+  const int src_idx = (t + offset) * agents + a;
+  const int dst_base = idx * dim;
+  const int src_base = src_idx * dim;
+  for (int d = 0; d < dim; ++d) {
+    sampled[dst_base + d] = goal_positions[src_base + d];
+  }
 }
 
 template <typename scalar_t>

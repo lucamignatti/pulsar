@@ -13,6 +13,166 @@ namespace {
 constexpr float kAdvantageStdFloor = 1.0F;
 constexpr float kAdvantageAbsCap = 10.0F;
 
+__device__ __forceinline__ std::uint32_t mix_u32(std::uint32_t x);
+
+// ---------------------------------------------------------------------------
+// HIP utility helpers (mirrors lora_ops_hip.hip)
+// ---------------------------------------------------------------------------
+
+inline int blocks_for(int elements, int threads) {
+  return (elements + threads - 1) / threads;
+}
+
+inline void set_hip_device_for(const at::Tensor& tensor) {
+  const int device_index = tensor.get_device();
+  if (device_index >= 0) {
+    static thread_local int current_device = -2;
+    if (current_device != device_index) {
+      const hipError_t err = hipSetDevice(device_index);
+      TORCH_CHECK(err == hipSuccess, "PPO HIP set device failed: ", hipGetErrorString(err));
+      current_device = device_index;
+    }
+  }
+}
+
+inline void check_hip_launch() {
+  const hipError_t err = hipGetLastError();
+  TORCH_CHECK(err == hipSuccess, "PPO HIP kernel launch failed: ", hipGetErrorString(err));
+}
+
+// ---------------------------------------------------------------------------
+// Advantage normalization kernels.
+// ---------------------------------------------------------------------------
+
+__global__ void normalize_partial_kernel(
+    const float* __restrict__ advantages,
+    const float* __restrict__ active_mask,
+    double* __restrict__ partial_sum,
+    double* __restrict__ partial_sumsq,
+    float* __restrict__ partial_count,
+    int elements) {
+  __shared__ double s_sum[256];
+  __shared__ double s_sumsq[256];
+  __shared__ float  s_count[256];
+
+  const int tid = static_cast<int>(threadIdx.x);
+  const int stride = static_cast<int>(gridDim.x) * static_cast<int>(blockDim.x);
+
+  double lsum = 0.0;
+  double lsumsq = 0.0;
+  float lcount = 0.0F;
+  for (int i = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + tid; i < elements; i += stride) {
+    if (active_mask[i] > 0.5F) {
+      const double v = static_cast<double>(advantages[i]);
+      lsum += v;
+      lsumsq += v * v;
+      lcount += 1.0F;
+    }
+  }
+  s_sum[tid] = lsum;
+  s_sumsq[tid] = lsumsq;
+  s_count[tid] = lcount;
+  __syncthreads();
+
+  for (int stride = static_cast<int>(blockDim.x) / 2; stride > 0; stride >>= 1) {
+    if (tid < stride) {
+      s_sum[tid]   += s_sum[tid + stride];
+      s_sumsq[tid] += s_sumsq[tid + stride];
+      s_count[tid] += s_count[tid + stride];
+    }
+    __syncthreads();
+  }
+  if (tid == 0) {
+    partial_sum[blockIdx.x]   = s_sum[0];
+    partial_sumsq[blockIdx.x] = s_sumsq[0];
+    partial_count[blockIdx.x] = s_count[0];
+  }
+}
+
+__global__ void normalize_finish_kernel(
+    const float* __restrict__ advantages,
+    const double* __restrict__ partial_sum,
+    const double* __restrict__ partial_sumsq,
+    const float* __restrict__ partial_count,
+    float* __restrict__ normalized,
+    int elements,
+    int partials) {
+  __shared__ double g_mean;
+  __shared__ double g_inv_std;
+
+  if (threadIdx.x == 0) {
+    double total_sum = 0.0, total_sumsq = 0.0, total_count = 0.0;
+    for (int p = 0; p < partials; ++p) {
+      total_sum   += partial_sum[p];
+      total_sumsq += partial_sumsq[p];
+      total_count += static_cast<double>(partial_count[p]);
+    }
+    if (total_count <= 0.0) {
+      g_mean = 0.0;
+      g_inv_std = 0.0;
+    } else {
+      const double mean = total_sum / total_count;
+      const double var = fmax(total_sumsq / total_count - mean * mean, 0.0);
+      const double std_val = sqrt(fmax(var, static_cast<double>(kAdvantageStdFloor * kAdvantageStdFloor)));
+      g_mean = mean;
+      g_inv_std = 1.0 / std_val;
+    }
+  }
+  __syncthreads();
+
+  for (int j = static_cast<int>(threadIdx.x); j < elements; j += static_cast<int>(blockDim.x)) {
+    if (g_inv_std == 0.0) {
+      normalized[j] = advantages[j];
+      continue;
+    }
+    const double v = static_cast<double>(advantages[j]);
+    const float normed = static_cast<float>((v - g_mean) * g_inv_std);
+    normalized[j] = fmaxf(-kAdvantageAbsCap, fminf(kAdvantageAbsCap, normed));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GCRL future goal sampler kernel
+// ---------------------------------------------------------------------------
+
+__global__ void sample_future_goal_kernel(
+    const float* __restrict__ goal_positions,
+    const float* __restrict__ dones,
+    const float* __restrict__ episode_starts,
+    float* __restrict__ sampled,
+    int steps,
+    int agents,
+    int dim,
+    int max_future,
+    std::uint32_t seed) {
+  const int idx = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+  if (idx >= steps * agents) return;
+
+  const int t = idx / agents;
+  const int a = idx % agents;
+
+  int horizon = 0;
+  for (int ft = t + 1; ft < steps && ft <= t + max_future; ++ft) {
+    const int fidx = ft * agents + a;
+    if (episode_starts != nullptr && episode_starts[fidx] > 0.5F) break;
+    ++horizon;
+    if (dones != nullptr && dones[fidx] > 0.5F) break;
+  }
+
+  const int offset = (horizon > 0)
+      ? (1 + static_cast<int>(mix_u32(seed ^ static_cast<std::uint32_t>(idx) * 0x9e3779b9U) % static_cast<std::uint32_t>(horizon)))
+      : 0;
+  const int src_idx = (t + offset) * agents + a;
+
+  const int out_base = idx * dim;
+  const int in_base  = src_idx * dim;
+  for (int d = 0; d < dim; ++d) {
+    sampled[out_base + d] = goal_positions[in_base + d];
+  }
+}
+
+// ---------------------------------------------------------------------------
+
 __device__ __forceinline__ float safe_logit_exp(float x) {
   return expf(fminf(fmaxf(x, -80.0F), 80.0F));
 }
