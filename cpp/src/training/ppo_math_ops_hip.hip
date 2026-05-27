@@ -347,6 +347,41 @@ __global__ void gae_kernel(
   }
 }
 
+}  // namespace
+
+at::Tensor compute_gae_hip(
+    const at::Tensor& values,
+    const at::Tensor& rewards,
+    const at::Tensor& dones,
+    float gamma,
+    float gae_lambda,
+    const at::Tensor& next_values,
+    const at::Tensor& bootstrap_mask,
+    const at::Tensor& bootstrap_values) {
+  set_hip_device_for(values);
+  const int steps = static_cast<int>(values.size(0));
+  const int agents = static_cast<int>(values.size(1));
+  at::Tensor advantages = at::empty_like(values);
+  constexpr int kThreads = 256;
+  gae_kernel<<<blocks_for(agents, kThreads), kThreads, 0, at::hip::getCurrentHIPStream()>>>(
+      values.data_ptr<float>(),
+      rewards.data_ptr<float>(),
+      dones.data_ptr<float>(),
+      next_values.defined() ? next_values.data_ptr<float>() : nullptr,
+      bootstrap_mask.defined() ? bootstrap_mask.data_ptr<float>() : nullptr,
+      bootstrap_values.defined() ? bootstrap_values.data_ptr<float>() : nullptr,
+      advantages.data_ptr<float>(),
+      steps,
+      agents,
+      gamma,
+      gae_lambda,
+      next_values.defined(),
+      bootstrap_mask.defined(),
+      bootstrap_values.defined());
+  check_hip_launch();
+  return advantages;
+}
+
 at::Tensor normalize_advantage_hip(const at::Tensor& advantages, const at::Tensor& active_mask) {
   set_hip_device_for(advantages);
   const int elements = static_cast<int>(advantages.numel());
@@ -502,5 +537,4 @@ at::Tensor sample_future_goal_positions_hip(
   return sampled;
 }
 
-}  // namespace
 }  // namespace pulsar
