@@ -46,12 +46,7 @@ namespace pulsar {
 namespace {
 
 constexpr int kEsLoraMinStage = 0;
-constexpr int kSelfPlayMinStage = 0;
 constexpr int kTrainerStateVersion = 2;
-
-bool uses_snapshot_opponents(const ExperimentConfig& config) {
-  return config.self_play_league.training_opponent_policy.rfind("snapshot", 0) == 0;
-}
 
 double current_process_rss_mb() {
 #if defined(__linux__)
@@ -439,7 +434,6 @@ void append_metrics_line(
       {"done_reset_seconds", metrics.done_reset_seconds},
       {"forward_backward_seconds", metrics.forward_backward_seconds},
       {"optimizer_step_seconds", metrics.optimizer_step_seconds},
-      {"self_play_eval_seconds", metrics.self_play_eval_seconds},
       {"process_rss_mb", metrics.process_rss_mb},
       {"process_peak_rss_mb", metrics.process_peak_rss_mb},
       {"cgroup_memory_current_mb", metrics.cgroup_memory_current_mb},
@@ -473,7 +467,6 @@ void append_metrics_line(
       {"truncated_episode_rate", metrics.truncated_episode_rate},
       {"touch_episode_rate", metrics.touch_episode_rate},
       {"multi_touch_episode_rate", metrics.multi_touch_episode_rate},
-      {"self_play_snapshot_count", metrics.self_play_snapshot_count},
       {"advantage_std", metrics.advantage_std},
   };
   for (const auto& [mode, rate] : metrics.mode_touch_rates) {
@@ -487,9 +480,6 @@ void append_metrics_line(
   }
   for (const auto& [mode, count] : metrics.mode_completed_episodes) {
     line["mode_" + mode + "_completed_episodes"] = count;
-  }
-  for (const auto& [mode, rating] : metrics.elo_ratings) {
-    line["elo_" + mode] = rating;
   }
   std::filesystem::create_directories(checkpoint_dir);
   std::ofstream output(checkpoint_dir / "metrics.jsonl", std::ios::app);
@@ -538,7 +528,6 @@ std::vector<std::string> configured_wandb_modes(const ExperimentConfig& config) 
 }
 
 void register_mode_wandb_sections(nlohmann::json& sections, const std::string& mode) {
-  register_wandb_metric_section(sections, mode, "elo_" + mode);
   register_wandb_metric_section(sections, mode, "mode_" + mode + "_touch_episode_rate");
   register_wandb_metric_section(sections, mode, "mode_" + mode + "_multi_touch_episode_rate");
   register_wandb_metric_section(sections, mode, "mode_" + mode + "_scored_episode_rate");
@@ -626,25 +615,21 @@ void accumulate_timings(CollectorTimings& dst, const CollectorTimings& src) {
 Trainer::Trainer(
     ExperimentConfig config,
     std::unique_ptr<BatchedRocketSimCollector> collector,
-    std::unique_ptr<SelfPlayManager> self_play_manager,
     std::filesystem::path run_output_root,
     bool log_initialization)
     : Trainer(
           std::move(config),
           make_collector_vector(std::move(collector)),
-          std::move(self_play_manager),
           std::move(run_output_root),
           log_initialization) {}
 
 Trainer::Trainer(
     ExperimentConfig config,
     std::vector<std::unique_ptr<BatchedRocketSimCollector>> collectors,
-    std::unique_ptr<SelfPlayManager> self_play_manager,
     std::filesystem::path run_output_root,
     bool log_initialization)
     : config_(std::move(config)),
       collectors_(std::move(collectors)),
-      self_play_manager_(std::move(self_play_manager)),
       action_table_(config_.action_table),
       actor_(Actor(config_.model, config_.goal_critic, config_.es_lora)),
       actor_normalizer_(config_.model.observation_dim),
@@ -753,7 +738,6 @@ Trainer::Trainer(
               << '\n';
   }
 
-  sync_self_play_assignments_to_collectors();
 }
 
 Trainer::~Trainer() {
@@ -795,22 +779,6 @@ static void load_actor_from_archive(
         archive.read(item.key(), t, /*is_buffer=*/true);
         item.value().copy_(t.to(device));
       } catch (...) {}
-    }
-  }
-}
-
-void Trainer::sync_self_play_assignments_to_collectors() {
-  for (auto& collector : collectors_) {
-    if (!collector) {
-      continue;
-    }
-    if (self_play_manager_ && self_play_manager_->enabled() && uses_snapshot_opponents(config_)) {
-      collector->set_self_play_assignment_fn(
-          [this](std::size_t env_idx, std::uint64_t seed) {
-            return self_play_manager_->sample_assignment(env_idx, seed);
-          });
-    } else {
-      collector->set_self_play_assignment_fn({});
     }
   }
 }
@@ -988,9 +956,6 @@ void Trainer::rebuild_collectors() {
         torch::zeros({static_cast<long>(collector->total_agents())}, opts));
   }
 
-  // re-apply self-play assignments
-  sync_self_play_assignments_to_collectors();
-
   std::cout << "rebuilt_collectors collectors=" << collectors_.size()
             << " modes=" << mode_envs.size()
             << " total_agents=" << total_agents_
@@ -1076,19 +1041,6 @@ void Trainer::maybe_initialize_from_checkpoint() {
     }
     resumed_global_step_ = metadata.global_step;
     resumed_update_index_ = metadata.update_index;
-  }
-
-  if (self_play_manager_ && self_play_manager_->enabled()) {
-    if (metadata.extra.contains("self_play_rng_state")) {
-      self_play_manager_->restore_rng_state(metadata.extra["self_play_rng_state"].get<std::string>());
-    }
-    if (metadata.extra.contains("self_play_ratings")) {
-      std::map<std::string, double> ratings;
-      for (const auto& [mode, v] : metadata.extra["self_play_ratings"].items()) {
-        ratings[mode] = v.get<double>();
-      }
-      self_play_manager_->restore_ratings(ratings);
-    }
   }
 
   if (log_initialization_) {
@@ -2541,7 +2493,6 @@ void Trainer::collect_rollout(
       double total_goal_distance = 0.0;
       double min_goal_distance = 1.0;
       std::string mode;
-      std::vector<SelfPlayLiveOutcome> self_play_outcomes;
     };
 
     // Launch one async task per shard that processes all rollout steps.
@@ -2596,7 +2547,6 @@ void Trainer::collect_rollout(
           torch::Tensor episode_starts_host = collector.host_episode_starts();
           torch::Tensor action_masks_host = collector.host_action_masks();
           torch::Tensor learner_active_host = collector.host_learner_active();
-          torch::Tensor snapshot_ids_host = collector.host_snapshot_ids();
           std::future<void> physics_prefix_future;
           if (physics_prefix_ticks > 0) {
             physics_prefix_future = std::async(std::launch::async, [&collector, &shard_step, physics_prefix_ticks]() {
@@ -2606,11 +2556,6 @@ void Trainer::collect_rollout(
           torch::Tensor raw_obs = raw_obs_host.to(shard_device, use_pinned_host_buffers_);
           torch::Tensor episode_starts = episode_starts_host.to(shard_device, use_pinned_host_buffers_);
           torch::Tensor action_masks = action_masks_host.to(shard_device, use_pinned_host_buffers_);  // uint8, sample_masked_actions handles it
-          torch::Tensor snapshot_ids;
-          if (uses_snapshot_opponents(config_)) {
-            snapshot_ids = snapshot_ids_host.to(shard_device, use_pinned_host_buffers_);
-          }
-
           torch::Tensor normalized_obs;
           torch::Tensor actions;
           torch::Tensor action_log_probs;
@@ -2627,19 +2572,6 @@ void Trainer::collect_rollout(
                 normalized_obs, recurrent_state, episode_starts, &recurrent_state, goal_values);
             actions = sample_masked_actions(
                 output.policy_logits, action_masks, false, &action_log_probs, config_.ppo.policy_temperature);
-            if (uses_snapshot_opponents(config_) && self_play_manager_ && self_play_manager_->has_snapshots()) {
-              torch::Tensor snapshot_actions;
-              self_play_manager_->infer_opponent_actions(
-                  shard_actor,
-                  raw_obs,
-                  action_masks,
-                  episode_starts,
-                  snapshot_ids,
-                  output.encoded,
-                  &snapshot_actions,
-                  nullptr);
-              actions = torch::where(snapshot_ids >= 0, snapshot_actions.to(actions.device()), actions);
-            }
           }
           if (config_.ppo.synchronize_cuda_timing && device_.is_cuda()) {
             torch::cuda::synchronize();
@@ -2659,7 +2591,6 @@ void Trainer::collect_rollout(
               physics_prefix_ticks,
               &shard_step.timings);
           shard_step.mode = collector.mode();
-          shard_step.self_play_outcomes = collector.last_self_play_outcomes();
 
           // Done-reset processing inside the shard task.
           torch::Tensor dones_host = collector.host_dones();
@@ -2830,10 +2761,6 @@ void Trainer::collect_rollout(
         for (const auto& [mode, count] : shard_step.mode_touched) mode_touched[mode] += count;
         for (const auto& [mode, count] : shard_step.mode_multi_touched) mode_multi_touched[mode] += count;
         for (const auto& [mode, count] : shard_step.mode_scored) mode_scored[mode] += count;
-        if (self_play_manager_ && !shard_step.self_play_outcomes.empty()) {
-          self_play_manager_->record_live_outcomes(shard_step.mode, shard_step.self_play_outcomes);
-        }
-
         local_collected_steps += shard_step.total_learner_steps;
       }
       dest.mark_step_filled(step);
@@ -2944,9 +2871,6 @@ void Trainer::collect_rollout(
               static_cast<std::size_t>(action_indices_cpu.numel())),
           physics_prefix_ticks,
           &collector_timings);
-      if (self_play_manager_ && !collector_->last_self_play_outcomes().empty()) {
-        self_play_manager_->record_live_outcomes(collector_->mode(), collector_->last_self_play_outcomes());
-      }
     }
     metrics.action_decode_seconds +=
         std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start).count();
@@ -3198,14 +3122,6 @@ CheckpointMetadata Trainer::make_checkpoint_metadata(std::int64_t global_step, i
   if (!wandb_run_id.empty()) {
     extra["wandb_run_id"] = wandb_run_id;
   }
-  if (self_play_manager_ && self_play_manager_->enabled()) {
-    extra["self_play_ratings"] = self_play_manager_->current_ratings();
-    const std::string rng = self_play_manager_->rng_state();
-    if (!rng.empty()) {
-      extra["self_play_rng_state"] = rng;
-    }
-  }
-
   return CheckpointMetadata{
       .schema_version = config_.schema_version,
       .obs_schema_version = config_.obs_schema_version,
@@ -3435,8 +3351,6 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
   WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "train");
   std::int64_t global_step = resumed_global_step_;
 
-  sync_self_play_assignments_to_collectors();
-
   TrainerMetrics coll_metrics{};
   std::int64_t coll_steps = 0;
   collect_rollout(rollout_, coll_metrics, &coll_steps, actor_snapshot_, actor_normalizer_);
@@ -3490,15 +3404,7 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
       train_metrics = update_actor(rollout_, update_index);
     }
 
-    // 3. Self-play / ES-LoRA (touch actor_, safe now)
-    if (self_play_manager_ && self_play_manager_->enabled()) {
-      const SelfPlayMetrics self_play_metrics =
-          self_play_manager_->on_update(actor_, actor_normalizer_, global_step, update_index);
-      coll_metrics.self_play_eval_seconds = self_play_metrics.eval_seconds;
-      coll_metrics.elo_ratings = self_play_metrics.ratings;
-      coll_metrics.self_play_snapshot_count = self_play_metrics.snapshot_count;
-    }
-
+    // 3. ES-LoRA update (touches actor_, safe now that PPO update is done)
     const int es_base_main = config_.es_lora.es_interval;
     steps_since_last_es_ += 1;
     const bool es_fired_this_update =
@@ -3621,7 +3527,6 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
               << " cuda_reserved_mb=" << coll_metrics.cuda_memory_reserved_mb
               << " cuda_max_reserved_mb=" << coll_metrics.cuda_max_memory_reserved_mb
               << " cuda_ooms=" << coll_metrics.cuda_ooms
-              << " league_snapshots=" << coll_metrics.self_play_snapshot_count
               << '\n';
     if (wandb.enabled()) {
       wandb.add_metric("Optimization", "update", update_index);
@@ -3644,7 +3549,6 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
       wandb.add_metric("Optimization", "kl_guard_skips", coll_metrics.kl_guard_skips);
       wandb.add_metric("Optimization", "grad_norm_guard_skips", coll_metrics.grad_norm_guard_skips);
       wandb.add_metric("Optimization", "rollout_steps", coll_metrics.rollout_steps);
-      wandb.add_metric("Optimization", "self_play_snapshot_count", coll_metrics.self_play_snapshot_count);
       wandb.add_metric("Optimization", "advantage_std", coll_metrics.advantage_std);
 
       wandb.add_metric("System", "process_rss_mb", coll_metrics.process_rss_mb);
@@ -3710,9 +3614,6 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
         wandb.add_metric("ES-LoRA", "es_virtual_population_waves", coll_metrics.es_virtual_population_waves);
         wandb.add_metric("ES-LoRA", "es_eval_shards", coll_metrics.es_eval_shards);
         wandb.add_metric("ES-LoRA", "es_policy_update_norm", coll_metrics.es_policy_update_norm);
-      }
-      for (const auto& [mode, rating] : coll_metrics.elo_ratings) {
-        wandb.add_metric(mode, "elo_" + mode, rating);
       }
       wandb.commit(global_step);
     }

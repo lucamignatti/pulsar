@@ -101,19 +101,6 @@
     "require_fitness_signal": true,
     "min_fitness_std": 1e-6
   },
-  "self_play_league": {
-    "enabled": false,
-    "opponent_probability": 0.5,
-    "snapshot_interval_updates": 50,
-    "max_snapshots": 4,
-    "training_opponent_policy": "current_policy",
-    "eval_interval_updates": 10,
-    "eval_num_envs": 8,
-    "eval_matches_per_snapshot": 4,
-    "eval_policy": "deterministic",
-    "elo_initial": 1000.0,
-    "elo_k": 32.0
-  },
   "wandb": {
     "enabled": true
   }

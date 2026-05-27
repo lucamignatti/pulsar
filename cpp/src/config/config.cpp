@@ -288,9 +288,6 @@ void to_json(json& j, const PPOConfig& value) {
       {"value_clipping", value.value_clipping},
       {"value_clip_range", value.value_clip_range},
       {"weight_decay", value.weight_decay},
-      {"popart_enabled", value.popart_enabled},
-      {"popart_beta", value.popart_beta},
-      {"popart_epsilon", value.popart_epsilon},
   };
 }
 
@@ -325,43 +322,6 @@ void from_json(const json& j, PPOConfig& value) {
   value.value_clipping = j.value("value_clipping", false);
   value.value_clip_range = j.value("value_clip_range", 0.2F);
   value.weight_decay = j.value("weight_decay", 0.0F);
-  value.popart_enabled = j.value("popart_enabled", false);
-  value.popart_beta = j.value("popart_beta", 0.0001);
-  value.popart_epsilon = j.value("popart_epsilon", 1e-4);
-}
-
-void to_json(json& j, const SelfPlayLeagueConfig& value) {
-  j = json{
-      {"enabled", value.enabled},
-      {"opponent_probability", value.opponent_probability},
-      {"snapshot_interval_updates", value.snapshot_interval_updates},
-      {"max_snapshots", value.max_snapshots},
-      {"training_opponent_policy", value.training_opponent_policy},
-      {"eval_interval_updates", value.eval_interval_updates},
-      {"eval_num_envs", value.eval_num_envs},
-      {"eval_matches_per_snapshot", value.eval_matches_per_snapshot},
-      {"eval_policy", value.eval_policy},
-      {"elo_initial", value.elo_initial},
-      {"elo_k", value.elo_k},
-      {"pfsp_enabled", value.pfsp_enabled},
-      {"pfsp_sigma", value.pfsp_sigma},
-  };
-}
-
-void from_json(const json& j, SelfPlayLeagueConfig& value) {
-  value.enabled = j.value("enabled", false);
-  value.opponent_probability = j.value("opponent_probability", 0.0F);
-  value.snapshot_interval_updates = j.value("snapshot_interval_updates", 10);
-  value.max_snapshots = j.value("max_snapshots", 8);
-  value.training_opponent_policy = j.value("training_opponent_policy", std::string{"current_policy"});
-  value.eval_interval_updates = j.value("eval_interval_updates", 10);
-  value.eval_num_envs = j.value("eval_num_envs", 8);
-  value.eval_matches_per_snapshot = j.value("eval_matches_per_snapshot", 4);
-  value.eval_policy = j.value("eval_policy", std::string{"deterministic"});
-  value.elo_initial = j.value("elo_initial", 1000.0F);
-  value.elo_k = j.value("elo_k", 32.0F);
-  value.pfsp_enabled = j.value("pfsp_enabled", false);
-  value.pfsp_sigma = j.value("pfsp_sigma", 200.0F);
 }
 
 void to_json(json& j, const WandbConfig& value) {
@@ -434,7 +394,6 @@ void to_json(json& j, const ExperimentConfig& value) {
       {"goal_mapping", value.goal_mapping},
       {"goal_critic", value.goal_critic},
       {"es_lora", value.es_lora},
-      {"self_play_league", value.self_play_league},
       {"wandb", value.wandb},
       {"curriculum", value.curriculum},
   };
@@ -459,6 +418,7 @@ void from_json(const json& j, ExperimentConfig& value) {
   reject_removed_section(j, "reward");
   reject_removed_section(j, "value_pretraining");
   reject_removed_section(j, "actor_goal");
+  // self_play_league was removed; silently ignore old config files that still contain it
   value.schema_version = j.value("schema_version", 6);
   value.obs_schema_version = j.value("obs_schema_version", 2);
   value.env = j.value("env", EnvConfig{});
@@ -469,7 +429,6 @@ void from_json(const json& j, ExperimentConfig& value) {
   value.goal_mapping = j.value("goal_mapping", GoalMappingConfig{});
   value.goal_critic = j.value("goal_critic", GoalCriticConfig{});
   value.es_lora = j.value("es_lora", ESLoraConfig{});
-  value.self_play_league = j.value("self_play_league", SelfPlayLeagueConfig{});
   value.wandb = j.value("wandb", WandbConfig{});
   value.curriculum = j.value("curriculum", CurriculumConfig{});
 }
@@ -642,17 +601,8 @@ void validate_experiment_config(const ExperimentConfig& config) {
   if (config.ppo.weight_decay < 0.0F) {
     throw std::invalid_argument("ppo.weight_decay must be non-negative.");
   }
-  if (config.ppo.popart_beta <= 0.0) {
-    throw std::invalid_argument("ppo.popart_beta must be positive.");
-  }
-  if (config.ppo.popart_epsilon <= 0.0) {
-    throw std::invalid_argument("ppo.popart_epsilon must be positive.");
-  }
   if (config.goal_critic.temperature <= 0.0F) {
     throw std::invalid_argument("goal_critic.temperature must be positive.");
-  }
-  if (config.self_play_league.pfsp_sigma <= 0.0F) {
-    throw std::invalid_argument("self_play_league.pfsp_sigma must be positive.");
   }
   if (config.env.team_size <= 0 || config.env.team_size > 4) {
     throw std::invalid_argument("env.team_size must be between 1 and 4.");

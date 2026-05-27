@@ -502,39 +502,6 @@ int main() {
       }
     }
 
-    // PopArtNormalizer unit tests
-    {
-      pulsar::PopArtNormalizer normalizer(0.1, 1e-4);
-
-      // 1. Check inverse property
-      torch::Tensor x = torch::randn({10, 5});
-      torch::Tensor normalized = normalizer.normalize(x);
-      torch::Tensor denormalized = normalizer.denormalize(normalized);
-      if (!torch::allclose(x, denormalized, 1e-6, 1e-6)) {
-        throw std::runtime_error("PopArtNormalizer inverse property check failed");
-      }
-
-      // 2. Check scale preservation invariant
-      torch::nn::Linear linear(torch::nn::LinearOptions(5, 3));
-      torch::Tensor input = torch::randn({4, 5});
-
-      // Compute original forward and denormalize it
-      torch::Tensor orig_pred = linear->forward(input);
-      torch::Tensor orig_denorm = normalizer.denormalize(orig_pred);
-
-      // Perform statistics update
-      torch::Tensor targets = torch::randn({100}) * 5.0 + 10.0;
-      normalizer.update(targets, *linear);
-
-      // Compute updated forward and denormalize with updated statistics
-      torch::Tensor updated_pred = linear->forward(input);
-      torch::Tensor updated_denorm = normalizer.denormalize(updated_pred);
-
-      if (!torch::allclose(orig_denorm, updated_denorm, 1e-6, 1e-6)) {
-        throw std::runtime_error("PopArtNormalizer scale preservation invariant failed");
-      }
-    }
-
     // Element-wise Smooth L1 Loss unit tests
     {
       auto local_elementwise_smooth_l1_loss = [](

@@ -133,25 +133,6 @@ struct PPOConfig {
   bool value_clipping = false;
   float value_clip_range = 0.2F;
   float weight_decay = 0.0F;
-  bool popart_enabled = false;
-  double popart_beta = 0.0001;
-  double popart_epsilon = 1e-4;
-};
-
-struct SelfPlayLeagueConfig {
-  bool enabled = false;
-  float opponent_probability = 0.0F;
-  int snapshot_interval_updates = 10;
-  int max_snapshots = 8;
-  std::string training_opponent_policy = "current_policy";
-  int eval_interval_updates = 10;
-  int eval_num_envs = 8;
-  int eval_matches_per_snapshot = 4;
-  std::string eval_policy = "deterministic";
-  float elo_initial = 1000.0F;
-  float elo_k = 32.0F;
-  bool pfsp_enabled = false;
-  float pfsp_sigma = 200.0F;
 };
 
 struct WandbConfig {
@@ -195,7 +176,6 @@ struct ExperimentConfig {
   GoalMappingConfig goal_mapping{};
   GoalCriticConfig goal_critic{};
   ESLoraConfig es_lora{};
-  SelfPlayLeagueConfig self_play_league{};
   WandbConfig wandb{};
   CurriculumConfig curriculum{};
 };
@@ -233,8 +213,6 @@ void to_json(nlohmann::json& j, const ESLoraConfig& value);
 void from_json(const nlohmann::json& j, ESLoraConfig& value);
 void to_json(nlohmann::json& j, const PPOConfig& value);
 void from_json(const nlohmann::json& j, PPOConfig& value);
-void to_json(nlohmann::json& j, const SelfPlayLeagueConfig& value);
-void from_json(const nlohmann::json& j, SelfPlayLeagueConfig& value);
 void to_json(nlohmann::json& j, const WandbConfig& value);
 void from_json(const nlohmann::json& j, WandbConfig& value);
 void to_json(nlohmann::json& j, const CurriculumModeConfig& value);

@@ -127,12 +127,10 @@ int main() {
     pulsar::validate_checkpoint_metadata(loaded, config);
     std::filesystem::remove(tmp_dir);
 
-    config.self_play_league.enabled = true;
-    config.self_play_league.opponent_probability = 0.5F;
     const auto config_path = std::filesystem::temp_directory_path() / "pulsar_test_config.json";
     pulsar::save_experiment_config(config, config_path.string());
     const auto roundtripped = pulsar::load_experiment_config(config_path.string());
-    require(roundtripped.self_play_league.enabled, "self-play config should round-trip");
+    require(roundtripped.schema_version == config.schema_version, "config should round-trip");
     std::filesystem::remove(config_path);
 
     const auto production_config_path = pulsar::test::find_repo_path("configs/2v2.json");

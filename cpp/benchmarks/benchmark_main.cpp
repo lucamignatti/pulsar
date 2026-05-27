@@ -16,7 +16,7 @@
 #include "pulsar/rl/action_table.hpp"
 #include "pulsar/training/trainer.hpp"
 #include "pulsar/training/batched_rocketsim_collector.hpp"
-#include "pulsar/training/self_play_manager.hpp"
+
 
 namespace {
 
@@ -149,11 +149,9 @@ int main(int argc, char** argv) {
       env_offset += shard_config.ppo.num_envs;
     }
 
-    std::unique_ptr<pulsar::SelfPlayManager> self_play_manager;
     pulsar::Trainer trainer(
         config,
         std::move(collectors),
-        std::move(self_play_manager),
         std::filesystem::path{},
         false);
 

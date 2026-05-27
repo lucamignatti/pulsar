@@ -109,7 +109,6 @@ void BatchedRocketSimCollector::initialize(
     const std::size_t agent_count = engines[env_idx]->num_agents();
     envs_.push_back(EnvRuntime{
         .engine = std::move(engines[env_idx]),
-        .assignment = {},
         .reset_seed = config_.env.seed + static_cast<std::uint64_t>(env_idx),
         .obs_car_order = {},
         .action_scratch = std::vector<ControllerState>(agent_count),
@@ -164,15 +163,6 @@ void BatchedRocketSimCollector::initialize(
   agent_reward_states_.resize(total_agents_);
   env_reward_states_.resize(envs_.size());
 
-  for (std::size_t env_idx = 0; env_idx < envs_.size(); ++env_idx) {
-    assign_env(env_idx, envs_[env_idx].reset_seed);
-  }
-  current_buffers_.episode_starts.fill_(1.0F);
-  rebuild_host_buffers(current_buffers_, nullptr);
-}
-
-void BatchedRocketSimCollector::set_self_play_assignment_fn(AssignmentFn assignment_fn) {
-  assignment_fn_ = std::move(assignment_fn);
   for (std::size_t env_idx = 0; env_idx < envs_.size(); ++env_idx) {
     assign_env(env_idx, envs_[env_idx].reset_seed);
   }
@@ -311,17 +301,11 @@ BatchedRocketSimCollector::HostBuffers BatchedRocketSimCollector::allocate_host_
       .obs = torch::empty({static_cast<long>(total_agents_), obs_dim_}, f32),
       .action_masks = torch::empty({static_cast<long>(total_agents_), action_dim_}, u8),
       .learner_active = torch::ones({static_cast<long>(total_agents_)}, f32),
-      .snapshot_ids = torch::full({static_cast<long>(total_agents_)}, -1, i64),
       .episode_starts = torch::zeros({static_cast<long>(total_agents_)}, f32),
   };
 }
 
 void BatchedRocketSimCollector::assign_env(std::size_t env_idx, std::uint64_t seed) {
-  if (assignment_fn_) {
-    envs_[env_idx].assignment = assignment_fn_(env_idx, seed);
-  } else {
-    envs_[env_idx].assignment = {};
-  }
   refresh_obs_car_order(env_idx, seed);
 }
 
@@ -367,8 +351,6 @@ void BatchedRocketSimCollector::rebuild_host_buffers(HostBuffers& buffers, Colle
 
   const auto mask_start = std::chrono::steady_clock::now();
   std::uint8_t* masks_ptr = buffers.action_masks.data_ptr<std::uint8_t>();
-  float* learner_ptr = buffers.learner_active.data_ptr<float>();
-  std::int64_t* snapshot_ptr = buffers.snapshot_ids.data_ptr<std::int64_t>();
   const std::size_t action_stride = static_cast<std::size_t>(action_dim_);
   executor_.parallel_for(envs_.size(), [&](std::size_t begin, std::size_t end) {
     for (std::size_t env_idx = begin; env_idx < end; ++env_idx) {
@@ -379,19 +361,7 @@ void BatchedRocketSimCollector::rebuild_host_buffers(HostBuffers& buffers, Colle
           std::span<std::uint8_t>(
               masks_ptr + static_cast<std::ptrdiff_t>(agent_offset * action_stride),
               state.cars.size() * action_stride));
-
-      for (std::size_t local_idx = 0; local_idx < state.cars.size(); ++local_idx) {
-        const std::size_t global_idx = agent_offset + local_idx;
-        const SelfPlayAssignment& assignment = envs_[env_idx].assignment;
-        const bool self_play =
-            assignment.enabled && assignment.snapshot_index >= 0;
-        const bool learner =
-            !self_play || state.cars[local_idx].team == assignment.learner_team;
-        learner_ptr[global_idx] = learner ? 1.0F : 0.0F;
-        snapshot_ptr[global_idx] = (self_play && !learner)
-            ? static_cast<std::int64_t>(assignment.snapshot_index)
-            : -1;
-      }
+      // All agents are always learners (no snapshot opponents).
     }
   });
   if (timings != nullptr) {
@@ -404,51 +374,6 @@ void BatchedRocketSimCollector::rebuild_next_buffers(CollectorTimings* timings) 
   PULSAR_TRACE_SCOPE_CAT("collector", "rebuild_next_buffers");
   next_buffers_.episode_starts.copy_(host_dones_);
   rebuild_host_buffers(next_buffers_, timings);
-}
-
-void BatchedRocketSimCollector::collect_live_self_play_outcomes() {
-  last_self_play_outcomes_.clear();
-  const auto* dones_ptr = host_dones_.data_ptr<float>();
-  const auto* labels_ptr = host_terminal_outcome_labels_.data_ptr<std::int64_t>();
-  const auto* learner_ptr = current_buffers_.learner_active.data_ptr<float>();
-
-  for (std::size_t env_idx = 0; env_idx < envs_.size(); ++env_idx) {
-    const SelfPlayAssignment& assignment = envs_[env_idx].assignment;
-    if (!assignment.enabled || assignment.snapshot_index < 0) {
-      continue;
-    }
-
-    const std::size_t agent_begin = agent_offsets_[env_idx];
-    const std::size_t agent_end = agent_offsets_[env_idx + 1];
-    bool env_done = false;
-    bool has_learner_terminal = false;
-    int learner_result = 0;
-    for (std::size_t gi = agent_begin; gi < agent_end; ++gi) {
-      if (dones_ptr[gi] <= 0.5F) {
-        continue;
-      }
-      env_done = true;
-      if (learner_ptr[gi] <= 0.5F) {
-        continue;
-      }
-      has_learner_terminal = true;
-      const std::int64_t label = labels_ptr[gi];
-      if (label == 0) {
-        learner_result = 1;
-        break;
-      }
-      if (label == 1) {
-        learner_result = -1;
-        break;
-      }
-    }
-    if (env_done && has_learner_terminal) {
-      last_self_play_outcomes_.push_back(SelfPlayLiveOutcome{
-          .snapshot_index = assignment.snapshot_index,
-          .learner_result = learner_result,
-      });
-    }
-  }
 }
 
 void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
@@ -655,7 +580,6 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         std::chrono::duration<double>(std::chrono::steady_clock::now() - done_reset_start).count();
   }
 
-  collect_live_self_play_outcomes();
   rebuild_next_buffers(timings);
   std::swap(current_buffers_, next_buffers_);
 }
@@ -748,7 +672,6 @@ void BatchedRocketSimCollector::step_after_physics_prefix(
 
   // Reset step output
   last_step_output_ = StepOutput{};
-  last_self_play_outcomes_.clear();
   auto& so = last_step_output_;
 
   // Output tensor pointers
@@ -773,8 +696,6 @@ void BatchedRocketSimCollector::step_after_physics_prefix(
   // once host_dones_ contains this step's freshly-computed reset flags.
   float* next_obs_ptr = next_buffers_.obs.data_ptr<float>();
   std::uint8_t* next_masks_ptr = next_buffers_.action_masks.data_ptr<std::uint8_t>();
-  float* next_learner_ptr = next_buffers_.learner_active.data_ptr<float>();
-  std::int64_t* next_snapshot_ptr = next_buffers_.snapshot_ids.data_ptr<std::int64_t>();
 
   const std::size_t obs_stride = static_cast<std::size_t>(obs_dim_);
   const std::size_t action_stride = static_cast<std::size_t>(action_dim_);
@@ -964,27 +885,12 @@ void BatchedRocketSimCollector::step_after_physics_prefix(
           std::span<float>(next_obs_ptr + static_cast<std::ptrdiff_t>(agent_begin * obs_stride),
                            count * obs_stride));
 
-      // Build next action masks + learner/snapshot flags
+      // Build next action masks (all agents are always learners)
       action_parser_->build_action_mask_batch(next_state,
           std::span<std::uint8_t>(next_masks_ptr + static_cast<std::ptrdiff_t>(agent_begin * action_stride),
                                    count * action_stride));
-
-      for (std::size_t i = 0; i < count; ++i) {
-        const std::size_t gi = agent_begin + i;
-        const SelfPlayAssignment& assignment = envs_[env_idx].assignment;
-        const bool self_play =
-            assignment.enabled && assignment.snapshot_index >= 0;
-        const bool learner =
-            !self_play || next_state.cars[i].team == assignment.learner_team;
-        next_learner_ptr[gi] = learner ? 1.0F : 0.0F;
-        next_snapshot_ptr[gi] = (self_play && !learner)
-            ? static_cast<std::int64_t>(assignment.snapshot_index)
-            : -1;
-      }
     }
   });
-
-  collect_live_self_play_outcomes();
   const torch::Tensor step_learner_active = current_buffers_.learner_active;
 
   // Mark the next observation as an episode start exactly when the just-taken
@@ -1061,10 +967,6 @@ const BatchedRocketSimCollector::StepOutput& BatchedRocketSimCollector::last_ste
   return last_step_output_;
 }
 
-const std::vector<SelfPlayLiveOutcome>& BatchedRocketSimCollector::last_self_play_outcomes() const {
-  return last_self_play_outcomes_;
-}
-
 const torch::Tensor& BatchedRocketSimCollector::host_observations() const {
   return current_buffers_.obs;
 }
@@ -1075,10 +977,6 @@ const torch::Tensor& BatchedRocketSimCollector::host_action_masks() const {
 
 const torch::Tensor& BatchedRocketSimCollector::host_learner_active() const {
   return current_buffers_.learner_active;
-}
-
-const torch::Tensor& BatchedRocketSimCollector::host_snapshot_ids() const {
-  return current_buffers_.snapshot_ids;
 }
 
 const torch::Tensor& BatchedRocketSimCollector::host_episode_starts() const {

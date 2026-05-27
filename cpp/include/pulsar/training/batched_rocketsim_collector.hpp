@@ -28,20 +28,8 @@ struct CollectorTimings {
   double done_reset_seconds = 0.0;
 };
 
-struct SelfPlayAssignment {
-  bool enabled = false;
-  Team learner_team = Team::Blue;
-  int snapshot_index = -1;
-};
-
-struct SelfPlayLiveOutcome {
-  int snapshot_index = -1;
-  int learner_result = 0;  // 1 = learner/current win, 0 = draw, -1 = learner/current loss.
-};
-
 class BatchedRocketSimCollector {
  public:
-  using AssignmentFn = std::function<SelfPlayAssignment(std::size_t, std::uint64_t)>;
 
   BatchedRocketSimCollector(
       ExperimentConfig config,
@@ -57,7 +45,6 @@ class BatchedRocketSimCollector {
       DoneConditionPtr done_condition,
       bool pin_host_memory);
 
-  void set_self_play_assignment_fn(AssignmentFn assignment_fn);
   void update_reward_config(const ExperimentConfig& cfg);
   void update_unlocked_mechanics(const std::vector<std::string>& mechanics);
   void set_mode(const std::string& mode);
@@ -103,12 +90,10 @@ class BatchedRocketSimCollector {
     int64_t ball_prox_denom = 0;
   };
   [[nodiscard]] const StepOutput& last_step_output() const;
-  [[nodiscard]] const std::vector<SelfPlayLiveOutcome>& last_self_play_outcomes() const;
 
   [[nodiscard]] const torch::Tensor& host_observations() const;
   [[nodiscard]] const torch::Tensor& host_action_masks() const;
   [[nodiscard]] const torch::Tensor& host_learner_active() const;
-  [[nodiscard]] const torch::Tensor& host_snapshot_ids() const;
   [[nodiscard]] const torch::Tensor& host_episode_starts() const;
   [[nodiscard]] const torch::Tensor& host_dones() const;
   [[nodiscard]] const torch::Tensor& host_terminated() const;
@@ -132,13 +117,11 @@ class BatchedRocketSimCollector {
     torch::Tensor obs{};
     torch::Tensor action_masks{};
     torch::Tensor learner_active{};
-    torch::Tensor snapshot_ids{};
     torch::Tensor episode_starts{};
   };
 
   struct EnvRuntime {
     TransitionEnginePtr engine;
-    SelfPlayAssignment assignment;
     std::uint64_t reset_seed = 0;
     std::vector<AgentId> obs_car_order{};
     std::vector<ControllerState> action_scratch{};
@@ -164,7 +147,6 @@ class BatchedRocketSimCollector {
   ParallelExecutor executor_;
   std::vector<EnvRuntime> envs_{};
   std::vector<std::size_t> agent_offsets_{};
-  AssignmentFn assignment_fn_{};
   HostBuffers current_buffers_{};
   HostBuffers next_buffers_{};
   torch::Tensor host_dones_;
@@ -187,7 +169,6 @@ class BatchedRocketSimCollector {
   std::vector<EnvRewardState> env_reward_states_;
   RewardEngine reward_engine_;
   StepOutput last_step_output_;
-  std::vector<SelfPlayLiveOutcome> last_self_play_outcomes_;
   std::string mode_ = "1v1";
   std::size_t total_agents_ = 0;
   int obs_dim_ = 0;

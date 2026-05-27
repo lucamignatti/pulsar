@@ -58,7 +58,6 @@ struct TrainerMetrics {
   double done_reset_seconds = 0.0;
   double forward_backward_seconds = 0.0;
   double optimizer_step_seconds = 0.0;
-  double self_play_eval_seconds = 0.0;
   double process_rss_mb = 0.0;
   double process_peak_rss_mb = 0.0;
   double cgroup_memory_current_mb = 0.0;
@@ -113,10 +112,9 @@ struct TrainerMetrics {
   double truncated_episode_rate = 0.0;
   double touch_episode_rate = 0.0;
   double multi_touch_episode_rate = 0.0;
-  int self_play_snapshot_count = 0;
   double advantage_std = 0.0;
 
-  std::map<std::string, double> elo_ratings{};
+
   std::map<std::string, double> mode_touch_rates{};
   std::map<std::string, double> mode_multi_touch_rates{};
   std::map<std::string, double> mode_scored_rates{};
@@ -156,13 +154,11 @@ class Trainer {
   Trainer(
       ExperimentConfig config,
       std::unique_ptr<BatchedRocketSimCollector> collector,
-      std::unique_ptr<SelfPlayManager> self_play_manager,
       std::filesystem::path run_output_root = {},
       bool log_initialization = true);
   Trainer(
       ExperimentConfig config,
       std::vector<std::unique_ptr<BatchedRocketSimCollector>> collectors,
-      std::unique_ptr<SelfPlayManager> self_play_manager,
       std::filesystem::path run_output_root = {},
       bool log_initialization = true);
   ~Trainer();
@@ -192,7 +188,6 @@ class Trainer {
   std::pair<torch::Tensor, torch::Tensor> compute_es_deltas();
 
   void rebuild_collectors();
-  void sync_self_play_assignments_to_collectors();
 
   struct ESPopulationFitness {
     std::vector<float> fitness{};
@@ -210,7 +205,6 @@ class Trainer {
 
   ExperimentConfig config_{};
   std::vector<std::unique_ptr<BatchedRocketSimCollector>> collectors_{};
-  std::unique_ptr<SelfPlayManager> self_play_manager_{};
   ControllerActionTable action_table_{};
   Actor actor_{nullptr};
   Actor actor_snapshot_{nullptr};

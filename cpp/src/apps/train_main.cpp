@@ -12,7 +12,7 @@
 #include "pulsar/tracing/tracing.hpp"
 #include "pulsar/training/trainer.hpp"
 #include "pulsar/training/batched_rocketsim_collector.hpp"
-#include "pulsar/training/self_play_manager.hpp"
+
 
 namespace {
 
@@ -159,21 +159,10 @@ int main(int argc, char** argv) {
       }
     }
 
-    std::unique_ptr<pulsar::SelfPlayManager> self_play_manager;
-    if (config.self_play_league.enabled) {
-      self_play_manager = std::make_unique<pulsar::SelfPlayManager>(
-          config,
-          std::filesystem::path(argv[2]) / "policy_versions",
-          obs_builder,
-          action_parser,
-          resolve_startup_device(config.ppo.device));
-    }
-
     const int updates = argc > 3 ? std::stoi(argv[3]) : 0;
     pulsar::Trainer trainer(
         config,
         std::move(collectors),
-        std::move(self_play_manager),
         std::filesystem::path(argv[2]));
     trainer.train(updates, argv[2], argv[1]);
     return 0;
