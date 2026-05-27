@@ -1955,6 +1955,7 @@ Trainer::ESPopulationFitness Trainer::evaluate_es_population(
       shard_futures.push_back(task_pool_->submit(
           [&, mode_config, spec, shard_idx]() -> EsShardResult {
         EsShardResult shard_result;
+        torch::NoGradGuard no_grad;
         shard_result.member_start = spec.member_start;
         shard_result.reward_sum.assign(static_cast<std::size_t>(spec.member_count), 0.0F);
         shard_result.reward_count.assign(static_cast<std::size_t>(spec.member_count), 0.0F);
