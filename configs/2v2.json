@@ -85,7 +85,7 @@
   "es_lora": {
     "rank": 4,
     "lora_alpha": 4.0,
-    "population_size": 512,
+    "population_size": 256,
     "virtual_population_waves": 1,
     "sigma_ES": 0.01,
     "eta_ES": 0.001,
