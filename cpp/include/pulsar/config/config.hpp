@@ -133,6 +133,10 @@ struct PPOConfig {
   bool value_clipping = false;
   float value_clip_range = 0.2F;
   float weight_decay = 0.0F;
+  int anchor_eval_interval = 50;        // 0 = disabled; run anchor eval every N updates
+  int anchor_eval_envs = 8;             // number of envs for anchor eval
+  int anchor_eval_steps = 1800;         // steps per anchor eval run
+  float anchor_update_threshold = 0.65F; // replace anchor when win_rate >= this (0=always, 1=never)
 };
 
 struct WandbConfig {

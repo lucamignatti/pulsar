@@ -288,6 +288,10 @@ void to_json(json& j, const PPOConfig& value) {
       {"value_clipping", value.value_clipping},
       {"value_clip_range", value.value_clip_range},
       {"weight_decay", value.weight_decay},
+      {"anchor_eval_interval", value.anchor_eval_interval},
+      {"anchor_eval_envs", value.anchor_eval_envs},
+      {"anchor_eval_steps", value.anchor_eval_steps},
+      {"anchor_update_threshold", value.anchor_update_threshold},
   };
 }
 
@@ -322,6 +326,10 @@ void from_json(const json& j, PPOConfig& value) {
   value.value_clipping = j.value("value_clipping", false);
   value.value_clip_range = j.value("value_clip_range", 0.2F);
   value.weight_decay = j.value("weight_decay", 0.0F);
+  value.anchor_eval_interval = j.value("anchor_eval_interval", 50);
+  value.anchor_eval_envs = j.value("anchor_eval_envs", 8);
+  value.anchor_eval_steps = j.value("anchor_eval_steps", 1800);
+  value.anchor_update_threshold = j.value("anchor_update_threshold", 0.65F);
 }
 
 void to_json(json& j, const WandbConfig& value) {

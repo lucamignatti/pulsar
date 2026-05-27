@@ -3344,12 +3344,240 @@ void Trainer::prune_old_checkpoints(const std::filesystem::path& checkpoint_dir)
   }
 }
 
+void Trainer::init_or_load_anchor() {
+  if (run_output_root_.empty() || config_.ppo.anchor_eval_interval <= 0) return;
+
+  const std::filesystem::path anchor_dir = run_output_root_ / "anchor";
+  const std::filesystem::path anchor_state = anchor_dir / "state.pt";
+
+  if (std::filesystem::exists(anchor_state)) {
+    // Resume case: load previously saved anchor
+    anchor_actor_ = clone_actor(actor_, device_);
+    {
+      torch::serialize::InputArchive archive;
+      archive.load_from(anchor_state.string(), device_);
+      load_actor_from_archive(anchor_actor_, archive, device_);
+      anchor_normalizer_ = ObservationNormalizer(config_.model.observation_dim);
+      anchor_normalizer_.load(archive);
+    }
+    anchor_actor_->eval();
+    anchor_actor_->to(device_);
+    anchor_normalizer_.to(device_);
+    std::cout << "anchor_loaded=" << anchor_state.string() << '\n';
+  } else {
+    // First run: snapshot current actor as the anchor
+    anchor_actor_ = clone_actor(actor_, device_);
+    anchor_actor_->eval();
+    anchor_normalizer_ = actor_normalizer_.clone();
+    anchor_normalizer_.to(device_);
+    save_anchor();
+    std::cout << "anchor_created=" << anchor_state.string() << '\n';
+  }
+}
+
+void Trainer::save_anchor() const {
+  if (!anchor_actor_ || run_output_root_.empty()) return;
+  const std::filesystem::path anchor_dir = run_output_root_ / "anchor";
+  std::filesystem::create_directories(anchor_dir);
+  torch::serialize::OutputArchive archive;
+  anchor_actor_->save(archive);
+  anchor_normalizer_.save(archive);
+  archive.save_to((anchor_dir / "state.pt").string());
+}
+
+Trainer::AnchorEvalResult Trainer::run_anchor_eval(int update_index) {
+  if (!anchor_actor_) return {};
+  const int eval_envs = config_.ppo.anchor_eval_envs;
+  const int eval_steps = config_.ppo.anchor_eval_steps;
+  if (eval_envs <= 0 || eval_steps <= 0) return {};
+
+  const auto eval_start = std::chrono::steady_clock::now();
+
+  // Determine team size from the primary collector mode
+  const std::string eval_mode = collectors_.front()->mode();
+  const int team_size = (eval_mode == "3v3") ? 3 : (eval_mode == "2v2") ? 2 : 1;
+  const int agents_per_env = 2 * team_size;
+
+  // Build a temporary eval collector: fixed team ordering, fresh seeds
+  ExperimentConfig eval_config = config_;
+  eval_config.ppo.num_envs = eval_envs;
+  eval_config.ppo.collection_workers = std::min(config_.ppo.collection_workers, eval_envs);
+  eval_config.env.team_size = team_size;
+  eval_config.env.spawn_opponents = true;
+
+  auto obs_builder_cfg = eval_config.env;
+  obs_builder_cfg.team_size = 3;  // max; zero-pads unused slots
+
+  const auto reset_mutator = std::make_shared<MutatorSequence>(
+      std::vector<StateMutatorPtr>{
+          std::make_shared<FixedTeamSizeMutator>(eval_config.env),
+          std::make_shared<KickoffMutator>(eval_config.env),
+      });
+  std::vector<TransitionEnginePtr> engines;
+  engines.reserve(static_cast<std::size_t>(eval_envs));
+  for (int env_idx = 0; env_idx < eval_envs; ++env_idx) {
+    EnvConfig env_config = eval_config.env;
+    env_config.seed += static_cast<std::uint64_t>(
+        3'000'007 + update_index * 65'537 + env_idx);
+    engines.push_back(std::make_shared<RocketSimTransitionEngine>(env_config, reset_mutator));
+  }
+
+  auto eval_collector = std::make_unique<BatchedRocketSimCollector>(
+      eval_config,
+      std::move(engines),
+      std::make_shared<PulsarObsBuilder>(obs_builder_cfg),
+      std::make_shared<DiscreteActionParser>(ControllerActionTable(config_.action_table)),
+      std::make_shared<SimpleDoneCondition>(eval_config.env),
+      use_pinned_host_buffers_);
+  eval_collector->set_mode(eval_mode);
+  eval_collector->set_randomize_obs_order(false);  // Blue = slots 0..team_size-1
+  eval_collector->reset_all();
+
+  // Clone both actors for eval on device_
+  Actor current_actor = clone_actor(actor_snapshot_, device_);
+  current_actor->eval();
+  Actor anchor_actor = clone_actor(anchor_actor_, device_);
+  anchor_actor->eval();
+
+  ObservationNormalizer current_norm = actor_normalizer_.clone();
+  current_norm.to(device_);
+  ObservationNormalizer anchor_norm = anchor_normalizer_.clone();
+  anchor_norm.to(device_);
+
+  const int64_t blue_agents = static_cast<int64_t>(eval_envs * team_size);
+  const int64_t orange_agents = static_cast<int64_t>(eval_envs * team_size);
+  torch::Tensor blue_state = current_actor->initial_recurrent_state(blue_agents, device_);
+  torch::Tensor orange_state = anchor_actor->initial_recurrent_state(orange_agents, device_);
+
+  const int physics_prefix_ticks =
+      config_.env.half_tick_skip > 0 && config_.env.half_tick_skip < config_.env.tick_skip
+          ? config_.env.half_tick_skip : 0;
+
+  int total_episodes = 0;
+  int blue_wins = 0;
+  int orange_wins = 0;
+
+  const int obs_dim_val = eval_collector->obs_dim();
+  const int action_dim_val = eval_collector->action_dim();
+  const int goal_dim_val = config_.goal_mapping.goal_dim;
+
+  for (int step = 0; step < eval_steps; ++step) {
+    if (config_.model.sequence_length > 0 && step % config_.model.sequence_length == 0) {
+      blue_state.zero_();
+      orange_state.zero_();
+    }
+
+    torch::Tensor raw_obs_host = eval_collector->host_observations();
+    torch::Tensor episode_starts_host = eval_collector->host_episode_starts();
+    torch::Tensor action_masks_host = eval_collector->host_action_masks();
+    torch::Tensor goal_values_host = eval_collector->host_task_goal_positions();
+
+    std::future<void> physics_future;
+    CollectorTimings step_timings{};
+    if (physics_prefix_ticks > 0) {
+      physics_future = std::async(std::launch::async, [&]() {
+        eval_collector->step_physics_only(physics_prefix_ticks, &step_timings);
+      });
+    }
+
+    const torch::Tensor raw_obs = raw_obs_host.to(device_, use_pinned_host_buffers_);
+    const torch::Tensor episode_starts = episode_starts_host.to(device_, use_pinned_host_buffers_);
+    const torch::Tensor action_masks = action_masks_host.to(device_, use_pinned_host_buffers_).to(torch::kBool);
+    const torch::Tensor goal_values = goal_values_host.to(device_, use_pinned_host_buffers_);
+
+    // Reshape to [eval_envs, agents_per_env, ...]
+    const torch::Tensor obs_4d = raw_obs.view({eval_envs, agents_per_env, obs_dim_val});
+    const torch::Tensor masks_4d = action_masks.view({eval_envs, agents_per_env, action_dim_val});
+    const torch::Tensor starts_4d = episode_starts.view({eval_envs, agents_per_env});
+    const torch::Tensor goals_4d = goal_values.view({eval_envs, agents_per_env, goal_dim_val});
+
+    // Slice blue and orange
+    const torch::Tensor blue_raw = obs_4d.slice(1, 0, team_size).reshape({blue_agents, obs_dim_val});
+    const torch::Tensor orange_raw = obs_4d.slice(1, team_size, agents_per_env).reshape({orange_agents, obs_dim_val});
+    const torch::Tensor blue_masks = masks_4d.slice(1, 0, team_size).reshape({blue_agents, action_dim_val});
+    const torch::Tensor orange_masks = masks_4d.slice(1, team_size, agents_per_env).reshape({orange_agents, action_dim_val});
+    const torch::Tensor blue_starts = starts_4d.slice(1, 0, team_size).reshape({blue_agents});
+    const torch::Tensor orange_starts = starts_4d.slice(1, team_size, agents_per_env).reshape({orange_agents});
+    const torch::Tensor blue_goals = goals_4d.slice(1, 0, team_size).reshape({blue_agents, goal_dim_val});
+    const torch::Tensor orange_goals = goals_4d.slice(1, team_size, agents_per_env).reshape({orange_agents, goal_dim_val});
+
+    torch::Tensor all_actions_cpu;
+    {
+      torch::NoGradGuard no_grad;
+      const torch::Tensor blue_norm = current_norm.normalize(blue_raw);
+      ActorStepOutput blue_out = current_actor->forward_step_stateful(
+          blue_norm, blue_state, blue_starts, &blue_state, blue_goals);
+      const torch::Tensor blue_actions = sample_masked_actions(
+          blue_out.policy_logits, blue_masks, /*greedy=*/true, nullptr, 1.0F);
+
+      const torch::Tensor orange_norm = anchor_norm.normalize(orange_raw);
+      ActorStepOutput orange_out = anchor_actor->forward_step_stateful(
+          orange_norm, orange_state, orange_starts, &orange_state, orange_goals);
+      const torch::Tensor orange_actions = sample_masked_actions(
+          orange_out.policy_logits, orange_masks, /*greedy=*/true, nullptr, 1.0F);
+
+      // Interleave: [eval_envs, team_size] cat → [eval_envs, agents_per_env] → flatten
+      const torch::Tensor combined = torch::cat(
+          {blue_actions.view({eval_envs, team_size}),
+           orange_actions.view({eval_envs, team_size})}, /*dim=*/1);
+      all_actions_cpu = combined.reshape({static_cast<int64_t>(eval_envs * agents_per_env)})
+                            .contiguous()
+                            .to(torch::kCPU);
+    }
+
+    if (physics_future.valid()) physics_future.get();
+    eval_collector->step_after_physics_prefix(
+        std::span<const std::int64_t>(
+            all_actions_cpu.data_ptr<std::int64_t>(),
+            static_cast<std::size_t>(all_actions_cpu.numel())),
+        physics_prefix_ticks,
+        &step_timings);
+
+    // Count outcomes
+    const torch::Tensor dones_host = eval_collector->host_dones();
+    const torch::Tensor labels_host = eval_collector->host_terminal_outcome_labels();
+    const float* dones_ptr = dones_host.data_ptr<float>();
+    const int64_t* labels_ptr = labels_host.data_ptr<int64_t>();
+
+    for (int env_idx = 0; env_idx < eval_envs; ++env_idx) {
+      const int base = env_idx * agents_per_env;
+      bool env_done = false, env_scored = false, env_conceded = false;
+      for (int a = 0; a < agents_per_env; ++a) {
+        if (dones_ptr[base + a] > 0.5F) {
+          env_done = true;
+          if (labels_ptr[base + a] == 0) env_scored = true;    // Blue scored
+          if (labels_ptr[base + a] == 1) env_conceded = true;  // Orange scored
+        }
+      }
+      if (env_done) {
+        ++total_episodes;
+        if (env_scored) ++blue_wins;
+        if (env_conceded) ++orange_wins;
+      }
+    }
+  }
+
+  const double seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - eval_start).count();
+  const int decisive = blue_wins + orange_wins;
+  const double win_rate =
+      decisive > 0 ? static_cast<double>(blue_wins) / static_cast<double>(decisive) : -1.0;
+
+  return AnchorEvalResult{
+      .win_rate = win_rate,
+      .episodes = static_cast<int64_t>(total_episodes),
+      .seconds = seconds,
+  };
+}
+
 void Trainer::train(int updates, const std::string& checkpoint_dir, const std::string& config_path) {
   const bool train_forever = updates <= 0;
   std::cout << "train_start\n";
   std::filesystem::create_directories(checkpoint_dir);
   WandbLogger wandb(config_.wandb, checkpoint_dir, config_path, "train");
   std::int64_t global_step = resumed_global_step_;
+
+  init_or_load_anchor();
 
   TrainerMetrics coll_metrics{};
   std::int64_t coll_steps = 0;
@@ -3476,6 +3704,29 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
             ? static_cast<double>(next_coll_steps) /
                   std::max(std::chrono::duration<double>(std::chrono::steady_clock::now() - iter_start).count(), 1.0e-9)
             : 0.0;
+    // Anchor eval: run current policy vs rolling anchor snapshot
+    const int anchor_interval = config_.ppo.anchor_eval_interval;
+    if (anchor_interval > 0 && update_index % anchor_interval == 0) {
+      const AnchorEvalResult anchor_result = run_anchor_eval(update_index);
+      coll_metrics.anchor_win_rate = anchor_result.win_rate;
+      coll_metrics.anchor_eval_seconds = anchor_result.seconds;
+      coll_metrics.anchor_eval_episodes = anchor_result.episodes;
+
+      // Ratchet anchor forward when current policy has clearly surpassed it
+      const float threshold = config_.ppo.anchor_update_threshold;
+      if (anchor_result.win_rate >= 0.0 && anchor_result.win_rate >= static_cast<double>(threshold)) {
+        anchor_actor_ = clone_actor(actor_snapshot_, device_);
+        anchor_actor_->eval();
+        anchor_normalizer_ = actor_normalizer_.clone();
+        anchor_normalizer_.to(device_);
+        save_anchor();
+        coll_metrics.anchor_updated = true;
+        std::cout << "anchor_updated update=" << update_index
+                  << " win_rate=" << anchor_result.win_rate
+                  << " threshold=" << threshold << '\n';
+      }
+    }
+
     if (update_index % 200 == 0) {
       trim_released_host_memory();
     }
@@ -3521,6 +3772,9 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
               << " goals=" << coll_metrics.goals_scored << "/" << coll_metrics.goals_conceded
               << " es_fitness=" << coll_metrics.es_fitness_mean
               << " es_reward=" << coll_metrics.es_reward_mean
+              << " anchor_win_rate=" << coll_metrics.anchor_win_rate
+              << " anchor_episodes=" << coll_metrics.anchor_eval_episodes
+              << " anchor_updated=" << coll_metrics.anchor_updated
               << " rss_mb=" << coll_metrics.process_rss_mb
               << " peak_rss_mb=" << coll_metrics.process_peak_rss_mb
               << " cgroup_mem_mb=" << coll_metrics.cgroup_memory_current_mb << "/" << coll_metrics.cgroup_memory_limit_mb
@@ -3597,6 +3851,12 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
       }
       for (const auto& [mode, count] : coll_metrics.mode_completed_episodes) {
         wandb.add_metric(mode, "mode_" + mode + "_completed_episodes", count);
+      }
+      if (coll_metrics.anchor_win_rate >= 0.0) {
+        wandb.add_metric("Optimization", "anchor_win_rate", coll_metrics.anchor_win_rate);
+        wandb.add_metric("Optimization", "anchor_eval_seconds", coll_metrics.anchor_eval_seconds);
+        wandb.add_metric("Optimization", "anchor_eval_episodes", coll_metrics.anchor_eval_episodes);
+        wandb.add_metric("Optimization", "anchor_updated", coll_metrics.anchor_updated ? 1 : 0);
       }
       if (es_fired_this_update) {
         wandb.add_metric("ES-LoRA", "es_fitness_mean", coll_metrics.es_fitness_mean);

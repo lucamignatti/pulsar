@@ -119,6 +119,11 @@ struct TrainerMetrics {
   std::map<std::string, double> mode_multi_touch_rates{};
   std::map<std::string, double> mode_scored_rates{};
   std::map<std::string, int> mode_completed_episodes{};
+
+  double anchor_win_rate = -1.0;     // -1 = not evaluated this update
+  double anchor_eval_seconds = 0.0;
+  int64_t anchor_eval_episodes = 0;
+  bool anchor_updated = false;       // true when anchor was replaced this update
 };
 
 struct TrainerBenchmarkMetrics {
@@ -189,6 +194,15 @@ class Trainer {
 
   void rebuild_collectors();
 
+  struct AnchorEvalResult {
+    double win_rate = -1.0;
+    int64_t episodes = 0;
+    double seconds = 0.0;
+  };
+  void init_or_load_anchor();
+  void save_anchor() const;
+  AnchorEvalResult run_anchor_eval(int update_index);
+
   struct ESPopulationFitness {
     std::vector<float> fitness{};
     std::vector<float> reward{};
@@ -233,6 +247,9 @@ class Trainer {
   torch::Tensor es_delta_B_;
 
   std::unique_ptr<GCRLTrainer> gcrl_trainer_{nullptr};
+
+  Actor anchor_actor_{nullptr};
+  ObservationNormalizer anchor_normalizer_{0};
 
 #ifdef PULSAR_HAS_CUDA
   std::vector<c10::cuda::CUDAStream> shard_collection_streams_;

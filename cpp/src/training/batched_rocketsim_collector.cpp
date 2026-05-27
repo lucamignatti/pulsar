@@ -182,6 +182,10 @@ void BatchedRocketSimCollector::set_mode(const std::string& mode) {
   mode_ = mode;
 }
 
+void BatchedRocketSimCollector::set_randomize_obs_order(bool value) {
+  randomize_obs_order_ = value;
+}
+
 const std::string& BatchedRocketSimCollector::mode() const {
   return mode_;
 }
@@ -313,7 +317,7 @@ void BatchedRocketSimCollector::refresh_obs_car_order(std::size_t env_idx, std::
   auto& order = envs_[env_idx].obs_car_order;
   order.resize(envs_[env_idx].engine->num_agents());
   std::iota(order.begin(), order.end(), AgentId{0});
-  if (order.size() <= 2) return;
+  if (!randomize_obs_order_ || order.size() <= 2) return;
 
   std::mt19937_64 rng(mix_obs_order_seed(seed, env_idx));
   std::shuffle(order.begin(), order.end(), rng);

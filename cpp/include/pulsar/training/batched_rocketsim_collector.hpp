@@ -46,6 +46,7 @@ class BatchedRocketSimCollector {
       bool pin_host_memory);
 
   void update_reward_config(const ExperimentConfig& cfg);
+  void set_randomize_obs_order(bool value);  // disable for anchor eval to get deterministic team ordering
   void update_unlocked_mechanics(const std::vector<std::string>& mechanics);
   void set_mode(const std::string& mode);
   [[nodiscard]] const std::string& mode() const;
@@ -137,7 +138,6 @@ class BatchedRocketSimCollector {
   void initialize(std::vector<TransitionEnginePtr> engines, bool pin_host_memory);
   void rebuild_host_buffers(HostBuffers& buffers, CollectorTimings* timings);
   void rebuild_next_buffers(CollectorTimings* timings);
-  void collect_live_self_play_outcomes();
   [[nodiscard]] int bounded_physics_prefix_ticks(int prefix_tick_count) const;
 
   ExperimentConfig config_{};
@@ -170,6 +170,7 @@ class BatchedRocketSimCollector {
   RewardEngine reward_engine_;
   StepOutput last_step_output_;
   std::string mode_ = "1v1";
+  bool randomize_obs_order_ = true;
   std::size_t total_agents_ = 0;
   int obs_dim_ = 0;
   int action_dim_ = 0;
