@@ -215,6 +215,10 @@ class ActorImpl : public torch::nn::Module {
 
   torch::nn::Sequential value_head_{nullptr};
   GoalCritic goal_critic_{nullptr};
+  torch::nn::Linear goal_proj_{nullptr};  // goal_dim → encoder_dim residual conditioning
+
+ private:
+  torch::Tensor apply_goal_residual(const torch::Tensor& encoded, const torch::Tensor& goal_values);
 };
 
 TORCH_MODULE(Actor);

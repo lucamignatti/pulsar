@@ -332,6 +332,7 @@ RolloutStorage make_rollout_storage(
       config.model.observation_dim,
       action_dim,
       config.model.encoder_dim,
+      config.goal_mapping.goal_dim,
       torch::Device(torch::kCPU),
       heads,
       pin_memory);
@@ -767,6 +768,37 @@ std::int64_t Trainer::model_parameter_count() const {
   return total;
 }
 
+// Load actor weights from archive, falling back to a key-by-key partial load
+// if strict loading fails (e.g., old checkpoints missing goal_proj_).
+static void load_actor_from_archive(
+    Actor& actor,
+    torch::serialize::InputArchive& archive,
+    const torch::Device& device) {
+  try {
+    actor->load(archive);
+  } catch (const std::exception& e) {
+    std::cerr << "[checkpoint] Strict actor load failed: " << e.what()
+              << "\nRetrying with partial load (goal_proj_ may be freshly initialized).\n";
+    torch::NoGradGuard no_grad;
+    for (auto& item : actor->named_parameters(/*recurse=*/true)) {
+      try {
+        torch::Tensor t;
+        archive.read(item.key(), t, /*is_buffer=*/false);
+        item.value().copy_(t.to(device));
+      } catch (...) {
+        std::cerr << "[checkpoint]   Skipping missing parameter: " << item.key() << "\n";
+      }
+    }
+    for (auto& item : actor->named_buffers(/*recurse=*/true)) {
+      try {
+        torch::Tensor t;
+        archive.read(item.key(), t, /*is_buffer=*/true);
+        item.value().copy_(t.to(device));
+      } catch (...) {}
+    }
+  }
+}
+
 void Trainer::sync_self_play_assignments_to_collectors() {
   for (auto& collector : collectors_) {
     if (!collector) {
@@ -1028,7 +1060,7 @@ void Trainer::maybe_initialize_from_checkpoint() {
   } else {
     torch::serialize::InputArchive actor_archive;
     actor_archive.load_from((base / "model.pt").string(), device_);
-    actor_->load(actor_archive);
+    load_actor_from_archive(actor_, actor_archive, device_);
     sanitize_actor_parameters();
     actor_normalizer_.load(actor_archive);
     actor_->to(device_);
@@ -1355,6 +1387,10 @@ TrainerMetrics Trainer::update_actor(RolloutStorage& rollout, int update_index) 
                   rollout.action_log_probs.narrow(0, 0, rollout_steps_local),
                   1,
                   gpu_micro_indices).to(gpu_dev);
+              torch::Tensor mode_gpu_task_goals_mb = index_select_on_source_device(
+                  rollout.task_goal_positions.narrow(0, 0, rollout_steps_local),
+                  1,
+                  gpu_micro_indices).to(gpu_dev);
 
               torch::Tensor mode_gpu_advantages_mb = index_select_on_source_device(
                   normalized_advantages.narrow(0, 0, rollout_steps_local),
@@ -1385,7 +1421,7 @@ TrainerMetrics Trainer::update_actor(RolloutStorage& rollout, int update_index) 
                 ActorSequenceOutput output;
                 {
                   OptionalCudaAutocastGuard autocast_guard(use_cuda_amp_local);
-                  const torch::Tensor goal_values = policy_goal_values_like(obs, config_.goal_critic.goal_dim);
+                  const torch::Tensor goal_values = mode_gpu_task_goals_mb.narrow(0, chunk_start, loss_steps);
                   const torch::Tensor episode_starts = mode_gpu_episode_starts_mb.narrow(0, chunk_start, loss_steps);
                   output = gpu_act->forward_sequence(obs, goal_values, episode_starts);
                 }
@@ -2055,7 +2091,8 @@ Trainer::ESPopulationFitness Trainer::evaluate_es_population(
             torch::Tensor action_masks = action_masks_host.to(spec.device, use_pinned_host_buffers_).to(torch::kBool);
             torch::Tensor normalized_obs = shard_normalizer.normalize(raw_obs);
 
-            const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
+            const torch::Tensor goal_values = eval_collector->host_task_goal_positions()
+                .to(spec.device, use_pinned_host_buffers_);
             ActorStepOutput output = shard_actor->forward_step_stateful(
                 normalized_obs,
                 recurrent_state,
@@ -2584,7 +2621,8 @@ void Trainer::collect_rollout(
             shard_normalizer->update(raw_obs);
             shard_normalizer_update->update(raw_obs);
             normalized_obs = shard_normalizer->normalize(raw_obs);
-            const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
+            const torch::Tensor goal_values = collector_ptr->host_task_goal_positions()
+                .to(shard_device, use_pinned_host_buffers_);
             output = shard_actor->forward_step_stateful(
                 normalized_obs, recurrent_state, episode_starts, &recurrent_state, goal_values);
             actions = sample_masked_actions(
@@ -2698,6 +2736,7 @@ void Trainer::collect_rollout(
           shard_step.total_learner_steps = static_cast<std::int64_t>(learner_active_host.sum().item<float>());
 
           torch::Tensor goal_pos_host = collector.host_goal_positions();
+          torch::Tensor task_goal_host = collector.host_task_goal_positions();
           torch::Tensor goal_norms = goal_pos_host.norm(2, 1);
           float gd_min = goal_norms.min().item<float>();
           float gd_mean = goal_norms.mean().item<float>();
@@ -2730,6 +2769,7 @@ void Trainer::collect_rollout(
               truncated_host,
               collector.host_bootstrap_truncated(),
               goal_pos_host,
+              task_goal_host,
               terminal_labels,
               collector.host_terminal_observations(),
               output.encoded);
@@ -2822,7 +2862,8 @@ void Trainer::collect_rollout(
         torch::Tensor final_raw_obs = collector.host_observations().to(shard_device, use_pinned_host_buffers_);
         torch::Tensor final_normalized = shard_normalizer.normalize(final_raw_obs);
         torch::Tensor final_starts = collector.host_episode_starts().to(shard_device, use_pinned_host_buffers_);
-        const torch::Tensor final_goal_values = policy_goal_values_like(final_normalized, config_.goal_critic.goal_dim);
+        const torch::Tensor final_goal_values = collector.host_task_goal_positions()
+            .to(shard_device, use_pinned_host_buffers_);
         ActorStepOutput final_output = shard_actor->forward_step_stateful(
             final_normalized,
             rollout_recurrent_states[shard],
@@ -2872,7 +2913,8 @@ void Trainer::collect_rollout(
       torch::NoGradGuard no_grad;
       normalizer.update(raw_obs);
       normalized_obs = normalizer.normalize(raw_obs);
-      const torch::Tensor goal_values = policy_goal_values_like(normalized_obs, config_.goal_critic.goal_dim);
+      const torch::Tensor goal_values = collector_->host_task_goal_positions()
+          .to(device_, use_pinned_host_buffers_);
       output = rollout_actor->forward_step_stateful(
           normalized_obs,
           rollout_recurrent_states[0],
@@ -2988,6 +3030,7 @@ void Trainer::collect_rollout(
     }
 
     torch::Tensor goal_pos_host = collector_->host_goal_positions();
+    torch::Tensor task_goal_host = collector_->host_task_goal_positions();
     torch::Tensor goal_norms = goal_pos_host.norm(2, 1);
     float gd_min = goal_norms.min().item<float>();
     float gd_mean = goal_norms.mean().item<float>();
@@ -3030,6 +3073,7 @@ void Trainer::collect_rollout(
         truncated_host,
         bootstrap_truncated_host,
         goal_pos_host,
+        task_goal_host,
         terminal_labels,
         terminal_obs_host,
         output.encoded);
@@ -3046,7 +3090,8 @@ void Trainer::collect_rollout(
     torch::Tensor final_raw_obs = collector_->host_observations().to(device_, use_pinned_host_buffers_);
     torch::Tensor final_normalized = normalizer.normalize(final_raw_obs);
     torch::Tensor final_starts = collector_->host_episode_starts().to(device_, use_pinned_host_buffers_);
-    const torch::Tensor final_goal_values = policy_goal_values_like(final_normalized, config_.goal_critic.goal_dim);
+    const torch::Tensor final_goal_values = collector_->host_task_goal_positions()
+        .to(device_, use_pinned_host_buffers_);
     ActorStepOutput final_output = rollout_actor->forward_step_stateful(
         final_normalized,
         rollout_recurrent_states[0],
@@ -3333,7 +3378,7 @@ void Trainer::save_training_state(const std::filesystem::path& path) const {
 void Trainer::load_training_state(const std::filesystem::path& path) {
   torch::serialize::InputArchive archive;
   archive.load_from(path.string(), device_);
-  actor_->load(archive);
+  load_actor_from_archive(actor_, archive, device_);
   sanitize_actor_parameters();
   actor_normalizer_.load(archive);
   try {

@@ -26,7 +26,7 @@ int main() {
     // --- Construction with a single head name ---
     std::vector<std::string> head_names = {"extrinsic"};
     pulsar::RolloutStorage storage(rollout_len, num_agents, obs_dim, action_dim, 8,
-                                   torch::kCPU, head_names);
+                                   4, torch::kCPU, head_names);
 
     require(storage.capacity() == rollout_len, "capacity");
     require(storage.num_agents() == num_agents, "num agents");
@@ -46,14 +46,15 @@ int main() {
     auto dones = torch::zeros({num_agents});
     auto truncated = torch::zeros({num_agents});
     auto bootstrap = torch::zeros({num_agents});
-    auto goal_pos = torch::zeros({num_agents, 3});
+    auto goal_pos = torch::zeros({num_agents, 4});
+    auto task_goal_pos = torch::zeros({num_agents, 4});
     auto labels = torch::zeros({num_agents}, torch::kInt64);
     auto term_obs = torch::zeros({num_agents, obs_dim});
 
     for (int step = 0; step < rollout_len; step++) {
       storage.append(step, obs, ep_starts, action_masks, learner_active,
                      actions, action_log_probs, values, rewards,
-                     dones, truncated, bootstrap, goal_pos, labels, term_obs);
+                     dones, truncated, bootstrap, goal_pos, task_goal_pos, labels, term_obs);
     }
 
     require(storage.rollout_length() == rollout_len, "rollout length after append");
@@ -118,7 +119,7 @@ int main() {
     const int total_agents = 6;
     const int slice_offset = 0;
     pulsar::RolloutStorage slice_storage(rollout_len, total_agents, obs_dim, action_dim, 8,
-                                         torch::kCPU, head_names);
+                                         4, torch::kCPU, head_names);
 
     auto slice_obs = torch::ones({total_agents, obs_dim});
     auto slice_ep_starts = torch::zeros({total_agents}, torch::kBool);
@@ -133,7 +134,8 @@ int main() {
     auto slice_dones = torch::zeros({total_agents});
     auto slice_truncated = torch::zeros({total_agents});
     auto slice_bootstrap = torch::zeros({total_agents});
-    auto slice_goal_pos = torch::zeros({total_agents, 3});
+    auto slice_goal_pos = torch::zeros({total_agents, 4});
+    auto slice_task_goal_pos = torch::zeros({total_agents, 4});
     auto slice_labels = torch::zeros({total_agents}, torch::kInt64);
     auto slice_term_obs = torch::zeros({total_agents, obs_dim});
 
@@ -142,7 +144,7 @@ int main() {
                                  slice_obs, slice_ep_starts, slice_masks, slice_active,
                                  slice_acts, slice_lps, slice_vals, slice_rewards,
                                  slice_dones, slice_truncated, slice_bootstrap,
-                                 slice_goal_pos, slice_labels, slice_term_obs);
+                                 slice_goal_pos, slice_task_goal_pos, slice_labels, slice_term_obs);
       slice_storage.mark_step_filled(step);
     }
 
@@ -155,7 +157,7 @@ int main() {
     const int partial_agents = 3;
     const int partial_offset = 2;
     pulsar::RolloutStorage partial_storage(rollout_len, total_agents, obs_dim, action_dim, 8,
-                                           torch::kCPU, head_names);
+                                           4, torch::kCPU, head_names);
 
     auto partial_obs = torch::full({partial_agents, obs_dim}, 2.0f);
     auto partial_ep_starts = torch::zeros({partial_agents}, torch::kBool);
@@ -177,6 +179,7 @@ int main() {
                                    partial_acts, partial_lps, partial_vals, partial_rewards,
                                    partial_dones, partial_truncated, partial_bootstrap,
                                    slice_goal_pos.narrow(0, 0, partial_agents),
+                                   slice_task_goal_pos.narrow(0, 0, partial_agents),
                                    slice_labels.narrow(0, 0, partial_agents),
                                    slice_term_obs.narrow(0, 0, partial_agents));
       partial_storage.mark_step_filled(step);

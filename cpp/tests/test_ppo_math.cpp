@@ -180,9 +180,9 @@ int main() {
       require(torch::allclose(loss_gpu.detach().to(torch::kCPU), loss_cpu.detach(), 1.0e-5, 1.0e-5), "accelerated clipped PPO loss parity");
       require(torch::allclose(cur_gpu.grad().to(torch::kCPU), cur_cpu.grad(), 1.0e-5, 1.0e-5), "accelerated clipped PPO grad parity");
 
-      auto goals = torch::randn({7, 5, 3}, opts);
+      auto goals = torch::randn({7, 5, 4}, opts);
       auto future = pulsar::sample_future_goal_positions(goals, dones_cpu.to(opts), boot_cpu.to(opts), 4);
-      require(future.sizes() == torch::IntArrayRef({7, 5, 3}), "accelerated future goals shape");
+      require(future.sizes() == torch::IntArrayRef({7, 5, 4}), "accelerated future goals shape");
       require_finite(future.to(torch::kCPU), "accelerated future goals finite");
     }
 

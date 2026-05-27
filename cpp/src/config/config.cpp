@@ -164,11 +164,13 @@ void from_json(const json& j, ModelConfig& value) {
 void to_json(json& j, const GoalMappingConfig& value) {
   j = json{
       {"arena_max_distance", value.arena_max_distance},
+      {"goal_dim", value.goal_dim},
   };
 }
 
 void from_json(const json& j, GoalMappingConfig& value) {
   value.arena_max_distance = j.value("arena_max_distance", 8192.0F);
+  value.goal_dim = j.value("goal_dim", 4);
 }
 
 void to_json(json& j, const GoalCriticConfig& value) {
@@ -528,6 +530,12 @@ void validate_experiment_config(const ExperimentConfig& config) {
   }
   if (config.goal_mapping.arena_max_distance <= 0.0F) {
     throw std::invalid_argument("goal_mapping.arena_max_distance must be positive.");
+  }
+  if (config.goal_mapping.goal_dim != config.goal_critic.goal_dim) {
+    throw std::invalid_argument(
+        "goal_mapping.goal_dim must equal goal_critic.goal_dim ("
+        + std::to_string(config.goal_mapping.goal_dim) + " vs "
+        + std::to_string(config.goal_critic.goal_dim) + ").");
   }
   if (config.goal_critic.goal_dim <= 0) {
     throw std::invalid_argument("goal_critic.goal_dim must be positive.");

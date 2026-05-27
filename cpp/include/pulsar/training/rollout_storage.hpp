@@ -18,6 +18,7 @@ class RolloutStorage {
       int obs_dim,
       int action_dim,
       int encoder_dim,
+      int goal_dim,
       torch::Device device,
       std::vector<std::string> head_names = {"extrinsic"},
       bool pin_memory = false);
@@ -36,6 +37,7 @@ class RolloutStorage {
       const torch::Tensor& truncated,
       const torch::Tensor& bootstrap_truncated,
       const torch::Tensor& goal_positions,
+      const torch::Tensor& task_goal_positions,
       const torch::Tensor& terminal_outcome_labels,
       const torch::Tensor& terminal_observations,
       const torch::Tensor& encoded = {});
@@ -54,6 +56,7 @@ class RolloutStorage {
       const torch::Tensor& truncated,
       const torch::Tensor& bootstrap_truncated,
       const torch::Tensor& goal_positions,
+      const torch::Tensor& task_goal_positions,
       const torch::Tensor& terminal_outcome_labels,
       const torch::Tensor& terminal_observations,
       const torch::Tensor& encoded = {});
@@ -82,7 +85,8 @@ class RolloutStorage {
   torch::Tensor dones;
   torch::Tensor truncated;
   torch::Tensor bootstrap_truncated;
-  torch::Tensor goal_positions;
+  torch::Tensor goal_positions;       // [rollout_length, num_agents, goal_dim] — ball pos + speed (GCRL hindsight)
+  torch::Tensor task_goal_positions;  // [rollout_length, num_agents, goal_dim] — opponent net (actor conditioning)
   torch::Tensor terminal_outcome_labels;
   torch::Tensor terminal_observations;
   torch::Tensor mode_ids;  // int8, [rollout_length, num_agents], 0=unknown 1=1v1 2=2v2 3=3v3

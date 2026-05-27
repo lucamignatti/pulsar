@@ -22,6 +22,7 @@ RolloutStorage::RolloutStorage(
     int obs_dim,
     int action_dim,
     int encoder_dim,
+    int goal_dim,
     torch::Device device,
     std::vector<std::string> head_names,
     bool pin_memory)
@@ -43,7 +44,8 @@ RolloutStorage::RolloutStorage(
   dones = torch::zeros({rollout_length, num_agents}, opts);
   truncated = torch::zeros({rollout_length, num_agents}, opts);
   bootstrap_truncated = torch::zeros({rollout_length, num_agents}, opts);
-  goal_positions = torch::zeros({rollout_length, num_agents, 3}, opts);
+  goal_positions      = torch::zeros({rollout_length, num_agents, goal_dim}, opts);
+  task_goal_positions = torch::zeros({rollout_length, num_agents, goal_dim}, opts);
   terminal_outcome_labels = torch::full(
       {rollout_length, num_agents}, 2,
       opts.dtype(torch::kInt64));
@@ -71,6 +73,7 @@ void RolloutStorage::append(
     const torch::Tensor& truncated_in,
     const torch::Tensor& bootstrap_truncated_in,
     const torch::Tensor& goal_positions_in,
+    const torch::Tensor& task_goal_positions_in,
     const torch::Tensor& terminal_outcome_labels_in,
     const torch::Tensor& terminal_observations_in,
     const torch::Tensor& encoded_in) {
@@ -87,6 +90,7 @@ void RolloutStorage::append(
   copy_detached(truncated[step], truncated_in);
   copy_detached(bootstrap_truncated[step], bootstrap_truncated_in);
   copy_detached(goal_positions[step], goal_positions_in);
+  copy_detached(task_goal_positions[step], task_goal_positions_in);
   copy_detached(terminal_outcome_labels[step], terminal_outcome_labels_in);
   copy_detached(terminal_observations[step], terminal_observations_in);
   if (encoded_in.defined()) {
@@ -123,6 +127,7 @@ void RolloutStorage::append_slice(
     const torch::Tensor& truncated_in,
     const torch::Tensor& bootstrap_truncated_in,
     const torch::Tensor& goal_positions_in,
+    const torch::Tensor& task_goal_positions_in,
     const torch::Tensor& terminal_outcome_labels_in,
     const torch::Tensor& terminal_observations_in,
     const torch::Tensor& encoded_in) {
@@ -144,6 +149,7 @@ void RolloutStorage::append_slice(
   copy_detached(truncated[step].narrow(0, agent_offset, agent_count), truncated_in);
   copy_detached(bootstrap_truncated[step].narrow(0, agent_offset, agent_count), bootstrap_truncated_in);
   copy_detached(goal_positions[step].narrow(0, agent_offset, agent_count), goal_positions_in);
+  copy_detached(task_goal_positions[step].narrow(0, agent_offset, agent_count), task_goal_positions_in);
   copy_detached(terminal_outcome_labels[step].narrow(0, agent_offset, agent_count), terminal_outcome_labels_in);
   copy_detached(terminal_observations[step].narrow(0, agent_offset, agent_count), terminal_observations_in);
   if (encoded_in.defined()) {

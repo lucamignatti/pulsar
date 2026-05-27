@@ -8,17 +8,17 @@
     "tick_skip": 8,
     "tick_rate": 120,
     "max_episode_ticks": 36000,
-    "no_touch_timeout_seconds": 6.0,
-    "no_touch_timeout_only_before_first_touch": false,
+    "no_touch_timeout_seconds": 30.0,
+    "no_touch_timeout_only_before_first_touch": true,
     "spawn_opponents": true,
     "randomize_kickoffs": true,
-    "seed": 7
+    "seed": 67
   },
   "outcome": {
     "score": 20.0,
     "concede": -16.0,
     "neutral": 0.0,
-    "neutral_no_touch": 0.0,
+    "neutral_no_touch": -4.0,
     "team_spirit": 0.1,
     "step_penalty": -0.01
   },
@@ -65,15 +65,16 @@
     "overlap_collection_update": true
   },
   "goal_mapping": {
-    "arena_max_distance": 8192.0
+    "arena_max_distance": 8192.0,
+    "goal_dim": 4
   },
   "goal_critic": {
-    "goal_dim": 3,
-    "hidden_dim": 384,
-    "embedding_dim": 64,
+    "goal_dim": 4,
+    "hidden_dim": 768,
+    "embedding_dim": 1024,
     "logsumexp_penalty_coeff": 0.01,
     "lambda_Zg": 1.0,
-    "lambda_goal_actor": 0.0,
+    "lambda_goal_actor": 0.4,
     "contrastive_batch_size": 1024,
     "max_future_horizon": 256
   },
@@ -101,7 +102,7 @@
     "min_fitness_std": 1e-6
   },
   "self_play_league": {
-    "enabled": true,
+    "enabled": false,
     "opponent_probability": 0.5,
     "snapshot_interval_updates": 50,
     "max_snapshots": 4,

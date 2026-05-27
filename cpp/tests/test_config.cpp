@@ -179,7 +179,6 @@ int main() {
       pulsar::test::require(prod.schema_version == 6, "production config schema");
       pulsar::test::require(!prod.env.disable_truncation, "production config has truncation enabled");
       pulsar::test::require(prod.ppo.device == "cuda", "production config should train on CUDA by default");
-      pulsar::test::require(prod.self_play_league.enabled, "self_play_league enabled in production");
       pulsar::test::require(prod.self_play_league.max_snapshots == 4, "max_snapshots in production");
       pulsar::test::require(std::isfinite(prod.ppo.max_policy_log_ratio) && prod.ppo.max_policy_log_ratio >= 0.0f,
                             "production PPO log-ratio guard should be non-negative");

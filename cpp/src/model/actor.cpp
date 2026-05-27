@@ -513,6 +513,25 @@ ActorImpl::ActorImpl(
 
   goal_critic_ = GoalCritic(feature_dim_, config_.action_dim, goal_critic_config_.embedding_dim, goal_critic_config_.hidden_dim, goal_critic_config_.goal_dim);
   register_module("goal_critic", goal_critic_);
+
+  if (goal_critic_config_.goal_dim > 0) {
+    goal_proj_ = register_module("goal_proj",
+        torch::nn::Linear(goal_critic_config_.goal_dim, config_.encoder_dim));
+    // Near-zero init: starts as identity-ish residual, no sudden policy shift on first update
+    torch::NoGradGuard no_grad;
+    goal_proj_->weight.normal_(0.0F, 0.01F);
+    goal_proj_->bias.zero_();
+  }
+}
+
+torch::Tensor ActorImpl::apply_goal_residual(
+    const torch::Tensor& encoded,
+    const torch::Tensor& goal_values) {
+  if (!goal_proj_ || !goal_values.defined() || goal_values.numel() == 0) {
+    return encoded;
+  }
+  return encoded + goal_proj_->forward(
+      goal_values.to(encoded.device()).to(encoded.dtype()));
 }
 
 ActorStepOutput ActorImpl::forward_step(
@@ -521,6 +540,7 @@ ActorStepOutput ActorImpl::forward_step(
     bool compute_value) {
   PULSAR_TRACE_SCOPE_CAT("actor", "forward_step");
   torch::Tensor encoded = mamba2_encoder_->forward(obs);
+  encoded = apply_goal_residual(encoded, goal_values);
 
   torch::Tensor policy_logits = policy_head_forward(encoded);
   torch::Tensor value = compute_value ? value_head_forward(encoded) : torch::Tensor{};
@@ -537,6 +557,7 @@ ActorStepOutput ActorImpl::forward_step_stateful(
     bool compute_value) {
   PULSAR_TRACE_SCOPE_CAT("actor", "forward_step_stateful");
   torch::Tensor encoded = mamba2_encoder_->forward_step(obs, state, episode_starts, next_state);
+  encoded = apply_goal_residual(encoded, goal_values);
 
   torch::Tensor policy_logits = policy_head_forward(encoded);
   torch::Tensor value = compute_value ? value_head_forward(encoded) : torch::Tensor{};
@@ -565,6 +586,12 @@ ActorSequenceOutput ActorImpl::forward_sequence(
   const auto batch = obs_seq.size(1);
   torch::Tensor encoded_seq = mamba2_encoder_->forward_sequence(obs_seq, episode_starts);
   torch::Tensor encoded = encoded_seq.reshape({time * batch, config_.encoder_dim});
+
+  // Apply goal residual before policy head. goal_values: [time, batch, goal_dim] or [time*batch, goal_dim]
+  if (goal_proj_ && goal_values.defined() && goal_values.numel() > 0) {
+    torch::Tensor flat_goal = goal_values.reshape({time * batch, goal_critic_config_.goal_dim});
+    encoded = encoded + goal_proj_->forward(flat_goal.to(encoded.device()).to(encoded.dtype()));
+  }
 
   torch::Tensor policy_logits = policy_head_forward(encoded);
   torch::Tensor value;
@@ -626,8 +653,8 @@ torch::Tensor ActorImpl::policy_eggroll_logits(
     const torch::Tensor& A_stack,
     const torch::Tensor& B_stack,
     float sigma,
-    torch::Tensor /* goal_values */) {
-  torch::Tensor policy_input = features;
+    torch::Tensor goal_values) {
+  torch::Tensor policy_input = apply_goal_residual(features, goal_values);
   if (!policy_hidden_.is_empty()) {
     policy_input = policy_hidden_->forward(policy_input);
   }

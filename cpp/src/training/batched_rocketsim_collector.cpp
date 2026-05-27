@@ -36,11 +36,16 @@ std::vector<TransitionEnginePtr> make_default_engines(const ExperimentConfig& co
   return engines;
 }
 
+constexpr float kMaxBallSpeed = 2300.0F;
+
 void compute_goal_position(const EnvState& state, const GoalMappingConfig& cfg, float* out) {
   const BallState& ball = state.ball;
   out[0] = ball.position.x / cfg.arena_max_distance;
   out[1] = ball.position.y / cfg.arena_max_distance;
   out[2] = ball.position.z / cfg.arena_max_distance;
+  out[3] = std::hypot(ball.velocity.x,
+                      ball.velocity.y,
+                      ball.velocity.z) / kMaxBallSpeed;
 }
 
 std::uint64_t mix_obs_order_seed(std::uint64_t seed, std::size_t env_idx) {
@@ -145,7 +150,8 @@ void BatchedRocketSimCollector::initialize(
   host_terminal_outcome_labels_ = torch::full({static_cast<long>(total_agents_)}, 2, i64);
   host_terminal_observations_ =
       torch::zeros({static_cast<long>(total_agents_), obs_dim_}, f32);
-  host_goal_positions_ = torch::zeros({static_cast<long>(total_agents_), 3}, f32);
+  host_goal_positions_ = torch::zeros({static_cast<long>(total_agents_), 4}, f32);
+  host_task_goal_positions_ = torch::zeros({static_cast<long>(total_agents_), 4}, f32);
   host_ball_proximity_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   host_episode_ball_touch_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
   host_episode_ball_touch_count_ = torch::zeros({static_cast<long>(total_agents_)}, f32);
@@ -215,6 +221,7 @@ void BatchedRocketSimCollector::reset_all(CollectorTimings* timings) {
   host_terminal_outcome_labels_.fill_(2);
   host_terminal_observations_.zero_();
   host_goal_positions_.zero_();
+  host_task_goal_positions_.zero_();
   host_ball_proximity_.zero_();
   host_episode_ball_touch_.zero_();
   host_episode_ball_touch_count_.zero_();
@@ -254,6 +261,7 @@ void BatchedRocketSimCollector::reset_es_episode(int update_index, int episode_i
   host_terminal_outcome_labels_.fill_(2);
   host_terminal_observations_.zero_();
   host_goal_positions_.zero_();
+  host_task_goal_positions_.zero_();
   host_ball_proximity_.zero_();
   host_episode_ball_touch_.zero_();
   host_episode_ball_touch_count_.zero_();
@@ -459,6 +467,7 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
   float* gp_reward_ptr = host_gameplay_rewards_.data_ptr<float>();
   float* mech_reward_ptr = host_mechanic_rewards_.data_ptr<float>();
   float* bootstrap_truncated_ptr = host_bootstrap_truncated_.data_ptr<float>();
+  float* task_goal_pos_ptr = host_task_goal_positions_.data_ptr<float>();
   const std::size_t obs_stride = static_cast<std::size_t>(obs_dim_);
   const bool has_team_spirit = reward_engine_.has_team_spirit();
   host_dones_.zero_();
@@ -467,6 +476,7 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
   host_terminal_outcome_labels_.fill_(2);
   host_terminal_observations_.zero_();
   host_goal_positions_.zero_();
+  host_task_goal_positions_.zero_();
   host_ball_proximity_.zero_();
   host_rewards_.zero_();
   host_gameplay_rewards_.zero_();
@@ -559,7 +569,7 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
         gp_reward_ptr[global_idx] = breakdown.gameplay;
         mech_reward_ptr[global_idx] = breakdown.mechanic;
 
-        float goal_pos[3];
+        float goal_pos[4];
         compute_goal_position(current_state, config_.goal_mapping, goal_pos);
         if (config_.env.obs_x_mirror) {
           const bool inverted = car.team == Team::Orange;
@@ -568,10 +578,22 @@ void BatchedRocketSimCollector::finalize_step(CollectorTimings* timings) {
             goal_pos[0] = -goal_pos[0];
           }
         }
-        const int pos_offset = static_cast<int>(global_idx) * 3;
+        const int pos_offset = static_cast<int>(global_idx) * 4;
         goal_pos_ptr[pos_offset + 0] = goal_pos[0];
         goal_pos_ptr[pos_offset + 1] = goal_pos[1];
         goal_pos_ptr[pos_offset + 2] = goal_pos[2];
+        goal_pos_ptr[pos_offset + 3] = goal_pos[3];
+
+        // Task goal: opponent's net position (fixed per team), shared ball speed as 4th dim.
+        // Blue goal is at y=+5120, Orange goal is at y=-5120 in world frame.
+        // Blue wants to score at Orange's net (y=-5120); Orange wants to score at Blue's net (y=+5120).
+        constexpr float kArenaGoalY = 5120.0F;
+        const bool is_orange = (car.team == Team::Orange);
+        const float task_y = (is_orange ? kArenaGoalY : -kArenaGoalY) / config_.goal_mapping.arena_max_distance;
+        task_goal_pos_ptr[pos_offset + 0] = 0.0F;    // x: centre of goal mouth
+        task_goal_pos_ptr[pos_offset + 1] = task_y;
+        task_goal_pos_ptr[pos_offset + 2] = 0.0F;    // z: ground level
+        task_goal_pos_ptr[pos_offset + 3] = goal_pos[3];  // ball speed (same as GCRL goal dim 3)
       }
 
       if (has_team_spirit) {
@@ -736,6 +758,7 @@ void BatchedRocketSimCollector::step_after_physics_prefix(
   std::int64_t* labels_ptr = host_terminal_outcome_labels_.data_ptr<std::int64_t>();
   float* terminal_obs_ptr = host_terminal_observations_.data_ptr<float>();
   float* goal_pos_ptr = host_goal_positions_.data_ptr<float>();
+  float* task_goal_pos_ptr = host_task_goal_positions_.data_ptr<float>();
   float* ball_touch_ptr = host_ball_proximity_.data_ptr<float>();
   float* episode_touch_ptr = host_episode_ball_touch_.data_ptr<float>();
   float* episode_touch_count_ptr = host_episode_ball_touch_count_.data_ptr<float>();
@@ -863,7 +886,7 @@ void BatchedRocketSimCollector::step_after_physics_prefix(
         gp_reward_ptr[gi] = bd.gameplay;
         mech_reward_ptr[gi] = bd.mechanic;
 
-        float goal_pos[3];
+        float goal_pos[4];
         compute_goal_position(current_state, config_.goal_mapping, goal_pos);
         if (config_.env.obs_x_mirror) {
           const bool inverted = car.team == Team::Orange;
@@ -872,10 +895,19 @@ void BatchedRocketSimCollector::step_after_physics_prefix(
             goal_pos[0] = -goal_pos[0];
           }
         }
-        const int po = static_cast<int>(gi) * 3;
-        goal_pos_ptr[po] = goal_pos[0];
+        const int po = static_cast<int>(gi) * 4;
+        goal_pos_ptr[po + 0] = goal_pos[0];
         goal_pos_ptr[po + 1] = goal_pos[1];
         goal_pos_ptr[po + 2] = goal_pos[2];
+        goal_pos_ptr[po + 3] = goal_pos[3];
+
+        constexpr float kArenaGoalY = 5120.0F;
+        const bool is_orange = (car.team == Team::Orange);
+        const float task_y = (is_orange ? kArenaGoalY : -kArenaGoalY) / config_.goal_mapping.arena_max_distance;
+        task_goal_pos_ptr[po + 0] = 0.0F;
+        task_goal_pos_ptr[po + 1] = task_y;
+        task_goal_pos_ptr[po + 2] = 0.0F;
+        task_goal_pos_ptr[po + 3] = goal_pos[3];  // ball speed
       }
 
       // Team spirit: each agent's reward gets a fraction of teammates' rewards
@@ -1079,6 +1111,10 @@ const torch::Tensor& BatchedRocketSimCollector::host_terminal_observations() con
 
 const torch::Tensor& BatchedRocketSimCollector::host_goal_positions() const {
   return host_goal_positions_;
+}
+
+const torch::Tensor& BatchedRocketSimCollector::host_task_goal_positions() const {
+  return host_task_goal_positions_;
 }
 
 const torch::Tensor& BatchedRocketSimCollector::host_ball_proximity() const {

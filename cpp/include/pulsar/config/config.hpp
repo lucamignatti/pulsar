@@ -64,10 +64,11 @@ struct ModelConfig {
 
 struct GoalMappingConfig {
   float arena_max_distance = 8192.0F;
+  int goal_dim = 4;  // must equal goal_critic.goal_dim
 };
 
 struct GoalCriticConfig {
-  int goal_dim = 3;
+  int goal_dim = 4;
   int hidden_dim = 256;
   int embedding_dim = 64;
   float logsumexp_penalty_coeff = 0.01F;

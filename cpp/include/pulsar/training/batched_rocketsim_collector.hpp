@@ -116,6 +116,7 @@ class BatchedRocketSimCollector {
   [[nodiscard]] const torch::Tensor& host_terminal_outcome_labels() const;
   [[nodiscard]] const torch::Tensor& host_terminal_observations() const;
   [[nodiscard]] const torch::Tensor& host_goal_positions() const;
+  [[nodiscard]] const torch::Tensor& host_task_goal_positions() const;
   [[nodiscard]] const torch::Tensor& host_ball_proximity() const;
   [[nodiscard]] const torch::Tensor& host_episode_ball_touch() const;
   [[nodiscard]] const torch::Tensor& host_episode_ball_touch_count() const;
@@ -172,6 +173,7 @@ class BatchedRocketSimCollector {
   torch::Tensor host_terminal_outcome_labels_;
   torch::Tensor host_terminal_observations_;
   torch::Tensor host_goal_positions_;
+  torch::Tensor host_task_goal_positions_;
   torch::Tensor host_ball_proximity_;
   torch::Tensor host_episode_ball_touch_;
   torch::Tensor host_episode_ball_touch_count_;
