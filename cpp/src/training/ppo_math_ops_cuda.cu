@@ -464,4 +464,5 @@ at::Tensor sample_future_goal_positions_cuda(
   return sampled;
 }
 
+}  // namespace
 }  // namespace pulsar
