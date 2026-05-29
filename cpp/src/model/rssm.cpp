@@ -157,13 +157,16 @@ std::vector<RSSMStepOutput> RSSMWorldModelImpl::forward_sequence(
     const torch::Tensor& obs_seq,
     const torch::Tensor& action_seq,
     const torch::Tensor& episode_starts,
-    const torch::Tensor& goal_seq) {
+    const torch::Tensor& goal_seq,
+    const RSSMState* initial_state) {
 
   const int64_t T = obs_seq.size(0);
   const int64_t batch = obs_seq.size(1);
   const torch::Device dev = obs_seq.device();
 
-  RSSMState state = zero_state(batch, dev);
+  RSSMState state = (initial_state != nullptr)
+      ? *initial_state
+      : zero_state(batch, dev);
   std::vector<RSSMStepOutput> outputs;
   outputs.reserve(static_cast<std::size_t>(T));
 

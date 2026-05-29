@@ -41,11 +41,13 @@ class RSSMWorldModelImpl : public torch::nn::Module {
 
   // Full sequence for TBPTT. goal_seq is used to train the goal head.
   // Returns one RSSMStepOutput per timestep.
+  // If initial_state is provided, uses it as the starting state instead of zero_state.
   std::vector<RSSMStepOutput> forward_sequence(
       const torch::Tensor& obs_seq,         // [T, batch, obs_dim]
       const torch::Tensor& action_seq,      // [T, batch] int64
       const torch::Tensor& episode_starts,  // [T, batch] float
-      const torch::Tensor& goal_seq);       // [T, batch, goal_dim]
+      const torch::Tensor& goal_seq,        // [T, batch, goal_dim]
+      const RSSMState* initial_state = nullptr);
 
   // goal head: latent → 4D goal prediction
   torch::Tensor predict_goal(const torch::Tensor& latent);

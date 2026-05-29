@@ -1140,16 +1140,16 @@ TrainerMetrics Trainer::update_actor(RolloutStorage& rollout, int update_index) 
   const int rollout_steps = rollout.rollout_length();
 
   // ---- RSSM world model update + intrinsic rewards ----
+  // TBPTT: compute_losses calls .backward() per chunk internally (each chunk_size steps).
+  // We zero_grad before the first chunk and step once after all chunks complete.
   WorldModelLosses wm_losses{};
   if (world_model_trainer_ && actor_->rssm()) {
     actor_optimizer_.zero_grad();
     const torch::Tensor intrinsic_rewards = world_model_trainer_->compute_losses(
         actor_->rssm(), rollout, config_, wm_losses);
-    if (wm_losses.total.defined() && torch::isfinite(wm_losses.total).item<bool>()) {
-      wm_losses.total.backward();
-      clip_existing_gradients(*actor_, config_.ppo.max_grad_norm);
-      actor_optimizer_.step();
-    }
+    // backward() was already called per TBPTT chunk — just clip and step
+    clip_existing_gradients(*actor_, config_.ppo.max_grad_norm);
+    actor_optimizer_.step();
     actor_optimizer_.zero_grad();
     metrics.rssm_kl_loss = wm_losses.kl_loss_val;
     metrics.rssm_consistency_loss = wm_losses.consistency_loss_val;

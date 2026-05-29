@@ -48,7 +48,7 @@ class WorldModelTrainer {
       int horizon,
       float icm_threshold);
 
- private:
+ public:
   static torch::Tensor kl_divergence_free_bits(
       const torch::Tensor& post_mean,
       const torch::Tensor& post_logvar,
