@@ -392,153 +392,179 @@ void append_metrics_line(
     const std::filesystem::path& checkpoint_dir,
     int update_index,
     std::int64_t global_step,
-    const TrainerMetrics& metrics) {
-  nlohmann::json line = {
-      {"update", update_index},
-      {"global_step", global_step},
-      {"collection_agent_steps_per_second", metrics.collection_agent_steps_per_second},
-      {"update_agent_steps_per_second", metrics.update_agent_steps_per_second},
-      {"overall_agent_steps_per_second", metrics.overall_agent_steps_per_second},
-      {"update_seconds", metrics.update_seconds},
-      {"policy_loss", metrics.policy_loss},
-      {"value_loss", metrics.value_loss},
-      {"entropy", metrics.entropy},
-      {"grad_norm", metrics.grad_norm_valid_steps > 0 ? nlohmann::json(metrics.grad_norm) : nlohmann::json(nullptr)},
-      {"grad_norm_valid_steps", metrics.grad_norm_valid_steps},
-      {"optimizer_steps", metrics.optimizer_steps},
-      {"policy_approx_kl", metrics.policy_approx_kl},
-      {"kl_divergence", metrics.policy_approx_kl},
-      {"policy_clip_fraction", metrics.policy_clip_fraction},
-      {"policy_log_ratio_abs_max", metrics.policy_log_ratio_abs_max},
-      {"nonfinite_loss_skips", metrics.nonfinite_loss_skips},
-      {"nonfinite_grad_norm_skips", metrics.nonfinite_grad_norm_skips},
-      {"kl_guard_skips", metrics.kl_guard_skips},
-      {"grad_norm_guard_skips", metrics.grad_norm_guard_skips},
-      {"total_reward_mean", metrics.total_reward_mean},
-      {"gameplay_reward_mean", metrics.gameplay_reward_mean},
-      {"mechanic_reward_mean", metrics.mechanic_reward_mean},
-      {"sampled_value_win_mean", metrics.sampled_value_win_mean},
-      {"rollout_steps", metrics.rollout_steps},
-      {"completed_episodes", metrics.completed_episodes},
-      {"scored_episodes", metrics.scored_episodes},
-      {"conceded_episodes", metrics.conceded_episodes},
-      {"neutral_episodes", metrics.neutral_episodes},
-      {"no_touch_episodes", metrics.no_touch_episodes},
-      {"truncated_episodes", metrics.truncated_episodes},
-      {"goal_critic_loss", metrics.goal_critic_loss},
-      {"mean_goal_score", metrics.mean_goal_score},
-      {"mean_sampled_goal_distance", metrics.mean_sampled_goal_distance},
-      {"mean_goal_distance", metrics.mean_goal_distance},
-      {"min_goal_distance", metrics.min_goal_distance},
-      {"ball_proximity_rate", metrics.ball_proximity_rate},
-      {"goals_scored", metrics.goals_scored},
-      {"goals_conceded", metrics.goals_conceded},
-      {"obs_build_seconds", metrics.obs_build_seconds},
-      {"mask_build_seconds", metrics.mask_build_seconds},
-      {"policy_forward_seconds", metrics.policy_forward_seconds},
-      {"action_decode_seconds", metrics.action_decode_seconds},
-      {"env_step_seconds", metrics.env_step_seconds},
-      {"done_reset_seconds", metrics.done_reset_seconds},
-      {"forward_backward_seconds", metrics.forward_backward_seconds},
-      {"optimizer_step_seconds", metrics.optimizer_step_seconds},
-      {"process_rss_mb", metrics.process_rss_mb},
-      {"process_peak_rss_mb", metrics.process_peak_rss_mb},
-      {"cgroup_memory_current_mb", metrics.cgroup_memory_current_mb},
-      {"cgroup_memory_limit_mb", metrics.cgroup_memory_limit_mb},
-      {"cuda_memory_allocated_mb", metrics.cuda_memory_allocated_mb},
-      {"cuda_memory_reserved_mb", metrics.cuda_memory_reserved_mb},
-      {"cuda_max_memory_allocated_mb", metrics.cuda_max_memory_allocated_mb},
-      {"cuda_max_memory_reserved_mb", metrics.cuda_max_memory_reserved_mb},
-      {"cuda_alloc_retries", metrics.cuda_alloc_retries},
-      {"cuda_ooms", metrics.cuda_ooms},
-      {"es_fitness_mean", metrics.es_fitness_mean},
-      {"es_fitness_std", metrics.es_fitness_std},
-      {"es_fitness_best", metrics.es_fitness_best},
-      {"es_reward_mean", metrics.es_reward_mean},
-      {"es_winrate_mean", metrics.es_winrate_mean},
-      {"es_kl_mean", metrics.es_kl_mean},
-      {"es_update_norm", metrics.es_update_norm},
-      {"es_lora_a_norm", metrics.es_lora_a_norm},
-      {"es_lora_b_norm", metrics.es_lora_b_norm},
-      {"es_seconds", metrics.es_seconds},
-      {"es_eval_seconds", metrics.es_eval_seconds},
-      {"es_agent_steps_per_second", metrics.es_agent_steps_per_second},
-      {"es_effective_population", metrics.es_effective_population},
-      {"es_virtual_population_waves", metrics.es_virtual_population_waves},
-      {"es_eval_shards", metrics.es_eval_shards},
-      {"es_policy_update_norm", metrics.es_policy_update_norm},
-      {"scored_episode_rate", metrics.scored_episode_rate},
-      {"conceded_episode_rate", metrics.conceded_episode_rate},
-      {"neutral_episode_rate", metrics.neutral_episode_rate},
-      {"no_touch_episode_rate", metrics.no_touch_episode_rate},
-      {"truncated_episode_rate", metrics.truncated_episode_rate},
-      {"touch_episode_rate", metrics.touch_episode_rate},
-      {"multi_touch_episode_rate", metrics.multi_touch_episode_rate},
-      {"advantage_std", metrics.advantage_std},
-  };
+    const TrainerMetrics& metrics,
+    bool es_fired);
+
+struct MetricItem {
+  std::string key;
+  nlohmann::json value;
+  std::string section;
+};
+
+std::vector<MetricItem> get_all_metrics(
+    const TrainerMetrics& metrics,
+    int update_index,
+    std::int64_t global_step,
+    bool es_fired) {
+  std::vector<MetricItem> items;
+
+  // 1. Core PPO Optimization Metrics
+  items.push_back({"update", update_index, "Optimization"});
+  items.push_back({"global_step", global_step, "Optimization"});
+  items.push_back({"policy_loss", metrics.policy_loss, "Optimization"});
+  items.push_back({"value_loss", metrics.value_loss, "Optimization"});
+  items.push_back({"entropy", metrics.entropy, "Optimization"});
+  items.push_back({"grad_norm", metrics.grad_norm_valid_steps > 0 ? nlohmann::json(metrics.grad_norm) : nlohmann::json(nullptr), "Optimization"});
+  items.push_back({"grad_norm_valid_steps", metrics.grad_norm_valid_steps, "Optimization"});
+  items.push_back({"optimizer_steps", metrics.optimizer_steps, "Optimization"});
+  items.push_back({"policy_approx_kl", metrics.policy_approx_kl, "Optimization"});
+  items.push_back({"kl_divergence", metrics.policy_approx_kl, "Optimization"});
+  items.push_back({"policy_clip_fraction", metrics.policy_clip_fraction, "Optimization"});
+  items.push_back({"policy_log_ratio_abs_max", metrics.policy_log_ratio_abs_max, "Optimization"});
+  items.push_back({"nonfinite_loss_skips", metrics.nonfinite_loss_skips, "Optimization"});
+  items.push_back({"nonfinite_grad_norm_skips", metrics.nonfinite_grad_norm_skips, "Optimization"});
+  items.push_back({"kl_guard_skips", metrics.kl_guard_skips, "Optimization"});
+  items.push_back({"grad_norm_guard_skips", metrics.grad_norm_guard_skips, "Optimization"});
+  items.push_back({"rollout_steps", metrics.rollout_steps, "Optimization"});
+  items.push_back({"advantage_std", metrics.advantage_std, "Optimization"});
+
+  // 2. Anchor Evaluation Metrics
+  if (metrics.anchor_win_rate >= 0.0) {
+    items.push_back({"anchor_win_rate", metrics.anchor_win_rate, "Optimization"});
+    items.push_back({"anchor_eval_seconds", metrics.anchor_eval_seconds, "Optimization"});
+    items.push_back({"anchor_eval_episodes", metrics.anchor_eval_episodes, "Optimization"});
+    items.push_back({"anchor_updated", metrics.anchor_updated ? 1 : 0, "Optimization"});
+  }
+
+  // 3. System Metrics
+  items.push_back({"process_rss_mb", metrics.process_rss_mb, "System"});
+  items.push_back({"process_peak_rss_mb", metrics.process_peak_rss_mb, "System"});
+  items.push_back({"cgroup_memory_current_mb", metrics.cgroup_memory_current_mb, "System"});
+  items.push_back({"cgroup_memory_limit_mb", metrics.cgroup_memory_limit_mb, "System"});
+  items.push_back({"cuda_memory_allocated_mb", metrics.cuda_memory_allocated_mb, "System"});
+  items.push_back({"cuda_memory_reserved_mb", metrics.cuda_memory_reserved_mb, "System"});
+  items.push_back({"cuda_max_memory_allocated_mb", metrics.cuda_max_memory_allocated_mb, "System"});
+  items.push_back({"cuda_max_memory_reserved_mb", metrics.cuda_max_memory_reserved_mb, "System"});
+  items.push_back({"cuda_alloc_retries", metrics.cuda_alloc_retries, "System"});
+  items.push_back({"cuda_ooms", metrics.cuda_ooms, "System"});
+
+  // 4. Reward & Gameplay Metrics
+  items.push_back({"total_reward_mean", metrics.total_reward_mean, "Rewards"});
+  items.push_back({"gameplay_reward_mean", metrics.gameplay_reward_mean, "Rewards"});
+  items.push_back({"mechanic_reward_mean", metrics.mechanic_reward_mean, "Rewards"});
+  items.push_back({"completed_episodes", metrics.completed_episodes, "Rewards"});
+  items.push_back({"conceded_episodes", metrics.conceded_episodes, "Rewards"});
+  items.push_back({"neutral_episodes", metrics.neutral_episodes, "Rewards"});
+  items.push_back({"no_touch_episodes", metrics.no_touch_episodes, "Rewards"});
+  items.push_back({"truncated_episodes", metrics.truncated_episodes, "Rewards"});
+  items.push_back({"touch_episode_rate", metrics.touch_episode_rate, "Rewards"});
+  items.push_back({"multi_touch_episode_rate", metrics.multi_touch_episode_rate, "Rewards"});
+  items.push_back({"scored_episode_rate", metrics.scored_episode_rate, "Rewards"});
+  items.push_back({"conceded_episode_rate", metrics.conceded_episode_rate, "Rewards"});
+  items.push_back({"neutral_episode_rate", metrics.neutral_episode_rate, "Rewards"});
+  items.push_back({"no_touch_episode_rate", metrics.no_touch_episode_rate, "Rewards"});
+  items.push_back({"truncated_episode_rate", metrics.truncated_episode_rate, "Rewards"});
+  items.push_back({"ball_proximity_rate", metrics.ball_proximity_rate, "Rewards"});
+  items.push_back({"goals_scored", metrics.goals_scored, "Rewards"});
+  items.push_back({"goals_conceded", metrics.goals_conceded, "Rewards"});
+
+  // 5. GCRL Metrics
+  items.push_back({"sampled_value_win_mean", metrics.sampled_value_win_mean, "GCRL"});
+  items.push_back({"goal_critic_loss", metrics.goal_critic_loss, "GCRL"});
+  items.push_back({"mean_goal_score", metrics.mean_goal_score, "GCRL"});
+  items.push_back({"mean_sampled_goal_distance", metrics.mean_sampled_goal_distance, "GCRL"});
+  items.push_back({"mean_goal_distance", metrics.mean_goal_distance, "GCRL"});
+  items.push_back({"min_goal_distance", metrics.min_goal_distance, "GCRL"});
+
+  // 6. Dynamic Shard Mode Metrics
   for (const auto& [mode, rate] : metrics.mode_touch_rates) {
-    line["mode_" + mode + "_touch_episode_rate"] = rate;
+    items.push_back({"mode_" + mode + "_touch_episode_rate", rate, mode});
   }
   for (const auto& [mode, rate] : metrics.mode_multi_touch_rates) {
-    line["mode_" + mode + "_multi_touch_episode_rate"] = rate;
+    items.push_back({"mode_" + mode + "_multi_touch_episode_rate", rate, mode});
   }
   for (const auto& [mode, rate] : metrics.mode_scored_rates) {
-    line["mode_" + mode + "_scored_episode_rate"] = rate;
+    items.push_back({"mode_" + mode + "_scored_episode_rate", rate, mode});
   }
   for (const auto& [mode, count] : metrics.mode_completed_episodes) {
-    line["mode_" + mode + "_completed_episodes"] = count;
+    items.push_back({"mode_" + mode + "_completed_episodes", count, mode});
   }
+
+  // 7. ES-LoRA Metrics
+  if (es_fired) {
+    items.push_back({"es_fitness_mean", metrics.es_fitness_mean, "ES-LoRA"});
+    items.push_back({"es_fitness_std", metrics.es_fitness_std, "ES-LoRA"});
+    items.push_back({"es_fitness_best", metrics.es_fitness_best, "ES-LoRA"});
+    items.push_back({"es_reward_mean", metrics.es_reward_mean, "ES-LoRA"});
+    items.push_back({"es_winrate_mean", metrics.es_winrate_mean, "ES-LoRA"});
+    items.push_back({"es_kl_mean", metrics.es_kl_mean, "ES-LoRA"});
+    items.push_back({"es_update_norm", metrics.es_update_norm, "ES-LoRA"});
+    items.push_back({"es_lora_a_norm", metrics.es_lora_a_norm, "ES-LoRA"});
+    items.push_back({"es_lora_b_norm", metrics.es_lora_b_norm, "ES-LoRA"});
+    items.push_back({"es_seconds", metrics.es_seconds, "ES-LoRA"});
+    items.push_back({"es_eval_seconds", metrics.es_eval_seconds, "ES-LoRA"});
+    items.push_back({"es_agent_steps_per_second", metrics.es_agent_steps_per_second, "ES-LoRA"});
+    items.push_back({"es_effective_population", metrics.es_effective_population, "ES-LoRA"});
+    items.push_back({"es_virtual_population_waves", metrics.es_virtual_population_waves, "ES-LoRA"});
+    items.push_back({"es_eval_shards", metrics.es_eval_shards, "ES-LoRA"});
+    items.push_back({"es_policy_update_norm", metrics.es_policy_update_norm, "ES-LoRA"});
+  }
+
+  // 8. Performance Timing Metrics
+  items.push_back({"obs_build_seconds", metrics.obs_build_seconds, "System"});
+  items.push_back({"mask_build_seconds", metrics.mask_build_seconds, "System"});
+  items.push_back({"policy_forward_seconds", metrics.policy_forward_seconds, "System"});
+  items.push_back({"action_decode_seconds", metrics.action_decode_seconds, "System"});
+  items.push_back({"env_step_seconds", metrics.env_step_seconds, "System"});
+  items.push_back({"done_reset_seconds", metrics.done_reset_seconds, "System"});
+  items.push_back({"forward_backward_seconds", metrics.forward_backward_seconds, "System"});
+  items.push_back({"optimizer_step_seconds", metrics.optimizer_step_seconds, "System"});
+
+  // 9. RSSM World Model Metrics (NEW)
+  items.push_back({"rssm_kl_loss", metrics.rssm_kl_loss, "Predictor"});
+  items.push_back({"rssm_consistency_loss", metrics.rssm_consistency_loss, "Predictor"});
+  items.push_back({"rssm_icm_forward_loss", metrics.rssm_icm_forward_loss, "Predictor"});
+  items.push_back({"rssm_icm_inverse_loss", metrics.rssm_icm_inverse_loss, "Predictor"});
+  items.push_back({"rssm_goal_head_loss", metrics.rssm_goal_head_loss, "Predictor"});
+  items.push_back({"intrinsic_reward_mean", metrics.intrinsic_reward_mean, "Exploration"});
+  items.push_back({"intrinsic_beta", metrics.intrinsic_beta, "Exploration"});
+
+  // 10. SAC Off-Policy Metrics (NEW)
+  items.push_back({"sac_td_loss", metrics.sac_td_loss, "Optimization"});
+  items.push_back({"sac_lql_loss", metrics.sac_lql_loss, "Optimization"});
+  items.push_back({"sac_total_loss", metrics.sac_total_loss, "Optimization"});
+  items.push_back({"sac_mean_q", metrics.sac_mean_q, "Optimization"});
+  items.push_back({"sac_max_q", metrics.sac_max_q, "Optimization"});
+  items.push_back({"replay_buffer_size", metrics.replay_buffer_size, "Optimization"});
+
+  // 11. PBRS Shaping Metrics (NEW)
+  items.push_back({"pbrs_weight", metrics.pbrs_weight, "Rewards"});
+  items.push_back({"pbrs_shaping_mean", metrics.pbrs_shaping_mean, "Rewards"});
+
+  // 12. Subgoal Planner Metrics (NEW)
+  items.push_back({"subgoal_reachability_mean", metrics.subgoal_reachability_mean, "GCRL"});
+  items.push_back({"subgoal_replans", metrics.subgoal_replans, "GCRL"});
+  items.push_back({"subgoal_early_aborts", metrics.subgoal_early_aborts, "GCRL"});
+  items.push_back({"subgoal_shaping_mean", metrics.subgoal_shaping_mean, "GCRL"});
+
+  return items;
+}
+
+void append_metrics_line(
+    const std::filesystem::path& checkpoint_dir,
+    int update_index,
+    std::int64_t global_step,
+    const TrainerMetrics& metrics,
+    bool es_fired) {
+  nlohmann::json line = nlohmann::json::object();
+  for (const auto& item : get_all_metrics(metrics, update_index, global_step, es_fired)) {
+    line[item.key] = item.value;
+  }
+  
+  if (checkpoint_dir.empty()) return;
   std::filesystem::create_directories(checkpoint_dir);
   std::ofstream output(checkpoint_dir / "metrics.jsonl", std::ios::app);
   output << line.dump() << '\n';
-}
-
-nlohmann::json wandb_section_order() {
-  return nlohmann::json::array({
-      "Tables",
-      "1v1",
-      "2v2",
-      "3v3",
-      "Rewards",
-      "GCRL",
-      "ES-LoRA",
-      "Optimization",
-      "Charts",
-      "System",
-      "Hidden Panels",
-  });
-}
-
-void register_wandb_metric_section(
-    nlohmann::json& sections,
-    const std::string& section,
-    const std::string& key) {
-  if (!section.empty() && !key.empty()) {
-    sections[key] = section;
-  }
-}
-
-void add_wandb_metric(
-    nlohmann::json& payload,
-    nlohmann::json& sections,
-    const std::string& section,
-    const std::string& key,
-    nlohmann::json value) {
-  register_wandb_metric_section(sections, section, key);
-  payload[key] = std::move(value);
-}
-
-std::vector<std::string> configured_wandb_modes(const ExperimentConfig& config) {
-  std::vector<std::string> modes;
-  modes.push_back(std::to_string(config.env.team_size) + "v" + std::to_string(config.env.team_size));
-  return modes;
-}
-
-void register_mode_wandb_sections(nlohmann::json& sections, const std::string& mode) {
-  register_wandb_metric_section(sections, mode, "mode_" + mode + "_touch_episode_rate");
-  register_wandb_metric_section(sections, mode, "mode_" + mode + "_multi_touch_episode_rate");
-  register_wandb_metric_section(sections, mode, "mode_" + mode + "_scored_episode_rate");
-  register_wandb_metric_section(sections, mode, "mode_" + mode + "_completed_episodes");
 }
 
 std::shared_ptr<MutatorSequence> make_es_eval_reset_mutator(const EnvConfig& config) {
@@ -4017,7 +4043,7 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
     coll_metrics.cgroup_memory_limit_mb = cgroup_memory.limit_mb;
     sample_cuda_memory_stats(coll_metrics, compute_devices_);
 
-    append_metrics_line(checkpoint_dir, update_index, global_step, coll_metrics);
+    append_metrics_line(checkpoint_dir, update_index, global_step, coll_metrics, es_fired_this_update);
     std::cout << "update=" << update_index
               << " global_step=" << global_step
               << " policy_loss=" << coll_metrics.policy_loss
@@ -4063,97 +4089,8 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
               << " cuda_ooms=" << coll_metrics.cuda_ooms
               << '\n';
     if (wandb.enabled()) {
-      wandb.add_metric("Optimization", "update", update_index);
-      wandb.add_metric("Optimization", "global_step", global_step);
-      wandb.add_metric("Optimization", "policy_loss", coll_metrics.policy_loss);
-      wandb.add_metric("Optimization", "value_loss", coll_metrics.value_loss);
-      wandb.add_metric("Optimization", "entropy", coll_metrics.entropy);
-      wandb.add_metric(
-          "Optimization",
-          "grad_norm",
-          coll_metrics.grad_norm_valid_steps > 0 ? nlohmann::json(coll_metrics.grad_norm) : nlohmann::json(nullptr));
-      wandb.add_metric("Optimization", "grad_norm_valid_steps", coll_metrics.grad_norm_valid_steps);
-      wandb.add_metric("Optimization", "optimizer_steps", coll_metrics.optimizer_steps);
-      wandb.add_metric("Optimization", "policy_approx_kl", coll_metrics.policy_approx_kl);
-      wandb.add_metric("Optimization", "kl_divergence", coll_metrics.policy_approx_kl);
-      wandb.add_metric("Optimization", "policy_clip_fraction", coll_metrics.policy_clip_fraction);
-      wandb.add_metric("Optimization", "policy_log_ratio_abs_max", coll_metrics.policy_log_ratio_abs_max);
-      wandb.add_metric("Optimization", "nonfinite_loss_skips", coll_metrics.nonfinite_loss_skips);
-      wandb.add_metric("Optimization", "nonfinite_grad_norm_skips", coll_metrics.nonfinite_grad_norm_skips);
-      wandb.add_metric("Optimization", "kl_guard_skips", coll_metrics.kl_guard_skips);
-      wandb.add_metric("Optimization", "grad_norm_guard_skips", coll_metrics.grad_norm_guard_skips);
-      wandb.add_metric("Optimization", "rollout_steps", coll_metrics.rollout_steps);
-      wandb.add_metric("Optimization", "advantage_std", coll_metrics.advantage_std);
-
-      wandb.add_metric("System", "process_rss_mb", coll_metrics.process_rss_mb);
-      wandb.add_metric("System", "process_peak_rss_mb", coll_metrics.process_peak_rss_mb);
-      wandb.add_metric("System", "cgroup_memory_current_mb", coll_metrics.cgroup_memory_current_mb);
-      wandb.add_metric("System", "cgroup_memory_limit_mb", coll_metrics.cgroup_memory_limit_mb);
-      wandb.add_metric("System", "cuda_memory_allocated_mb", coll_metrics.cuda_memory_allocated_mb);
-      wandb.add_metric("System", "cuda_memory_reserved_mb", coll_metrics.cuda_memory_reserved_mb);
-      wandb.add_metric("System", "cuda_max_memory_allocated_mb", coll_metrics.cuda_max_memory_allocated_mb);
-      wandb.add_metric("System", "cuda_max_memory_reserved_mb", coll_metrics.cuda_max_memory_reserved_mb);
-      wandb.add_metric("System", "cuda_alloc_retries", coll_metrics.cuda_alloc_retries);
-      wandb.add_metric("System", "cuda_ooms", coll_metrics.cuda_ooms);
-
-      wandb.add_metric("Rewards", "total_reward_mean", coll_metrics.total_reward_mean);
-      wandb.add_metric("Rewards", "gameplay_reward_mean", coll_metrics.gameplay_reward_mean);
-      wandb.add_metric("Rewards", "mechanic_reward_mean", coll_metrics.mechanic_reward_mean);
-      wandb.add_metric("Rewards", "completed_episodes", coll_metrics.completed_episodes);
-      wandb.add_metric("Rewards", "conceded_episodes", coll_metrics.conceded_episodes);
-      wandb.add_metric("Rewards", "neutral_episodes", coll_metrics.neutral_episodes);
-      wandb.add_metric("Rewards", "no_touch_episodes", coll_metrics.no_touch_episodes);
-      wandb.add_metric("Rewards", "truncated_episodes", coll_metrics.truncated_episodes);
-      wandb.add_metric("Rewards", "touch_episode_rate", coll_metrics.touch_episode_rate);
-      wandb.add_metric("Rewards", "multi_touch_episode_rate", coll_metrics.multi_touch_episode_rate);
-      wandb.add_metric("Rewards", "scored_episode_rate", coll_metrics.scored_episode_rate);
-      wandb.add_metric("Rewards", "conceded_episode_rate", coll_metrics.conceded_episode_rate);
-      wandb.add_metric("Rewards", "neutral_episode_rate", coll_metrics.neutral_episode_rate);
-      wandb.add_metric("Rewards", "no_touch_episode_rate", coll_metrics.no_touch_episode_rate);
-      wandb.add_metric("Rewards", "truncated_episode_rate", coll_metrics.truncated_episode_rate);
-      wandb.add_metric("Rewards", "ball_proximity_rate", coll_metrics.ball_proximity_rate);
-
-      wandb.add_metric("GCRL", "sampled_value_win_mean", coll_metrics.sampled_value_win_mean);
-      wandb.add_metric("GCRL", "goal_critic_loss", coll_metrics.goal_critic_loss);
-      wandb.add_metric("GCRL", "mean_goal_score", coll_metrics.mean_goal_score);
-      wandb.add_metric("GCRL", "mean_sampled_goal_distance", coll_metrics.mean_sampled_goal_distance);
-      wandb.add_metric("GCRL", "mean_goal_distance", coll_metrics.mean_goal_distance);
-      wandb.add_metric("GCRL", "min_goal_distance", coll_metrics.min_goal_distance);
-
-      for (const auto& [mode, rate] : coll_metrics.mode_touch_rates) {
-        wandb.add_metric(mode, "mode_" + mode + "_touch_episode_rate", rate);
-      }
-      for (const auto& [mode, rate] : coll_metrics.mode_multi_touch_rates) {
-        wandb.add_metric(mode, "mode_" + mode + "_multi_touch_episode_rate", rate);
-      }
-      for (const auto& [mode, rate] : coll_metrics.mode_scored_rates) {
-        wandb.add_metric(mode, "mode_" + mode + "_scored_episode_rate", rate);
-      }
-      for (const auto& [mode, count] : coll_metrics.mode_completed_episodes) {
-        wandb.add_metric(mode, "mode_" + mode + "_completed_episodes", count);
-      }
-      if (coll_metrics.anchor_win_rate >= 0.0) {
-        wandb.add_metric("Optimization", "anchor_win_rate", coll_metrics.anchor_win_rate);
-        wandb.add_metric("Optimization", "anchor_eval_seconds", coll_metrics.anchor_eval_seconds);
-        wandb.add_metric("Optimization", "anchor_eval_episodes", coll_metrics.anchor_eval_episodes);
-        wandb.add_metric("Optimization", "anchor_updated", coll_metrics.anchor_updated ? 1 : 0);
-      }
-      if (es_fired_this_update) {
-        wandb.add_metric("ES-LoRA", "es_fitness_mean", coll_metrics.es_fitness_mean);
-        wandb.add_metric("ES-LoRA", "es_fitness_std", coll_metrics.es_fitness_std);
-        wandb.add_metric("ES-LoRA", "es_fitness_best", coll_metrics.es_fitness_best);
-        wandb.add_metric("ES-LoRA", "es_reward_mean", coll_metrics.es_reward_mean);
-        wandb.add_metric("ES-LoRA", "es_winrate_mean", coll_metrics.es_winrate_mean);
-        wandb.add_metric("ES-LoRA", "es_kl_mean", coll_metrics.es_kl_mean);
-        wandb.add_metric("ES-LoRA", "es_update_norm", coll_metrics.es_update_norm);
-        wandb.add_metric("ES-LoRA", "es_lora_a_norm", coll_metrics.es_lora_a_norm);
-        wandb.add_metric("ES-LoRA", "es_lora_b_norm", coll_metrics.es_lora_b_norm);
-        wandb.add_metric("ES-LoRA", "es_eval_seconds", coll_metrics.es_eval_seconds);
-        wandb.add_metric("ES-LoRA", "es_agent_steps_per_second", coll_metrics.es_agent_steps_per_second);
-        wandb.add_metric("ES-LoRA", "es_effective_population", coll_metrics.es_effective_population);
-        wandb.add_metric("ES-LoRA", "es_virtual_population_waves", coll_metrics.es_virtual_population_waves);
-        wandb.add_metric("ES-LoRA", "es_eval_shards", coll_metrics.es_eval_shards);
-        wandb.add_metric("ES-LoRA", "es_policy_update_norm", coll_metrics.es_policy_update_norm);
+      for (const auto& item : get_all_metrics(coll_metrics, update_index, global_step, es_fired_this_update)) {
+        wandb.add_metric(item.section, item.key, item.value);
       }
       wandb.commit(global_step);
     }
