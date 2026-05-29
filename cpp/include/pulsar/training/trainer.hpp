@@ -300,8 +300,10 @@ class Trainer {
   GoalCritic goal_critic_b_{nullptr};        // ensemble member for pessimistic scoring
   std::unique_ptr<torch::optim::Adam> goal_critic_b_optimizer_{nullptr};
   torch::Tensor current_subgoal_;            // [total_agents, goal_dim] — current planner subgoal
-  torch::Tensor recent_subgoal_scores_;      // [window, total_agents] — for early abort detection
-  int subgoal_score_history_size_ = 0;
+  torch::Tensor sg_score_at_replan_;         // [total_agents] — score when last subgoal was selected
+  torch::Tensor sg_score_recent_;            // [total_agents] — most recent subgoal score
+  // Kept for should_replan interface (passed as [2, agents] view)
+  torch::Tensor recent_subgoal_scores_;      // [2, total_agents] — {at_replan, recent}
 
   // Goal candidate buffer for planner
   torch::Tensor goal_buffer_;

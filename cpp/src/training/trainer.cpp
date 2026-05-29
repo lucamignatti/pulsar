@@ -763,11 +763,14 @@ Trainer::Trainer(
       {static_cast<int64_t>(total_agents_)},
       torch::TensorOptions().dtype(torch::kInt64));
 
-  // Subgoal score history (window = commit_horizon for early abort detection)
-  const int sg_window = config_.subgoal_planner.commit_horizon;
-  recent_subgoal_scores_ = torch::zeros(
-      {sg_window, static_cast<int64_t>(total_agents_)},
+  // Subgoal score history — just two rows: [at_replan, recent]
+  sg_score_at_replan_ = torch::zeros(
+      {static_cast<int64_t>(total_agents_)},
       torch::TensorOptions().dtype(torch::kFloat32));
+  sg_score_recent_ = torch::zeros(
+      {static_cast<int64_t>(total_agents_)},
+      torch::TensorOptions().dtype(torch::kFloat32));
+  recent_subgoal_scores_ = torch::stack({sg_score_at_replan_, sg_score_recent_}, 0);
 
   maybe_initialize_from_checkpoint();
   sanitize_actor_parameters();
@@ -3223,6 +3226,7 @@ void Trainer::collect_rollout(
             sac_critic_ready_);
         if (sg_result.subgoal.defined()) {
           current_subgoal_ = sg_result.subgoal;
+          sg_score_at_replan_.zero_();  // reset stall baseline after replan
         }
       }
 
@@ -3235,13 +3239,10 @@ void Trainer::collect_rollout(
             current_subgoal_).detach().to(torch::kCPU);
         subgoal_shaping = config_.subgoal_planner.shaped_reward_scale * sg_score;
 
-        // Update subgoal score history for early abort detection
-        const int window = static_cast<int>(recent_subgoal_scores_.size(0));
-        if (window > 0) {
-          // Roll left by 1 (oldest score discarded, newest appended at end)
-          recent_subgoal_scores_ = torch::roll(recent_subgoal_scores_, -1, 0);
-          recent_subgoal_scores_[window - 1].copy_(sg_score);
-        }
+        // Update two-tensor history for early abort detection (no allocation)
+        sg_score_recent_.copy_(sg_score);
+        recent_subgoal_scores_[0].copy_(sg_score_at_replan_);
+        recent_subgoal_scores_[1].copy_(sg_score_recent_);
       }
       subgoal_planner_->increment_step();
     }

@@ -138,46 +138,50 @@ std::pair<torch::Tensor, torch::Tensor> ReplayBuffer::her_relabel_batch(
     const torch::Tensor& timestep_ids,
     const torch::Tensor& sampled_indices) {
 
-  const int N = static_cast<int>(achieved_goals.size(0));
-  torch::Tensor final_goals = conditioned_goals.clone();
+  const int N    = static_cast<int>(achieved_goals.size(0));
+  const int cap  = std::min(filled_, config_.capacity);
+  // K candidates per sample: scan K slots forward for a future same-episode step
+  const int K    = std::min(cap, config_.her_future_k * 16);
 
-  const torch::Tensor relabel_mask = (torch::rand({N}) < config_.her_relabel_fraction);
-  const auto* relabel_ptr  = relabel_mask.data_ptr<bool>();
-  const auto* ep_ptr       = episode_ids.data_ptr<int64_t>();
-  const auto* ts_ptr       = timestep_ids.data_ptr<int64_t>();
-  const auto* idx_ptr      = sampled_indices.data_ptr<int64_t>();
-  const auto* buf_ep_ptr   = buf_episode_ids_.data_ptr<int64_t>();
-  const auto* buf_ts_ptr   = buf_timestep_ids_.data_ptr<int64_t>();
-  auto*       goals_ptr    = final_goals.data_ptr<float>();
-  const auto* buf_ach_ptr  = buf_achieved_goals_.data_ptr<float>();
-  const int   cap          = std::min(filled_, config_.capacity);
-  const int   gd           = goal_dim_;
+  // Build future_slots[N, K]: for sample i, check slots (idx[i]+1), ..., (idx[i]+K) mod cap
+  const torch::Tensor offsets = torch::arange(1, K + 1,
+      torch::TensorOptions().dtype(torch::kInt64));  // [K]
+  // future_slots: [N, K]
+  const torch::Tensor future_slots =
+      (sampled_indices.unsqueeze(1) + offsets.unsqueeze(0)) % cap;
 
-  for (int i = 0; i < N; ++i) {
-    if (!relabel_ptr[i]) continue;
+  // Gather episode_ids and timestep_ids for all candidate slots (one index_select)
+  const torch::Tensor fut_ep = buf_episode_ids_
+      .index_select(0, future_slots.flatten()).reshape({N, K});  // [N, K]
+  const torch::Tensor fut_ts = buf_timestep_ids_
+      .index_select(0, future_slots.flatten()).reshape({N, K});  // [N, K]
 
-    const int64_t ep_id = ep_ptr[i];
-    const int64_t ts_id = ts_ptr[i];
-    const int base_slot = static_cast<int>(idx_ptr[i]);
+  // Valid: same episode AND strictly later timestep
+  const torch::Tensor same_ep  = (fut_ep == episode_ids.unsqueeze(1));   // [N, K] bool
+  const torch::Tensor future_t = (fut_ts > timestep_ids.unsqueeze(1));   // [N, K] bool
+  const torch::Tensor valid    = same_ep & future_t;                      // [N, K] bool
 
-    // Scan forward for a valid future slot from the same episode
-    int chosen = -1;
-    const int scan_limit = std::min(cap, config_.her_future_k * 32);
-    for (int j = 1; j <= scan_limit; ++j) {
-      const int cand = (base_slot + j) % cap;
-      if (buf_ep_ptr[cand] == ep_id && buf_ts_ptr[cand] > ts_id) {
-        chosen = cand;
-        // Accept first candidate (could randomize, but first is fine for HER)
-        break;
-      }
-    }
-    if (chosen < 0) continue;
+  const torch::Tensor has_valid = valid.any(1);                           // [N] bool
+  // First valid k index per sample (argmax of bool tensor along dim=1)
+  const torch::Tensor first_valid = valid.to(torch::kFloat32).argmax(1);  // [N]
 
-    // Replace conditioned goal with future achieved goal
-    for (int d = 0; d < gd; ++d) {
-      goals_ptr[i * gd + d] = buf_ach_ptr[chosen * gd + d];
-    }
-  }
+  // Gather the chosen future slots
+  const torch::Tensor chosen_slots = future_slots.gather(
+      1, first_valid.unsqueeze(1)).squeeze(1);  // [N]
+
+  // Gather future achieved goals: [N, goal_dim]
+  const torch::Tensor future_achieved = buf_achieved_goals_
+      .index_select(0, chosen_slots);  // [N, goal_dim]
+
+  // HER relabel mask: has_valid AND random draw
+  const torch::Tensor relabel = has_valid &
+      (torch::rand({N}) < config_.her_relabel_fraction);  // [N] bool
+
+  // Apply relabeling
+  const torch::Tensor final_goals = torch::where(
+      relabel.unsqueeze(1).expand({N, goal_dim_}),
+      future_achieved,
+      conditioned_goals);
 
   const torch::Tensor rewards = compute_goal_reward(achieved_goals, final_goals);
   return {final_goals, rewards};
@@ -214,83 +218,85 @@ ReplayBuffer::TransitionBatch ReplayBuffer::sample_transitions(int batch_size) {
 ReplayBuffer::SegmentBatch ReplayBuffer::sample_segments(int num_segments) {
   TORCH_CHECK(ready(), "ReplayBuffer not ready");
 
-  const int L = config_.segment_length;
+  const int L   = config_.segment_length;
+  const int B   = num_segments;
   const int cap = std::min(filled_, config_.capacity);
-  // Leave margin so we don't sample partially-overwritten segments
   const int max_start = std::max(1, cap - L - 1);
+  const auto lopt = torch::TensorOptions().dtype(torch::kInt64);
 
-  const torch::Tensor start_indices = torch::randint(0, max_start, {num_segments},
-      torch::TensorOptions().dtype(torch::kInt64));
-  const auto* starts = start_indices.data_ptr<int64_t>();
+  // Sample start positions for each segment: [B]
+  const torch::Tensor starts = torch::randint(0, max_start, {B}, lopt);
 
-  std::vector<torch::Tensor> obs_b, act_b, rew_b, next_b, done_b, goal_b, ep_end_b;
+  // Build all slots at once: [B, L] → index all buffer arrays in one shot
+  // slots[b, l] = (starts[b] + l) % cap
+  const torch::Tensor l_range = torch::arange(L, lopt).unsqueeze(0).expand({B, L});  // [B, L]
+  const torch::Tensor all_slots = (starts.unsqueeze(1) + l_range) % cap;              // [B, L]
+  const torch::Tensor flat_slots = all_slots.flatten();                                // [B*L]
 
-  for (int b = 0; b < num_segments; ++b) {
-    const int start = static_cast<int>(starts[b]);
+  // Single index_select per buffer array — avoids B separate calls
+  const torch::Tensor all_obs      = buf_obs_.index_select(0, flat_slots).reshape({B, L, obs_dim_});
+  const torch::Tensor all_next     = buf_next_obs_.index_select(0, flat_slots).reshape({B, L, obs_dim_});
+  const torch::Tensor all_actions  = buf_actions_.index_select(0, flat_slots).reshape({B, L});
+  const torch::Tensor all_dones    = buf_dones_.index_select(0, flat_slots).reshape({B, L});
+  const torch::Tensor all_achieved = buf_achieved_goals_.index_select(0, flat_slots).reshape({B, L, goal_dim_});
+  const torch::Tensor all_ep_ids   = buf_episode_ids_.index_select(0, flat_slots).reshape({B, L});
+  torch::Tensor all_goals = buf_conditioned_goals_.index_select(0, flat_slots).reshape({B, L, goal_dim_}).clone();
 
-    // Build slot index for this segment
-    torch::Tensor slots = torch::arange(start, start + L, torch::TensorOptions().dtype(torch::kInt64));
-    // Modulo for wraparound
-    slots = slots % cap;
-
-    const torch::Tensor seg_obs      = buf_obs_.index_select(0, slots);
-    const torch::Tensor seg_next     = buf_next_obs_.index_select(0, slots);
-    const torch::Tensor seg_actions  = buf_actions_.index_select(0, slots);
-    const torch::Tensor seg_dones    = buf_dones_.index_select(0, slots);
-    const torch::Tensor seg_achieved = buf_achieved_goals_.index_select(0, slots);
-    const torch::Tensor seg_ep_ids   = buf_episode_ids_.index_select(0, slots);
-
-    // Episode boundary detection: 1 at position l if episode changed from l-1 to l
-    const torch::Tensor ep_ends_raw = torch::zeros({L}, torch::TensorOptions().dtype(torch::kFloat32));
-    // Use diff of episode_ids; non-zero means boundary
-    if (L > 1) {
-      const torch::Tensor ep_diff = (seg_ep_ids.narrow(0, 1, L - 1) != seg_ep_ids.narrow(0, 0, L - 1)).to(torch::kFloat32);
-      ep_ends_raw.narrow(0, 1, L - 1).copy_(ep_diff);
-    }
-    const torch::Tensor ep_ends = ep_ends_raw;
-
-    // Segment-level HER: all steps get the same goal
-    torch::Tensor seg_goals = buf_conditioned_goals_.index_select(0, slots).clone();
-    torch::Tensor seg_rewards = compute_goal_reward(seg_achieved, seg_goals);
-
-    if (torch::rand({1}).item<float>() < config_.her_relabel_fraction) {
-      // Try to find a future state from beyond the segment end, same episode as last slot
-      const int64_t last_ep = seg_ep_ids[L - 1].item<int64_t>();
-      const int future_start = (start + L) % cap;
-      int future_slot = -1;
-      const int scan = std::min(cap / 4, 512);
-      for (int j = 0; j < scan; ++j) {
-        const int cand = (future_start + j) % cap;
-        if (buf_episode_ids_[cand].item<int64_t>() == last_ep) {
-          future_slot = cand;
-          break;
-        }
-      }
-      if (future_slot >= 0) {
-        const torch::Tensor future_goal = buf_achieved_goals_[future_slot]
-            .unsqueeze(0).expand({L, goal_dim_}).clone();
-        seg_goals = future_goal;
-        seg_rewards = compute_goal_reward(seg_achieved, seg_goals);
-      }
-    }
-
-    obs_b.push_back(seg_obs.unsqueeze(1));
-    act_b.push_back(seg_actions.unsqueeze(1));
-    rew_b.push_back(seg_rewards.unsqueeze(1));
-    next_b.push_back(seg_next.unsqueeze(1));
-    done_b.push_back(seg_dones.unsqueeze(1));
-    goal_b.push_back(seg_goals.unsqueeze(1));
-    ep_end_b.push_back(ep_ends.unsqueeze(1));
+  // Episode boundary detection — vectorized over all [B, L]
+  // ep_ends[b, l] = 1 if ep_ids[b, l] != ep_ids[b, l-1]
+  torch::Tensor ep_ends = torch::zeros({B, L}, all_dones.options());
+  if (L > 1) {
+    ep_ends.narrow(1, 1, L - 1) = (all_ep_ids.narrow(1, 1, L - 1) !=
+                                    all_ep_ids.narrow(1, 0, L - 1)).to(torch::kFloat32);
   }
 
+  // Segment-level HER: for her_relabel_fraction of segments, replace all steps' goal
+  // with a future achieved_goal from beyond the segment end.
+  const torch::Tensor do_relabel = (torch::rand({B}) < config_.her_relabel_fraction);  // [B] bool
+  if (do_relabel.any().item<bool>()) {
+    // For relabeled segments, find a future slot from the same episode
+    const int K_seg = std::min(cap, 128);
+    // last slot per segment: all_slots[:, L-1]  → [B]
+    const torch::Tensor last_slots = all_slots.select(1, L - 1);     // [B]
+    const torch::Tensor last_ep    = all_ep_ids.select(1, L - 1);    // [B]
+
+    // Future candidate slots: [B, K_seg]
+    const torch::Tensor fut_offsets = torch::arange(L, L + K_seg, lopt);  // [K_seg]
+    const torch::Tensor fut_slots_all =
+        (last_slots.unsqueeze(1) + fut_offsets.unsqueeze(0)) % cap;  // [B, K_seg]
+    const torch::Tensor fut_ep_all = buf_episode_ids_
+        .index_select(0, fut_slots_all.flatten()).reshape({B, K_seg});  // [B, K_seg]
+
+    // Match: same episode as last slot
+    const torch::Tensor ep_match = (fut_ep_all == last_ep.unsqueeze(1));     // [B, K_seg] bool
+    const torch::Tensor has_fut  = ep_match.any(1);                           // [B] bool
+    const torch::Tensor first_k  = ep_match.to(torch::kFloat32).argmax(1);   // [B]
+    const torch::Tensor chosen_slots = fut_slots_all.gather(1, first_k.unsqueeze(1)).squeeze(1);  // [B]
+
+    // Gather future achieved goals: [B, goal_dim]
+    const torch::Tensor fut_goals = buf_achieved_goals_.index_select(0, chosen_slots);
+
+    // Apply: relabeled[b] = do_relabel[b] AND has_fut[b]
+    const torch::Tensor apply = (do_relabel & has_fut).unsqueeze(1).unsqueeze(2)
+        .expand({B, L, goal_dim_});  // [B, L, goal_dim]
+    const torch::Tensor fut_goals_expanded = fut_goals.unsqueeze(1).expand({B, L, goal_dim_});
+    all_goals = torch::where(apply, fut_goals_expanded, all_goals);
+  }
+
+  // Compute rewards for all (B, L) pairs at once
+  const torch::Tensor all_rewards = compute_goal_reward(
+      all_achieved.reshape({B * L, goal_dim_}),
+      all_goals.reshape({B * L, goal_dim_})).reshape({B, L});
+
+  // Transpose from [B, L, ...] to [L, B, ...]
   SegmentBatch batch;
-  batch.obs          = torch::cat(obs_b, 1);      // [L, num_segments, obs_dim]
-  batch.actions      = torch::cat(act_b, 1);
-  batch.rewards      = torch::cat(rew_b, 1);
-  batch.next_obs     = torch::cat(next_b, 1);
-  batch.dones        = torch::cat(done_b, 1);
-  batch.goals        = torch::cat(goal_b, 1);
-  batch.episode_ends = torch::cat(ep_end_b, 1);
+  batch.obs          = all_obs.permute({1, 0, 2}).contiguous();    // [L, B, obs_dim]
+  batch.actions      = all_actions.t().contiguous();                // [L, B]
+  batch.rewards      = all_rewards.t().contiguous();               // [L, B]
+  batch.next_obs     = all_next.permute({1, 0, 2}).contiguous();   // [L, B, obs_dim]
+  batch.dones        = all_dones.t().contiguous();                  // [L, B]
+  batch.goals        = all_goals.permute({1, 0, 2}).contiguous();  // [L, B, goal_dim]
+  batch.episode_ends = ep_ends.t().contiguous();                    // [L, B]
   return batch;
 }
 
