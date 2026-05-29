@@ -2517,7 +2517,6 @@ void Trainer::collect_rollout(
 
     // Launch one async task per shard that processes all rollout steps.
     // This reduces std::async launches from (shards × steps) to just shards.
-    std::cout << "dbg collect submitting_shards n=" << collectors_.size() << "\n" << std::flush;
     struct ShardResult {
       std::size_t shard;
       std::vector<PendingShardStep> steps;
@@ -2539,7 +2538,6 @@ void Trainer::collect_rollout(
 
       shard_futures.push_back(task_pool_->submit(
           [&, collector_ptr, shard_actor, shard_normalizer, shard_normalizer_update, recurrent_state, shard_device, shard_idx]() mutable -> ShardResult {
-        std::cout << "dbg shard=" << shard_idx << " started\n" << std::flush;
         ShardResult result;
         result.shard = shard_idx;
         result.steps.reserve(config_.ppo.rollout_length);
@@ -2558,9 +2556,6 @@ void Trainer::collect_rollout(
 #endif
 
         for (int step = 0; step < config_.ppo.rollout_length; ++step) {
-          if (step % 32 == 0) {
-            std::cout << "dbg shard=" << shard_idx << " step=" << step << "\n" << std::flush;
-          }
           if (config_.model.sequence_length > 0 && step % config_.model.sequence_length == 0) {
             recurrent_state.zero_();
           }
@@ -2734,19 +2729,15 @@ void Trainer::collect_rollout(
 
           result.steps.push_back(std::move(shard_step));
         }
-        std::cout << "dbg shard=" << shard_idx << " finished\n" << std::flush;
         result.next_recurrent_state = recurrent_state;
         return result;
       }));
     }
 
     // Wait for all shard tasks and aggregate results per step.
-    std::cout << "dbg collect waiting_shards\n" << std::flush;
     std::vector<std::vector<PendingShardStep>> all_shard_steps(collectors_.size());
     for (std::size_t fi = 0; fi < shard_futures.size(); ++fi) {
-      std::cout << "dbg collect waiting_shard fi=" << fi << "\n" << std::flush;
       ShardResult shard_result = shard_futures[fi].get();
-      std::cout << "dbg collect shard_done fi=" << fi << "\n" << std::flush;
       metrics.policy_forward_seconds += [&] { double s = 0; for (auto& st : shard_result.steps) s += st.policy_forward_seconds; return s; }();
       metrics.action_decode_seconds += [&] { double s = 0; for (auto& st : shard_result.steps) s += st.action_decode_seconds; return s; }();
       if (shard_result.next_recurrent_state.defined()) {
@@ -3647,26 +3638,18 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
     std::future<std::int64_t> collect_future;
     if (overlap_collection_update) {
       collection_normalizer.emplace(actor_normalizer_.clone());
-      std::cout << "dbg update=" << update_index << " submitting_collect\n" << std::flush;
       collect_future = task_pool_->submit([&]() {
         std::int64_t steps = 0;
         collect_rollout(rollout_B_, next_coll_metrics, &steps, actor_snapshot_, *collection_normalizer);
         return steps;
       });
-      std::cout << "dbg update=" << update_index << " waiting_checkpoint\n" << std::flush;
       wait_for_checkpoint();
-      std::cout << "dbg update=" << update_index << " starting_update_actor\n" << std::flush;
       train_metrics = update_actor(rollout_, update_index);
-      std::cout << "dbg update=" << update_index << " waiting_collect_future\n" << std::flush;
       next_coll_steps = collect_future.get();
-      std::cout << "dbg update=" << update_index << " collect_future_done\n" << std::flush;
       actor_normalizer_ = collection_normalizer->clone();
     } else {
-      std::cout << "dbg update=" << update_index << " waiting_checkpoint\n" << std::flush;
       wait_for_checkpoint();
-      std::cout << "dbg update=" << update_index << " starting_update_actor\n" << std::flush;
       train_metrics = update_actor(rollout_, update_index);
-      std::cout << "dbg update=" << update_index << " update_actor_done\n" << std::flush;
     }
 
     // 3. ES-LoRA update (touches actor_, safe now that PPO update is done)
@@ -3675,16 +3658,13 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
     const bool es_fired_this_update =
         (es_base_main > 0) && (steps_since_last_es_ >= es_base_main);
     if (es_fired_this_update) {
-      std::cout << "dbg update=" << update_index << " starting_es_lora_update\n" << std::flush;
       run_es_lora_update(update_index, coll_metrics);
-      std::cout << "dbg update=" << update_index << " es_lora_update_done\n" << std::flush;
       steps_since_last_es_ = 0;
       // Sync ES-LoRA weight changes to replica actors.
       if (compute_actors_.size() > 0) {
         sync_actor_to_replicas(actor_, compute_actors_);
       }
     }
-
 
     // 5. Clone snapshot for next iteration's collection after all work using
     // the previous snapshot has completed.
