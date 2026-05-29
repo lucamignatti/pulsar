@@ -2460,16 +2460,15 @@ void Trainer::collect_rollout(
     const torch::Device shard_device = shard_devices_.empty() ? device_ : shard_devices_[shard];
     if (use_persistent) {
       rollout_actors.push_back(collection_actors_[shard]);
-    } else if (shard_device == device_) {
-      rollout_actors.push_back(rollout_actor);
     } else {
+      // Clone per shard even when shard_device == device_: concurrent forward calls on
+      // the same nn::Module from multiple threads are not safe in PyTorch.
       rollout_actors.push_back(clone_actor(rollout_actor, shard_device));
       rollout_actors.back()->eval();
     }
-    // NOTE: Cloned normalizers are thread-safe for parallel execution.
-    // Each sharded rollout worker runs asynchronously on its own thread and operates on
-    // a disjoint cloned ObservationNormalizer instance. This avoids concurrent updates/reads
-    // to the shared 'normalizer' object, preventing data races without requiring lock overhead.
+    // NOTE: Cloned actors and normalizers are required for thread-safe parallel execution.
+    // Each sharded rollout worker runs asynchronously on its own thread and must operate on
+    // disjoint model and normalizer instances to avoid data races.
     shard_normalizers.push_back(normalizer.clone());
     shard_normalizers.back().to(shard_device);
     shard_normalizer_updates.emplace_back(config_.model.observation_dim);
@@ -3696,9 +3695,9 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
       new_snapshot->eval();
       // Sync persistent collection actors
       for (size_t i = 0; i < collection_actors_.size(); ++i) {
-        if (collection_actors_[i] && shard_devices_[i] == device_) {
-          collection_actors_[i] = new_snapshot;
-        } else if (collection_actors_[i]) {
+        if (collection_actors_[i]) {
+          // Always clone per shard, even when shard_devices_[i] == device_:
+          // sharing the same nn::Module across concurrent shard threads causes data races.
           collection_actors_[i] = clone_actor(new_snapshot, shard_devices_[i]);
           collection_actors_[i]->eval();
         }
