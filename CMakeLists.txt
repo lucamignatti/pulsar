@@ -110,6 +110,7 @@ if(PULSAR_ENABLE_TORCH)
       cpp/src/model/mamba2_ops.cpp
       cpp/src/model/layernorm_ops.cpp
       cpp/src/model/normalizer.cpp
+      cpp/src/model/rssm.cpp
       cpp/src/training/rollout_storage.cpp
       cpp/src/training/ppo_math.cpp
       cpp/src/training/reward_engine.cpp
@@ -119,6 +120,11 @@ if(PULSAR_ENABLE_TORCH)
       cpp/src/training/gradient_ops.cpp
       cpp/src/training/gcrl_trainer.cpp
       cpp/src/training/self_play_manager.cpp
+      cpp/src/training/replay_buffer.cpp
+      cpp/src/training/sac_critic.cpp
+      cpp/src/training/sac_trainer.cpp
+      cpp/src/training/subgoal_planner.cpp
+      cpp/src/training/world_model_trainer.cpp
     )
 
     target_include_directories(pulsar_torch PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)

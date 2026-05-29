@@ -169,6 +169,61 @@ struct CurriculumConfig {
   std::vector<CurriculumModeConfig> modes;
 };
 
+struct WorldModelConfig {
+  int latent_dim = 256;
+  int stochastic_dim = 32;
+  int obs_encoder_dim = 128;
+  int num_consistency_steps = 8;
+  float kl_free_bits = 1.0F;
+  float kl_weight = 0.1F;
+  float consistency_weight = 0.5F;
+  float icm_weight = 0.5F;
+  float icm_inverse_weight = 0.1F;
+  float icm_uncertainty_threshold = 0.1F;
+  float intrinsic_reward_scale = 0.01F;
+  float intrinsic_anneal_steps = 1000.0F;
+};
+
+struct ReplayBufferConfig {
+  int capacity = 1048576;
+  int min_fill_before_sampling = 8192;
+  int segment_length = 64;
+  float her_relabel_fraction = 0.8F;
+  int her_future_k = 4;
+  float goal_reach_epsilon = 0.15F;
+  bool epsilon_position_only = true;
+};
+
+struct SACCriticConfig {
+  int hidden_dim = 512;
+  int num_layers = 3;
+  float learning_rate = 3.0e-4F;
+  float gamma = 0.99F;
+  float tau = 0.005F;
+  float temperature = 0.2F;
+  int update_frequency = 4;
+  int batch_size = 2048;
+  float lql_lambda_ub = 1.0F;
+  float lql_lambda_lb = 1.0F;
+};
+
+struct PBRSConfig {
+  float initial_weight = 0.1F;
+  float final_weight = 1.0F;
+  float warmup_updates = 500.0F;
+  int recompute_interval = 4;
+};
+
+struct SubgoalPlannerConfig {
+  int commit_horizon = 12;
+  int candidate_buffer_size = 256;
+  int imagination_depth = 15;
+  float reachability_weight = 0.5F;
+  float uncertainty_penalty = 0.1F;
+  float min_reachability = 0.15F;
+  float shaped_reward_scale = 0.1F;
+};
+
 struct ExperimentConfig {
   int schema_version = 6;
   int obs_schema_version = 2;
@@ -182,6 +237,11 @@ struct ExperimentConfig {
   ESLoraConfig es_lora{};
   WandbConfig wandb{};
   CurriculumConfig curriculum{};
+  WorldModelConfig world_model{};
+  ReplayBufferConfig replay_buffer{};
+  SACCriticConfig sac_critic{};
+  PBRSConfig pbrs{};
+  SubgoalPlannerConfig subgoal_planner{};
 };
 
 struct CheckpointMetadata {
@@ -223,6 +283,16 @@ void to_json(nlohmann::json& j, const CurriculumModeConfig& value);
 void from_json(const nlohmann::json& j, CurriculumModeConfig& value);
 void to_json(nlohmann::json& j, const CurriculumConfig& value);
 void from_json(const nlohmann::json& j, CurriculumConfig& value);
+void to_json(nlohmann::json& j, const WorldModelConfig& value);
+void from_json(const nlohmann::json& j, WorldModelConfig& value);
+void to_json(nlohmann::json& j, const ReplayBufferConfig& value);
+void from_json(const nlohmann::json& j, ReplayBufferConfig& value);
+void to_json(nlohmann::json& j, const SACCriticConfig& value);
+void from_json(const nlohmann::json& j, SACCriticConfig& value);
+void to_json(nlohmann::json& j, const PBRSConfig& value);
+void from_json(const nlohmann::json& j, PBRSConfig& value);
+void to_json(nlohmann::json& j, const SubgoalPlannerConfig& value);
+void from_json(const nlohmann::json& j, SubgoalPlannerConfig& value);
 void to_json(nlohmann::json& j, const ExperimentConfig& value);
 void from_json(const nlohmann::json& j, ExperimentConfig& value);
 void to_json(nlohmann::json& j, const CheckpointMetadata& value);

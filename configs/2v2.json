@@ -107,5 +107,55 @@
   },
   "wandb": {
     "enabled": true
+  },
+  "world_model": {
+    "latent_dim": 256,
+    "stochastic_dim": 32,
+    "obs_encoder_dim": 128,
+    "num_consistency_steps": 8,
+    "kl_free_bits": 1.0,
+    "kl_weight": 0.1,
+    "consistency_weight": 0.5,
+    "icm_weight": 0.5,
+    "icm_inverse_weight": 0.1,
+    "icm_uncertainty_threshold": 0.1,
+    "intrinsic_reward_scale": 0.01,
+    "intrinsic_anneal_steps": 1000.0
+  },
+  "replay_buffer": {
+    "capacity": 1048576,
+    "min_fill_before_sampling": 8192,
+    "segment_length": 64,
+    "her_relabel_fraction": 0.8,
+    "her_future_k": 4,
+    "goal_reach_epsilon": 0.15,
+    "epsilon_position_only": true
+  },
+  "sac_critic": {
+    "hidden_dim": 512,
+    "num_layers": 3,
+    "learning_rate": 3e-4,
+    "gamma": 0.99,
+    "tau": 0.005,
+    "temperature": 0.2,
+    "update_frequency": 4,
+    "batch_size": 2048,
+    "lql_lambda_ub": 1.0,
+    "lql_lambda_lb": 1.0
+  },
+  "pbrs": {
+    "initial_weight": 0.1,
+    "final_weight": 1.0,
+    "warmup_updates": 500.0,
+    "recompute_interval": 4
+  },
+  "subgoal_planner": {
+    "commit_horizon": 12,
+    "candidate_buffer_size": 256,
+    "imagination_depth": 15,
+    "reachability_weight": 0.5,
+    "uncertainty_penalty": 0.1,
+    "min_reachability": 0.15,
+    "shaped_reward_scale": 0.1
   }
 }

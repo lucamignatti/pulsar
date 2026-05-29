@@ -24,6 +24,11 @@
 #include "pulsar/training/gradient_ops.hpp"
 #include "pulsar/training/gcrl_trainer.hpp"
 #include "pulsar/training/optimizers.hpp"
+#include "pulsar/training/replay_buffer.hpp"
+#include "pulsar/training/sac_critic.hpp"
+#include "pulsar/training/sac_trainer.hpp"
+#include "pulsar/training/subgoal_planner.hpp"
+#include "pulsar/training/world_model_trainer.hpp"
 
 #ifdef PULSAR_HAS_CUDA
 #include <c10/cuda/CUDAStream.h>
@@ -120,10 +125,37 @@ struct TrainerMetrics {
   std::map<std::string, double> mode_scored_rates{};
   std::map<std::string, int> mode_completed_episodes{};
 
-  double anchor_win_rate = -1.0;     // -1 = not evaluated this update
+  double anchor_win_rate = -1.0;
   double anchor_eval_seconds = 0.0;
   int64_t anchor_eval_episodes = 0;
-  bool anchor_updated = false;       // true when anchor was replaced this update
+  bool anchor_updated = false;
+
+  // RSSM world model
+  double rssm_kl_loss = 0.0;
+  double rssm_consistency_loss = 0.0;
+  double rssm_icm_forward_loss = 0.0;
+  double rssm_icm_inverse_loss = 0.0;
+  double rssm_goal_head_loss = 0.0;
+  double intrinsic_reward_mean = 0.0;
+  double intrinsic_beta = 0.0;
+
+  // SAC / LQL
+  int64_t replay_buffer_size = 0;
+  double sac_td_loss = 0.0;
+  double sac_lql_loss = 0.0;
+  double sac_total_loss = 0.0;
+  double sac_mean_q = 0.0;
+  double sac_max_q = 0.0;
+
+  // PBRS
+  double pbrs_weight = 0.0;
+  double pbrs_shaping_mean = 0.0;
+
+  // Subgoal planner
+  double subgoal_reachability_mean = 0.0;
+  int64_t subgoal_replans = 0;
+  int64_t subgoal_early_aborts = 0;
+  double subgoal_shaping_mean = 0.0;
 };
 
 struct TrainerBenchmarkMetrics {
@@ -247,6 +279,40 @@ class Trainer {
   torch::Tensor es_delta_B_;
 
   std::unique_ptr<GCRLTrainer> gcrl_trainer_{nullptr};
+
+  // World model
+  std::unique_ptr<WorldModelTrainer> world_model_trainer_{nullptr};
+
+  // Off-policy components
+  std::unique_ptr<ReplayBuffer> replay_buffer_{nullptr};
+  std::unique_ptr<SACTrainer> sac_trainer_{nullptr};
+  SACCritic sac_critic_{nullptr};
+  std::unique_ptr<torch::optim::Adam> sac_critic_b_optimizer_{nullptr};  // unused slot (kept for clarity)
+  bool sac_critic_ready_ = false;
+
+  // PBRS cache (K-step reuse)
+  torch::Tensor cached_v_current_;
+  torch::Tensor cached_v_next_;
+  int pbrs_cache_age_ = 0;
+
+  // Subgoal planner
+  std::unique_ptr<SubgoalPlanner> subgoal_planner_{nullptr};
+  GoalCritic goal_critic_b_{nullptr};        // ensemble member for pessimistic scoring
+  std::unique_ptr<torch::optim::Adam> goal_critic_b_optimizer_{nullptr};
+  torch::Tensor current_subgoal_;            // [total_agents, goal_dim] — current planner subgoal
+  torch::Tensor recent_subgoal_scores_;      // [window, total_agents] — for early abort detection
+  int subgoal_score_history_size_ = 0;
+
+  // Goal candidate buffer for planner
+  torch::Tensor goal_buffer_;
+  int goal_buffer_head_ = 0;
+  int goal_buffer_filled_ = 0;
+  static constexpr int kGoalBufferCapacity = 65536;
+
+  // Per-env episode ID tracking for HER
+  torch::Tensor episode_ids_;  // [total_agents] int64 — incremented on reset
+
+  int update_index_ = 0;
 
   Actor anchor_actor_{nullptr};
   ObservationNormalizer anchor_normalizer_{0};

@@ -43,6 +43,13 @@
 #endif
 
 namespace pulsar {
+
+inline float compute_pbrs_weight(int update_index, const PBRSConfig& cfg) {
+  if (cfg.warmup_updates <= 0.0F) return cfg.final_weight;
+  const float t = static_cast<float>(update_index) / cfg.warmup_updates;
+  return cfg.initial_weight + (cfg.final_weight - cfg.initial_weight) * std::min(1.0F, t);
+}
+
 namespace {
 
 constexpr int kEsLoraMinStage = 0;
@@ -698,6 +705,70 @@ Trainer::Trainer(
     gcrl_trainer_ = std::make_unique<GCRLTrainer>(config_.goal_critic, device_);
   }
 
+  // Initialize RSSM world model (registered as actor submodule for checkpoint save/load)
+  if (config_.world_model.latent_dim > 0) {
+    world_model_trainer_ = std::make_unique<WorldModelTrainer>(config_.world_model, device_);
+    actor_->init_rssm(config_.world_model);
+    actor_->rssm()->to(device_);
+  }
+
+  // Initialize replay buffer
+  replay_buffer_ = std::make_unique<ReplayBuffer>(
+      config_.replay_buffer,
+      config_.model.observation_dim,
+      config_.model.action_dim,
+      config_.goal_mapping.goal_dim,
+      torch::Device(torch::kCPU));
+
+  // Initialize SAC critic
+  sac_critic_ = SACCritic(
+      config_.sac_critic,
+      config_.model.observation_dim,
+      config_.model.action_dim,
+      config_.goal_mapping.goal_dim);
+  sac_critic_->to(device_);
+  sac_trainer_ = std::make_unique<SACTrainer>(config_.sac_critic, device_);
+
+  // Second GoalCritic for pessimistic ensemble
+  goal_critic_b_ = GoalCritic(
+      actor_->feature_dim(),
+      config_.model.action_dim,
+      config_.goal_critic.embedding_dim,
+      config_.goal_critic.hidden_dim,
+      config_.goal_critic.goal_dim);
+  goal_critic_b_->to(device_);
+  {
+    std::vector<at::Tensor> gc_b_params;
+    for (auto& p : goal_critic_b_->parameters()) {
+      if (p.requires_grad()) gc_b_params.push_back(p);
+    }
+    goal_critic_b_optimizer_ = std::make_unique<torch::optim::Adam>(
+        gc_b_params,
+        torch::optim::AdamOptions(static_cast<double>(config_.ppo.learning_rate)));
+  }
+
+  // Subgoal planner
+  subgoal_planner_ = std::make_unique<SubgoalPlanner>(
+      config_.subgoal_planner,
+      config_.goal_critic,
+      device_);
+
+  // Goal candidate buffer
+  goal_buffer_ = torch::zeros(
+      {kGoalBufferCapacity, config_.goal_mapping.goal_dim},
+      torch::TensorOptions().dtype(torch::kFloat32));
+
+  // Episode ID tracking
+  episode_ids_ = torch::zeros(
+      {static_cast<int64_t>(total_agents_)},
+      torch::TensorOptions().dtype(torch::kInt64));
+
+  // Subgoal score history (window = commit_horizon for early abort detection)
+  const int sg_window = config_.subgoal_planner.commit_horizon;
+  recent_subgoal_scores_ = torch::zeros(
+      {sg_window, static_cast<int64_t>(total_agents_)},
+      torch::TensorOptions().dtype(torch::kFloat32));
+
   maybe_initialize_from_checkpoint();
   sanitize_actor_parameters();
   actor_snapshot_ = clone_actor(actor_, device_);
@@ -1064,6 +1135,63 @@ TrainerMetrics Trainer::update_actor(RolloutStorage& rollout, int update_index) 
 
   const int total_agents = rollout.num_agents();
   const int rollout_steps = rollout.rollout_length();
+
+  // ---- RSSM world model update + intrinsic rewards ----
+  WorldModelLosses wm_losses{};
+  if (world_model_trainer_ && actor_->rssm()) {
+    actor_optimizer_.zero_grad();
+    const torch::Tensor intrinsic_rewards = world_model_trainer_->compute_losses(
+        actor_->rssm(), rollout, config_, wm_losses);
+    if (wm_losses.total.defined() && torch::isfinite(wm_losses.total).item<bool>()) {
+      wm_losses.total.backward();
+      clip_existing_gradients(*actor_, config_.ppo.max_grad_norm);
+      actor_optimizer_.step();
+    }
+    actor_optimizer_.zero_grad();
+    metrics.rssm_kl_loss = wm_losses.kl_loss_val;
+    metrics.rssm_consistency_loss = wm_losses.consistency_loss_val;
+    metrics.rssm_icm_forward_loss = wm_losses.icm_forward_loss_val;
+    metrics.rssm_icm_inverse_loss = wm_losses.icm_inverse_loss_val;
+    metrics.rssm_goal_head_loss = wm_losses.goal_head_loss_val;
+
+    // Blend intrinsic reward into extrinsic stream (annealed)
+    const float beta = compute_intrinsic_beta(update_index_, config_.world_model);
+    metrics.intrinsic_beta = static_cast<double>(beta);
+    if (beta > 0.0F) {
+      auto& ext = const_cast<std::unordered_map<std::string, torch::Tensor>&>(rollout.all_rewards()).at("extrinsic");
+      ext.narrow(0, 0, rollout_steps).add_(
+          beta * intrinsic_rewards.narrow(0, 0, rollout_steps));
+      metrics.intrinsic_reward_mean =
+          (beta * intrinsic_rewards.narrow(0, 0, rollout_steps)).mean().item<double>();
+    }
+  }
+
+  // ---- SAC critic updates ----
+  if (sac_trainer_ && replay_buffer_ && replay_buffer_->ready()) {
+    sac_trainer_->init_optimizer(sac_critic_);
+    SACTrainerLosses sac_log{};
+    for (int k = 0; k < config_.sac_critic.update_frequency; ++k) {
+      const int segs = std::max(1, config_.sac_critic.batch_size / config_.replay_buffer.segment_length);
+      const auto seg = replay_buffer_->sample_segments(segs);
+      sac_log = sac_trainer_->update(sac_critic_, seg);
+    }
+    sac_critic_->update_target(config_.sac_critic.tau);
+    sac_critic_ready_ = true;
+    metrics.replay_buffer_size = static_cast<int64_t>(replay_buffer_->size());
+    metrics.sac_td_loss    = sac_log.td_loss;
+    metrics.sac_lql_loss   = sac_log.lql_lb_loss;
+    metrics.sac_total_loss = sac_log.total_loss;
+    metrics.sac_mean_q     = sac_log.mean_q_value;
+    metrics.sac_max_q      = sac_log.max_q_value;
+  }
+
+  // ---- Second GoalCritic update (same InfoNCE loss, independent parameters) ----
+  // This is wired into the GCRL block below via passing goal_critic_b_ alongside goal_critic_.
+  // The goal_critic_b_ optimizer is stepped alongside the actor optimizer after each minibatch.
+
+  ++update_index_;
+  metrics.pbrs_weight = static_cast<double>(compute_pbrs_weight(update_index_, config_.pbrs));
+
   const auto& all_rewards = rollout.all_rewards();
 
   const float effective_entropy_coef = config_.ppo.entropy_coef;
@@ -1492,6 +1620,29 @@ TrainerMetrics Trainer::update_actor(RolloutStorage& rollout, int update_index) 
                       goal_loss,
                       actor_goal_loss,
                       chunk_goal_score);
+
+                  // Also train goal_critic_b_ with same InfoNCE loss (ensemble member, separate params)
+                  // Only on primary GPU (g==0) to avoid multi-GPU sync complexity
+                  if (g == 0 && goal_critic_b_ && compute_goal_critic_loss && goal_critic_b_optimizer_) {
+                    torch::Tensor gc_b_loss, gc_b_actor_loss, gc_b_score;
+                    gcrl_trainer_->compute_gcrl_losses(
+                        goal_critic_b_,
+                        active_features.detach(),
+                        active_actions,
+                        active_logits.detach(),
+                        active_masks,
+                        active_future_goal_pos,
+                        /*compute_critic_loss=*/true,
+                        /*compute_actor_loss=*/false,
+                        gc_b_loss,
+                        gc_b_actor_loss,
+                        gc_b_score);
+                    if (gc_b_loss.defined() && torch::isfinite(gc_b_loss).item<bool>()) {
+                      goal_critic_b_optimizer_->zero_grad();
+                      (config_.goal_critic.lambda_Zg * gc_b_loss).backward();
+                      goal_critic_b_optimizer_->step();
+                    }
+                  }
 
                   if (compute_goal_critic_loss) {
                     add_metric(goal_critic_loss_metric, goal_loss, active_samples);
@@ -2998,8 +3149,117 @@ void Trainer::collect_rollout(
     sampled_value_sum = sampled_value_sum + sampled_value.to(torch::kFloat64).sum();
     sampled_value_count += sampled_value.numel();
 
+    // ---- Off-policy buffer push (raw terminal reward only — NEVER shaped rewards) ----
+    if (replay_buffer_) {
+      const torch::Tensor conditioned_goal_host = current_subgoal_.defined()
+          ? current_subgoal_.to(torch::kCPU)
+          : task_goal_host;
+      replay_buffer_->push(
+          raw_obs_host,
+          action_indices_cpu,
+          goal_pos_host,         // achieved_goal: ball pos after step
+          conditioned_goal_host, // conditioned_goal: subgoal or task goal
+          collector_->host_observations(),  // next_obs (post-step)
+          dones_host,
+          episode_ids_);
+      // Increment episode IDs on reset (where done == 1)
+      episode_ids_.add_(dones_host.to(torch::kInt64));
+    }
+
+    // ---- PBRS shaping (K-step cached SAC V(s,g)) ----
+    torch::Tensor pbrs_shaping = torch::zeros_like(extrinsic_rewards_host);
+    if (sac_critic_ && sac_critic_ready_) {
+      const float pbrs_w = compute_pbrs_weight(update_index_, config_.pbrs);
+      if (pbrs_w > 0.0F) {
+        const bool recompute = (pbrs_cache_age_ % std::max(1, config_.pbrs.recompute_interval) == 0);
+        if (recompute || !cached_v_current_.defined()) {
+          torch::NoGradGuard no_grad;
+          const torch::Tensor goal_dev = task_goal_host.to(device_);
+          const torch::Tensor obs_dev  = raw_obs_host.to(device_);
+          cached_v_current_ = sac_critic_->value(obs_dev, goal_dev).to(torch::kCPU);
+          const torch::Tensor next_obs_dev = collector_->host_observations().to(device_);
+          const torch::Tensor v_next = sac_critic_->value(next_obs_dev, goal_dev);
+          cached_v_next_ = (v_next * (1.0F - dones_host.to(device_))).to(torch::kCPU);
+        } else {
+          // Shift: current V is last step's next V (free, no forward pass)
+          cached_v_current_ = cached_v_next_;
+          // Recompute next only on K-interval
+          if (recompute) {
+            torch::NoGradGuard no_grad;
+            const torch::Tensor goal_dev = task_goal_host.to(device_);
+            const torch::Tensor next_obs_dev = collector_->host_observations().to(device_);
+            const torch::Tensor v_next = sac_critic_->value(next_obs_dev, goal_dev);
+            cached_v_next_ = (v_next * (1.0F - dones_host.to(device_))).to(torch::kCPU);
+          }
+        }
+        // Force recompute on episode reset (stale V after reset is wrong)
+        if (dones_host.any().item<bool>()) {
+          pbrs_cache_age_ = 0;
+        }
+        pbrs_shaping = pbrs_w * (config_.sac_critic.gamma * cached_v_next_ - cached_v_current_);
+        ++pbrs_cache_age_;
+      }
+    }
+
+    // ---- Subgoal planner ----
+    torch::Tensor subgoal_shaping = torch::zeros_like(extrinsic_rewards_host);
+    if (subgoal_planner_ && goal_critic_b_ && goal_buffer_filled_ > 0) {
+      const bool should_plan =
+          (step % config_.subgoal_planner.commit_horizon == 0) ||
+          (current_subgoal_.defined() && subgoal_planner_->should_replan(
+              actor_->goal_critic(), goal_critic_b_,
+              output.features.detach(),
+              action_indices_cpu.to(device_),
+              current_subgoal_,
+              recent_subgoal_scores_));
+      if (should_plan) {
+        const torch::Tensor cand_buf = goal_buffer_.narrow(0, 0, goal_buffer_filled_).to(device_);
+        const auto sg_result = subgoal_planner_->select_subgoals(
+            actor_->goal_critic(), goal_critic_b_, sac_critic_,
+            output.features.detach(),
+            action_indices_cpu.to(device_),
+            cand_buf,
+            task_goal_host.to(device_),
+            sac_critic_ready_);
+        if (sg_result.subgoal.defined()) {
+          current_subgoal_ = sg_result.subgoal;
+        }
+      }
+
+      // Subgoal shaping reward (NEVER written to replay buffer)
+      if (current_subgoal_.defined()) {
+        torch::NoGradGuard no_grad;
+        const torch::Tensor sg_score = actor_->goal_critic()->forward(
+            output.features.detach(),
+            action_indices_cpu.to(device_),
+            current_subgoal_).detach().to(torch::kCPU);
+        subgoal_shaping = config_.subgoal_planner.shaped_reward_scale * sg_score;
+
+        // Update subgoal score history for early abort detection
+        const int window = static_cast<int>(recent_subgoal_scores_.size(0));
+        if (window > 0) {
+          // Roll left by 1 (oldest score discarded, newest appended at end)
+          recent_subgoal_scores_ = torch::roll(recent_subgoal_scores_, -1, 0);
+          recent_subgoal_scores_[window - 1].copy_(sg_score);
+        }
+      }
+      subgoal_planner_->increment_step();
+    }
+
+    // ---- Update goal candidate buffer ----
+    {
+      const int n_goals = static_cast<int>(goal_pos_host.size(0));
+      for (int gi = 0; gi < n_goals; ++gi) {
+        const int slot = goal_buffer_head_;
+        goal_buffer_[slot].copy_(goal_pos_host[gi]);
+        goal_buffer_head_ = (goal_buffer_head_ + 1) % kGoalBufferCapacity;
+        if (goal_buffer_filled_ < kGoalBufferCapacity) ++goal_buffer_filled_;
+      }
+    }
+
+    // ---- Combined reward for RolloutStorage ----
     std::unordered_map<std::string, torch::Tensor> all_rewards;
-    all_rewards["extrinsic"] = extrinsic_rewards_host;
+    all_rewards["extrinsic"] = extrinsic_rewards_host + pbrs_shaping + subgoal_shaping;
     all_rewards["gameplay"] = gameplay_r_host;
     all_rewards["mechanic"] = mechanic_r_host;
 

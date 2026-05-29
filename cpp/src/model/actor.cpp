@@ -673,6 +673,18 @@ GoalCritic& ActorImpl::goal_critic() {
   return goal_critic_;
 }
 
+void ActorImpl::init_rssm(const WorldModelConfig& wm_config) {
+  if (rssm_) {
+    unregister_module("rssm");
+  }
+  world_model_config_ = wm_config;
+  has_rssm_ = true;
+  rssm_ = register_module("rssm", RSSMWorldModel(
+      wm_config,
+      config_.observation_dim,
+      config_.action_dim));
+}
+
 std::vector<std::string> ActorImpl::enabled_critic_heads() const {
   return {"extrinsic"};
 }
@@ -706,6 +718,9 @@ Actor clone_actor(const Actor& source, const torch::Device& device) {
     return nullptr;
   }
   auto clone = Actor(source->config(), source->goal_critic_config(), source->es_lora_config());
+  if (source->has_rssm_) {
+    clone->init_rssm(source->world_model_config_);
+  }
   clone->to(device);
   copy_module_tensors_to(source, clone, device);
   return clone;

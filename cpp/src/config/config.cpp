@@ -390,6 +390,126 @@ void from_json(const json& j, CurriculumConfig& value) {
   value.modes = j.value("modes", std::vector<CurriculumModeConfig>{});
 }
 
+void to_json(json& j, const WorldModelConfig& value) {
+  j = json{
+      {"latent_dim", value.latent_dim},
+      {"stochastic_dim", value.stochastic_dim},
+      {"obs_encoder_dim", value.obs_encoder_dim},
+      {"num_consistency_steps", value.num_consistency_steps},
+      {"kl_free_bits", value.kl_free_bits},
+      {"kl_weight", value.kl_weight},
+      {"consistency_weight", value.consistency_weight},
+      {"icm_weight", value.icm_weight},
+      {"icm_inverse_weight", value.icm_inverse_weight},
+      {"icm_uncertainty_threshold", value.icm_uncertainty_threshold},
+      {"intrinsic_reward_scale", value.intrinsic_reward_scale},
+      {"intrinsic_anneal_steps", value.intrinsic_anneal_steps},
+  };
+}
+
+void from_json(const json& j, WorldModelConfig& value) {
+  value.latent_dim = j.value("latent_dim", 256);
+  value.stochastic_dim = j.value("stochastic_dim", 32);
+  value.obs_encoder_dim = j.value("obs_encoder_dim", 128);
+  value.num_consistency_steps = j.value("num_consistency_steps", 8);
+  value.kl_free_bits = j.value("kl_free_bits", 1.0F);
+  value.kl_weight = j.value("kl_weight", 0.1F);
+  value.consistency_weight = j.value("consistency_weight", 0.5F);
+  value.icm_weight = j.value("icm_weight", 0.5F);
+  value.icm_inverse_weight = j.value("icm_inverse_weight", 0.1F);
+  value.icm_uncertainty_threshold = j.value("icm_uncertainty_threshold", 0.1F);
+  value.intrinsic_reward_scale = j.value("intrinsic_reward_scale", 0.01F);
+  value.intrinsic_anneal_steps = j.value("intrinsic_anneal_steps", 1000.0F);
+}
+
+void to_json(json& j, const ReplayBufferConfig& value) {
+  j = json{
+      {"capacity", value.capacity},
+      {"min_fill_before_sampling", value.min_fill_before_sampling},
+      {"segment_length", value.segment_length},
+      {"her_relabel_fraction", value.her_relabel_fraction},
+      {"her_future_k", value.her_future_k},
+      {"goal_reach_epsilon", value.goal_reach_epsilon},
+      {"epsilon_position_only", value.epsilon_position_only},
+  };
+}
+
+void from_json(const json& j, ReplayBufferConfig& value) {
+  value.capacity = j.value("capacity", 1048576);
+  value.min_fill_before_sampling = j.value("min_fill_before_sampling", 8192);
+  value.segment_length = j.value("segment_length", 64);
+  value.her_relabel_fraction = j.value("her_relabel_fraction", 0.8F);
+  value.her_future_k = j.value("her_future_k", 4);
+  value.goal_reach_epsilon = j.value("goal_reach_epsilon", 0.15F);
+  value.epsilon_position_only = j.value("epsilon_position_only", true);
+}
+
+void to_json(json& j, const SACCriticConfig& value) {
+  j = json{
+      {"hidden_dim", value.hidden_dim},
+      {"num_layers", value.num_layers},
+      {"learning_rate", value.learning_rate},
+      {"gamma", value.gamma},
+      {"tau", value.tau},
+      {"temperature", value.temperature},
+      {"update_frequency", value.update_frequency},
+      {"batch_size", value.batch_size},
+      {"lql_lambda_ub", value.lql_lambda_ub},
+      {"lql_lambda_lb", value.lql_lambda_lb},
+  };
+}
+
+void from_json(const json& j, SACCriticConfig& value) {
+  value.hidden_dim = j.value("hidden_dim", 512);
+  value.num_layers = j.value("num_layers", 3);
+  value.learning_rate = j.value("learning_rate", 3.0e-4F);
+  value.gamma = j.value("gamma", 0.99F);
+  value.tau = j.value("tau", 0.005F);
+  value.temperature = j.value("temperature", 0.2F);
+  value.update_frequency = j.value("update_frequency", 4);
+  value.batch_size = j.value("batch_size", 2048);
+  value.lql_lambda_ub = j.value("lql_lambda_ub", 1.0F);
+  value.lql_lambda_lb = j.value("lql_lambda_lb", 1.0F);
+}
+
+void to_json(json& j, const PBRSConfig& value) {
+  j = json{
+      {"initial_weight", value.initial_weight},
+      {"final_weight", value.final_weight},
+      {"warmup_updates", value.warmup_updates},
+      {"recompute_interval", value.recompute_interval},
+  };
+}
+
+void from_json(const json& j, PBRSConfig& value) {
+  value.initial_weight = j.value("initial_weight", 0.1F);
+  value.final_weight = j.value("final_weight", 1.0F);
+  value.warmup_updates = j.value("warmup_updates", 500.0F);
+  value.recompute_interval = j.value("recompute_interval", 4);
+}
+
+void to_json(json& j, const SubgoalPlannerConfig& value) {
+  j = json{
+      {"commit_horizon", value.commit_horizon},
+      {"candidate_buffer_size", value.candidate_buffer_size},
+      {"imagination_depth", value.imagination_depth},
+      {"reachability_weight", value.reachability_weight},
+      {"uncertainty_penalty", value.uncertainty_penalty},
+      {"min_reachability", value.min_reachability},
+      {"shaped_reward_scale", value.shaped_reward_scale},
+  };
+}
+
+void from_json(const json& j, SubgoalPlannerConfig& value) {
+  value.commit_horizon = j.value("commit_horizon", 12);
+  value.candidate_buffer_size = j.value("candidate_buffer_size", 256);
+  value.imagination_depth = j.value("imagination_depth", 15);
+  value.reachability_weight = j.value("reachability_weight", 0.5F);
+  value.uncertainty_penalty = j.value("uncertainty_penalty", 0.1F);
+  value.min_reachability = j.value("min_reachability", 0.15F);
+  value.shaped_reward_scale = j.value("shaped_reward_scale", 0.1F);
+}
+
 void to_json(json& j, const ExperimentConfig& value) {
   j = json{
       {"schema_version", value.schema_version},
@@ -404,6 +524,11 @@ void to_json(json& j, const ExperimentConfig& value) {
       {"es_lora", value.es_lora},
       {"wandb", value.wandb},
       {"curriculum", value.curriculum},
+      {"world_model", value.world_model},
+      {"replay_buffer", value.replay_buffer},
+      {"sac_critic", value.sac_critic},
+      {"pbrs", value.pbrs},
+      {"subgoal_planner", value.subgoal_planner},
   };
 }
 
@@ -439,6 +564,11 @@ void from_json(const json& j, ExperimentConfig& value) {
   value.es_lora = j.value("es_lora", ESLoraConfig{});
   value.wandb = j.value("wandb", WandbConfig{});
   value.curriculum = j.value("curriculum", CurriculumConfig{});
+  value.world_model = j.value("world_model", WorldModelConfig{});
+  value.replay_buffer = j.value("replay_buffer", ReplayBufferConfig{});
+  value.sac_critic = j.value("sac_critic", SACCriticConfig{});
+  value.pbrs = j.value("pbrs", PBRSConfig{});
+  value.subgoal_planner = j.value("subgoal_planner", SubgoalPlannerConfig{});
 }
 
 void to_json(json& j, const CheckpointMetadata& value) {
@@ -617,6 +747,51 @@ void validate_experiment_config(const ExperimentConfig& config) {
   }
   if (config.env.tick_rate != 120) {
     std::cerr << "Warning: env.tick_rate is currently ignored. Simulation hardcodes 120 Hz.\n";
+  }
+  if (config.world_model.latent_dim <= 0) {
+    throw std::invalid_argument("world_model.latent_dim must be positive.");
+  }
+  if (config.world_model.stochastic_dim <= 0) {
+    throw std::invalid_argument("world_model.stochastic_dim must be positive.");
+  }
+  if (config.world_model.obs_encoder_dim <= 0) {
+    throw std::invalid_argument("world_model.obs_encoder_dim must be positive.");
+  }
+  if (config.world_model.intrinsic_reward_scale < 0.0F) {
+    throw std::invalid_argument("world_model.intrinsic_reward_scale must be non-negative.");
+  }
+  if (config.replay_buffer.capacity <= 0) {
+    throw std::invalid_argument("replay_buffer.capacity must be positive.");
+  }
+  if (config.replay_buffer.segment_length <= 0) {
+    throw std::invalid_argument("replay_buffer.segment_length must be positive.");
+  }
+  if (config.replay_buffer.goal_reach_epsilon <= 0.0F) {
+    throw std::invalid_argument("replay_buffer.goal_reach_epsilon must be positive.");
+  }
+  if (config.sac_critic.hidden_dim <= 0) {
+    throw std::invalid_argument("sac_critic.hidden_dim must be positive.");
+  }
+  if (config.sac_critic.learning_rate <= 0.0F) {
+    throw std::invalid_argument("sac_critic.learning_rate must be positive.");
+  }
+  if (config.sac_critic.gamma <= 0.0F || config.sac_critic.gamma >= 1.0F) {
+    throw std::invalid_argument("sac_critic.gamma must be in (0, 1).");
+  }
+  if (config.sac_critic.tau <= 0.0F || config.sac_critic.tau > 1.0F) {
+    throw std::invalid_argument("sac_critic.tau must be in (0, 1].");
+  }
+  if (config.sac_critic.temperature <= 0.0F) {
+    throw std::invalid_argument("sac_critic.temperature must be positive.");
+  }
+  if (config.pbrs.warmup_updates < 0.0F) {
+    throw std::invalid_argument("pbrs.warmup_updates must be non-negative.");
+  }
+  if (config.subgoal_planner.commit_horizon <= 0) {
+    throw std::invalid_argument("subgoal_planner.commit_horizon must be positive.");
+  }
+  if (config.subgoal_planner.candidate_buffer_size <= 0) {
+    throw std::invalid_argument("subgoal_planner.candidate_buffer_size must be positive.");
   }
 }
 

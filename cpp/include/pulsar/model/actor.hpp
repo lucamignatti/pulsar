@@ -10,6 +10,7 @@
 
 #ifdef PULSAR_HAS_TORCH
 #include <torch/torch.h>
+#include "pulsar/model/rssm.hpp"
 #endif
 
 namespace pulsar {
@@ -203,10 +204,16 @@ class ActorImpl : public torch::nn::Module {
   void apply_policy_eggroll_update(const torch::Tensor& delta_weight);
   [[nodiscard]] const LoRALinear& policy_lora() const;
   [[nodiscard]] GoalCritic& goal_critic();
+  [[nodiscard]] RSSMWorldModel& rssm() { return rssm_; }
+  // Initialize (or re-initialize) the RSSM as a registered submodule.
+  // Must be called before checkpointing if the world model is enabled.
+  void init_rssm(const WorldModelConfig& wm_config);
 
   ModelConfig config_{};
   GoalCriticConfig goal_critic_config_{};
   ESLoraConfig es_lora_config_{};
+  WorldModelConfig world_model_config_{};
+  bool has_rssm_ = false;
   int feature_dim_ = 0;
   Mamba2Encoder mamba2_encoder_{nullptr};
 
@@ -216,6 +223,7 @@ class ActorImpl : public torch::nn::Module {
   torch::nn::Sequential value_head_{nullptr};
   GoalCritic goal_critic_{nullptr};
   torch::nn::Linear goal_proj_{nullptr};  // goal_dim → encoder_dim residual conditioning
+  RSSMWorldModel rssm_{nullptr};          // RSSM world model (separate pathway from Mamba2)
 
  private:
   torch::Tensor apply_goal_residual(const torch::Tensor& encoded, const torch::Tensor& goal_values);
