@@ -1900,12 +1900,6 @@ Trainer::ESPopulationFitness Trainer::evaluate_es_population(
         static_cast<std::int64_t>(es_cfg.eval_episodes_per_member) *
         static_cast<std::int64_t>(es_cfg.eval_rollout_length);
 
-    struct EsShardSpec {
-      int member_start = 0;
-      int member_count = 0;
-      int worker_count = 1;
-      torch::Device device{torch::kCPU};
-    };
     struct EsShardResult {
       int member_start = 0;
       std::vector<float> reward_sum;
@@ -1943,6 +1937,35 @@ Trainer::ESPopulationFitness Trainer::evaluate_es_population(
       });
     }
 
+    // Rebuild cached ES eval collectors when shard configuration changes (first call,
+    // team_size change, or shard count change). Avoids recreating hundreds of
+    // RocketSim arenas every 25 updates — the seed is fully controlled by reset_es_episode.
+    {
+      bool need_rebuild = (es_eval_cached_team_size_ != team_size) ||
+          (es_eval_shard_specs_.size() != shard_specs.size());
+      if (!need_rebuild) {
+        for (std::size_t si = 0; si < shard_specs.size(); ++si) {
+          if (es_eval_shard_specs_[si].member_count != shard_specs[si].member_count ||
+              es_eval_shard_specs_[si].worker_count != shard_specs[si].worker_count) {
+            need_rebuild = true;
+            break;
+          }
+        }
+      }
+      if (need_rebuild) {
+        es_eval_collectors_.clear();
+        es_eval_shard_specs_ = shard_specs;
+        es_eval_cached_team_size_ = team_size;
+        for (std::size_t si = 0; si < shard_specs.size(); ++si) {
+          ExperimentConfig shard_config = mode_config;
+          shard_config.ppo.collection_workers = shard_specs[si].worker_count;
+          const int shard_envs = shard_specs[si].member_count * eval_envs;
+          es_eval_collectors_.push_back(make_es_eval_collector(
+              shard_config, shard_envs, eval_envs, 0, 0, use_pinned_host_buffers_));
+        }
+      }
+    }
+
     std::vector<std::future<EsShardResult>> shard_futures;
     shard_futures.reserve(shard_specs.size());
     const int physics_prefix_ticks =
@@ -1952,8 +1975,9 @@ Trainer::ESPopulationFitness Trainer::evaluate_es_population(
 
     for (std::size_t shard_idx = 0; shard_idx < shard_specs.size(); ++shard_idx) {
       const EsShardSpec spec = shard_specs[shard_idx];
+      BatchedRocketSimCollector* eval_collector = es_eval_collectors_[shard_idx].get();
       shard_futures.push_back(task_pool_->submit(
-          [&, mode_config, spec, shard_idx]() -> EsShardResult {
+          [&, spec, shard_idx, eval_collector]() -> EsShardResult {
         EsShardResult shard_result;
         torch::NoGradGuard no_grad;
         shard_result.member_start = spec.member_start;
@@ -1964,11 +1988,7 @@ Trainer::ESPopulationFitness Trainer::evaluate_es_population(
         shard_result.episode_counts.assign(static_cast<std::size_t>(spec.member_count), 0);
         shard_result.win_counts.assign(static_cast<std::size_t>(spec.member_count), 0);
 
-        ExperimentConfig shard_config = mode_config;
-        shard_config.ppo.collection_workers = spec.worker_count;
         const int shard_envs = spec.member_count * eval_envs;
-        auto eval_collector = make_es_eval_collector(
-            shard_config, shard_envs, eval_envs, update_index, wave_index, use_pinned_host_buffers_);
 
         Actor shard_actor = clone_actor(actor_, spec.device);
         shard_actor->eval();
@@ -2498,6 +2518,7 @@ void Trainer::collect_rollout(
 
     // Launch one async task per shard that processes all rollout steps.
     // This reduces std::async launches from (shards × steps) to just shards.
+    std::cout << "dbg collect submitting_shards n=" << collectors_.size() << "\n" << std::flush;
     struct ShardResult {
       std::size_t shard;
       std::vector<PendingShardStep> steps;
@@ -2519,6 +2540,7 @@ void Trainer::collect_rollout(
 
       shard_futures.push_back(task_pool_->submit(
           [&, collector_ptr, shard_actor, shard_normalizer, shard_normalizer_update, recurrent_state, shard_device, shard_idx]() mutable -> ShardResult {
+        std::cout << "dbg shard=" << shard_idx << " started\n" << std::flush;
         ShardResult result;
         result.shard = shard_idx;
         result.steps.reserve(config_.ppo.rollout_length);
@@ -2537,6 +2559,9 @@ void Trainer::collect_rollout(
 #endif
 
         for (int step = 0; step < config_.ppo.rollout_length; ++step) {
+          if (step % 32 == 0) {
+            std::cout << "dbg shard=" << shard_idx << " step=" << step << "\n" << std::flush;
+          }
           if (config_.model.sequence_length > 0 && step % config_.model.sequence_length == 0) {
             recurrent_state.zero_();
           }
@@ -2710,15 +2735,19 @@ void Trainer::collect_rollout(
 
           result.steps.push_back(std::move(shard_step));
         }
+        std::cout << "dbg shard=" << shard_idx << " finished\n" << std::flush;
         result.next_recurrent_state = recurrent_state;
         return result;
       }));
     }
 
     // Wait for all shard tasks and aggregate results per step.
+    std::cout << "dbg collect waiting_shards\n" << std::flush;
     std::vector<std::vector<PendingShardStep>> all_shard_steps(collectors_.size());
-    for (auto& fut : shard_futures) {
-      ShardResult shard_result = fut.get();
+    for (std::size_t fi = 0; fi < shard_futures.size(); ++fi) {
+      std::cout << "dbg collect waiting_shard fi=" << fi << "\n" << std::flush;
+      ShardResult shard_result = shard_futures[fi].get();
+      std::cout << "dbg collect shard_done fi=" << fi << "\n" << std::flush;
       metrics.policy_forward_seconds += [&] { double s = 0; for (auto& st : shard_result.steps) s += st.policy_forward_seconds; return s; }();
       metrics.action_decode_seconds += [&] { double s = 0; for (auto& st : shard_result.steps) s += st.action_decode_seconds; return s; }();
       if (shard_result.next_recurrent_state.defined()) {
@@ -3619,18 +3648,26 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
     std::future<std::int64_t> collect_future;
     if (overlap_collection_update) {
       collection_normalizer.emplace(actor_normalizer_.clone());
+      std::cout << "dbg update=" << update_index << " submitting_collect\n" << std::flush;
       collect_future = task_pool_->submit([&]() {
         std::int64_t steps = 0;
         collect_rollout(rollout_B_, next_coll_metrics, &steps, actor_snapshot_, *collection_normalizer);
         return steps;
       });
+      std::cout << "dbg update=" << update_index << " waiting_checkpoint\n" << std::flush;
       wait_for_checkpoint();
+      std::cout << "dbg update=" << update_index << " starting_update_actor\n" << std::flush;
       train_metrics = update_actor(rollout_, update_index);
+      std::cout << "dbg update=" << update_index << " waiting_collect_future\n" << std::flush;
       next_coll_steps = collect_future.get();
+      std::cout << "dbg update=" << update_index << " collect_future_done\n" << std::flush;
       actor_normalizer_ = collection_normalizer->clone();
     } else {
+      std::cout << "dbg update=" << update_index << " waiting_checkpoint\n" << std::flush;
       wait_for_checkpoint();
+      std::cout << "dbg update=" << update_index << " starting_update_actor\n" << std::flush;
       train_metrics = update_actor(rollout_, update_index);
+      std::cout << "dbg update=" << update_index << " update_actor_done\n" << std::flush;
     }
 
     // 3. ES-LoRA update (touches actor_, safe now that PPO update is done)
@@ -3639,7 +3676,9 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
     const bool es_fired_this_update =
         (es_base_main > 0) && (steps_since_last_es_ >= es_base_main);
     if (es_fired_this_update) {
+      std::cout << "dbg update=" << update_index << " starting_es_lora_update\n" << std::flush;
       run_es_lora_update(update_index, coll_metrics);
+      std::cout << "dbg update=" << update_index << " es_lora_update_done\n" << std::flush;
       steps_since_last_es_ = 0;
       // Sync ES-LoRA weight changes to replica actors.
       if (compute_actors_.size() > 0) {

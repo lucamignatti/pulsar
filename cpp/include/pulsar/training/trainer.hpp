@@ -251,6 +251,18 @@ class Trainer {
   Actor anchor_actor_{nullptr};
   ObservationNormalizer anchor_normalizer_{0};
 
+  // Cached ES eval collectors — created once, reused across ES evals to avoid
+  // recreating hundreds of RocketSim arenas every 25 updates.
+  struct EsShardSpec {
+    int member_start = 0;
+    int member_count = 0;
+    int worker_count = 1;
+    torch::Device device{torch::kCPU};
+  };
+  std::vector<EsShardSpec> es_eval_shard_specs_{};
+  std::vector<std::unique_ptr<BatchedRocketSimCollector>> es_eval_collectors_{};
+  int es_eval_cached_team_size_ = -1;
+
 #ifdef PULSAR_HAS_CUDA
   std::vector<c10::cuda::CUDAStream> shard_collection_streams_;
   std::optional<c10::cuda::CUDAStream> training_stream_;
