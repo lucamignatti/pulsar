@@ -78,7 +78,7 @@
     "embedding_dim": 1024,
     "logsumexp_penalty_coeff": 0.01,
     "lambda_Zg": 1.0,
-    "lambda_goal_actor": 0.6,
+    "lambda_goal_actor": 1.0,
     "contrastive_batch_size": 4096,
     "max_future_horizon": 256
   },
