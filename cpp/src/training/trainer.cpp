@@ -1196,22 +1196,24 @@ TrainerMetrics Trainer::update_actor(RolloutStorage& rollout, int update_index) 
   }
 
   // ---- SAC critic updates ----
-  if (sac_trainer_ && replay_buffer_ && replay_buffer_->ready()) {
-    sac_trainer_->init_optimizer(sac_critic_);
-    SACTrainerLosses sac_log{};
-    for (int k = 0; k < config_.sac_critic.update_frequency; ++k) {
-      const int segs = std::max(1, config_.sac_critic.batch_size / config_.replay_buffer.segment_length);
-      const auto seg = replay_buffer_->sample_segments(segs);
-      sac_log = sac_trainer_->update(sac_critic_, seg);
-    }
-    sac_critic_->update_target(config_.sac_critic.tau);
-    sac_critic_ready_ = true;
+  if (sac_trainer_ && replay_buffer_) {
     metrics.replay_buffer_size = static_cast<int64_t>(replay_buffer_->size());
-    metrics.sac_td_loss    = sac_log.td_loss;
-    metrics.sac_lql_loss   = sac_log.lql_lb_loss;
-    metrics.sac_total_loss = sac_log.total_loss;
-    metrics.sac_mean_q     = sac_log.mean_q_value;
-    metrics.sac_max_q      = sac_log.max_q_value;
+    if (replay_buffer_->ready()) {
+      sac_trainer_->init_optimizer(sac_critic_);
+      SACTrainerLosses sac_log{};
+      for (int k = 0; k < config_.sac_critic.update_frequency; ++k) {
+        const int segs = std::max(1, config_.sac_critic.batch_size / config_.replay_buffer.segment_length);
+        const auto seg = replay_buffer_->sample_segments(segs);
+        sac_log = sac_trainer_->update(sac_critic_, seg);
+      }
+      sac_critic_->update_target(config_.sac_critic.tau);
+      sac_critic_ready_ = true;
+      metrics.sac_td_loss    = sac_log.td_loss;
+      metrics.sac_lql_loss   = sac_log.lql_lb_loss;
+      metrics.sac_total_loss = sac_log.total_loss;
+      metrics.sac_mean_q     = sac_log.mean_q_value;
+      metrics.sac_max_q      = sac_log.max_q_value;
+    }
   }
 
   // ---- Second GoalCritic update (same InfoNCE loss, independent parameters) ----
@@ -2618,6 +2620,12 @@ void Trainer::collect_rollout(
   int truncated_episodes = 0;
   int touched_episodes = 0;
   int multi_touched_episodes = 0;
+  double total_pbrs_shaping = 0.0;
+  double total_subgoal_shaping = 0.0;
+  double total_reachability = 0.0;
+  int64_t reachability_count = 0;
+  int64_t subgoal_replans_count = 0;
+  int64_t subgoal_early_aborts_count = 0;
   std::map<std::string, int> mode_completed;
   std::map<std::string, int> mode_touched;
   std::map<std::string, int> mode_multi_touched;
@@ -3226,6 +3234,7 @@ void Trainer::collect_rollout(
           pbrs_cache_age_ = 0;
         }
         pbrs_shaping = pbrs_w * (config_.sac_critic.gamma * cached_v_next_ - cached_v_current_);
+        total_pbrs_shaping += pbrs_shaping.sum().item<double>();
         ++pbrs_cache_age_;
       }
     }
@@ -3233,14 +3242,18 @@ void Trainer::collect_rollout(
     // ---- Subgoal planner ----
     torch::Tensor subgoal_shaping = torch::zeros_like(extrinsic_rewards_host);
     if (subgoal_planner_ && goal_critic_b_ && goal_buffer_filled_ > 0) {
+      bool is_early_abort = false;
       const bool should_plan =
           (step % config_.subgoal_planner.commit_horizon == 0) ||
-          (current_subgoal_.defined() && subgoal_planner_->should_replan(
+          (current_subgoal_.defined() && (is_early_abort = subgoal_planner_->should_replan(
               actor_->goal_critic(), goal_critic_b_,
               output.features.detach(),
               action_indices_cpu.to(device_),
               current_subgoal_,
-              recent_subgoal_scores_));
+              recent_subgoal_scores_)));
+      if (is_early_abort) {
+        subgoal_early_aborts_count++;
+      }
       if (should_plan) {
         const torch::Tensor cand_buf = goal_buffer_.narrow(0, 0, goal_buffer_filled_).to(device_);
         const auto sg_result = subgoal_planner_->select_subgoals(
@@ -3254,6 +3267,13 @@ void Trainer::collect_rollout(
           current_subgoal_ = sg_result.subgoal;
           sg_score_at_replan_.zero_();  // reset stall baseline after replan
         }
+        if (sg_result.replanned) {
+          subgoal_replans_count++;
+        }
+        if (sg_result.planner_score.defined()) {
+          total_reachability += sg_result.planner_score.mean().item<double>();
+          reachability_count++;
+        }
       }
 
       // Subgoal shaping reward (NEVER written to replay buffer)
@@ -3264,6 +3284,7 @@ void Trainer::collect_rollout(
             action_indices_cpu.to(device_),
             current_subgoal_).detach().to(torch::kCPU);
         subgoal_shaping = config_.subgoal_planner.shaped_reward_scale * sg_score;
+        total_subgoal_shaping += subgoal_shaping.sum().item<double>();
 
         // Update two-tensor history for early abort detection (no allocation)
         sg_score_recent_.copy_(sg_score);
@@ -3362,6 +3383,15 @@ void Trainer::collect_rollout(
   metrics.neutral_episodes = neutral_episodes;
   metrics.no_touch_episodes = no_touch_episodes;
   metrics.truncated_episodes = truncated_episodes;
+  if (total_steps > 0) {
+    metrics.pbrs_shaping_mean = total_pbrs_shaping / static_cast<double>(total_steps);
+    metrics.subgoal_shaping_mean = total_subgoal_shaping / static_cast<double>(total_steps);
+  }
+  if (reachability_count > 0) {
+    metrics.subgoal_reachability_mean = total_reachability / static_cast<double>(reachability_count);
+  }
+  metrics.subgoal_replans = subgoal_replans_count;
+  metrics.subgoal_early_aborts = subgoal_early_aborts_count;
   metrics.scored_episode_rate =
       completed_episodes > 0
           ? static_cast<double>(scored_episodes) / static_cast<double>(completed_episodes)
@@ -4001,6 +4031,30 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
     coll_metrics.mean_goal_score = train_metrics.mean_goal_score;
     coll_metrics.mean_sampled_goal_distance = train_metrics.mean_sampled_goal_distance;
     coll_metrics.advantage_std = train_metrics.advantage_std;
+
+    // Off-policy and World Model metrics copies
+    coll_metrics.rssm_kl_loss = train_metrics.rssm_kl_loss;
+    coll_metrics.rssm_consistency_loss = train_metrics.rssm_consistency_loss;
+    coll_metrics.rssm_icm_forward_loss = train_metrics.rssm_icm_forward_loss;
+    coll_metrics.rssm_icm_inverse_loss = train_metrics.rssm_icm_inverse_loss;
+    coll_metrics.rssm_goal_head_loss = train_metrics.rssm_goal_head_loss;
+    coll_metrics.intrinsic_reward_mean = train_metrics.intrinsic_reward_mean;
+    coll_metrics.intrinsic_beta = train_metrics.intrinsic_beta;
+
+    coll_metrics.sac_td_loss = train_metrics.sac_td_loss;
+    coll_metrics.sac_lql_loss = train_metrics.sac_lql_loss;
+    coll_metrics.sac_total_loss = train_metrics.sac_total_loss;
+    coll_metrics.sac_mean_q = train_metrics.sac_mean_q;
+    coll_metrics.sac_max_q = train_metrics.sac_max_q;
+    coll_metrics.replay_buffer_size = train_metrics.replay_buffer_size;
+
+    coll_metrics.pbrs_weight = train_metrics.pbrs_weight;
+    coll_metrics.pbrs_shaping_mean = train_metrics.pbrs_shaping_mean;
+
+    coll_metrics.subgoal_reachability_mean = train_metrics.subgoal_reachability_mean;
+    coll_metrics.subgoal_replans = train_metrics.subgoal_replans;
+    coll_metrics.subgoal_early_aborts = train_metrics.subgoal_early_aborts;
+    coll_metrics.subgoal_shaping_mean = train_metrics.subgoal_shaping_mean;
 
     coll_metrics.update_agent_steps_per_second =
         next_coll_steps > 0 ? static_cast<double>(next_coll_steps) / std::max(train_metrics.update_seconds, 1.0e-9) : 0.0;
