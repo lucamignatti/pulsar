@@ -107,7 +107,9 @@
     "min_fitness_std": 1e-6
   },
   "wandb": {
-    "enabled": false
+    "enabled": true,
+    "project": "pulsar-crl",
+    "mode": "online"
   },
   "replay_buffer": {
     "max_episodes": 2048,
