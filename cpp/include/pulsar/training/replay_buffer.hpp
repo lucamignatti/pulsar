@@ -26,12 +26,14 @@ class ReplayBuffer {
   // Called once per environment step for all agents simultaneously.
   // Accumulates per-agent data; flushes a complete episode to the circular
   // buffer whenever done[i]==1 for agent i.
+  // agent_offset is the global index of batch[0] — used when called per-shard.
   void push_step(
-      const torch::Tensor& obs,        // [total_agents, obs_dim]
-      const torch::Tensor& actions,    // [total_agents] int64
-      const torch::Tensor& ball_goals, // [total_agents, goal_dim]   — ball pos after step
-      const torch::Tensor& car_goals,  // [total_agents, car_goal_dim] — car pos after step
-      const torch::Tensor& dones);     // [total_agents] float — flush on done==1
+      const torch::Tensor& obs,        // [batch_agents, obs_dim]
+      const torch::Tensor& actions,    // [batch_agents] int64
+      const torch::Tensor& ball_goals, // [batch_agents, goal_dim]   — ball pos after step
+      const torch::Tensor& car_goals,  // [batch_agents, car_goal_dim] — car pos after step
+      const torch::Tensor& dones,      // [batch_agents] float — flush on done==1
+      int agent_offset = 0);
 
   // CRL batch: obs + actions + hindsight-relabeled future goals for both heads.
   struct CRLBatch {

@@ -2175,6 +2175,17 @@ void Trainer::collect_rollout(
 
           torch::Tensor goal_pos_host = collector.host_goal_positions();
           torch::Tensor task_goal_host = collector.host_task_goal_positions();
+
+          if (replay_buffer_) {
+            replay_buffer_->push_step(
+                raw_obs_host,
+                action_indices_cpu,
+                goal_pos_host,
+                collector.host_car_positions(),
+                dones_host,
+                static_cast<int>(shard_step.agent_offset));
+          }
+
           torch::Tensor goal_norms = goal_pos_host.norm(2, 1);
           float gd_min = goal_norms.min().item<float>();
           float gd_mean = goal_norms.mean().item<float>();

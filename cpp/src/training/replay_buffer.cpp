@@ -56,12 +56,11 @@ void ReplayBuffer::push_step(
     const torch::Tensor& actions,
     const torch::Tensor& ball_goals,
     const torch::Tensor& car_goals,
-    const torch::Tensor& dones) {
+    const torch::Tensor& dones,
+    int agent_offset) {
 
-  const int A = total_agents_;
-  TORCH_CHECK(obs.size(0) == A, "push_step: obs batch size mismatch");
+  const int A = static_cast<int>(obs.size(0));
 
-  // All inputs assumed CPU already (collector writes to host tensors)
   const torch::Tensor obs_c  = obs.to(torch::kCPU).contiguous();
   const torch::Tensor act_c  = actions.to(torch::kCPU).contiguous();
   const torch::Tensor bg_c   = ball_goals.to(torch::kCPU).contiguous();
@@ -72,20 +71,21 @@ void ReplayBuffer::push_step(
   auto* step_ptr       = acc_step_.data_ptr<int32_t>();
 
   for (int i = 0; i < A; ++i) {
-    const int s = step_ptr[i];
+    const int gi = agent_offset + i;  // global agent index
+    const int s  = step_ptr[gi];
     if (s < max_ep_len_) {
-      acc_obs_[i][s]        = obs_c[i];
-      acc_actions_[i][s]    = act_c[i];
-      acc_ball_goals_[i][s] = bg_c[i];
-      acc_car_goals_[i][s]  = cg_c[i];
-      step_ptr[i] = s + 1;
+      acc_obs_[gi][s]        = obs_c[i];
+      acc_actions_[gi][s]    = act_c[i];
+      acc_ball_goals_[gi][s] = bg_c[i];
+      acc_car_goals_[gi][s]  = cg_c[i];
+      step_ptr[gi] = s + 1;
     }
     if (done_ptr[i] > 0.5F) {
       {
         std::lock_guard<std::mutex> lock(ep_mutex_);
-        flush_agent_locked(i);
+        flush_agent_locked(gi);
       }
-      step_ptr[i] = 0;
+      step_ptr[gi] = 0;
     }
   }
 }
