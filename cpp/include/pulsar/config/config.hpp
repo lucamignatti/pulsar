@@ -185,13 +185,10 @@ struct WorldModelConfig {
 };
 
 struct ReplayBufferConfig {
-  int capacity = 1048576;
-  int min_fill_before_sampling = 8192;
-  int segment_length = 64;
-  float her_relabel_fraction = 0.8F;
-  int her_future_k = 4;
-  float goal_reach_epsilon = 0.15F;
-  bool epsilon_position_only = true;
+  int max_episodes = 2048;
+  int max_episode_length = 300;
+  int min_episodes_before_sampling = 32;
+  int max_future_horizon = 256;
 };
 
 struct SACCriticConfig {
@@ -224,8 +221,16 @@ struct SubgoalPlannerConfig {
   float shaped_reward_scale = 0.1F;
 };
 
+struct CRLConfig {
+  bool enabled = true;
+  float car_head_initial_weight = 1.0F;
+  float car_head_anneal_steps = 1.0e9F;
+  int num_updates_per_rollout = 4;
+  int car_goal_dim = 3;
+};
+
 struct ExperimentConfig {
-  int schema_version = 6;
+  int schema_version = 7;
   int obs_schema_version = 2;
   EnvConfig env{};
   OutcomeConfig outcome{};
@@ -237,15 +242,12 @@ struct ExperimentConfig {
   ESLoraConfig es_lora{};
   WandbConfig wandb{};
   CurriculumConfig curriculum{};
-  WorldModelConfig world_model{};
   ReplayBufferConfig replay_buffer{};
-  SACCriticConfig sac_critic{};
-  PBRSConfig pbrs{};
-  SubgoalPlannerConfig subgoal_planner{};
+  CRLConfig crl{};
 };
 
 struct CheckpointMetadata {
-  int schema_version = 6;
+  int schema_version = 7;
   int obs_schema_version = 2;
   std::string config_hash{};
   std::string action_table_hash{};
@@ -287,12 +289,8 @@ void to_json(nlohmann::json& j, const WorldModelConfig& value);
 void from_json(const nlohmann::json& j, WorldModelConfig& value);
 void to_json(nlohmann::json& j, const ReplayBufferConfig& value);
 void from_json(const nlohmann::json& j, ReplayBufferConfig& value);
-void to_json(nlohmann::json& j, const SACCriticConfig& value);
-void from_json(const nlohmann::json& j, SACCriticConfig& value);
-void to_json(nlohmann::json& j, const PBRSConfig& value);
-void from_json(const nlohmann::json& j, PBRSConfig& value);
-void to_json(nlohmann::json& j, const SubgoalPlannerConfig& value);
-void from_json(const nlohmann::json& j, SubgoalPlannerConfig& value);
+void to_json(nlohmann::json& j, const CRLConfig& value);
+void from_json(const nlohmann::json& j, CRLConfig& value);
 void to_json(nlohmann::json& j, const ExperimentConfig& value);
 void from_json(const nlohmann::json& j, ExperimentConfig& value);
 void to_json(nlohmann::json& j, const CheckpointMetadata& value);

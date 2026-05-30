@@ -190,8 +190,6 @@ int main(int argc, char** argv) {
     std::cout << "overall_agent_steps_per_second="
               << static_cast<double>(metrics.agent_steps) / total_seconds << '\n';
     std::cout << "policy_loss=" << metrics.policy_loss << '\n';
-    std::cout << "value_loss=" << metrics.value_loss << '\n';
-    std::cout << "entropy=" << metrics.entropy << '\n';
     std::cout << "grad_norm=" << metrics.grad_norm << '\n';
     std::cout << "es_updates=" << metrics.es_updates << '\n';
     std::cout << "es_seconds=" << metrics.es_seconds << '\n';

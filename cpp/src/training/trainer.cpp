@@ -44,12 +44,6 @@
 
 namespace pulsar {
 
-inline float compute_pbrs_weight(int update_index, const PBRSConfig& cfg) {
-  if (cfg.warmup_updates <= 0.0F) return cfg.final_weight;
-  const float t = static_cast<float>(update_index) / cfg.warmup_updates;
-  return cfg.initial_weight + (cfg.final_weight - cfg.initial_weight) * std::min(1.0F, t);
-}
-
 namespace {
 
 constexpr int kEsLoraMinStage = 0;
@@ -408,25 +402,16 @@ std::vector<MetricItem> get_all_metrics(
     bool es_fired) {
   std::vector<MetricItem> items;
 
-  // 1. Core PPO Optimization Metrics
+  // 1. CRL Optimization Metrics
   items.push_back({"update", update_index, "Optimization"});
   items.push_back({"global_step", global_step, "Optimization"});
-  items.push_back({"policy_loss", metrics.policy_loss, "Optimization"});
-  items.push_back({"value_loss", metrics.value_loss, "Optimization"});
-  items.push_back({"entropy", metrics.entropy, "Optimization"});
+  items.push_back({"ball_critic_loss", metrics.policy_loss, "Optimization"});
   items.push_back({"grad_norm", metrics.grad_norm_valid_steps > 0 ? nlohmann::json(metrics.grad_norm) : nlohmann::json(nullptr), "Optimization"});
   items.push_back({"grad_norm_valid_steps", metrics.grad_norm_valid_steps, "Optimization"});
   items.push_back({"optimizer_steps", metrics.optimizer_steps, "Optimization"});
-  items.push_back({"policy_approx_kl", metrics.policy_approx_kl, "Optimization"});
-  items.push_back({"kl_divergence", metrics.policy_approx_kl, "Optimization"});
-  items.push_back({"policy_clip_fraction", metrics.policy_clip_fraction, "Optimization"});
-  items.push_back({"policy_log_ratio_abs_max", metrics.policy_log_ratio_abs_max, "Optimization"});
   items.push_back({"nonfinite_loss_skips", metrics.nonfinite_loss_skips, "Optimization"});
   items.push_back({"nonfinite_grad_norm_skips", metrics.nonfinite_grad_norm_skips, "Optimization"});
-  items.push_back({"kl_guard_skips", metrics.kl_guard_skips, "Optimization"});
-  items.push_back({"grad_norm_guard_skips", metrics.grad_norm_guard_skips, "Optimization"});
   items.push_back({"rollout_steps", metrics.rollout_steps, "Optimization"});
-  items.push_back({"advantage_std", metrics.advantage_std, "Optimization"});
 
   // 2. Anchor Evaluation Metrics
   if (metrics.anchor_win_rate >= 0.0) {
@@ -448,9 +433,7 @@ std::vector<MetricItem> get_all_metrics(
   items.push_back({"cuda_alloc_retries", metrics.cuda_alloc_retries, "System"});
   items.push_back({"cuda_ooms", metrics.cuda_ooms, "System"});
 
-  // 4. Reward & Gameplay Metrics
-  items.push_back({"total_reward_mean", metrics.total_reward_mean, "Rewards"});
-  items.push_back({"gameplay_reward_mean", metrics.gameplay_reward_mean, "Rewards"});
+  // 4. Episode Metrics
   items.push_back({"mechanic_reward_mean", metrics.mechanic_reward_mean, "Rewards"});
   items.push_back({"completed_episodes", metrics.completed_episodes, "Rewards"});
   items.push_back({"conceded_episodes", metrics.conceded_episodes, "Rewards"});
@@ -469,7 +452,6 @@ std::vector<MetricItem> get_all_metrics(
   items.push_back({"goals_conceded", metrics.goals_conceded, "Rewards"});
 
   // 5. GCRL Metrics
-  items.push_back({"sampled_value_win_mean", metrics.sampled_value_win_mean, "GCRL"});
   items.push_back({"goal_critic_loss", metrics.goal_critic_loss, "GCRL"});
   items.push_back({"mean_goal_score", metrics.mean_goal_score, "GCRL"});
   items.push_back({"mean_sampled_goal_distance", metrics.mean_sampled_goal_distance, "GCRL"});
@@ -520,32 +502,11 @@ std::vector<MetricItem> get_all_metrics(
   items.push_back({"forward_backward_seconds", metrics.forward_backward_seconds, "System"});
   items.push_back({"optimizer_step_seconds", metrics.optimizer_step_seconds, "System"});
 
-  // 9. RSSM World Model Metrics (NEW)
-  items.push_back({"rssm_kl_loss", metrics.rssm_kl_loss, "Predictor"});
-  items.push_back({"rssm_consistency_loss", metrics.rssm_consistency_loss, "Predictor"});
-  items.push_back({"rssm_icm_forward_loss", metrics.rssm_icm_forward_loss, "Predictor"});
-  items.push_back({"rssm_icm_inverse_loss", metrics.rssm_icm_inverse_loss, "Predictor"});
-  items.push_back({"rssm_goal_head_loss", metrics.rssm_goal_head_loss, "Predictor"});
-  items.push_back({"intrinsic_reward_mean", metrics.intrinsic_reward_mean, "Exploration"});
-  items.push_back({"intrinsic_beta", metrics.intrinsic_beta, "Exploration"});
-
-  // 10. SAC Off-Policy Metrics (NEW)
-  items.push_back({"sac_td_loss", metrics.sac_td_loss, "Optimization"});
-  items.push_back({"sac_lql_loss", metrics.sac_lql_loss, "Optimization"});
-  items.push_back({"sac_total_loss", metrics.sac_total_loss, "Optimization"});
-  items.push_back({"sac_mean_q", metrics.sac_mean_q, "Optimization"});
-  items.push_back({"sac_max_q", metrics.sac_max_q, "Optimization"});
-  items.push_back({"replay_buffer_size", metrics.replay_buffer_size, "Optimization"});
-
-  // 11. PBRS Shaping Metrics (NEW)
-  items.push_back({"pbrs_weight", metrics.pbrs_weight, "Rewards"});
-  items.push_back({"pbrs_shaping_mean", metrics.pbrs_shaping_mean, "Rewards"});
-
-  // 12. Subgoal Planner Metrics (NEW)
-  items.push_back({"subgoal_reachability_mean", metrics.subgoal_reachability_mean, "GCRL"});
-  items.push_back({"subgoal_replans", metrics.subgoal_replans, "GCRL"});
-  items.push_back({"subgoal_early_aborts", metrics.subgoal_early_aborts, "GCRL"});
-  items.push_back({"subgoal_shaping_mean", metrics.subgoal_shaping_mean, "GCRL"});
+  // 9. CRL Off-Policy Metrics
+  items.push_back({"replay_buffer_size", metrics.replay_buffer_size, "CRL"});
+  items.push_back({"car_critic_loss", metrics.car_critic_loss, "CRL"});
+  items.push_back({"car_actor_loss", metrics.car_actor_loss, "CRL"});
+  items.push_back({"car_head_weight", metrics.car_head_weight, "CRL"});
 
   return items;
 }
@@ -734,72 +695,33 @@ Trainer::Trainer(
     gcrl_trainer_ = std::make_unique<GCRLTrainer>(config_.goal_critic, device_);
   }
 
-  // Initialize RSSM world model (registered as actor submodule for checkpoint save/load)
-  if (config_.world_model.latent_dim > 0) {
-    world_model_trainer_ = std::make_unique<WorldModelTrainer>(config_.world_model, device_);
-    actor_->init_rssm(config_.world_model);
-    actor_->rssm()->to(device_);
-  }
-
-  // Initialize replay buffer
+  // Replay buffer
   replay_buffer_ = std::make_unique<ReplayBuffer>(
       config_.replay_buffer,
+      static_cast<int>(total_agents_),
       config_.model.observation_dim,
       config_.model.action_dim,
       config_.goal_mapping.goal_dim,
+      config_.crl.car_goal_dim,
       torch::Device(torch::kCPU));
 
-  // Initialize SAC critic
-  sac_critic_ = SACCritic(
-      config_.sac_critic,
-      config_.model.observation_dim,
-      config_.model.action_dim,
-      config_.goal_mapping.goal_dim);
-  sac_critic_->to(device_);
-  sac_trainer_ = std::make_unique<SACTrainer>(config_.sac_critic, device_);
-
-  // Second GoalCritic for pessimistic ensemble
-  goal_critic_b_ = GoalCritic(
-      actor_->feature_dim(),
-      config_.model.action_dim,
-      config_.goal_critic.embedding_dim,
-      config_.goal_critic.hidden_dim,
-      config_.goal_critic.goal_dim);
-  goal_critic_b_->to(device_);
-  {
-    std::vector<at::Tensor> gc_b_params;
-    for (auto& p : goal_critic_b_->parameters()) {
-      if (p.requires_grad()) gc_b_params.push_back(p);
+  // Car-head GoalCritic (locomotion bootstrap, annealed during training)
+  if (config_.crl.enabled) {
+    car_goal_critic_ = GoalCritic(
+        actor_->feature_dim(),
+        config_.model.action_dim,
+        config_.goal_critic.embedding_dim,
+        config_.goal_critic.hidden_dim,
+        config_.crl.car_goal_dim);
+    car_goal_critic_->to(device_);
+    std::vector<at::Tensor> car_params;
+    for (auto& p : car_goal_critic_->parameters()) {
+      if (p.requires_grad()) car_params.push_back(p);
     }
-    goal_critic_b_optimizer_ = std::make_unique<torch::optim::Adam>(
-        gc_b_params,
+    car_goal_critic_optimizer_ = std::make_unique<torch::optim::Adam>(
+        car_params,
         torch::optim::AdamOptions(static_cast<double>(config_.ppo.learning_rate)));
   }
-
-  // Subgoal planner
-  subgoal_planner_ = std::make_unique<SubgoalPlanner>(
-      config_.subgoal_planner,
-      config_.goal_critic,
-      device_);
-
-  // Goal candidate buffer
-  goal_buffer_ = torch::zeros(
-      {kGoalBufferCapacity, config_.goal_mapping.goal_dim},
-      torch::TensorOptions().dtype(torch::kFloat32));
-
-  // Episode ID tracking
-  episode_ids_ = torch::zeros(
-      {static_cast<int64_t>(total_agents_)},
-      torch::TensorOptions().dtype(torch::kInt64));
-
-  // Subgoal score history — just two rows: [at_replan, recent]
-  sg_score_at_replan_ = torch::zeros(
-      {static_cast<int64_t>(total_agents_)},
-      torch::TensorOptions().dtype(torch::kFloat32));
-  sg_score_recent_ = torch::zeros(
-      {static_cast<int64_t>(total_agents_)},
-      torch::TensorOptions().dtype(torch::kFloat32));
-  recent_subgoal_scores_ = torch::stack({sg_score_at_replan_, sg_score_recent_}, 0);
 
   maybe_initialize_from_checkpoint();
   sanitize_actor_parameters();
@@ -1151,7 +1073,7 @@ void Trainer::maybe_initialize_from_checkpoint() {
   }
 }
 
-TrainerMetrics Trainer::update_actor(RolloutStorage& rollout, int update_index) {
+TrainerMetrics Trainer::update_actor(RolloutStorage& rollout, int /*update_index*/) {
   PULSAR_TRACE_SCOPE_CAT("trainer", "update_actor");
 #ifdef PULSAR_HAS_CUDA
   std::optional<c10::cuda::CUDAStream> prev_train_stream;
@@ -1162,736 +1084,116 @@ TrainerMetrics Trainer::update_actor(RolloutStorage& rollout, int update_index) 
 #endif
   const auto update_start = std::chrono::steady_clock::now();
   TrainerMetrics metrics{};
-  sanitize_actor_parameters(); // Guarantee clean parameters before PPO epochs
-
-
-  const int total_agents = rollout.num_agents();
-  const int rollout_steps = rollout.rollout_length();
-
-  // ---- RSSM world model update + intrinsic rewards ----
-  // TBPTT: compute_losses calls .backward() per chunk internally (each chunk_size steps).
-  // We zero_grad before the first chunk and step once after all chunks complete.
-  WorldModelLosses wm_losses{};
-  if (world_model_trainer_ && actor_->rssm()) {
-    actor_optimizer_.zero_grad();
-    const torch::Tensor intrinsic_rewards = world_model_trainer_->compute_losses(
-        actor_->rssm(), rollout, config_, wm_losses);
-    // backward() was already called per TBPTT chunk — just clip and step
-    clip_existing_gradients(*actor_, config_.ppo.max_grad_norm);
-    actor_optimizer_.step();
-    actor_optimizer_.zero_grad();
-    metrics.rssm_kl_loss = wm_losses.kl_loss_val;
-    metrics.rssm_consistency_loss = wm_losses.consistency_loss_val;
-    metrics.rssm_icm_forward_loss = wm_losses.icm_forward_loss_val;
-    metrics.rssm_icm_inverse_loss = wm_losses.icm_inverse_loss_val;
-    metrics.rssm_goal_head_loss = wm_losses.goal_head_loss_val;
-
-    // Blend intrinsic reward into extrinsic stream (annealed)
-    const float beta = compute_intrinsic_beta(update_index_, config_.world_model);
-    metrics.intrinsic_beta = static_cast<double>(beta);
-    if (beta > 0.0F) {
-      auto& ext = const_cast<std::unordered_map<std::string, torch::Tensor>&>(rollout.all_rewards()).at("extrinsic");
-      ext.narrow(0, 0, rollout_steps).add_(
-          beta * intrinsic_rewards.narrow(0, 0, rollout_steps));
-      metrics.intrinsic_reward_mean =
-          (beta * intrinsic_rewards.narrow(0, 0, rollout_steps)).mean().item<double>();
-    }
-  }
-
-  // ---- SAC critic updates ----
-  if (sac_trainer_ && replay_buffer_) {
-    metrics.replay_buffer_size = static_cast<int64_t>(replay_buffer_->size());
-    if (replay_buffer_->ready()) {
-      sac_trainer_->init_optimizer(sac_critic_);
-      SACTrainerLosses sac_log{};
-      for (int k = 0; k < config_.sac_critic.update_frequency; ++k) {
-        const int segs = std::max(1, config_.sac_critic.batch_size / config_.replay_buffer.segment_length);
-        const auto seg = replay_buffer_->sample_segments(segs);
-        sac_log = sac_trainer_->update(sac_critic_, seg);
-      }
-      sac_critic_->update_target(config_.sac_critic.tau);
-      sac_critic_ready_ = true;
-      metrics.sac_td_loss    = sac_log.td_loss;
-      metrics.sac_lql_loss   = sac_log.lql_lb_loss;
-      metrics.sac_total_loss = sac_log.total_loss;
-      metrics.sac_mean_q     = sac_log.mean_q_value;
-      metrics.sac_max_q      = sac_log.max_q_value;
-    }
-  }
-
-  // ---- Second GoalCritic update (same InfoNCE loss, independent parameters) ----
-  // This is wired into the GCRL block below via passing goal_critic_b_ alongside goal_critic_.
-  // The goal_critic_b_ optimizer is stepped alongside the actor optimizer after each minibatch.
+  sanitize_actor_parameters();
 
   ++update_index_;
-  metrics.pbrs_weight = static_cast<double>(compute_pbrs_weight(update_index_, config_.pbrs));
+  metrics.replay_buffer_size = static_cast<int64_t>(replay_buffer_->size());
 
-  const auto& all_rewards = rollout.all_rewards();
-
-  const float effective_entropy_coef = config_.ppo.entropy_coef;
-  const float eff_gcrl_actor_coef = config_.goal_critic.lambda_goal_actor;
-
-  const int seq_len = std::max(1, config_.ppo.rollout_length);
-  const size_t num_update_gpus = compute_devices_.size();
-
-  const int max_forward_samples = effective_update_forward_samples(
-      config_.model,
-      device_,
-      config_.ppo.overlap_collection_update,
-      num_update_gpus,
-      total_agents,
-      config_.ppo.num_envs);
-  const int agents_per_forward = std::max(1, max_forward_samples / seq_len);
-  const int requested_logical_agents_per_batch = std::max(1, config_.ppo.minibatch_size / seq_len);
-  constexpr int kMaxLogicalMinibatchesPerUpdate = 25;
-  const int update_epochs = std::max(1, config_.ppo.update_epochs);
-  const int min_agents_for_minibatch_cap = std::max(
-      1,
-      static_cast<int>(
-          (static_cast<std::int64_t>(total_agents) * update_epochs + kMaxLogicalMinibatchesPerUpdate - 1) /
-          kMaxLogicalMinibatchesPerUpdate));
-  const int logical_agents_per_batch = std::min(
-      total_agents,
-      std::max(requested_logical_agents_per_batch, min_agents_for_minibatch_cap));
-  const bool use_cuda_amp = device_.is_cuda() && config_.ppo.cuda_amp;
-  const double cuda_amp_loss_scale = 1.0;
-  const int optimizer_accumulation_steps = std::max(1, config_.ppo.optimizer_accumulation_steps);
-  int minibatches_per_epoch = 0;
-  int microbatches_per_epoch = 0;
-  for (int offset = 0; offset < total_agents;) {
-    const int remaining = total_agents - offset;
-    const int count = config_.ppo.overbatching && remaining <= logical_agents_per_batch * 2
-        ? remaining
-        : std::min(logical_agents_per_batch, remaining);
-    ++minibatches_per_epoch;
-    microbatches_per_epoch += (count + agents_per_forward - 1) / agents_per_forward;
-    offset += count;
-  }
-  if (benchmark_progress_) {
-    std::cout << "bench_update_phase_start"
-              << " rollout_steps=" << rollout_steps
-              << " total_agents=" << total_agents
-              << " update_epochs=" << config_.ppo.update_epochs
-              << " logical_agents_per_batch=" << logical_agents_per_batch
-              << " effective_forward_samples=" << max_forward_samples
-              << " agents_per_forward=" << agents_per_forward
-              << " minibatches_per_epoch=" << minibatches_per_epoch
-              << " microbatches_per_epoch=" << microbatches_per_epoch
-              << " optimizer_accumulation_steps=" << optimizer_accumulation_steps
-              << " cuda_amp=" << (use_cuda_amp ? 1 : 0)
-              << " loss_scale=" << cuda_amp_loss_scale
-              << '\n' << std::flush;
-  }
-  std::int64_t metric_steps = 0;
-  double policy_loss_sum = 0.0;
-  double value_loss_sum = 0.0;
-  double entropy_sum = 0.0;
-  double grad_norm_sum = 0.0;
-  std::int64_t grad_norm_steps = 0;
-  double policy_approx_kl_sum = 0.0;
-  double policy_clip_fraction_sum = 0.0;
-  double goal_critic_loss_sum = 0.0;
-  double goal_score_sum = 0.0;
-  double sampled_goal_distance_sum = 0.0;
-  double policy_log_ratio_abs_max = 0.0;
-  int accumulated_minibatches = 0;
-  bool accumulated_has_backward = false;
-  double accumulated_total_active = 0.0;
-  double accumulated_policy_kl_sum = 0.0;
-  double accumulated_policy_kl_count = 0.0;
-
-  const auto& all_values = rollout.all_values();
-  if (rollout_steps <= 0) {
+  // ---- CRL off-policy update ----
+  // Each rollout triggers num_updates_per_rollout gradient steps on the replay buffer.
+  // Ball head: symmetric InfoNCE on hindsight-relabeled future ball positions.
+  // Car head: same loss on hindsight-relabeled future car positions, weighted by annealing schedule.
+  if (!config_.crl.enabled || !replay_buffer_->ready() || !gcrl_trainer_) {
+    metrics.update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count();
+    sanitize_actor_parameters();
     return metrics;
   }
-  const torch::Tensor extrinsic_values = all_values.at("extrinsic").narrow(0, 0, rollout_steps).to(device_);
-  const torch::Tensor extrinsic_rewards = all_rewards.at("extrinsic").narrow(0, 0, rollout_steps).to(device_);
 
-  torch::Tensor shaped_rewards = extrinsic_rewards.clone();
+  actor_->train();
 
-  const torch::Tensor rollout_dones = rollout.dones.narrow(0, 0, rollout_steps).to(device_);
-  const torch::Tensor rollout_bootstrap_truncated = rollout.bootstrap_truncated.narrow(0, 0, rollout_steps).to(device_);
+  const int n_updates = config_.crl.num_updates_per_rollout;
+  const int B = config_.goal_critic.contrastive_batch_size;
+  const float lambda_actor = config_.goal_critic.lambda_goal_actor;
+  const float lambda_Zg = config_.goal_critic.lambda_Zg;
 
-  torch::Tensor active_mask = rollout.learner_active.narrow(0, 0, rollout_steps).to(device_) > 0.5F;
-  torch::Tensor normalized_advantages;
-  torch::Tensor returns;
-  {
-    PULSAR_TRACE_SCOPE_CAT("trainer", "update_gae");
-    const auto gae_start = std::chrono::steady_clock::now();
-    if (benchmark_progress_) {
-      std::cout << "bench_update_gae_start\n" << std::flush;
+  double ball_critic_loss_sum = 0.0;
+  double car_critic_loss_sum  = 0.0;
+  double car_actor_loss_sum   = 0.0;
+  double grad_norm_sum        = 0.0;
+  std::int64_t grad_norm_steps = 0;
+
+  const auto lopt = torch::TensorOptions().dtype(torch::kInt64).device(device_);
+  const auto fopt = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
+
+  for (int k = 0; k < n_updates; ++k) {
+    auto batch = replay_buffer_->sample_crl_batch(B);
+
+    const torch::Tensor obs_dev       = actor_normalizer_.normalize(batch.obs.to(device_));
+    const torch::Tensor actions_dev   = batch.actions.to(device_);
+    const torch::Tensor ball_goals    = batch.future_ball_goals.to(device_);
+    const torch::Tensor car_goals     = batch.future_car_goals.to(device_);
+
+    // Forward actor (no goal conditioning needed for InfoNCE update;
+    // features encode obs, critic evaluates obs×action×goal similarity)
+    const auto out = actor_->forward_step(obs_dev, {}, /*compute_value=*/false);
+    const torch::Tensor features = out.features;   // [B, feat_dim]
+    const torch::Tensor logits   = out.policy_logits; // [B, action_dim]
+    // Uniform mask — no env masks stored in replay buffer
+    const torch::Tensor masks = torch::ones({B, config_.model.action_dim}, fopt);
+
+    actor_optimizer_.zero_grad();
+    if (car_goal_critic_optimizer_) car_goal_critic_optimizer_->zero_grad();
+
+    // Ball head (goal_dim=4): InfoNCE critic + Gumbel-Softmax actor
+    torch::Tensor ball_critic_loss, ball_actor_loss, ball_score;
+    gcrl_trainer_->compute_gcrl_losses(
+        actor_->goal_critic(), features, actions_dev, logits, masks, ball_goals,
+        /*compute_critic=*/true, /*compute_actor=*/(lambda_actor > 0.0F),
+        ball_critic_loss, ball_actor_loss, ball_score);
+
+    // Car head (car_goal_dim=3): InfoNCE critic + Gumbel-Softmax actor (annealed)
+    const float w_car = config_.crl.car_head_initial_weight *
+        std::max(0.0F, 1.0F - static_cast<float>(global_step_) / config_.crl.car_head_anneal_steps);
+
+    torch::Tensor total_loss = ball_critic_loss;
+    if (lambda_actor > 0.0F && ball_actor_loss.defined())
+      total_loss = total_loss + lambda_actor * ball_actor_loss;
+
+    if (car_goal_critic_ && w_car > 0.0F) {
+      torch::Tensor car_critic_loss, car_actor_loss, car_score;
+      gcrl_trainer_->compute_gcrl_losses(
+          car_goal_critic_, features, actions_dev, logits, masks, car_goals,
+          /*compute_critic=*/true, /*compute_actor=*/(lambda_actor > 0.0F),
+          car_critic_loss, car_actor_loss, car_score);
+      total_loss = total_loss + w_car * car_critic_loss;
+      if (lambda_actor > 0.0F && car_actor_loss.defined())
+        total_loss = total_loss + w_car * lambda_actor * car_actor_loss;
+      car_critic_loss_sum += car_critic_loss.item<double>();
+      if (car_actor_loss.defined()) car_actor_loss_sum += car_actor_loss.item<double>();
     }
-    torch::Tensor terminal_values;
-    if (rollout_bootstrap_truncated.any().item<bool>()) {
-      torch::NoGradGuard no_grad;
-      torch::Tensor term_obs = rollout.terminal_observations.narrow(0, 0, rollout_steps);
-      auto term_flat = term_obs.reshape({rollout_steps * total_agents, config_.model.observation_dim});
-      const int total_term_samples = rollout_steps * total_agents;
-      const int max_term_batch = effective_max_forward_samples(config_.model, device_);
-      std::vector<torch::Tensor> term_value_chunks;
-      for (int offset = 0; offset < total_term_samples; offset += max_term_batch) {
-        int batch = std::min(max_term_batch, total_term_samples - offset);
-        auto chunk = actor_normalizer_.normalize(term_flat.slice(0, offset, offset + batch).to(device_));
-        auto chunk_goal = policy_goal_values_like(chunk, config_.goal_critic.goal_dim);
-        auto chunk_out = actor_->forward_step(chunk, chunk_goal);
-        term_value_chunks.push_back(chunk_out.value_win_logits.squeeze(-1));
-      }
-      auto term_value_flat = torch::cat(term_value_chunks, 0);
-      terminal_values = term_value_flat.reshape({rollout_steps, total_agents});
-    }
-    auto final_values_map = rollout.final_values();
-    torch::Tensor final_values = final_values_map.count("extrinsic") && final_values_map.at("extrinsic").defined()
-        ? final_values_map.at("extrinsic").to(device_)
-        : torch::Tensor{};
 
-    torch::Tensor shaped_advantages = compute_gae(
-        extrinsic_values,
-        shaped_rewards,
-        rollout_dones,
-        config_.ppo.gamma,
-        config_.ppo.gae_lambda,
-        final_values,
-        rollout_bootstrap_truncated,
-        terminal_values);
-    returns = shaped_advantages + extrinsic_values.detach();
-    normalized_advantages = normalize_advantage(shaped_advantages, active_mask);
-
-    if (active_mask.any().item<bool>()) {
-      metrics.advantage_std = shaped_advantages.index({active_mask}).std().item<double>();
+    if (torch::isfinite(total_loss).all().item<bool>()) {
+      total_loss.backward();
+      const float gn = clip_existing_gradients(*actor_, config_.ppo.max_grad_norm);
+      actor_optimizer_.step();
+      if (car_goal_critic_optimizer_) car_goal_critic_optimizer_->step();
+      ball_critic_loss_sum += ball_critic_loss.item<double>();
+      grad_norm_sum += static_cast<double>(gn);
+      ++grad_norm_steps;
     } else {
-      metrics.advantage_std = 0.0;
+      ++metrics.nonfinite_loss_skips;
     }
-    if (benchmark_progress_) {
-      const double gae_seconds =
-          std::chrono::duration<double>(std::chrono::steady_clock::now() - gae_start).count();
-      std::cout << "bench_update_gae_done seconds=" << gae_seconds << '\n' << std::flush;
-    }
+
+    ++global_step_;
+    metrics.car_head_weight = static_cast<double>(
+        config_.crl.car_head_initial_weight *
+        std::max(0.0F, 1.0F - static_cast<float>(global_step_) / config_.crl.car_head_anneal_steps));
   }
 
-  int completed_minibatches = 0;
-  for (int epoch = 0; epoch < config_.ppo.update_epochs; ++epoch) {
-    PULSAR_TRACE_SCOPE_CAT("trainer", "update_epoch");
-    const torch::Tensor perm = torch::randperm(total_agents, torch::TensorOptions().dtype(torch::kLong).device(torch::kCPU));
-    for (int agent_offset = 0; agent_offset < total_agents;) {
-      PULSAR_TRACE_SCOPE_CAT("trainer", "update_minibatch");
-      const auto minibatch_start = std::chrono::steady_clock::now();
-
-      const int remaining_agents = total_agents - agent_offset;
-      const int count = config_.ppo.overbatching && remaining_agents <= logical_agents_per_batch * 2
-          ? remaining_agents
-          : std::min(logical_agents_per_batch, remaining_agents);
-      const torch::Tensor agent_indices = perm.narrow(0, agent_offset, count);
-      const int next_agent_offset = agent_offset + count;
-      agent_offset = next_agent_offset;
-
-      const std::vector<torch::Tensor> mode_agent_indices_list = {agent_indices};
-      double combined_total_active = 0.0;
-
-      for (const torch::Tensor& mode_agent_indices : mode_agent_indices_list) {
-        const int mode_count = static_cast<int>(mode_agent_indices.numel());
-        if (mode_count == 0) continue;
-
-        // Fast-path: if all agents are learners (common in curriculum without self-play),
-        // mode_total_active is just mode_count * rollout_length. Skip expensive tensor sum.
-        double mode_total_active;
-        bool mode_all_active = false;
-        {
-          torch::Tensor active_slice = index_select_on_source_device(
-              rollout.learner_active.narrow(0, 0, rollout.rollout_length()),
-              1,
-              mode_agent_indices);
-          const float active_sum = active_slice.sum().item<float>();
-          const float active_all = static_cast<float>(mode_count * rollout.rollout_length());
-          mode_total_active = static_cast<double>(active_sum);
-          mode_all_active = active_sum >= active_all - 0.5F;
-          if (mode_total_active <= 0.0) continue;
-        }
-        combined_total_active += mode_total_active;
-
-        if (accumulated_minibatches == 0) {
-          actor_optimizer_.zero_grad();
-        }
-
-        // Launch one async task per GPU. Each task processes all micro-batches
-        // for its chunk of agents, accumulating GPU-local CapturedGrad groups.
-        struct GpuTaskResult {
-          double policy_loss_sum = 0.0;
-          double value_loss_sum = 0.0;
-          double entropy_sum = 0.0;
-          double policy_approx_kl = 0.0;
-          double policy_clip_frac = 0.0;
-          double policy_log_ratio_max = 0.0;
-          double goal_critic_loss = 0.0;
-          double goal_score = 0.0;
-          double sampled_goal_dist = 0.0;
-          double fwd_bwd_seconds = 0.0;
-          bool has_backward = false;
-          std::int64_t active_count = 0;
-          std::int64_t nonfinite_loss_skips = 0;
-        };
-        std::vector<std::future<GpuTaskResult>> gpu_futures;
-        gpu_futures.reserve(num_update_gpus);
-
-        const int mode_count_local = mode_count;
-        const int agents_per_forward_local = agents_per_forward;
-        const int seq_len_local = seq_len;
-        const int rollout_steps_local = rollout_steps;
-        const double mode_total_active_local = mode_total_active;
-        const bool mode_all_active_local = mode_all_active;
-        const bool use_cuda_amp_local = use_cuda_amp;
-        const double cuda_amp_loss_scale_local = cuda_amp_loss_scale;
-        const int optimizer_accumulation_steps_local = optimizer_accumulation_steps;
-
-        for (size_t g = 0; g < num_update_gpus; ++g) {
-          const torch::Device gpu_dev = compute_devices_[g];
-          Actor gpu_act = (g == 0) ? actor_ : compute_actors_[g - 1];
-
-          gpu_futures.push_back(task_pool_->submit([=, &rollout, &normalized_advantages, &returns,
-              &mode_agent_indices, &effective_entropy_coef, this]() mutable -> GpuTaskResult {
-            GpuTaskResult result;
-            torch::Tensor policy_loss_metric;
-            torch::Tensor value_loss_metric;
-            torch::Tensor entropy_metric;
-            torch::Tensor policy_approx_kl_metric;
-            torch::Tensor policy_clip_frac_metric;
-            torch::Tensor policy_log_ratio_max_metric;
-            torch::Tensor goal_critic_loss_metric;
-            torch::Tensor goal_score_metric;
-            torch::Tensor sampled_goal_dist_metric;
-            auto add_metric = [](torch::Tensor& dst, const torch::Tensor& value, double weight) {
-              const torch::Tensor term = value.detach().to(torch::kFloat32) * weight;
-              dst = dst.defined() ? dst + term : term;
-            };
-            auto max_metric = [](torch::Tensor& dst, const torch::Tensor& value) {
-              const torch::Tensor term = value.detach().to(torch::kFloat32);
-              dst = dst.defined() ? torch::maximum(dst, term) : term;
-            };
-            const auto task_compute_start = std::chrono::steady_clock::now();
-
-            const int gpu_agent_start = static_cast<int>(g * mode_count_local / num_update_gpus);
-            const int gpu_agent_end = static_cast<int>((g + 1) * mode_count_local / num_update_gpus);
-            const int gpu_agent_count = gpu_agent_end - gpu_agent_start;
-            if (gpu_agent_count <= 0) return result;
-
-            for (int micro_agent_offset = 0; micro_agent_offset < gpu_agent_count; micro_agent_offset += agents_per_forward_local) {
-              const int gpu_chunk_count = std::min(agents_per_forward_local, gpu_agent_count - micro_agent_offset);
-              torch::Tensor gpu_micro_indices = mode_agent_indices.narrow(0, gpu_agent_start + micro_agent_offset, gpu_chunk_count);
-
-              torch::Tensor mode_gpu_obs_mb = index_select_on_source_device(
-                  rollout.obs.narrow(0, 0, rollout_steps_local),
-                  1,
-                  gpu_micro_indices).to(gpu_dev);
-              torch::Tensor mode_gpu_episode_starts_mb = index_select_on_source_device(
-                  rollout.episode_starts.narrow(0, 0, rollout_steps_local),
-                  1,
-                  gpu_micro_indices).to(gpu_dev);
-              torch::Tensor mode_gpu_action_masks_mb = index_select_on_source_device(
-                  rollout.action_masks.narrow(0, 0, rollout_steps_local),
-                  1,
-                  gpu_micro_indices).to(gpu_dev);
-              torch::Tensor mode_gpu_learner_active_mb = index_select_on_source_device(
-                  rollout.learner_active.narrow(0, 0, rollout_steps_local),
-                  1,
-                  gpu_micro_indices).to(gpu_dev);
-              torch::Tensor mode_gpu_actions_mb = index_select_on_source_device(
-                  rollout.actions.narrow(0, 0, rollout_steps_local),
-                  1,
-                  gpu_micro_indices).to(gpu_dev);
-              torch::Tensor mode_gpu_action_log_probs_mb = index_select_on_source_device(
-                  rollout.action_log_probs.narrow(0, 0, rollout_steps_local),
-                  1,
-                  gpu_micro_indices).to(gpu_dev);
-              torch::Tensor mode_gpu_task_goals_mb = index_select_on_source_device(
-                  rollout.task_goal_positions.narrow(0, 0, rollout_steps_local),
-                  1,
-                  gpu_micro_indices).to(gpu_dev);
-
-              torch::Tensor mode_gpu_advantages_mb = index_select_on_source_device(
-                  normalized_advantages.narrow(0, 0, rollout_steps_local),
-                  1,
-                  gpu_micro_indices);
-              if (gpu_dev != device_) {
-                mode_gpu_advantages_mb = mode_gpu_advantages_mb.to(gpu_dev);
-              }
-              torch::Tensor mode_gpu_returns_mb = index_select_on_source_device(
-                  returns.narrow(0, 0, rollout_steps_local),
-                  1,
-                  gpu_micro_indices);
-              if (gpu_dev != device_) {
-                mode_gpu_returns_mb = mode_gpu_returns_mb.to(gpu_dev);
-              }
-              torch::Tensor mode_gpu_old_values_mb = index_select_on_source_device(
-                  extrinsic_values.narrow(0, 0, rollout_steps_local),
-                  1,
-                  gpu_micro_indices).to(gpu_dev);
-
-              for (int seq_start = 0; seq_start < rollout_steps_local; seq_start += seq_len_local) {
-                const int chunk_start = seq_start;
-                const int chunk_end = std::min(rollout_steps_local, chunk_start + seq_len_local);
-                const int loss_steps = chunk_end - chunk_start;
-                if (loss_steps <= 0) continue;
-
-                const torch::Tensor obs = mode_gpu_obs_mb.narrow(0, chunk_start, loss_steps);
-                ActorSequenceOutput output;
-                {
-                  OptionalCudaAutocastGuard autocast_guard(use_cuda_amp_local);
-                  const torch::Tensor goal_values = mode_gpu_task_goals_mb.narrow(0, chunk_start, loss_steps);
-                  const torch::Tensor episode_starts = mode_gpu_episode_starts_mb.narrow(0, chunk_start, loss_steps);
-                  output = gpu_act->forward_sequence(obs, goal_values, episode_starts);
-                }
-
-                torch::Tensor encoded = output.encoded;
-                torch::Tensor policy_logits = output.policy_logits;
-                torch::Tensor features = output.features;
-                const torch::Tensor action_masks = mode_gpu_action_masks_mb.narrow(0, chunk_start, loss_steps).to(torch::kBool);
-                const torch::Tensor learner_active = mode_gpu_learner_active_mb.narrow(0, chunk_start, loss_steps);
-                const torch::Tensor old_actions = mode_gpu_actions_mb.narrow(0, chunk_start, loss_steps);
-                const torch::Tensor old_log_probs = mode_gpu_action_log_probs_mb.narrow(0, chunk_start, loss_steps);
-                const torch::Tensor chunk_advantages = mode_gpu_advantages_mb.narrow(0, chunk_start, loss_steps);
-
-                const auto samples = loss_steps * gpu_chunk_count;
-                torch::Tensor flat_logits = policy_logits.reshape({samples, config_.model.action_dim});
-                torch::Tensor flat_features = features.reshape({samples, static_cast<int64_t>(gpu_act->feature_dim())});
-                torch::Tensor flat_masks = action_masks.reshape({samples, config_.model.action_dim});
-                torch::Tensor flat_actions = old_actions.reshape({samples});
-                torch::Tensor flat_old_log_probs = old_log_probs.reshape({samples});
-                torch::Tensor flat_advantages = chunk_advantages.reshape({samples});
-
-                const bool all_active = mode_all_active_local;
-                const torch::Tensor flat_active = all_active ? torch::Tensor{} : learner_active.reshape({samples}) > 0.5F;
-                const torch::Tensor active_logits = all_active ? flat_logits.to(torch::kFloat32) : flat_logits.index({flat_active}).to(torch::kFloat32);
-                const torch::Tensor active_features = all_active ? flat_features.to(torch::kFloat32) : flat_features.index({flat_active}).to(torch::kFloat32);
-                const torch::Tensor active_masks = all_active ? flat_masks : flat_masks.index({flat_active});
-                const torch::Tensor active_actions = all_active ? flat_actions : flat_actions.index({flat_active});
-                const torch::Tensor active_old_log_probs = all_active ? flat_old_log_probs.to(torch::kFloat32) : flat_old_log_probs.index({flat_active}).to(torch::kFloat32);
-                const torch::Tensor active_advantages = all_active ? flat_advantages.to(torch::kFloat32) : flat_advantages.index({flat_active}).to(torch::kFloat32);
-                const auto active_sample_count = all_active ? samples : active_logits.size(0);
-                if (active_sample_count == 0) continue;
-                const auto active_samples = static_cast<double>(active_sample_count);
-                result.active_count += active_sample_count;
-
-                const float policy_temperature = std::max(config_.ppo.policy_temperature, 1.0e-6F);
-                const torch::Tensor log_probs = torch::log_softmax(
-                    apply_action_mask_to_logits(active_logits / policy_temperature, active_masks), -1);
-                const torch::Tensor current_log_probs = log_probs.gather(1, active_actions.unsqueeze(1)).squeeze(1);
-                torch::Tensor bounded_current_log_probs = current_log_probs;
-                torch::Tensor raw_log_ratio = current_log_probs - active_old_log_probs;
-                {
-                  const torch::Tensor metric_log_ratio = raw_log_ratio.detach().to(torch::kFloat32).clamp(-20.0F, 20.0F);
-                  const torch::Tensor approx_kl = ((torch::exp(metric_log_ratio) - 1.0F) - metric_log_ratio).mean();
-                  const torch::Tensor clip_fraction = (raw_log_ratio.detach().abs() > std::log1p(static_cast<double>(config_.ppo.clip_range))).to(torch::kFloat32).mean();
-                  add_metric(policy_approx_kl_metric, approx_kl, active_samples);
-                  add_metric(policy_clip_frac_metric, clip_fraction, active_samples);
-                  max_metric(policy_log_ratio_max_metric, raw_log_ratio.detach().abs().max());
-                }
-                if (config_.ppo.max_policy_log_ratio > 0.0F) {
-                  raw_log_ratio.clamp_(-config_.ppo.max_policy_log_ratio, config_.ppo.max_policy_log_ratio);
-                  bounded_current_log_probs = active_old_log_probs + raw_log_ratio;
-                }
-
-                torch::Tensor policy_loss = clipped_ppo_policy_loss(
-                    bounded_current_log_probs,
-                    active_old_log_probs,
-                    active_advantages,
-                    config_.ppo.clip_range).mean();
-                const torch::Tensor entropy = masked_action_entropy(active_logits, active_masks, policy_temperature).mean();
-
-                torch::Tensor chunk_returns = mode_gpu_returns_mb.narrow(0, chunk_start, loss_steps).reshape({samples});
-                torch::Tensor active_returns = all_active ? chunk_returns.to(torch::kFloat32) : chunk_returns.index({flat_active}).to(torch::kFloat32);
-
-                torch::Tensor values_new = output.value_win_logits.reshape({samples});
-                torch::Tensor active_values = all_active ? values_new.to(torch::kFloat32) : values_new.index({flat_active}).to(torch::kFloat32);
-
-                torch::Tensor chunk_old_values = mode_gpu_old_values_mb.narrow(0, chunk_start, loss_steps).reshape({samples});
-                torch::Tensor active_old_values = all_active ? chunk_old_values.to(torch::kFloat32) : chunk_old_values.index({flat_active}).to(torch::kFloat32);
-
-                torch::Tensor value_loss;
-                if (config_.ppo.value_clipping) {
-                  torch::Tensor loss_unclipped = elementwise_smooth_l1_loss(active_values, active_returns, config_.ppo.value_loss_delta);
-                  torch::Tensor clipped_values = active_old_values + torch::clamp(
-                      active_values - active_old_values,
-                      -config_.ppo.value_clip_range,
-                      config_.ppo.value_clip_range);
-                  torch::Tensor loss_clipped = elementwise_smooth_l1_loss(clipped_values, active_returns, config_.ppo.value_loss_delta);
-                  value_loss = torch::maximum(loss_unclipped, loss_clipped).mean();
-                } else {
-                  value_loss = smooth_l1_value_loss(active_values, active_returns, config_.ppo.value_loss_delta);
-                }
-
-                torch::Tensor goal_loss = torch::zeros({}, active_advantages.options());
-                torch::Tensor actor_goal_loss = torch::zeros({}, active_advantages.options());
-                torch::Tensor chunk_goal_score = torch::zeros({}, active_advantages.options());
-                torch::Tensor chunk_sampled_goal_norm = torch::zeros({}, active_advantages.options());
-                const bool compute_goal_critic_loss = config_.goal_critic.lambda_Zg > 0.0F;
-                const bool compute_goal_actor_loss = config_.goal_critic.lambda_goal_actor > 0.0F;
-                if ((compute_goal_critic_loss || compute_goal_actor_loss) && gcrl_trainer_) {
-                  torch::Tensor chunk_goal_pos = index_select_on_source_device(
-                      rollout.goal_positions.narrow(0, chunk_start, loss_steps),
-                      1,
-                      gpu_micro_indices).to(gpu_dev);
-                  torch::Tensor chunk_dones = index_select_on_source_device(
-                      rollout.dones.narrow(0, chunk_start, loss_steps),
-                      1,
-                      gpu_micro_indices).to(gpu_dev);
-                  torch::Tensor chunk_ep_starts = index_select_on_source_device(
-                      rollout.episode_starts.narrow(0, chunk_start, loss_steps),
-                      1,
-                      gpu_micro_indices).to(gpu_dev);
-                  torch::Tensor future_goal_pos = sample_future_goal_positions(chunk_goal_pos, chunk_dones, chunk_ep_starts, config_.goal_critic.max_future_horizon);
-                  torch::Tensor flat_future_goal_pos = future_goal_pos.reshape({samples, config_.goal_critic.goal_dim});
-                  torch::Tensor active_future_goal_pos = all_active ? flat_future_goal_pos : flat_future_goal_pos.index({flat_active});
-
-                  GoalCritic& goal_crit = gpu_act->goal_critic();
-                  gcrl_trainer_->compute_gcrl_losses(
-                      goal_crit,
-                      active_features,
-                      active_actions,
-                      active_logits,
-                      active_masks,
-                      active_future_goal_pos,
-                      compute_goal_critic_loss,
-                      compute_goal_actor_loss,
-                      goal_loss,
-                      actor_goal_loss,
-                      chunk_goal_score);
-
-                  // Also train goal_critic_b_ with same InfoNCE loss (ensemble member, separate params)
-                  // Only on primary GPU (g==0) to avoid multi-GPU sync complexity
-                  if (g == 0 && goal_critic_b_ && compute_goal_critic_loss && goal_critic_b_optimizer_) {
-                    torch::Tensor gc_b_loss, gc_b_actor_loss, gc_b_score;
-                    gcrl_trainer_->compute_gcrl_losses(
-                        goal_critic_b_,
-                        active_features.detach(),
-                        active_actions,
-                        active_logits.detach(),
-                        active_masks,
-                        active_future_goal_pos,
-                        /*compute_critic_loss=*/true,
-                        /*compute_actor_loss=*/false,
-                        gc_b_loss,
-                        gc_b_actor_loss,
-                        gc_b_score);
-                    if (gc_b_loss.defined() && torch::isfinite(gc_b_loss).item<bool>()) {
-                      goal_critic_b_optimizer_->zero_grad();
-                      (config_.goal_critic.lambda_Zg * gc_b_loss).backward();
-                      goal_critic_b_optimizer_->step();
-                    }
-                  }
-
-                  if (compute_goal_critic_loss) {
-                    add_metric(goal_critic_loss_metric, goal_loss, active_samples);
-                    add_metric(goal_score_metric, chunk_goal_score, active_samples);
-                  }
-                  if (compute_goal_actor_loss) {
-                    chunk_sampled_goal_norm = active_future_goal_pos.norm(2, -1).mean();
-                    add_metric(sampled_goal_dist_metric, chunk_sampled_goal_norm, active_samples);
-                  }
-                }
-
-                const auto sample_weight = active_samples / mode_total_active_local;
-                const torch::Tensor task_loss = policy_loss + config_.ppo.value_coef * value_loss - effective_entropy_coef * entropy;
-
-                const torch::Tensor combined_finite_check = task_loss
-                    + config_.goal_critic.lambda_Zg * goal_loss
-                    + eff_gcrl_actor_coef * actor_goal_loss;
-                const bool losses_finite =
-                    torch::isfinite(combined_finite_check).item<bool>();
-
-                if (!losses_finite) {
-                  ++result.nonfinite_loss_skips;
-                } else {
-                  const torch::Tensor loss =
-                      task_loss + config_.goal_critic.lambda_Zg * goal_loss + eff_gcrl_actor_coef * actor_goal_loss;
-                  (loss * sample_weight / static_cast<double>(optimizer_accumulation_steps_local) * cuda_amp_loss_scale_local).backward();
-                  result.has_backward = true;
-                }
-
-                add_metric(policy_loss_metric, policy_loss, active_samples);
-                add_metric(value_loss_metric, value_loss, active_samples);
-                add_metric(entropy_metric, entropy, active_samples);
-              }
-            }
-            const auto metric_opts = torch::TensorOptions().dtype(torch::kFloat32).device(gpu_dev);
-            const torch::Tensor zero_metric = torch::zeros({}, metric_opts);
-            auto scalar_or_zero = [&](const torch::Tensor& tensor) -> torch::Tensor {
-              return tensor.defined() ? tensor.to(torch::kFloat32) : zero_metric;
-            };
-            const torch::Tensor packed_metrics = torch::stack({
-                scalar_or_zero(policy_loss_metric),
-                scalar_or_zero(value_loss_metric),
-                scalar_or_zero(entropy_metric),
-                scalar_or_zero(policy_approx_kl_metric),
-                scalar_or_zero(policy_clip_frac_metric),
-                scalar_or_zero(policy_log_ratio_max_metric),
-                scalar_or_zero(goal_critic_loss_metric),
-                scalar_or_zero(goal_score_metric),
-                scalar_or_zero(sampled_goal_dist_metric),
-            }).to(torch::kCPU);
-            const float* metric_data = packed_metrics.data_ptr<float>();
-            result.policy_loss_sum = metric_data[0];
-            result.value_loss_sum = metric_data[1];
-            result.entropy_sum = metric_data[2];
-            result.policy_approx_kl = metric_data[3];
-            result.policy_clip_frac = metric_data[4];
-            result.policy_log_ratio_max = metric_data[5];
-            result.goal_critic_loss = metric_data[6];
-            result.goal_score = metric_data[7];
-            result.sampled_goal_dist = metric_data[8];
-            result.fwd_bwd_seconds =
-                std::chrono::duration<double>(std::chrono::steady_clock::now() - task_compute_start).count();
-            return result;
-          }));
-        }
-
-        // Wait for all GPU tasks and accumulate metrics.
-        for (auto& fut : gpu_futures) {
-          GpuTaskResult task_result = fut.get();
-
-          policy_loss_sum += task_result.policy_loss_sum;
-          value_loss_sum += task_result.value_loss_sum;
-          entropy_sum += task_result.entropy_sum;
-          policy_approx_kl_sum += task_result.policy_approx_kl;
-          policy_clip_fraction_sum += task_result.policy_clip_frac;
-          accumulated_policy_kl_sum += task_result.policy_approx_kl;
-          accumulated_policy_kl_count += static_cast<double>(task_result.active_count);
-          policy_log_ratio_abs_max = std::max(policy_log_ratio_abs_max, task_result.policy_log_ratio_max);
-          goal_critic_loss_sum += task_result.goal_critic_loss;
-          goal_score_sum += task_result.goal_score;
-          sampled_goal_distance_sum += task_result.sampled_goal_dist;
-          metrics.forward_backward_seconds += task_result.fwd_bwd_seconds;
-          accumulated_has_backward = accumulated_has_backward || task_result.has_backward;
-          metric_steps += task_result.active_count;
-          metrics.nonfinite_loss_skips += task_result.nonfinite_loss_skips;
-        }
-      }
-
-      accumulated_minibatches++;
-      accumulated_total_active += combined_total_active;
-
-      const bool at_epoch_end = agent_offset >= total_agents;
-      const bool should_step_optimizer =
-          accumulated_minibatches >= optimizer_accumulation_steps ||
-          at_epoch_end;
-      if (!should_step_optimizer) {
-        continue;
-      }
-      if (!accumulated_has_backward) {
-        actor_optimizer_.zero_grad();
-        accumulated_minibatches = 0;
-        accumulated_total_active = 0.0;
-        accumulated_policy_kl_sum = 0.0;
-        accumulated_policy_kl_count = 0.0;
-        continue;
-      }
-      const double accumulated_policy_kl =
-          accumulated_policy_kl_count > 0.0
-              ? accumulated_policy_kl_sum / accumulated_policy_kl_count
-              : 0.0;
-      if (config_.ppo.target_kl > 0.0F &&
-          accumulated_policy_kl > static_cast<double>(config_.ppo.target_kl)) {
-        ++metrics.kl_guard_skips;
-        actor_optimizer_.zero_grad();
-        accumulated_minibatches = 0;
-        accumulated_has_backward = false;
-        accumulated_total_active = 0.0;
-        accumulated_policy_kl_sum = 0.0;
-        accumulated_policy_kl_count = 0.0;
-        if (benchmark_progress_) {
-          std::cout << "bench_update_optimizer_skipped reason=target_kl"
-                    << " approx_kl=" << accumulated_policy_kl
-                    << " target_kl=" << config_.ppo.target_kl
-                    << '\n' << std::flush;
-        }
-        continue;
-      }
-
-      if (num_update_gpus > 1) {
-        reduce_gradients_from_replicas(actor_, compute_actors_);
-      }
-
-      const auto optim_start = std::chrono::steady_clock::now();
-      double grad_norm = 0.0;
-      bool stepped_optimizer = false;
-      {
-        PULSAR_TRACE_SCOPE_CAT("trainer", "update_optimizer");
-        scale_existing_gradients(*actor_, cuda_amp_loss_scale);
-        grad_norm = clip_existing_gradients(*actor_, config_.ppo.max_grad_norm);
-        const bool nonfinite_before_sanitize = !std::isfinite(grad_norm);
-        if (nonfinite_before_sanitize) {
-          sanitize_actor_parameters(); // Repair if we got a non-finite gradient
-          const GradientSanitizeResult sanitized = zero_nonfinite_gradients(*actor_);
-          ++metrics.nonfinite_grad_norm_skips;
-          std::cerr << "skipping optimizer step with non-finite gradient entries";
-          if (sanitized.changed) {
-            std::cerr << " in " << sanitized.first_parameter;
-          }
-          std::cerr << "; preclip grad_norm=" << grad_norm << '\n';
-        } else if (std::isfinite(grad_norm)) {
-          grad_norm_sum += grad_norm;
-          ++grad_norm_steps;
-          actor_optimizer_.step();
-          ++metrics.optimizer_steps;
-          stepped_optimizer = true;
-        } else {
-          ++metrics.nonfinite_grad_norm_skips;
-          std::cerr << "skipping optimizer step with non-finite grad_norm=" << grad_norm << '\n';
-        }
-      }
-      actor_optimizer_.zero_grad();
-
-      // Sync updated primary weights back to all replica GPU actors.
-      if (num_update_gpus > 1) {
-        sync_actor_to_replicas(actor_, compute_actors_);
-        // Clear any residual gradients on replicas after sync.
-        for (auto& replica : compute_actors_) {
-          if (replica) zero_existing_gradients(*replica);
-        }
-      }
-      metrics.optimizer_step_seconds +=
-          std::chrono::duration<double>(std::chrono::steady_clock::now() - optim_start).count();
-      if (stepped_optimizer) {
-        // Redundant metrics.grad_norm accumulation removed.
-      }
-      accumulated_minibatches = 0;
-      accumulated_has_backward = false;
-      accumulated_total_active = 0.0;
-      accumulated_policy_kl_sum = 0.0;
-      accumulated_policy_kl_count = 0.0;
-      ++completed_minibatches;
-      if (benchmark_progress_) {
-        const double minibatch_seconds =
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - minibatch_start).count();
-        std::cout << "bench_update_minibatch_done"
-                  << " epoch=" << (epoch + 1) << "/" << config_.ppo.update_epochs
-                  << " minibatch=" << completed_minibatches << "/"
-                  << (minibatches_per_epoch * config_.ppo.update_epochs)
-                  << " agents=" << count
-                  << " active_samples=" << combined_total_active
-                  << " seconds=" << minibatch_seconds
-                  << " grad_norm=" << grad_norm
-                  << '\n' << std::flush;
-      }
-    }
-  }
-
-  if (metric_steps > 0) {
-    const double denom = static_cast<double>(metric_steps);
-    metrics.policy_loss = policy_loss_sum / denom;
-    metrics.value_loss = value_loss_sum / denom;
-    metrics.entropy = entropy_sum / denom;
+  if (n_updates > 0) {
+    const double denom = static_cast<double>(n_updates);
+    metrics.policy_loss = ball_critic_loss_sum / denom;
+    metrics.car_critic_loss = car_critic_loss_sum / denom;
+    metrics.car_actor_loss  = car_actor_loss_sum / denom;
     metrics.grad_norm = grad_norm_steps > 0 ? grad_norm_sum / static_cast<double>(grad_norm_steps) : 0.0;
     metrics.grad_norm_valid_steps = grad_norm_steps;
-    metrics.policy_approx_kl = policy_approx_kl_sum / denom;
-    metrics.policy_clip_fraction = policy_clip_fraction_sum / denom;
-    metrics.policy_log_ratio_abs_max = policy_log_ratio_abs_max;
-    metrics.goal_critic_loss = goal_critic_loss_sum / denom;
-    metrics.mean_goal_score = goal_score_sum / denom;
-    metrics.mean_sampled_goal_distance = sampled_goal_distance_sum / denom;
+    metrics.optimizer_steps = grad_norm_steps;
   }
   metrics.update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count();
-  sanitize_actor_parameters(); // Guarantee actor is 100% clean and finite before returning (and cloning snapshot)
+  sanitize_actor_parameters();
   return metrics;
 }
+
 
 void Trainer::sanitize_actor_parameters() {
   PULSAR_TRACE_SCOPE_CAT("trainer", "sanitize_actor_params");
@@ -2623,12 +1925,6 @@ void Trainer::collect_rollout(
   int truncated_episodes = 0;
   int touched_episodes = 0;
   int multi_touched_episodes = 0;
-  double total_pbrs_shaping = 0.0;
-  double total_subgoal_shaping = 0.0;
-  double total_reachability = 0.0;
-  int64_t reachability_count = 0;
-  int64_t subgoal_replans_count = 0;
-  int64_t subgoal_early_aborts_count = 0;
   std::map<std::string, int> mode_completed;
   std::map<std::string, int> mode_touched;
   std::map<std::string, int> mode_multi_touched;
@@ -3189,128 +2485,19 @@ void Trainer::collect_rollout(
     sampled_value_sum = sampled_value_sum + sampled_value.to(torch::kFloat64).sum();
     sampled_value_count += sampled_value.numel();
 
-    // ---- Off-policy buffer push (raw terminal reward only — NEVER shaped rewards) ----
+    // ---- Off-policy buffer push ----
     if (replay_buffer_) {
-      const torch::Tensor conditioned_goal_host = current_subgoal_.defined()
-          ? current_subgoal_.to(torch::kCPU)
-          : task_goal_host;
-      replay_buffer_->push(
+      replay_buffer_->push_step(
           raw_obs_host,
           action_indices_cpu,
-          goal_pos_host,         // achieved_goal: ball pos after step
-          conditioned_goal_host, // conditioned_goal: subgoal or task goal
-          collector_->host_observations(),  // next_obs (post-step)
-          dones_host,
-          episode_ids_);
-      // Increment episode IDs on reset (where done == 1)
-      episode_ids_.add_(dones_host.to(torch::kInt64));
+          goal_pos_host,                    // achieved ball pos after step (4D)
+          collector_->host_car_positions(), // achieved car pos after step (3D)
+          dones_host);
     }
 
-    // ---- PBRS shaping (K-step cached SAC V(s,g)) ----
-    torch::Tensor pbrs_shaping = torch::zeros_like(extrinsic_rewards_host);
-    if (sac_critic_ && sac_critic_ready_) {
-      const float pbrs_w = compute_pbrs_weight(update_index_, config_.pbrs);
-      if (pbrs_w > 0.0F) {
-        const bool recompute = (pbrs_cache_age_ % std::max(1, config_.pbrs.recompute_interval) == 0);
-        if (recompute || !cached_v_current_.defined()) {
-          torch::NoGradGuard no_grad;
-          const torch::Tensor goal_dev = task_goal_host.to(device_);
-          const torch::Tensor obs_dev  = raw_obs_host.to(device_);
-          cached_v_current_ = sac_critic_->value(obs_dev, goal_dev).to(torch::kCPU);
-          const torch::Tensor next_obs_dev = collector_->host_observations().to(device_);
-          const torch::Tensor v_next = sac_critic_->value(next_obs_dev, goal_dev);
-          cached_v_next_ = (v_next * (1.0F - dones_host.to(device_))).to(torch::kCPU);
-        } else {
-          // Shift: current V is last step's next V (free, no forward pass)
-          cached_v_current_ = cached_v_next_;
-          // Recompute next only on K-interval
-          if (recompute) {
-            torch::NoGradGuard no_grad;
-            const torch::Tensor goal_dev = task_goal_host.to(device_);
-            const torch::Tensor next_obs_dev = collector_->host_observations().to(device_);
-            const torch::Tensor v_next = sac_critic_->value(next_obs_dev, goal_dev);
-            cached_v_next_ = (v_next * (1.0F - dones_host.to(device_))).to(torch::kCPU);
-          }
-        }
-        // Force recompute on episode reset (stale V after reset is wrong)
-        if (dones_host.any().item<bool>()) {
-          pbrs_cache_age_ = 0;
-        }
-        pbrs_shaping = pbrs_w * (config_.sac_critic.gamma * cached_v_next_ - cached_v_current_);
-        total_pbrs_shaping += pbrs_shaping.sum().item<double>();
-        ++pbrs_cache_age_;
-      }
-    }
-
-    // ---- Subgoal planner ----
-    torch::Tensor subgoal_shaping = torch::zeros_like(extrinsic_rewards_host);
-    if (subgoal_planner_ && goal_critic_b_ && goal_buffer_filled_ > 0) {
-      bool is_early_abort = false;
-      const bool should_plan =
-          (step % config_.subgoal_planner.commit_horizon == 0) ||
-          (current_subgoal_.defined() && (is_early_abort = subgoal_planner_->should_replan(
-              actor_->goal_critic(), goal_critic_b_,
-              output.features.detach(),
-              action_indices_cpu.to(device_),
-              current_subgoal_,
-              recent_subgoal_scores_)));
-      if (is_early_abort) {
-        subgoal_early_aborts_count++;
-      }
-      if (should_plan) {
-        const torch::Tensor cand_buf = goal_buffer_.narrow(0, 0, goal_buffer_filled_).to(device_);
-        const auto sg_result = subgoal_planner_->select_subgoals(
-            actor_->goal_critic(), goal_critic_b_, sac_critic_,
-            output.features.detach(),
-            action_indices_cpu.to(device_),
-            cand_buf,
-            task_goal_host.to(device_),
-            sac_critic_ready_);
-        if (sg_result.subgoal.defined()) {
-          current_subgoal_ = sg_result.subgoal;
-          sg_score_at_replan_.zero_();  // reset stall baseline after replan
-        }
-        if (sg_result.replanned) {
-          subgoal_replans_count++;
-        }
-        if (sg_result.planner_score.defined()) {
-          total_reachability += sg_result.planner_score.mean().item<double>();
-          reachability_count++;
-        }
-      }
-
-      // Subgoal shaping reward (NEVER written to replay buffer)
-      if (current_subgoal_.defined()) {
-        torch::NoGradGuard no_grad;
-        const torch::Tensor sg_score = actor_->goal_critic()->forward(
-            output.features.detach(),
-            action_indices_cpu.to(device_),
-            current_subgoal_).detach().to(torch::kCPU);
-        subgoal_shaping = config_.subgoal_planner.shaped_reward_scale * sg_score;
-        total_subgoal_shaping += subgoal_shaping.sum().item<double>();
-
-        // Update two-tensor history for early abort detection (no allocation)
-        sg_score_recent_.copy_(sg_score);
-        recent_subgoal_scores_[0].copy_(sg_score_at_replan_);
-        recent_subgoal_scores_[1].copy_(sg_score_recent_);
-      }
-      subgoal_planner_->increment_step();
-    }
-
-    // ---- Update goal candidate buffer ----
-    {
-      const int n_goals = static_cast<int>(goal_pos_host.size(0));
-      for (int gi = 0; gi < n_goals; ++gi) {
-        const int slot = goal_buffer_head_;
-        goal_buffer_[slot].copy_(goal_pos_host[gi]);
-        goal_buffer_head_ = (goal_buffer_head_ + 1) % kGoalBufferCapacity;
-        if (goal_buffer_filled_ < kGoalBufferCapacity) ++goal_buffer_filled_;
-      }
-    }
-
-    // ---- Combined reward for RolloutStorage ----
+    // ---- Combined reward for RolloutStorage (no shaping — CRL is reward-free) ----
     std::unordered_map<std::string, torch::Tensor> all_rewards;
-    all_rewards["extrinsic"] = extrinsic_rewards_host + pbrs_shaping + subgoal_shaping;
+    all_rewards["extrinsic"] = extrinsic_rewards_host;
     all_rewards["gameplay"] = gameplay_r_host;
     all_rewards["mechanic"] = mechanic_r_host;
 
@@ -3371,8 +2558,6 @@ void Trainer::collect_rollout(
       std::chrono::duration<double>(std::chrono::steady_clock::now() - collection_start).count();
 
   if (total_learner_steps > 0) {
-    metrics.total_reward_mean = total_reward / static_cast<double>(total_learner_steps);
-    metrics.gameplay_reward_mean = total_gameplay_reward / static_cast<double>(total_learner_steps);
     metrics.mechanic_reward_mean = total_mechanic_reward / static_cast<double>(total_learner_steps);
     metrics.mean_goal_distance = total_goal_distance / static_cast<double>(std::max(dest.rollout_length(), 1));
   }
@@ -3386,15 +2571,6 @@ void Trainer::collect_rollout(
   metrics.neutral_episodes = neutral_episodes;
   metrics.no_touch_episodes = no_touch_episodes;
   metrics.truncated_episodes = truncated_episodes;
-  if (total_steps > 0) {
-    metrics.pbrs_shaping_mean = total_pbrs_shaping / static_cast<double>(total_steps);
-    metrics.subgoal_shaping_mean = total_subgoal_shaping / static_cast<double>(total_steps);
-  }
-  if (reachability_count > 0) {
-    metrics.subgoal_reachability_mean = total_reachability / static_cast<double>(reachability_count);
-  }
-  metrics.subgoal_replans = subgoal_replans_count;
-  metrics.subgoal_early_aborts = subgoal_early_aborts_count;
   metrics.scored_episode_rate =
       completed_episodes > 0
           ? static_cast<double>(scored_episodes) / static_cast<double>(completed_episodes)
@@ -3437,10 +2613,6 @@ void Trainer::collect_rollout(
   }
   if (total_ball_proximity_denom > 0) {
     metrics.ball_proximity_rate = static_cast<double>(total_ball_proximity_steps) / static_cast<double>(total_ball_proximity_denom);
-  }
-  if (accumulated_value_count > 0) {
-    metrics.sampled_value_win_mean = accumulated_sampled_value
-        / static_cast<double>(accumulated_value_count);
   }
 
   metrics.obs_build_seconds = collector_timings.obs_build_seconds;
@@ -3552,8 +2724,6 @@ TrainerBenchmarkMetrics Trainer::benchmark(int updates) {
     result.forward_backward_seconds += update_metrics.forward_backward_seconds;
     result.optimizer_step_seconds += update_metrics.optimizer_step_seconds;
     result.policy_loss += update_metrics.policy_loss;
-    result.value_loss += update_metrics.value_loss;
-    result.entropy += update_metrics.entropy;
     result.grad_norm += update_metrics.grad_norm;
     std::cout << "bench_update_done update=" << (index + 1)
               << " update_seconds=" << update_metrics.update_seconds
@@ -3621,8 +2791,6 @@ TrainerBenchmarkMetrics Trainer::benchmark(int updates) {
       std::chrono::duration<double>(std::chrono::steady_clock::now() - benchmark_start).count();
   const double denom = static_cast<double>(bounded_updates);
   result.policy_loss /= denom;
-  result.value_loss /= denom;
-  result.entropy /= denom;
   result.grad_norm /= denom;
   if (result.es_updates > 0) {
     const double es_denom = static_cast<double>(result.es_updates);
@@ -4032,49 +3200,21 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
     global_step += next_coll_steps;
 
     coll_metrics.policy_loss = train_metrics.policy_loss;
-    coll_metrics.value_loss = train_metrics.value_loss;
-    coll_metrics.entropy = train_metrics.entropy;
     coll_metrics.grad_norm = train_metrics.grad_norm;
     coll_metrics.grad_norm_valid_steps = train_metrics.grad_norm_valid_steps;
     coll_metrics.optimizer_steps = train_metrics.optimizer_steps;
-    coll_metrics.policy_approx_kl = train_metrics.policy_approx_kl;
-    coll_metrics.policy_clip_fraction = train_metrics.policy_clip_fraction;
-    coll_metrics.policy_log_ratio_abs_max = train_metrics.policy_log_ratio_abs_max;
     coll_metrics.nonfinite_loss_skips = train_metrics.nonfinite_loss_skips;
     coll_metrics.nonfinite_grad_norm_skips = train_metrics.nonfinite_grad_norm_skips;
-    coll_metrics.kl_guard_skips = train_metrics.kl_guard_skips;
-    coll_metrics.grad_norm_guard_skips = train_metrics.grad_norm_guard_skips;
     coll_metrics.update_seconds = train_metrics.update_seconds;
-    coll_metrics.forward_backward_seconds = train_metrics.forward_backward_seconds;
-    coll_metrics.optimizer_step_seconds = train_metrics.optimizer_step_seconds;
     coll_metrics.goal_critic_loss = train_metrics.goal_critic_loss;
     coll_metrics.mean_goal_score = train_metrics.mean_goal_score;
     coll_metrics.mean_sampled_goal_distance = train_metrics.mean_sampled_goal_distance;
-    coll_metrics.advantage_std = train_metrics.advantage_std;
 
-    // Off-policy and World Model metrics copies
-    coll_metrics.rssm_kl_loss = train_metrics.rssm_kl_loss;
-    coll_metrics.rssm_consistency_loss = train_metrics.rssm_consistency_loss;
-    coll_metrics.rssm_icm_forward_loss = train_metrics.rssm_icm_forward_loss;
-    coll_metrics.rssm_icm_inverse_loss = train_metrics.rssm_icm_inverse_loss;
-    coll_metrics.rssm_goal_head_loss = train_metrics.rssm_goal_head_loss;
-    coll_metrics.intrinsic_reward_mean = train_metrics.intrinsic_reward_mean;
-    coll_metrics.intrinsic_beta = train_metrics.intrinsic_beta;
-
-    coll_metrics.sac_td_loss = train_metrics.sac_td_loss;
-    coll_metrics.sac_lql_loss = train_metrics.sac_lql_loss;
-    coll_metrics.sac_total_loss = train_metrics.sac_total_loss;
-    coll_metrics.sac_mean_q = train_metrics.sac_mean_q;
-    coll_metrics.sac_max_q = train_metrics.sac_max_q;
+    // CRL off-policy metrics copies
     coll_metrics.replay_buffer_size = train_metrics.replay_buffer_size;
-
-    coll_metrics.pbrs_weight = train_metrics.pbrs_weight;
-    coll_metrics.pbrs_shaping_mean = train_metrics.pbrs_shaping_mean;
-
-    coll_metrics.subgoal_reachability_mean = train_metrics.subgoal_reachability_mean;
-    coll_metrics.subgoal_replans = train_metrics.subgoal_replans;
-    coll_metrics.subgoal_early_aborts = train_metrics.subgoal_early_aborts;
-    coll_metrics.subgoal_shaping_mean = train_metrics.subgoal_shaping_mean;
+    coll_metrics.car_critic_loss = train_metrics.car_critic_loss;
+    coll_metrics.car_actor_loss  = train_metrics.car_actor_loss;
+    coll_metrics.car_head_weight = train_metrics.car_head_weight;
 
     coll_metrics.update_agent_steps_per_second =
         next_coll_steps > 0 ? static_cast<double>(next_coll_steps) / std::max(train_metrics.update_seconds, 1.0e-9) : 0.0;
@@ -4120,46 +3260,24 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
     append_metrics_line(checkpoint_dir, update_index, global_step, coll_metrics, es_fired_this_update);
     std::cout << "update=" << update_index
               << " global_step=" << global_step
-              << " policy_loss=" << coll_metrics.policy_loss
-              << " value_loss=" << coll_metrics.value_loss
-              << " entropy=" << coll_metrics.entropy
+              << " ball_critic_loss=" << coll_metrics.policy_loss
+              << " car_critic_loss=" << coll_metrics.car_critic_loss
+              << " car_head_weight=" << coll_metrics.car_head_weight
               << " grad_norm=" << coll_metrics.grad_norm
-              << " grad_norm_valid_steps=" << coll_metrics.grad_norm_valid_steps
               << " optimizer_steps=" << coll_metrics.optimizer_steps
-              << " policy_approx_kl=" << coll_metrics.policy_approx_kl
-              << " clip_frac=" << coll_metrics.policy_clip_fraction
-              << " max_log_ratio=" << coll_metrics.policy_log_ratio_abs_max
               << " nonfinite_loss_skips=" << coll_metrics.nonfinite_loss_skips
-              << " nonfinite_grad_skips=" << coll_metrics.nonfinite_grad_norm_skips
-              << " kl_guard_skips=" << coll_metrics.kl_guard_skips
-              << " grad_guard_skips=" << coll_metrics.grad_norm_guard_skips
-              << " total_reward=" << coll_metrics.total_reward_mean
-              << " gameplay_reward=" << coll_metrics.gameplay_reward_mean
+              << " replay_buf=" << coll_metrics.replay_buffer_size
               << " mechanic_reward=" << coll_metrics.mechanic_reward_mean
               << " rollout_steps=" << coll_metrics.rollout_steps
               << " completed_eps=" << coll_metrics.completed_episodes
               << " scored_eps=" << coll_metrics.scored_episodes
               << " conceded_eps=" << coll_metrics.conceded_episodes
-              << " neutral_eps=" << coll_metrics.neutral_episodes
-              << " no_touch_eps=" << coll_metrics.no_touch_episodes
-              << " trunc_eps=" << coll_metrics.truncated_episodes
               << " touch_rate=" << coll_metrics.touch_episode_rate
-              << " multi_touch_rate=" << coll_metrics.multi_touch_episode_rate
-              << " no_touch_rate=" << coll_metrics.no_touch_episode_rate
-              << " sampled_goal_dist=" << coll_metrics.mean_sampled_goal_distance
               << " mean_goal_dist=" << coll_metrics.mean_goal_distance
-              << " ball_prox=" << coll_metrics.ball_proximity_rate
               << " goals=" << coll_metrics.goals_scored << "/" << coll_metrics.goals_conceded
-              << " es_fitness=" << coll_metrics.es_fitness_mean
-              << " es_reward=" << coll_metrics.es_reward_mean
               << " anchor_win_rate=" << coll_metrics.anchor_win_rate
-              << " anchor_episodes=" << coll_metrics.anchor_eval_episodes
-              << " anchor_updated=" << coll_metrics.anchor_updated
               << " rss_mb=" << coll_metrics.process_rss_mb
-              << " peak_rss_mb=" << coll_metrics.process_peak_rss_mb
-              << " cgroup_mem_mb=" << coll_metrics.cgroup_memory_current_mb << "/" << coll_metrics.cgroup_memory_limit_mb
               << " cuda_reserved_mb=" << coll_metrics.cuda_memory_reserved_mb
-              << " cuda_max_reserved_mb=" << coll_metrics.cuda_max_memory_reserved_mb
               << " cuda_ooms=" << coll_metrics.cuda_ooms
               << '\n';
     if (wandb.enabled()) {

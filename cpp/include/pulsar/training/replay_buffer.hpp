@@ -2,94 +2,86 @@
 
 #ifdef PULSAR_HAS_TORCH
 
+#include <mutex>
 #include <torch/torch.h>
 #include "pulsar/config/config.hpp"
 
 namespace pulsar {
 
-// Off-policy replay buffer for SAC critic training with HER relabeling.
-// Stores achieved_goal (ball pos after action) and conditioned_goal (agent's current goal)
-// separately. Reward is computed entirely at sample time: r=1 if achieved_goal ≈ conditioned_goal.
-// r_terminal is NEVER stored here — this ensures SAC trains on a clean goal-reaching MDP.
+// Off-policy episode buffer for CRL training with hindsight relabeling.
+// Stores complete episodes. Goals are relabeled at sample time by picking
+// a uniformly random future timestep within the same episode — no cross-episode
+// ID tracking or cumsum tricks needed.
 class ReplayBuffer {
  public:
   ReplayBuffer(
       const ReplayBufferConfig& config,
+      int total_agents,
       int obs_dim,
       int action_dim,
       int goal_dim,
+      int car_goal_dim,
       const torch::Device& host_device = torch::Device(torch::kCPU));
 
-  // Write one PPO step's worth of transitions.
-  // achieved_goal: ball position AFTER the action (post-step ball pos = host_goal_positions())
-  // conditioned_goal: what the agent was trying to reach (subgoal or task_goal_host)
-  // r_terminal is intentionally absent — reward computed at sample time from goals.
-  void push(
-      const torch::Tensor& obs,              // [batch, obs_dim] — pre-step obs
-      const torch::Tensor& actions,          // [batch] int64
-      const torch::Tensor& achieved_goal,    // [batch, goal_dim] — ball pos after step
-      const torch::Tensor& conditioned_goal, // [batch, goal_dim] — subgoal or task goal
-      const torch::Tensor& next_obs,         // [batch, obs_dim] — post-step obs
-      const torch::Tensor& dones,            // [batch] float
-      const torch::Tensor& episode_ids);     // [batch] int64 — incremented on reset
+  // Called once per environment step for all agents simultaneously.
+  // Accumulates per-agent data; flushes a complete episode to the circular
+  // buffer whenever done[i]==1 for agent i.
+  void push_step(
+      const torch::Tensor& obs,        // [total_agents, obs_dim]
+      const torch::Tensor& actions,    // [total_agents] int64
+      const torch::Tensor& ball_goals, // [total_agents, goal_dim]   — ball pos after step
+      const torch::Tensor& car_goals,  // [total_agents, car_goal_dim] — car pos after step
+      const torch::Tensor& dones);     // [total_agents] float — flush on done==1
 
-  struct TransitionBatch {
-    torch::Tensor obs;
-    torch::Tensor actions;
-    torch::Tensor rewards;      // {0, 1} — computed from HER relabeling
-    torch::Tensor next_obs;
-    torch::Tensor dones;
-    torch::Tensor goals;        // conditioned_goal after HER relabeling
+  // CRL batch: obs + actions + hindsight-relabeled future goals for both heads.
+  struct CRLBatch {
+    torch::Tensor obs;               // [B, obs_dim]
+    torch::Tensor actions;           // [B] int64
+    torch::Tensor future_ball_goals; // [B, goal_dim]
+    torch::Tensor future_car_goals;  // [B, car_goal_dim]
   };
-  TransitionBatch sample_transitions(int batch_size);
+  CRLBatch sample_crl_batch(int batch_size);
 
-  // Segment batch for LQL (segments respect episode boundaries).
-  struct SegmentBatch {
-    torch::Tensor obs;           // [L, B, obs_dim]
-    torch::Tensor actions;       // [L, B] int64
-    torch::Tensor rewards;       // [L, B] — HER-relabeled, {0, 1}
-    torch::Tensor next_obs;      // [L, B, obs_dim]
-    torch::Tensor dones;         // [L, B]
-    torch::Tensor goals;         // [L, B, goal_dim]
-    torch::Tensor episode_ends;  // [L, B] — 1 at episode boundaries (for LQL boundary masking)
-  };
-  SegmentBatch sample_segments(int num_segments);
-
-  [[nodiscard]] int size() const;
+  [[nodiscard]] int size() const;   // number of valid episodes
   [[nodiscard]] bool ready() const;
 
- private:
-  // HER relabeling: for a batch of sampled transitions, replace conditioned_goal with a
-  // future achieved_goal from the same episode for her_relabel_fraction of transitions.
-  // Returns relabeled (goals, rewards). rewards = 1 if achieved_goal ≈ relabeled goal.
-  std::pair<torch::Tensor, torch::Tensor> her_relabel_batch(
-      const torch::Tensor& achieved_goals,    // [N, goal_dim]
-      const torch::Tensor& conditioned_goals, // [N, goal_dim]
-      const torch::Tensor& episode_ids,       // [N]
-      const torch::Tensor& timestep_ids,      // [N]
-      const torch::Tensor& sampled_indices);  // [N] — buffer positions
+  // Legacy stub — kept so SACTrainer (not used in CRL mode) still compiles.
+  struct SegmentBatch {
+    torch::Tensor obs, actions, rewards, next_obs, dones, goals, episode_ends;
+  };
 
-  torch::Tensor compute_goal_reward(
-      const torch::Tensor& achieved_goals,
-      const torch::Tensor& target_goals) const;
+ private:
+  // Flush agent i's accumulation buffer as one complete episode.
+  // Caller must hold ep_mutex_.
+  void flush_agent_locked(int agent_idx);
 
   ReplayBufferConfig config_;
+  int total_agents_;
   int obs_dim_;
   int action_dim_;
   int goal_dim_;
+  int car_goal_dim_;
+  int max_ep_len_;
 
-  // Circular buffers — stored CPU, pinned for fast GPU transfer
-  torch::Tensor buf_obs_;
-  torch::Tensor buf_actions_;
-  torch::Tensor buf_next_obs_;
-  torch::Tensor buf_dones_;
-  torch::Tensor buf_achieved_goals_;
-  torch::Tensor buf_conditioned_goals_;
-  torch::Tensor buf_episode_ids_;
-  torch::Tensor buf_timestep_ids_;
+  // Circular episode buffer — CPU pinned for fast GPU transfer.
+  torch::Tensor ep_obs_;        // [max_episodes, max_ep_len, obs_dim]
+  torch::Tensor ep_actions_;    // [max_episodes, max_ep_len]   int64
+  torch::Tensor ep_ball_goals_; // [max_episodes, max_ep_len, goal_dim]
+  torch::Tensor ep_car_goals_;  // [max_episodes, max_ep_len, car_goal_dim]
+  torch::Tensor ep_lengths_;    // [max_episodes]               int32
 
-  int head_ = 0;    // next write position
-  int filled_ = 0;  // number of valid entries
+  int head_   = 0;  // next write position (episode index)
+  int filled_ = 0;  // number of valid episodes
+
+  mutable std::mutex ep_mutex_;
+
+  // Per-agent accumulation buffers for in-progress episodes (no lock needed —
+  // only the collector thread writes these).
+  torch::Tensor acc_obs_;        // [total_agents, max_ep_len, obs_dim]
+  torch::Tensor acc_actions_;    // [total_agents, max_ep_len]
+  torch::Tensor acc_ball_goals_; // [total_agents, max_ep_len, goal_dim]
+  torch::Tensor acc_car_goals_;  // [total_agents, max_ep_len, car_goal_dim]
+  torch::Tensor acc_step_;       // [total_agents]  int32 — steps written so far
 };
 
 }  // namespace pulsar

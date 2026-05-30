@@ -25,10 +25,6 @@
 #include "pulsar/training/gcrl_trainer.hpp"
 #include "pulsar/training/optimizers.hpp"
 #include "pulsar/training/replay_buffer.hpp"
-#include "pulsar/training/sac_critic.hpp"
-#include "pulsar/training/sac_trainer.hpp"
-#include "pulsar/training/subgoal_planner.hpp"
-#include "pulsar/training/world_model_trainer.hpp"
 
 #ifdef PULSAR_HAS_CUDA
 #include <c10/cuda/CUDAStream.h>
@@ -43,18 +39,11 @@ struct TrainerMetrics {
   double overall_agent_steps_per_second = 0.0;
   double update_seconds = 0.0;
   double policy_loss = 0.0;
-  double value_loss = 0.0;
-  double entropy = 0.0;
   double grad_norm = 0.0;
   int64_t grad_norm_valid_steps = 0;
   int64_t optimizer_steps = 0;
-  double policy_approx_kl = 0.0;
-  double policy_clip_fraction = 0.0;
-  double policy_log_ratio_abs_max = 0.0;
   int64_t nonfinite_loss_skips = 0;
   int64_t nonfinite_grad_norm_skips = 0;
-  int64_t kl_guard_skips = 0;
-  int64_t grad_norm_guard_skips = 0;
   double obs_build_seconds = 0.0;
   double mask_build_seconds = 0.0;
   double policy_forward_seconds = 0.0;
@@ -73,10 +62,7 @@ struct TrainerMetrics {
   double cuda_max_memory_reserved_mb = 0.0;
   int64_t cuda_alloc_retries = 0;
   int64_t cuda_ooms = 0;
-  double total_reward_mean = 0.0;
-  double gameplay_reward_mean = 0.0;
   double mechanic_reward_mean = 0.0;
-  double sampled_value_win_mean = 0.0;
   int64_t rollout_steps = 0;
   int64_t completed_episodes = 0;
   int64_t scored_episodes = 0;
@@ -130,32 +116,10 @@ struct TrainerMetrics {
   int64_t anchor_eval_episodes = 0;
   bool anchor_updated = false;
 
-  // RSSM world model
-  double rssm_kl_loss = 0.0;
-  double rssm_consistency_loss = 0.0;
-  double rssm_icm_forward_loss = 0.0;
-  double rssm_icm_inverse_loss = 0.0;
-  double rssm_goal_head_loss = 0.0;
-  double intrinsic_reward_mean = 0.0;
-  double intrinsic_beta = 0.0;
-
-  // SAC / LQL
   int64_t replay_buffer_size = 0;
-  double sac_td_loss = 0.0;
-  double sac_lql_loss = 0.0;
-  double sac_total_loss = 0.0;
-  double sac_mean_q = 0.0;
-  double sac_max_q = 0.0;
-
-  // PBRS
-  double pbrs_weight = 0.0;
-  double pbrs_shaping_mean = 0.0;
-
-  // Subgoal planner
-  double subgoal_reachability_mean = 0.0;
-  int64_t subgoal_replans = 0;
-  int64_t subgoal_early_aborts = 0;
-  double subgoal_shaping_mean = 0.0;
+  double car_critic_loss = 0.0;
+  double car_actor_loss = 0.0;
+  double car_head_weight = 0.0;
 };
 
 struct TrainerBenchmarkMetrics {
@@ -173,8 +137,6 @@ struct TrainerBenchmarkMetrics {
   double forward_backward_seconds = 0.0;
   double optimizer_step_seconds = 0.0;
   double policy_loss = 0.0;
-  double value_loss = 0.0;
-  double entropy = 0.0;
   double grad_norm = 0.0;
   int es_updates = 0;
   double es_seconds = 0.0;
@@ -280,39 +242,14 @@ class Trainer {
 
   std::unique_ptr<GCRLTrainer> gcrl_trainer_{nullptr};
 
-  // World model
-  std::unique_ptr<WorldModelTrainer> world_model_trainer_{nullptr};
-
-  // Off-policy components
+  // Off-policy replay buffer
   std::unique_ptr<ReplayBuffer> replay_buffer_{nullptr};
-  std::unique_ptr<SACTrainer> sac_trainer_{nullptr};
-  SACCritic sac_critic_{nullptr};
-  std::unique_ptr<torch::optim::Adam> sac_critic_b_optimizer_{nullptr};  // unused slot (kept for clarity)
-  bool sac_critic_ready_ = false;
 
-  // PBRS cache (K-step reuse)
-  torch::Tensor cached_v_current_;
-  torch::Tensor cached_v_next_;
-  int pbrs_cache_age_ = 0;
+  // Car-head GoalCritic (car_goal_dim=3, trains locomotion via ball-position bootstrap)
+  GoalCritic car_goal_critic_{nullptr};
+  std::unique_ptr<torch::optim::Adam> car_goal_critic_optimizer_{nullptr};
 
-  // Subgoal planner
-  std::unique_ptr<SubgoalPlanner> subgoal_planner_{nullptr};
-  GoalCritic goal_critic_b_{nullptr};        // ensemble member for pessimistic scoring
-  std::unique_ptr<torch::optim::Adam> goal_critic_b_optimizer_{nullptr};
-  torch::Tensor current_subgoal_;            // [total_agents, goal_dim] — current planner subgoal
-  torch::Tensor sg_score_at_replan_;         // [total_agents] — score when last subgoal was selected
-  torch::Tensor sg_score_recent_;            // [total_agents] — most recent subgoal score
-  // Kept for should_replan interface (passed as [2, agents] view)
-  torch::Tensor recent_subgoal_scores_;      // [2, total_agents] — {at_replan, recent}
-
-  // Goal candidate buffer for planner
-  torch::Tensor goal_buffer_;
-  int goal_buffer_head_ = 0;
-  int goal_buffer_filled_ = 0;
-  static constexpr int kGoalBufferCapacity = 65536;
-
-  // Per-env episode ID tracking for HER
-  torch::Tensor episode_ids_;  // [total_agents] int64 — incremented on reset
+  std::int64_t global_step_ = 0;
 
   int update_index_ = 0;
 
