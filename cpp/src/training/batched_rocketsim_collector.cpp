@@ -17,11 +17,14 @@ namespace pulsar {
 namespace {
 
 std::shared_ptr<MutatorSequence> make_default_reset_mutator(const EnvConfig& config) {
-  return std::make_shared<MutatorSequence>(
-      std::vector<StateMutatorPtr>{
-          std::make_shared<FixedTeamSizeMutator>(config),
-          std::make_shared<KickoffMutator>(config),
-      });
+  std::vector<StateMutatorPtr> mutators;
+  mutators.push_back(std::make_shared<FixedTeamSizeMutator>(config));
+  if (config.mode.find("random") != std::string::npos) {
+    mutators.push_back(std::make_shared<RandomStateMutator>(config));
+  } else {
+    mutators.push_back(std::make_shared<KickoffMutator>(config));
+  }
+  return std::make_shared<MutatorSequence>(std::move(mutators));
 }
 
 std::vector<TransitionEnginePtr> make_default_engines(const ExperimentConfig& config) {

@@ -158,9 +158,16 @@ void RocketSimTransitionEngine::reset(std::uint64_t seed) {
   episode_ticks_ = 0;
   last_reset_seed_ = seed;
 
-  const int kickoff_seed = config_.randomize_kickoffs ? static_cast<int>(seed) : 0;
-  arena_->tickCount = 0;
-  arena_->ResetToRandomKickoff(kickoff_seed);
+  if (config_.mode.find("random") != std::string::npos) {
+    if (reset_mutator_) {
+      reset_mutator_->apply(state_, seed);
+    }
+    sync_arena_from_state();
+  } else {
+    const int kickoff_seed = config_.randomize_kickoffs ? static_cast<int>(seed) : 0;
+    arena_->tickCount = 0;
+    arena_->ResetToRandomKickoff(kickoff_seed);
+  }
   sync_state_from_arena();
 #else
   state_ = {};
@@ -302,6 +309,36 @@ void RocketSimTransitionEngine::sync_state_from_arena() {
       const auto* pad = arena_->GetBoostPads()[i];
       const auto pad_state = pad->GetState();
       state_.boost_pad_timers[i] = pad_state.isActive ? 0.0F : pad_state.cooldown;
+    }
+  }
+}
+
+void RocketSimTransitionEngine::sync_arena_from_state() {
+  if (arena_ != nullptr) {
+    // Sync ball
+    auto ball_state = arena_->ball->GetState();
+    ball_state.pos = RocketSim::Vec(state_.ball.position.x, state_.ball.position.y, state_.ball.position.z);
+    ball_state.vel = RocketSim::Vec(state_.ball.velocity.x, state_.ball.velocity.y, state_.ball.velocity.z);
+    ball_state.angVel = RocketSim::Vec(state_.ball.angular_velocity.x, state_.ball.angular_velocity.y, state_.ball.angular_velocity.z);
+    arena_->ball->SetState(ball_state);
+
+    // Sync cars
+    for (std::size_t i = 0; i < cars_.size(); ++i) {
+      if (i >= state_.cars.size()) break;
+      auto* car_ptr = cars_[i];
+      const auto& car_src = state_.cars[i];
+      auto car_dst = car_ptr->GetState();
+      car_dst.pos = RocketSim::Vec(car_src.position.x, car_src.position.y, car_src.position.z);
+      car_dst.vel = RocketSim::Vec(car_src.velocity.x, car_src.velocity.y, car_src.velocity.z);
+      car_dst.angVel = RocketSim::Vec(car_src.angular_velocity.x, car_src.angular_velocity.y, car_src.angular_velocity.z);
+      
+      RocketSim::Vec rs_forward(car_src.forward.x, car_src.forward.y, car_src.forward.z);
+      RocketSim::Vec rs_up(car_src.up.x, car_src.up.y, car_src.up.z);
+      car_dst.rotMat = RocketSim::RotMat::LookAt(rs_forward, rs_up);
+
+      car_dst.boost = car_src.boost;
+      car_dst.isOnGround = car_src.on_ground;
+      car_ptr->SetState(car_dst);
     }
   }
 }

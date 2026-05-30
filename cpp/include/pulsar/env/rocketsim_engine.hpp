@@ -32,6 +32,7 @@ class RocketSimTransitionEngine final : public TransitionEngine {
   void apply_placeholder_dynamics(std::span<const ControllerState> actions);
 #ifdef PULSAR_HAS_ROCKETSIM
   void sync_state_from_arena();
+  void sync_arena_from_state();
 #endif
 
   EnvConfig config_{};

@@ -568,11 +568,14 @@ void append_metrics_line(
 }
 
 std::shared_ptr<MutatorSequence> make_es_eval_reset_mutator(const EnvConfig& config) {
-  return std::make_shared<MutatorSequence>(
-      std::vector<StateMutatorPtr>{
-          std::make_shared<FixedTeamSizeMutator>(config),
-          std::make_shared<KickoffMutator>(config),
-      });
+  std::vector<StateMutatorPtr> mutators;
+  mutators.push_back(std::make_shared<FixedTeamSizeMutator>(config));
+  if (config.mode.find("random") != std::string::npos) {
+    mutators.push_back(std::make_shared<RandomStateMutator>(config));
+  } else {
+    mutators.push_back(std::make_shared<KickoffMutator>(config));
+  }
+  return std::make_shared<MutatorSequence>(std::move(mutators));
 }
 
 std::unique_ptr<BatchedRocketSimCollector> make_es_eval_collector(
@@ -884,9 +887,9 @@ static void load_actor_from_archive(
 }
 
 int team_size_from_mode(const std::string& mode) {
-  if (mode == "1v1") return 1;
-  if (mode == "2v2") return 2;
-  if (mode == "3v3") return 3;
+  if (mode == "1v1" || mode == "1v1_random") return 1;
+  if (mode == "2v2" || mode == "2v2_random") return 2;
+  if (mode == "3v3" || mode == "3v3_random") return 3;
   return 1;
 }
 
@@ -3759,11 +3762,14 @@ Trainer::AnchorEvalResult Trainer::run_anchor_eval(int update_index) {
   auto obs_builder_cfg = eval_config.env;
   obs_builder_cfg.team_size = 3;  // max; zero-pads unused slots
 
-  const auto reset_mutator = std::make_shared<MutatorSequence>(
-      std::vector<StateMutatorPtr>{
-          std::make_shared<FixedTeamSizeMutator>(eval_config.env),
-          std::make_shared<KickoffMutator>(eval_config.env),
-      });
+  std::vector<StateMutatorPtr> mutators;
+  mutators.push_back(std::make_shared<FixedTeamSizeMutator>(eval_config.env));
+  if (eval_config.env.mode.find("random") != std::string::npos) {
+    mutators.push_back(std::make_shared<RandomStateMutator>(eval_config.env));
+  } else {
+    mutators.push_back(std::make_shared<KickoffMutator>(eval_config.env));
+  }
+  const auto reset_mutator = std::make_shared<MutatorSequence>(std::move(mutators));
   std::vector<TransitionEnginePtr> engines;
   engines.reserve(static_cast<std::size_t>(eval_envs));
   for (int env_idx = 0; env_idx < eval_envs; ++env_idx) {
@@ -4160,6 +4166,30 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
       for (const auto& item : get_all_metrics(coll_metrics, update_index, global_step, es_fired_this_update)) {
         wandb.add_metric(item.section, item.key, item.value);
       }
+      
+      // Dynamic mode stats tables
+      std::vector<std::string> columns = {"Mode", "Completed Episodes", "Touch Rate", "Multi-Touch Rate", "Scored Rate"};
+      std::vector<std::vector<nlohmann::json>> table_data;
+      for (const auto& [mode, count] : coll_metrics.mode_completed_episodes) {
+        float touch_rate = 0.0F;
+        float multi_touch_rate = 0.0F;
+        float scored_rate = 0.0F;
+        if (coll_metrics.mode_touch_rates.count(mode)) touch_rate = coll_metrics.mode_touch_rates.at(mode);
+        if (coll_metrics.mode_multi_touch_rates.count(mode)) multi_touch_rate = coll_metrics.mode_multi_touch_rates.at(mode);
+        if (coll_metrics.mode_scored_rates.count(mode)) scored_rate = coll_metrics.mode_scored_rates.at(mode);
+
+        table_data.push_back({
+          mode,
+          static_cast<int>(count),
+          touch_rate,
+          multi_touch_rate,
+          scored_rate
+        });
+      }
+      if (!table_data.empty()) {
+        wandb.add_table("mode_statistics", columns, table_data);
+      }
+
       wandb.commit(global_step);
     }
     if (config_.ppo.checkpoint_interval > 0 && update_index % config_.ppo.checkpoint_interval == 0) {

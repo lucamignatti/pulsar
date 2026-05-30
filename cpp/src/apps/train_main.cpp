@@ -29,9 +29,9 @@ torch::Device resolve_startup_device(const std::string& device_name) {
 }
 
 int team_size_from_mode(const std::string& mode) {
-  if (mode == "1v1") return 1;
-  if (mode == "2v2") return 2;
-  if (mode == "3v3") return 3;
+  if (mode == "1v1" || mode == "1v1_random") return 1;
+  if (mode == "2v2" || mode == "2v2_random") return 2;
+  if (mode == "3v3" || mode == "3v3_random") return 3;
   throw std::invalid_argument("Unknown curriculum mode: " + mode);
 }
 

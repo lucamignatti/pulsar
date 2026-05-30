@@ -108,6 +108,16 @@
   "wandb": {
     "enabled": true
   },
+  "curriculum": {
+    "modes": [
+      {"mode": "1v1", "shards": 1, "num_envs": 256, "collection_workers": 4},
+      {"mode": "2v2", "shards": 1, "num_envs": 256, "collection_workers": 4},
+      {"mode": "3v3", "shards": 1, "num_envs": 256, "collection_workers": 4},
+      {"mode": "1v1_random", "shards": 1, "num_envs": 256, "collection_workers": 4},
+      {"mode": "2v2_random", "shards": 1, "num_envs": 256, "collection_workers": 4},
+      {"mode": "3v3_random", "shards": 1, "num_envs": 256, "collection_workers": 4}
+    ]
+  },
   "world_model": {
     "latent_dim": 256,
     "stochastic_dim": 32,

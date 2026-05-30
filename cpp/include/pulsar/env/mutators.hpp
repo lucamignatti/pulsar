@@ -27,6 +27,16 @@ class KickoffMutator final : public StateMutator {
   EnvConfig config_{};
 };
 
+class RandomStateMutator final : public StateMutator {
+ public:
+  explicit RandomStateMutator(EnvConfig config);
+
+  void apply(EnvState& state, std::uint64_t seed) const override;
+
+ private:
+  EnvConfig config_{};
+};
+
 class MutatorSequence final : public StateMutator {
  public:
   explicit MutatorSequence(std::vector<StateMutatorPtr> mutators);
