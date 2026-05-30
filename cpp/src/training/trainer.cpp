@@ -3448,6 +3448,20 @@ void Trainer::collect_rollout(
       local_collected_steps > 0 ? static_cast<double>(local_collected_steps) / collection_seconds : 0.0;
 
 #ifdef PULSAR_HAS_CUDA
+  // Flush all per-shard collection streams before returning. Collection enqueues
+  // GPU work (policy forward, H2D/D2H copies) on these streams asynchronously, and
+  // reads snapshot tensors / input buffers allocated on other streams without
+  // record_stream(). Under overlap_collection_update the caller frees and reuses
+  // those tensors (snapshot reclone, collection_actors_ reassignment) as soon as
+  // this returns; if a shard stream still has pending reads, the caching allocator
+  // can hand that memory to the concurrent update, corrupting it (manifesting as
+  // intermittent SIGSEGVs in downstream physics). Synchronizing here makes
+  // "collect_rollout returned" also mean "its GPU work finished", which the
+  // CPU-level future.get() alone does not guarantee. Cost is negligible: collection
+  // has already completed on the CPU side by this point.
+  for (const auto& stream : shard_collection_streams_) {
+    stream.synchronize();
+  }
   c10::cuda::setCurrentCUDAStream(prev_collect_stream);
 #endif
   *collected_agent_steps = local_collected_steps;

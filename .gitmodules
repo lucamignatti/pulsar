@@ -1,0 +1,3 @@
+[submodule "external/RocketSim"]
+	path = external/RocketSim
+	url = https://github.com/ZealanL/RocketSim
