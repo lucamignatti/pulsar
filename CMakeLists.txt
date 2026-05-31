@@ -12,14 +12,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-function(pulsar_link_torch_whole_core target_name)
-  target_link_libraries(
-    "${target_name}"
-    PRIVATE
-      pulsar_torch
-      "$<LINK_LIBRARY:WHOLE_ARCHIVE,pulsar_core>"
-  )
-endfunction()
 
 if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
@@ -45,6 +37,7 @@ option(
 option(PULSAR_FETCH_JSON "Fetch nlohmann_json when not provided by the system" ON)
 option(PULSAR_FETCH_PYBIND11 "Fetch pybind11 when not provided by the system" OFF)
 option(PULSAR_ENABLE_TRACING "Enable Perfetto-compatible trace instrumentation" OFF)
+option(PULSAR_ENABLE_TRAINING "Build the Pulsar training targets (see PLAN.md)" ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CTest)
@@ -100,32 +93,25 @@ add_library(
 
 target_link_libraries(pulsar_core PUBLIC pulsar_core_usage)
 
+# Legacy pulsar_torch (retained for: normalizer, rollout_storage, ppo_math,
+# reward_engine, batched_rocketsim_collector, optimizers, gradient_ops,
+# reachability_grid — all still used by the remaining tests).
+# Mamba-2, LoRA, RSSM, SAC, world-model, trainer, self_play_manager,
+# replay_buffer, subgoal_planner, gcrl_trainer have been deleted (Phase 7).
 if(PULSAR_ENABLE_TORCH)
   pulsar_find_torch()
 
   if(Torch_FOUND)
     add_library(
       pulsar_torch
-      cpp/src/model/actor.cpp
-      cpp/src/model/mamba2_ops.cpp
-      cpp/src/model/layernorm_ops.cpp
       cpp/src/model/normalizer.cpp
-      cpp/src/model/rssm.cpp
       cpp/src/training/rollout_storage.cpp
       cpp/src/training/ppo_math.cpp
       cpp/src/training/reward_engine.cpp
       cpp/src/training/batched_rocketsim_collector.cpp
-      cpp/src/training/trainer.cpp
       cpp/src/training/optimizers.cpp
       cpp/src/training/gradient_ops.cpp
-      cpp/src/training/gcrl_trainer.cpp
       cpp/src/training/reachability_grid.cpp
-      cpp/src/training/self_play_manager.cpp
-      cpp/src/training/replay_buffer.cpp
-      cpp/src/training/sac_critic.cpp
-      cpp/src/training/sac_trainer.cpp
-      cpp/src/training/subgoal_planner.cpp
-      cpp/src/training/world_model_trainer.cpp
     )
 
     target_include_directories(pulsar_torch PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
@@ -136,79 +122,112 @@ if(PULSAR_ENABLE_TORCH)
     if(CUDAToolkit_FOUND OR Torch_CUDA_FOUND)
       target_compile_definitions(pulsar_torch PUBLIC PULSAR_HAS_CUDA=1 PULSAR_ENABLE_AMP=1)
     endif()
-    if(CUDAToolkit_FOUND)
-      check_language(CUDA)
-      if(CMAKE_CUDA_COMPILER)
-        enable_language(CUDA)
-        set(CMAKE_CUDA_STANDARD 17)
-        set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-        target_sources(
-          pulsar_torch
-          PRIVATE
-            cpp/src/model/mamba2_ops_cuda.cu
-            cpp/src/model/layernorm_ops_cuda.cu
-            cpp/src/model/lora_ops_cuda.cu
-            cpp/src/training/ppo_math_ops_cuda.cu
-        )
-        target_compile_definitions(
-          pulsar_torch
-          PRIVATE
-            PULSAR_HAS_MAMBA2_CUDA_KERNELS=1
-            PULSAR_HAS_LAYERNORM_CUDA_KERNELS=1
-            PULSAR_HAS_LORA_CUDA_KERNELS=1
-            PULSAR_HAS_PPO_MATH_CUDA_KERNELS=1
-        )
-        set_source_files_properties(
-          cpp/src/model/mamba2_ops_cuda.cu
-          cpp/src/model/layernorm_ops_cuda.cu
-          cpp/src/model/lora_ops_cuda.cu
-          cpp/src/training/ppo_math_ops_cuda.cu
-          PROPERTIES LANGUAGE CUDA
-        )
-        message(STATUS "Custom CUDA kernels enabled: ${CMAKE_CUDA_COMPILER}")
-      else()
-        message(STATUS "Custom CUDA kernels disabled: CUDA language compiler unavailable.")
-      endif()
-    else()
-      message(STATUS "Custom CUDA kernels disabled: CUDAToolkit was not found.")
-    endif()
     check_language(HIP)
     if(CMAKE_HIP_COMPILER)
       enable_language(HIP)
       set(CMAKE_HIP_STANDARD 17)
       set(CMAKE_HIP_STANDARD_REQUIRED ON)
-      target_sources(
-        pulsar_torch
-        PRIVATE
-          cpp/src/model/mamba2_ops_hip.hip
-          cpp/src/model/layernorm_ops_hip.hip
-          cpp/src/model/lora_ops_hip.hip
-          cpp/src/training/ppo_math_ops_hip.hip
-      )
-      target_compile_definitions(
-        pulsar_torch
-        PRIVATE
-          PULSAR_HAS_MAMBA2_HIP_KERNELS=1
-          PULSAR_HAS_LAYERNORM_HIP_KERNELS=1
-          PULSAR_HAS_LORA_HIP_KERNELS=1
-          PULSAR_HAS_PPO_MATH_HIP_KERNELS=1
-      )
-      set_source_files_properties(
-        cpp/src/model/mamba2_ops_hip.hip
-        cpp/src/model/layernorm_ops_hip.hip
-        cpp/src/model/lora_ops_hip.hip
-        cpp/src/training/ppo_math_ops_hip.hip
-        PROPERTIES LANGUAGE HIP
-      )
-      message(STATUS "Custom HIP kernels enabled: ${CMAKE_HIP_COMPILER}")
+      message(STATUS "HIP enabled: ${CMAKE_HIP_COMPILER}")
     else()
-      message(STATUS "Custom HIP kernels disabled: HIP language compiler unavailable.")
+      message(STATUS "HIP not found.")
+    endif()
+  else()
+    message(WARNING "Torch not found; skipping pulsar_torch.")
+  endif()
+endif()
+
+if(PULSAR_ENABLE_TRAINING)
+  # Ground-up Pulsar training system. New code lives under cpp/pulsar/, cleanly separated from the
+  # legacy cpp/src/ tree. Phase 0 scaffold: parity loader + placeholders. Later phases
+  # add the env/model/collector/update/curriculum sources here.
+  # Header interface (parity loader + pulsar_env.hpp — no Torch, no RocketSim needed)
+  add_library(pulsar_headers INTERFACE)
+  target_include_directories(pulsar_headers INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/pulsar/include)
+  target_compile_features(pulsar_headers INTERFACE cxx_std_20)
+
+  # pulsar_env.hpp needs the pulsar core types (types.hpp, interfaces.hpp)
+  # These are header-only in pulsar_core_usage which carries no .cpp deps.
+  target_link_libraries(pulsar_headers INTERFACE pulsar_core_usage)
+
+  add_executable(pulsar_train cpp/pulsar/pulsar_train.cpp)
+  target_link_libraries(pulsar_train PRIVATE pulsar_headers)
+
+  # Phase 0: harness self-test (shape checks only)
+  add_executable(pulsar_parity_check cpp/pulsar/parity_check.cpp)
+  target_link_libraries(pulsar_parity_check PRIVATE pulsar_headers)
+  if(BUILD_TESTING AND PULSAR_ENABLE_TESTS)
+    add_test(
+      NAME pulsar_parity_check
+      COMMAND pulsar_parity_check ${CMAKE_CURRENT_SOURCE_DIR}/parity/ref
+    )
+  endif()
+
+  # Phase 1: obs/action/done parity vs Python reference
+  add_executable(pulsar_phase1_parity cpp/pulsar/test_phase1_parity.cpp)
+  target_link_libraries(pulsar_phase1_parity PRIVATE pulsar_headers)
+  if(BUILD_TESTING AND PULSAR_ENABLE_TESTS)
+    add_test(
+      NAME pulsar_phase1_parity
+      COMMAND pulsar_phase1_parity ${CMAKE_CURRENT_SOURCE_DIR}/parity/ref
+    )
+  endif()
+
+  # Phase 2+3: Torch-dependent models and collector
+  if(PULSAR_ENABLE_TORCH AND Torch_FOUND)
+    # Core Pulsar training library: models + collector (collector needs pulsar_core for the engine)
+    add_library(pulsar_training STATIC
+      cpp/pulsar/pulsar_models.cpp
+      cpp/pulsar/pulsar_collector.cpp
+      cpp/pulsar/pulsar_update.cpp
+    )
+    target_link_libraries(pulsar_training PUBLIC pulsar_headers torch)
+    target_compile_definitions(pulsar_training PUBLIC PULSAR_HAS_TORCH=1)
+
+    # When RocketSim is available, the collector needs pulsar_core (engine + parallel exec)
+    if(TARGET pulsar_core)
+      target_link_libraries(pulsar_training PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,pulsar_core>")
+      target_compile_definitions(pulsar_training PUBLIC PULSAR_HAS_ROCKETSIM=1)
     endif()
 
-    add_executable(pulsar_train cpp/src/apps/train_main.cpp)
-    pulsar_link_torch_whole_core(pulsar_train)
-  else()
-    message(WARNING "Torch not found; skipping pulsar_torch and training targets.")
+    add_executable(pulsar_phase2_parity cpp/pulsar/test_phase2_parity.cpp)
+    target_link_libraries(pulsar_phase2_parity PRIVATE pulsar_training)
+    if(BUILD_TESTING AND PULSAR_ENABLE_TESTS)
+      add_test(
+        NAME pulsar_phase2_parity
+        COMMAND pulsar_phase2_parity ${CMAKE_CURRENT_SOURCE_DIR}/parity/ref
+      )
+    endif()
+
+    add_executable(pulsar_phase5_parity cpp/pulsar/test_phase5_parity.cpp)
+    target_link_libraries(pulsar_phase5_parity PRIVATE pulsar_headers)
+    if(BUILD_TESTING AND PULSAR_ENABLE_TESTS)
+      add_test(
+        NAME pulsar_phase5_parity
+        COMMAND pulsar_phase5_parity ${CMAKE_CURRENT_SOURCE_DIR}/parity/ref
+      )
+    endif()
+
+    add_executable(pulsar_phase4_parity cpp/pulsar/test_phase4_parity.cpp)
+    target_link_libraries(pulsar_phase4_parity PRIVATE pulsar_training)
+    if(BUILD_TESTING AND PULSAR_ENABLE_TESTS)
+      add_test(
+        NAME pulsar_phase4_parity
+        COMMAND pulsar_phase4_parity ${CMAKE_CURRENT_SOURCE_DIR}/parity/ref
+      )
+    endif()
+
+    add_executable(pulsar_phase3_collector cpp/pulsar/test_phase3_collector.cpp)
+    target_link_libraries(pulsar_phase3_collector PRIVATE pulsar_training)
+    if(BUILD_TESTING AND PULSAR_ENABLE_TESTS)
+      add_test(
+        NAME pulsar_phase3_collector
+        COMMAND pulsar_phase3_collector ${CMAKE_CURRENT_SOURCE_DIR}/external/RocketSim/collision_meshes
+      )
+    endif()
+
+    # Wire pulsar_train against the full Pulsar training library
+    target_link_libraries(pulsar_train PRIVATE pulsar_training)
+    target_compile_definitions(pulsar_train PRIVATE PULSAR_HAS_TORCH=1)
   endif()
 endif()
 
@@ -248,21 +267,17 @@ if(PULSAR_ENABLE_TESTS)
   add_test(NAME pulsar_env_tests COMMAND pulsar_env_tests)
 
   if(TARGET pulsar_torch)
-    add_executable(
-      pulsar_torch_tests
-      cpp/tests/test_torch.cpp
-    )
-    target_include_directories(pulsar_torch_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
-    pulsar_link_torch_whole_core(pulsar_torch_tests)
-    add_test(NAME pulsar_torch_tests COMMAND pulsar_torch_tests)
-
+    # pulsar_torch_tests and pulsar_ppo_math_tests exercise normalizer, ppo_math,
+    # rollout_storage, reward_engine — all still present.
+    # test_torch.cpp and test_self_play.cpp reference the deleted actor/trainer/sac;
+    # they are removed from the build.
     if(PULSAR_ENABLE_PPO_MATH_TESTS)
       add_executable(
         pulsar_ppo_math_tests
         cpp/tests/test_ppo_math.cpp
       )
       target_include_directories(pulsar_ppo_math_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
-      pulsar_link_torch_whole_core(pulsar_ppo_math_tests)
+      target_link_libraries(pulsar_ppo_math_tests PRIVATE pulsar_torch "$<LINK_LIBRARY:WHOLE_ARCHIVE,pulsar_core>")
       add_test(NAME pulsar_ppo_math_tests COMMAND pulsar_ppo_math_tests)
       set_tests_properties(pulsar_ppo_math_tests PROPERTIES LABELS "reference")
     endif()
@@ -272,39 +287,16 @@ if(PULSAR_ENABLE_TESTS)
       cpp/tests/test_reward_engine.cpp
     )
     target_include_directories(pulsar_reward_engine_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
-    pulsar_link_torch_whole_core(pulsar_reward_engine_tests)
+    target_link_libraries(pulsar_reward_engine_tests PRIVATE pulsar_torch "$<LINK_LIBRARY:WHOLE_ARCHIVE,pulsar_core>")
     add_test(NAME pulsar_reward_engine_tests COMMAND pulsar_reward_engine_tests)
-
-    add_executable(
-      pulsar_config_tests
-      cpp/tests/test_config.cpp
-    )
-    target_include_directories(pulsar_config_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
-    pulsar_link_torch_whole_core(pulsar_config_tests)
-    add_test(NAME pulsar_config_tests COMMAND pulsar_config_tests)
 
     add_executable(
       pulsar_rollout_storage_tests
       cpp/tests/test_rollout_storage.cpp
     )
     target_include_directories(pulsar_rollout_storage_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
-    pulsar_link_torch_whole_core(pulsar_rollout_storage_tests)
+    target_link_libraries(pulsar_rollout_storage_tests PRIVATE pulsar_torch "$<LINK_LIBRARY:WHOLE_ARCHIVE,pulsar_core>")
     add_test(NAME pulsar_rollout_storage_tests COMMAND pulsar_rollout_storage_tests)
-
-    add_executable(
-      pulsar_self_play_tests
-      cpp/tests/test_self_play.cpp
-    )
-    target_include_directories(pulsar_self_play_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
-    pulsar_link_torch_whole_core(pulsar_self_play_tests)
-    add_test(NAME pulsar_self_play_tests COMMAND pulsar_self_play_tests)
-    set_tests_properties(
-      pulsar_self_play_tests
-      PROPERTIES
-        ENVIRONMENT "CUDA_VISIBLE_DEVICES=;OMP_NUM_THREADS=1;MKL_NUM_THREADS=1;OPENBLAS_NUM_THREADS=1"
-        TIMEOUT 30
-    )
-
   endif()
 endif()
 
@@ -314,7 +306,7 @@ if(PULSAR_ENABLE_BENCHMARKS AND TARGET pulsar_torch)
     cpp/benchmarks/benchmark_main.cpp
   )
   target_include_directories(pulsar_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
-  pulsar_link_torch_whole_core(pulsar_bench)
+  target_link_libraries(pulsar_bench PRIVATE pulsar_torch "$<LINK_LIBRARY:WHOLE_ARCHIVE,pulsar_core>")
 
   if(PULSAR_ENABLE_TESTS AND Python3_EXECUTABLE)
     add_test(

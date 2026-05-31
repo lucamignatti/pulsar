@@ -1,0 +1,16 @@
+{
+  "_comment": "Tuned for AMD Ryzen 9 7900X (12c/24t) + Radeon RX 6800 XT (16 GB GDDR6, ROCm)",
+
+  "num_envs":        32,
+  "num_workers":     11,
+  "num_steps":      256,
+  "num_epochs":       4,
+  "minibatch_size":4096,
+
+  "lr":          0.0003,
+  "tick_skip":        8,
+  "max_steps":      200,
+
+  "log_interval":    10,
+  "collision_meshes_path": "collision_meshes"
+}

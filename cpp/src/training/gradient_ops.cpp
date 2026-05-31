@@ -194,49 +194,6 @@ void scale_existing_gradients(torch::nn::Module& module, double scale) {
   }
 }
 
-void reduce_gradients_from_replicas(
-    Actor& primary,
-    const std::vector<Actor>& replicas) {
-  if (!primary) return;
-  auto primary_params = primary->named_parameters(true);
-  if (primary_params.size() == 0) return;
-  const torch::Device primary_device = primary->parameters().front().device();
-  for (const auto& replica : replicas) {
-    if (!replica) continue;
-    auto replica_params = replica->named_parameters(true);
-    for (const auto& item : replica_params) {
-      torch::Tensor* primary_tensor = primary_params.find(item.key());
-      if (primary_tensor == nullptr) continue;
-      torch::Tensor replica_grad = item.value().mutable_grad();
-      if (!replica_grad.defined()) continue;
-      torch::Tensor primary_grad = primary_tensor->mutable_grad();
-      if (primary_grad.defined()) {
-        primary_grad.add_(replica_grad.to(primary_device));
-      } else {
-        primary_tensor->mutable_grad() = replica_grad.to(primary_device);
-      }
-    }
-  }
-}
-
-void sync_actor_to_replicas(
-    const Actor& primary,
-    std::vector<Actor>& replicas) {
-  if (!primary) return;
-  for (auto& replica : replicas) {
-    if (replica) {
-      copy_actor_tensors_to(primary, replica, replica->parameters().front().device());
-    }
-  }
-}
-
-torch::Tensor policy_goal_values_like(const torch::Tensor& obs, int goal_dim) {
-  const auto options = obs.options().dtype(torch::kFloat32);
-  if (obs.dim() == 3) {
-    return torch::zeros({obs.size(0), obs.size(1), goal_dim}, options);
-  }
-  return torch::zeros({obs.size(0), goal_dim}, options);
-}
 
 torch::Tensor smooth_l1_value_loss(
     const torch::Tensor& prediction,

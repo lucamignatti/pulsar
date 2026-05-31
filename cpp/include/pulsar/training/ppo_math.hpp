@@ -8,7 +8,6 @@
 #include <torch/torch.h>
 
 #include "pulsar/config/config.hpp"
-#include "pulsar/model/actor.hpp"
 
 namespace pulsar {
 
