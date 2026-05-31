@@ -98,7 +98,9 @@ void GCRLTrainer::compute_gcrl_losses(
   }
 
   if (compute_critic_loss) {
-    torch::Tensor sa_emb = goal_critic->sa_embedding(selected_features.detach(), selected_actions);
+    // Features are NOT detached: the contrastive InfoNCE objective is what
+    // trains the shared encoder's φ(o,a) representation (paper's core mechanism).
+    torch::Tensor sa_emb = goal_critic->sa_embedding(selected_features, selected_actions);
     torch::Tensor g_emb = goal_critic->goal_embedding(selected_future_goal_pos);
     goal_loss = compute_symmetric_infonce_loss(
         compute_pairwise_negative_l2_logits(sa_emb, g_emb, config_.temperature),

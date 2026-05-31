@@ -33,16 +33,21 @@ class ReplayBuffer {
       const torch::Tensor& ball_goals, // [batch_agents, goal_dim]   — ball pos after step
       const torch::Tensor& car_goals,  // [batch_agents, car_goal_dim] — car pos after step
       const torch::Tensor& dones,      // [batch_agents] float — flush on done==1
+      const torch::Tensor& masks,      // [batch_agents, action_dim] — action mask at step
       int agent_offset = 0);
 
-  // CRL batch: obs + actions + hindsight-relabeled future goals for both heads.
+  // CRL batch: obs sequence (for the recurrent encoder) + action/mask at the
+  // final step + hindsight-relabeled future goals for both heads.
   struct CRLBatch {
-    torch::Tensor obs;               // [B, obs_dim]
-    torch::Tensor actions;           // [B] int64
+    torch::Tensor obs_seq;           // [B, L, obs_dim] — window ending at t (zero-padded at episode start)
+    torch::Tensor actions;           // [B] int64       — action taken at t
     torch::Tensor future_ball_goals; // [B, goal_dim]
     torch::Tensor future_car_goals;  // [B, car_goal_dim]
+    torch::Tensor masks;             // [B, action_dim] — action mask at t
   };
-  CRLBatch sample_crl_batch(int batch_size);
+  // sequence_length is the recurrent context window replayed through the SSM
+  // (must match the collection-time reset stride so train/inference features align).
+  CRLBatch sample_crl_batch(int batch_size, int sequence_length);
 
   [[nodiscard]] int size() const;   // number of valid episodes
   [[nodiscard]] bool ready() const;
@@ -70,6 +75,7 @@ class ReplayBuffer {
   torch::Tensor ep_actions_;    // [max_episodes, max_ep_len]   int64
   torch::Tensor ep_ball_goals_; // [max_episodes, max_ep_len, goal_dim]
   torch::Tensor ep_car_goals_;  // [max_episodes, max_ep_len, car_goal_dim]
+  torch::Tensor ep_masks_;      // [max_episodes, max_ep_len, action_dim] uint8
   torch::Tensor ep_lengths_;    // [max_episodes]               int32
 
   int head_   = 0;  // next write position (episode index)
@@ -83,6 +89,7 @@ class ReplayBuffer {
   torch::Tensor acc_actions_;    // [total_agents, max_ep_len]
   torch::Tensor acc_ball_goals_; // [total_agents, max_ep_len, goal_dim]
   torch::Tensor acc_car_goals_;  // [total_agents, max_ep_len, car_goal_dim]
+  torch::Tensor acc_masks_;      // [total_agents, max_ep_len, action_dim] uint8
   torch::Tensor acc_step_;       // [total_agents]  int32 — steps written so far
 };
 

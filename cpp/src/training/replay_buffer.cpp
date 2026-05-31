@@ -32,22 +32,26 @@ ReplayBuffer::ReplayBuffer(
   const auto fpin = torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(use_pinned);
   const auto lpin = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(use_pinned);
   const auto ipin = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(use_pinned);
+  const auto upin = torch::TensorOptions().dtype(torch::kUInt8).pinned_memory(use_pinned);
 
   ep_obs_        = torch::zeros({E, T, obs_dim_}, fpin);
   ep_actions_    = torch::zeros({E, T}, lpin);
   ep_ball_goals_ = torch::zeros({E, T, goal_dim_}, fpin);
   ep_car_goals_  = torch::zeros({E, T, car_goal_dim_}, fpin);
+  ep_masks_      = torch::ones({E, T, action_dim_}, upin);
   ep_lengths_    = torch::zeros({E}, ipin);
 
   // Accumulation buffers — CPU only, no pinning needed (written step-by-step)
   const auto fcpu = torch::TensorOptions().dtype(torch::kFloat32);
   const auto lcpu = torch::TensorOptions().dtype(torch::kInt64);
   const auto icpu = torch::TensorOptions().dtype(torch::kInt32);
+  const auto ucpu = torch::TensorOptions().dtype(torch::kUInt8);
 
   acc_obs_        = torch::zeros({A, T, obs_dim_}, fcpu);
   acc_actions_    = torch::zeros({A, T}, lcpu);
   acc_ball_goals_ = torch::zeros({A, T, goal_dim_}, fcpu);
   acc_car_goals_  = torch::zeros({A, T, car_goal_dim_}, fcpu);
+  acc_masks_      = torch::ones({A, T, action_dim_}, ucpu);
   acc_step_       = torch::zeros({A}, icpu);
 }
 
@@ -57,6 +61,7 @@ void ReplayBuffer::push_step(
     const torch::Tensor& ball_goals,
     const torch::Tensor& car_goals,
     const torch::Tensor& dones,
+    const torch::Tensor& masks,
     int agent_offset) {
 
   const int A = static_cast<int>(obs.size(0));
@@ -66,6 +71,7 @@ void ReplayBuffer::push_step(
   const torch::Tensor bg_c   = ball_goals.to(torch::kCPU).contiguous();
   const torch::Tensor cg_c   = car_goals.to(torch::kCPU).contiguous();
   const torch::Tensor done_c = dones.to(torch::kCPU).contiguous();
+  const torch::Tensor mask_c = masks.to(torch::kCPU).to(torch::kUInt8).contiguous();
 
   const auto* done_ptr = done_c.data_ptr<float>();
   auto* step_ptr       = acc_step_.data_ptr<int32_t>();
@@ -78,6 +84,7 @@ void ReplayBuffer::push_step(
       acc_actions_[gi][s]    = act_c[i];
       acc_ball_goals_[gi][s] = bg_c[i];
       acc_car_goals_[gi][s]  = cg_c[i];
+      acc_masks_[gi][s]      = mask_c[i];
       step_ptr[gi] = s + 1;
     }
     if (done_ptr[i] > 0.5F) {
@@ -99,6 +106,7 @@ void ReplayBuffer::flush_agent_locked(int i) {
   ep_actions_[slot].narrow(0, 0, len).copy_(acc_actions_[i].narrow(0, 0, len));
   ep_ball_goals_[slot].narrow(0, 0, len).copy_(acc_ball_goals_[i].narrow(0, 0, len));
   ep_car_goals_[slot].narrow(0, 0, len).copy_(acc_car_goals_[i].narrow(0, 0, len));
+  ep_masks_[slot].narrow(0, 0, len).copy_(acc_masks_[i].narrow(0, 0, len));
   ep_lengths_.data_ptr<int32_t>()[slot] = len;
 
   head_   = (head_ + 1) % config_.max_episodes;
@@ -108,11 +116,12 @@ void ReplayBuffer::flush_agent_locked(int i) {
 int  ReplayBuffer::size()  const { return filled_; }
 bool ReplayBuffer::ready() const { return filled_ >= config_.min_episodes_before_sampling; }
 
-ReplayBuffer::CRLBatch ReplayBuffer::sample_crl_batch(int batch_size) {
+ReplayBuffer::CRLBatch ReplayBuffer::sample_crl_batch(int batch_size, int sequence_length) {
   TORCH_CHECK(ready(), "ReplayBuffer not ready for sampling");
 
   const auto lopt = torch::TensorOptions().dtype(torch::kInt64);
   const auto fopt = torch::TensorOptions().dtype(torch::kFloat32);
+  const int64_t L = std::max(1, sequence_length);
 
   torch::Tensor ep_indices, lengths_i, t, t_prime;
   {
@@ -143,9 +152,23 @@ ReplayBuffer::CRLBatch ReplayBuffer::sample_crl_batch(int batch_size) {
   const torch::Tensor flat_t  = ep_indices * T + t;        // [B]
   const torch::Tensor flat_tp = ep_indices * T + t_prime;  // [B]
 
+  // Build the recurrent context window [t-L+1, t] per sample. The SSM is
+  // replayed over this window (zero initial state at the window start), so the
+  // features at step t see the same kind of recent context they did during
+  // collection — single-step replay would otherwise produce features the policy
+  // was never executed on.
+  const torch::Tensor offsets = torch::arange(L, lopt);                    // [L]
+  const torch::Tensor win_steps = t.unsqueeze(1) - (L - 1) + offsets;      // [B, L]
+  const torch::Tensor win_valid = (win_steps >= 0).to(torch::kFloat32);    // [B, L]
+  const torch::Tensor win_clamped = win_steps.clamp(0, T - 1);             // [B, L]
+  const torch::Tensor flat_win = (ep_indices.unsqueeze(1) * T + win_clamped).reshape({-1});  // [B*L]
+
   CRLBatch batch;
-  batch.obs = ep_obs_.view({-1, obs_dim_}).index_select(0, flat_t);
+  batch.obs_seq = ep_obs_.view({-1, obs_dim_})
+                      .index_select(0, flat_win)
+                      .view({batch_size, L, obs_dim_}) * win_valid.unsqueeze(-1);  // zero-pad pre-episode
   batch.actions = ep_actions_.view({-1}).index_select(0, flat_t);
+  batch.masks   = ep_masks_.view({-1, action_dim_}).index_select(0, flat_t);
   batch.future_ball_goals = ep_ball_goals_.view({-1, goal_dim_}).index_select(0, flat_tp);
   batch.future_car_goals  = ep_car_goals_.view({-1, car_goal_dim_}).index_select(0, flat_tp);
   return batch;

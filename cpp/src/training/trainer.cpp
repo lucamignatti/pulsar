@@ -1115,29 +1115,39 @@ TrainerMetrics Trainer::update_actor(RolloutStorage& rollout, int /*update_index
   const auto lopt = torch::TensorOptions().dtype(torch::kInt64).device(device_);
   const auto fopt = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
 
-  for (int k = 0; k < n_updates; ++k) {
-    auto batch = replay_buffer_->sample_crl_batch(B);
+  const int64_t L = std::max(1, config_.model.sequence_length);
 
-    const torch::Tensor obs_dev       = actor_normalizer_.normalize(batch.obs.to(device_));
+  for (int k = 0; k < n_updates; ++k) {
+    auto batch = replay_buffer_->sample_crl_batch(B, static_cast<int>(L));
+
     const torch::Tensor actions_dev   = batch.actions.to(device_);
     const torch::Tensor ball_goals    = batch.future_ball_goals.to(device_);
     const torch::Tensor car_goals     = batch.future_car_goals.to(device_);
+    const torch::Tensor masks         = batch.masks.to(device_).to(torch::kBool);
 
-    // Critic features must stay goal-AGNOSTIC: the contrastive structure is
-    // φ(o,a) vs ψ(g); leaking the goal into φ lets InfoNCE trivially collapse.
-    const auto base = actor_->forward_step(obs_dev, {}, /*compute_value=*/false);
-    const torch::Tensor features = base.features;   // [B, feat_dim] goal-agnostic
+    // Replay the recurrent context window through the SSM. The buffer stores
+    // single transitions, but the Mamba encoder is sequential — feeding it
+    // isolated observations (zero state) yields features the policy was never
+    // executed on at collection time. Sampling a [B, L, obs] window and running
+    // forward_sequence reconstructs collection-consistent features at step t.
+    const torch::Tensor obs_seq = actor_normalizer_
+        .normalize(batch.obs_seq.to(device_).reshape({B * L, config_.model.observation_dim}))
+        .reshape({B, L, config_.model.observation_dim})
+        .permute({1, 0, 2}).contiguous();  // [L, B, obs_dim]
 
-    // Policy logits MUST be goal-conditioned. The DDPG-style actor loss trains
-    // π(a|o,g) to reach the hindsight goal; without conditioning, goal_proj_
-    // never receives gradient and the policy stays blind to its commanded goal.
-    // ball_goals[i] and car_goals[i] are the ball/car components of the SAME
-    // future state t', so conditioning on the (terminal) ball goal is coherent
-    // for both heads' actor losses.
-    const auto cond = actor_->forward_step(obs_dev, ball_goals, /*compute_value=*/false);
-    const torch::Tensor logits = cond.policy_logits; // [B, action_dim] goal-conditioned
-    // Uniform mask — no env masks stored in replay buffer
-    const torch::Tensor masks = torch::ones({B, config_.model.action_dim}, fopt);
+    // Goal-conditioned policy: broadcast the (terminal) ball goal across the
+    // window. The goal residual is applied after the recurrent pass, so it only
+    // conditions the policy logits — features (encoded_seq) stay goal-agnostic,
+    // preserving the φ(o,a) vs ψ(g) contrastive structure. ball_goals[i] and
+    // car_goals[i] are the ball/car components of the SAME future state t', so
+    // conditioning on the ball goal is coherent for both heads' actor losses.
+    const torch::Tensor ball_goals_seq =
+        ball_goals.unsqueeze(0).expand({L, B, config_.goal_critic.goal_dim}).contiguous();
+
+    const auto seq_out = actor_->forward_sequence(
+        obs_seq, ball_goals_seq, /*episode_starts=*/{}, /*compute_value=*/false);
+    const torch::Tensor features = seq_out.features[L - 1];        // [B, feat_dim] goal-agnostic
+    const torch::Tensor logits   = seq_out.policy_logits[L - 1];   // [B, action_dim] goal-conditioned
 
     actor_optimizer_.zero_grad();
     if (car_goal_critic_optimizer_) car_goal_critic_optimizer_->zero_grad();
@@ -2191,6 +2201,7 @@ void Trainer::collect_rollout(
                 goal_pos_host,
                 collector.host_car_positions(),
                 dones_host,
+                action_masks_host,
                 static_cast<int>(shard_step.agent_offset));
           }
 
@@ -2511,7 +2522,8 @@ void Trainer::collect_rollout(
           action_indices_cpu,
           goal_pos_host,                    // achieved ball pos after step (4D)
           collector_->host_car_positions(), // achieved car pos after step (3D)
-          dones_host);
+          dones_host,
+          action_masks_host);
     }
 
     // ---- Combined reward for RolloutStorage (no shaping — CRL is reward-free) ----
