@@ -72,6 +72,7 @@ void GCRLTrainer::compute_gcrl_losses(
     const torch::Tensor& active_logits,
     const torch::Tensor& active_masks,
     const torch::Tensor& active_future_goal_pos,
+    const torch::Tensor& active_actor_goal_pos,
     bool compute_critic_loss,
     bool compute_actor_loss,
     torch::Tensor& goal_loss,
@@ -114,7 +115,7 @@ void GCRLTrainer::compute_gcrl_losses(
         active_features,
         active_logits,
         active_masks,
-        active_future_goal_pos,
+        active_actor_goal_pos,
         config_.contrastive_batch_size);
   }
 }

@@ -36,6 +36,7 @@ class GCRLTrainer {
       const torch::Tensor& active_logits,
       const torch::Tensor& active_masks,
       const torch::Tensor& active_future_goal_pos,
+      const torch::Tensor& active_actor_goal_pos,
       bool compute_critic_loss,
       bool compute_actor_loss,
       torch::Tensor& goal_loss,

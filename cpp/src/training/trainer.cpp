@@ -1123,6 +1123,11 @@ TrainerMetrics Trainer::update_actor(RolloutStorage& rollout, int /*update_index
     const torch::Tensor actions_dev   = batch.actions.to(device_);
     const torch::Tensor ball_goals    = batch.future_ball_goals.to(device_);
     const torch::Tensor car_goals     = batch.future_car_goals.to(device_);
+    // Car-head actor command: drive the car to the ball's position (3D). The car
+    // head's *critic* still learns reachability from hindsight car positions
+    // (car_goals); only the actor is aimed at the ball, so the controllable head
+    // generates car->ball contact that the (pre-contact degenerate) ball head needs.
+    const torch::Tensor ball_pos_goal = ball_goals.narrow(1, 0, 3);
     const torch::Tensor masks         = batch.masks.to(device_).to(torch::kBool);
 
     // Replay the recurrent context window through the SSM. The buffer stores
@@ -1155,7 +1160,7 @@ TrainerMetrics Trainer::update_actor(RolloutStorage& rollout, int /*update_index
     // Ball head (goal_dim=4): InfoNCE critic + Gumbel-Softmax actor
     torch::Tensor ball_critic_loss, ball_actor_loss, ball_score;
     gcrl_trainer_->compute_gcrl_losses(
-        actor_->goal_critic(), features, actions_dev, logits, masks, ball_goals,
+        actor_->goal_critic(), features, actions_dev, logits, masks, ball_goals, ball_goals,
         /*compute_critic=*/true, /*compute_actor=*/(lambda_actor > 0.0F),
         ball_critic_loss, ball_actor_loss, ball_score);
 
@@ -1170,7 +1175,7 @@ TrainerMetrics Trainer::update_actor(RolloutStorage& rollout, int /*update_index
     if (car_goal_critic_ && w_car > 0.0F) {
       torch::Tensor car_critic_loss, car_actor_loss, car_score;
       gcrl_trainer_->compute_gcrl_losses(
-          car_goal_critic_, features, actions_dev, logits, masks, car_goals,
+          car_goal_critic_, features, actions_dev, logits, masks, car_goals, ball_pos_goal,
           /*compute_critic=*/true, /*compute_actor=*/(lambda_actor > 0.0F),
           car_critic_loss, car_actor_loss, car_score);
       total_loss = total_loss + w_car * car_critic_loss;
@@ -2091,7 +2096,11 @@ void Trainer::collect_rollout(
             shard_normalizer->update(raw_obs);
             shard_normalizer_update->update(raw_obs);
             normalized_obs = shard_normalizer->normalize(raw_obs);
-            const torch::Tensor goal_values = collector_ptr->host_task_goal_positions()
+            // Condition the rollout policy on the ball position (not the net):
+            // the update conditions on the hindsight future ball goal, so the
+            // deployed policy must be conditioned on a ball position too, and
+            // commanding "reach the ball" is what drives contact during bootstrap.
+            const torch::Tensor goal_values = collector_ptr->host_goal_positions()
                 .to(shard_device, use_pinned_host_buffers_);
             output = shard_actor->forward_step_stateful(
                 normalized_obs, recurrent_state, episode_starts, &recurrent_state, goal_values);
@@ -2326,7 +2335,7 @@ void Trainer::collect_rollout(
         torch::Tensor final_raw_obs = collector.host_observations().to(shard_device, use_pinned_host_buffers_);
         torch::Tensor final_normalized = shard_normalizer.normalize(final_raw_obs);
         torch::Tensor final_starts = collector.host_episode_starts().to(shard_device, use_pinned_host_buffers_);
-        const torch::Tensor final_goal_values = collector.host_task_goal_positions()
+        const torch::Tensor final_goal_values = collector.host_goal_positions()
             .to(shard_device, use_pinned_host_buffers_);
         ActorStepOutput final_output = shard_actor->forward_step_stateful(
             final_normalized,
@@ -2377,7 +2386,7 @@ void Trainer::collect_rollout(
       torch::NoGradGuard no_grad;
       normalizer.update(raw_obs);
       normalized_obs = normalizer.normalize(raw_obs);
-      const torch::Tensor goal_values = collector_->host_task_goal_positions()
+      const torch::Tensor goal_values = collector_->host_goal_positions()
           .to(device_, use_pinned_host_buffers_);
       output = rollout_actor->forward_step_stateful(
           normalized_obs,
@@ -2563,7 +2572,7 @@ void Trainer::collect_rollout(
     torch::Tensor final_raw_obs = collector_->host_observations().to(device_, use_pinned_host_buffers_);
     torch::Tensor final_normalized = normalizer.normalize(final_raw_obs);
     torch::Tensor final_starts = collector_->host_episode_starts().to(device_, use_pinned_host_buffers_);
-    const torch::Tensor final_goal_values = collector_->host_task_goal_positions()
+    const torch::Tensor final_goal_values = collector_->host_goal_positions()
         .to(device_, use_pinned_host_buffers_);
     ActorStepOutput final_output = rollout_actor->forward_step_stateful(
         final_normalized,

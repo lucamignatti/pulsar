@@ -113,14 +113,31 @@ void RandomStateMutator::apply(EnvState& state, std::uint64_t seed) const {
       car.on_ground = true;
     }
 
-    // Keep safe distance from the ball (min 400 units) to avoid overlapping resets
-    float dx = car.position.x - state.ball.position.x;
-    float dy = car.position.y - state.ball.position.y;
-    float dz = car.position.z - state.ball.position.z;
-    float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-    if (dist < 400.0F) {
-      car.position.y += team_sign * 500.0F;
-      car.position.y = std::clamp(car.position.y, -4800.0F, 4800.0F);
+    // Contact-seeding: on a fraction of resets, spawn the car right next to the
+    // ball (on the ground) so the first few actions touch it. This seeds the
+    // buffer with ball-contact transitions — without them the contrastive ball
+    // head has no data in which actions move the ball and can never learn.
+    constexpr float kContactStartProb = 0.35F;
+    constexpr float kTouchDistance = 150.0F;  // ball radius (~92) + car half-length
+    if (rand_range(0.0F, 1.0F) < kContactStartProb) {
+      const float approach = rand_range(0.0F, 6.2831853F);
+      car.position.x = std::clamp(
+          state.ball.position.x + kTouchDistance * std::cos(approach), -4000.0F, 4000.0F);
+      car.position.y = std::clamp(
+          state.ball.position.y + kTouchDistance * std::sin(approach), -4800.0F, 4800.0F);
+      car.position.z = 17.0F;
+      car.velocity.z = 0.0F;
+      car.on_ground = true;
+    } else {
+      // Otherwise keep a safe distance (min 400 units) to avoid overlapping resets.
+      float dx = car.position.x - state.ball.position.x;
+      float dy = car.position.y - state.ball.position.y;
+      float dz = car.position.z - state.ball.position.z;
+      float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+      if (dist < 400.0F) {
+        car.position.y += team_sign * 500.0F;
+        car.position.y = std::clamp(car.position.y, -4800.0F, 4800.0F);
+      }
     }
 
     car.velocity.x = rand_range(-1000.0F, 1000.0F);
