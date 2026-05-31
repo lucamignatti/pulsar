@@ -44,6 +44,7 @@ class ReplayBuffer {
     torch::Tensor future_ball_goals; // [B, goal_dim]
     torch::Tensor future_car_goals;  // [B, car_goal_dim]
     torch::Tensor masks;             // [B, action_dim] — action mask at t
+    torch::Tensor agent_ids;         // [B] int64       — original agent index
   };
   // sequence_length is the recurrent context window replayed through the SSM
   // (must match the collection-time reset stride so train/inference features align).
@@ -77,6 +78,7 @@ class ReplayBuffer {
   torch::Tensor ep_car_goals_;  // [max_episodes, max_ep_len, car_goal_dim]
   torch::Tensor ep_masks_;      // [max_episodes, max_ep_len, action_dim] uint8
   torch::Tensor ep_lengths_;    // [max_episodes]               int32
+  torch::Tensor ep_agent_ids_;  // [max_episodes]               int64
 
   int head_   = 0;  // next write position (episode index)
   int filled_ = 0;  // number of valid episodes

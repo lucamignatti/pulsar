@@ -19,7 +19,12 @@ namespace {
 std::shared_ptr<MutatorSequence> make_default_reset_mutator(const EnvConfig& config) {
   std::vector<StateMutatorPtr> mutators;
   mutators.push_back(std::make_shared<FixedTeamSizeMutator>(config));
-  if (config.mode.find("random") != std::string::npos) {
+  if (config.mode == "self_play_reachability") {
+    if (!g_reachability_grid) {
+      g_reachability_grid = std::make_shared<SelfPlayReachabilityGrid>();
+    }
+    mutators.push_back(std::make_shared<SelfPlayReachabilityMutator>(config, g_reachability_grid));
+  } else if (config.mode.find("random") != std::string::npos) {
     mutators.push_back(std::make_shared<RandomStateMutator>(config));
   } else {
     mutators.push_back(std::make_shared<KickoffMutator>(config));
@@ -199,6 +204,22 @@ std::int8_t BatchedRocketSimCollector::mode_id() const {
   if (mode_ == "2v2") return 2;
   if (mode_ == "3v3") return 3;
   return 0;
+}
+
+std::vector<std::int8_t> BatchedRocketSimCollector::get_active_cell_ids() const {
+  std::vector<std::int8_t> cell_ids(total_agents_, mode_id());
+  if (mode_ == "self_play_reachability" && g_reachability_grid) {
+    for (std::size_t env_idx = 0; env_idx < envs_.size(); ++env_idx) {
+      std::uint64_t seed = envs_[env_idx].reset_seed;
+      std::int8_t cell_idx = static_cast<std::int8_t>(g_reachability_grid->get_cell_for_seed(seed));
+      std::size_t start_agent = agent_offsets_[env_idx];
+      std::size_t end_agent = agent_offsets_[env_idx + 1];
+      for (std::size_t a = start_agent; a < end_agent; ++a) {
+        cell_ids[a] = cell_idx;
+      }
+    }
+  }
+  return cell_ids;
 }
 
 void BatchedRocketSimCollector::reset_all(CollectorTimings* timings) {

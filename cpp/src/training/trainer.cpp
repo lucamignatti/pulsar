@@ -1,4 +1,5 @@
 #include "pulsar/training/trainer.hpp"
+#include "pulsar/training/reachability_grid.hpp"
 
 #ifdef PULSAR_HAS_TORCH
 
@@ -1183,12 +1184,19 @@ TrainerMetrics Trainer::update_actor(RolloutStorage& rollout, int /*update_index
     actor_optimizer_.zero_grad();
     if (car_goal_critic_optimizer_) car_goal_critic_optimizer_->zero_grad();
 
+    torch::Tensor loss_weights;
+    if (batch.agent_ids.defined()) {
+      torch::Tensor local_ids = batch.agent_ids % (2 * config_.env.team_size);
+      torch::Tensor is_defender = local_ids >= config_.env.team_size;
+      loss_weights = torch::where(is_defender, 0.85F, 1.0F).to(device_);
+    }
+
     // Ball head (goal_dim=4): InfoNCE critic + Gumbel-Softmax actor
     torch::Tensor ball_critic_loss, ball_actor_loss, ball_score;
     gcrl_trainer_->compute_gcrl_losses(
         actor_->goal_critic(), features, actions_dev, logits, masks, ball_goals, ball_goals,
         /*compute_critic=*/true, /*compute_actor=*/(lambda_actor > 0.0F),
-        ball_critic_loss, ball_actor_loss, ball_score);
+        ball_critic_loss, ball_actor_loss, ball_score, loss_weights);
 
     // Car head (car_goal_dim=3): InfoNCE critic + Gumbel-Softmax actor (annealed)
     const float w_car = config_.crl.car_head_initial_weight *
@@ -1203,7 +1211,7 @@ TrainerMetrics Trainer::update_actor(RolloutStorage& rollout, int /*update_index
       gcrl_trainer_->compute_gcrl_losses(
           car_goal_critic_, features, actions_dev, logits, masks, car_goals, ball_pos_goal,
           /*compute_critic=*/true, /*compute_actor=*/(lambda_actor > 0.0F),
-          car_critic_loss, car_actor_loss, car_score);
+          car_critic_loss, car_actor_loss, car_score, loss_weights);
       total_loss = total_loss + w_car * car_critic_loss;
       if (lambda_actor > 0.0F && car_actor_loss.defined())
         total_loss = total_loss + w_car * lambda_actor * car_actor_loss;
@@ -2284,7 +2292,11 @@ void Trainer::collect_rollout(
               collector.host_terminal_observations(),
               output.encoded);
           auto& coll = collector;
-          dest.set_mode_ids_slice(step, shard_step.agent_offset, static_cast<int>(coll.total_agents()), coll.mode_id());
+          if (coll.mode() == "self_play_reachability") {
+            dest.set_mode_ids_slice(step, shard_step.agent_offset, coll.get_active_cell_ids());
+          } else {
+            dest.set_mode_ids_slice(step, shard_step.agent_offset, static_cast<int>(coll.total_agents()), coll.mode_id());
+          }
 
           result.steps.push_back(std::move(shard_step));
         }
@@ -3228,6 +3240,64 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
     } else {
       wait_for_checkpoint();
       train_metrics = update_actor(rollout_, update_index);
+    }
+
+    // 2.5 Evaluate and update reachability grid using exact KLD
+    if (config_.env.mode == "self_play_reachability" && g_reachability_grid) {
+      torch::NoGradGuard no_grad;
+      actor_->eval();
+
+      int R = rollout_.capacity();
+      int A_cnt = rollout_.num_agents();
+      int N_samples = R * A_cnt;
+
+      torch::Tensor flat_obs = rollout_.obs.reshape({N_samples, -1}).to(device_);
+      torch::Tensor flat_masks = rollout_.action_masks.reshape({N_samples, -1}).to(device_);
+      torch::Tensor flat_actions = rollout_.actions.reshape({N_samples, 1}).to(device_);
+      torch::Tensor flat_goals = rollout_.goal_positions.reshape({N_samples, -1}).to(device_);
+
+      auto norm_obs = actor_normalizer_.normalize(flat_obs);
+      auto output = actor_->forward_step(norm_obs, flat_goals);
+
+      torch::Tensor masked_logits = apply_action_mask_to_logits(output.policy_logits, flat_masks);
+      float policy_temp = std::max(config_.ppo.policy_temperature, 1.0e-6F);
+      torch::Tensor log_probs = torch::log_softmax(masked_logits / policy_temp, -1);
+      torch::Tensor new_log_probs = log_probs.gather(-1, flat_actions).squeeze(-1);
+
+      torch::Tensor old_log_probs = rollout_.action_log_probs.reshape({N_samples}).to(device_);
+      torch::Tensor kl_divs = (old_log_probs - new_log_probs).to(torch::kCPU);
+      torch::Tensor cell_ids = rollout_.mode_ids.reshape({N_samples}).to(torch::kCPU);
+
+      const float* kl_ptr = kl_divs.data_ptr<float>();
+      const auto* cell_ptr = cell_ids.data_ptr<std::int8_t>();
+
+      std::unordered_map<int, std::vector<float>> cell_kls;
+      for (int i = 0; i < N_samples; ++i) {
+        int cell_idx = static_cast<int>(cell_ptr[i]);
+        cell_kls[cell_idx].push_back(kl_ptr[i]);
+      }
+
+      for (const auto& [cell_idx, kls] : cell_kls) {
+        if (kls.empty()) continue;
+        float avg_kl = 0.0F;
+        for (float val : kls) {
+          avg_kl += val;
+        }
+        avg_kl /= static_cast<float>(kls.size());
+
+        int y_bins = 16;
+        int ci = cell_idx / y_bins;
+        int cj = cell_idx % y_bins;
+        g_reachability_grid->record_kl(ci, cj, avg_kl);
+      }
+
+      auto [new_mastered, new_frontier] = g_reachability_grid->update_frontiers();
+      if (new_mastered > 0 || new_frontier > 0) {
+        int unknown = 0, frontier = 0, mastered = 0, tier = 0;
+        g_reachability_grid->get_stats(unknown, frontier, mastered, tier);
+        std::cout << "[CURRICULUM UPDATE] C++ Grid Mastered " << mastered << " cells (" 
+                  << frontier << " frontier, " << unknown << " unknown) at tier " << tier << ".\n" << std::flush;
+      }
     }
 
     // 3. ES-LoRA update (touches actor_, safe now that PPO update is done)

@@ -119,6 +119,7 @@ if(PULSAR_ENABLE_TORCH)
       cpp/src/training/optimizers.cpp
       cpp/src/training/gradient_ops.cpp
       cpp/src/training/gcrl_trainer.cpp
+      cpp/src/training/reachability_grid.cpp
       cpp/src/training/self_play_manager.cpp
       cpp/src/training/replay_buffer.cpp
       cpp/src/training/sac_critic.cpp

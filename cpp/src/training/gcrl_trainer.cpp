@@ -38,7 +38,8 @@ torch::Tensor goal_actor_critic_loss(
     const torch::Tensor& logits,
     const torch::Tensor& masks,
     const torch::Tensor& future_goals,
-    int contrastive_batch_size) {
+    int contrastive_batch_size,
+    const torch::Tensor& loss_weights) {
   const auto active_count = features.size(0);
   if (active_count <= 0) {
     return torch::zeros({}, logits.options().dtype(torch::kFloat32));
@@ -48,6 +49,7 @@ torch::Tensor goal_actor_critic_loss(
   torch::Tensor selected_logits = logits;
   torch::Tensor selected_masks = masks;
   torch::Tensor selected_goals = future_goals;
+  torch::Tensor selected_weights = loss_weights;
   const int bounded_batch = std::max(1, contrastive_batch_size);
   if (active_count > static_cast<c10::IntArrayRef::value_type>(bounded_batch)) {
     const torch::Tensor idx = torch::randperm(
@@ -58,6 +60,9 @@ torch::Tensor goal_actor_critic_loss(
     selected_logits = selected_logits.index({idx});
     selected_masks = selected_masks.index({idx});
     selected_goals = selected_goals.index({idx});
+    if (selected_weights.defined()) {
+      selected_weights = selected_weights.index({idx});
+    }
   }
 
   const torch::Tensor action_probs = sample_masked_gumbel_softmax(
@@ -65,10 +70,14 @@ torch::Tensor goal_actor_critic_loss(
       selected_masks,
       1.0F);
   ModuleRequiresGradGuard freeze_goal_critic(*goal_critic, false);
-  return -goal_critic->forward(
+  torch::Tensor losses = -goal_critic->forward(
       selected_features.detach(),
       action_probs,
-      selected_goals.detach()).to(torch::kFloat32).mean();
+      selected_goals.detach()).to(torch::kFloat32).squeeze(-1);
+  if (selected_weights.defined()) {
+    losses = losses * selected_weights.to(losses.device());
+  }
+  return losses.mean();
 }
 
 GCRLTrainer::GCRLTrainer(
@@ -88,7 +97,8 @@ void GCRLTrainer::compute_gcrl_losses(
     bool compute_actor_loss,
     torch::Tensor& goal_loss,
     torch::Tensor& actor_goal_loss,
-    torch::Tensor& goal_score) {
+    torch::Tensor& goal_score,
+    const torch::Tensor& loss_weights) {
   PULSAR_TRACE_SCOPE_CAT("gcrl_trainer", "compute_gcrl_losses");
 
   const auto active_count = active_features.size(0);
@@ -127,7 +137,8 @@ void GCRLTrainer::compute_gcrl_losses(
         active_logits,
         active_masks,
         active_actor_goal_pos,
-        config_.contrastive_batch_size);
+        config_.contrastive_batch_size,
+        loss_weights);
   }
 }
 

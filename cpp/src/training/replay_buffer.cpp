@@ -41,6 +41,7 @@ ReplayBuffer::ReplayBuffer(
   ep_car_goals_  = torch::zeros({E, T, car_goal_dim_}, fpin);
   ep_masks_      = torch::ones({E, T, action_dim_}, upin);
   ep_lengths_    = torch::zeros({E}, ipin);
+  ep_agent_ids_  = torch::zeros({E}, lpin);
 
   // Accumulation buffers — CPU only, no pinning needed (written step-by-step)
   const auto fcpu = torch::TensorOptions().dtype(torch::kFloat32);
@@ -109,6 +110,7 @@ void ReplayBuffer::flush_agent_locked(int i) {
   ep_car_goals_[slot].narrow(0, 0, len).copy_(acc_car_goals_[i].narrow(0, 0, len));
   ep_masks_[slot].narrow(0, 0, len).copy_(acc_masks_[i].narrow(0, 0, len));
   ep_lengths_.data_ptr<int32_t>()[slot] = len;
+  ep_agent_ids_.data_ptr<int64_t>()[slot] = i;
 
   head_   = (head_ + 1) % config_.max_episodes;
   filled_ = std::min(filled_ + 1, config_.max_episodes);
@@ -182,6 +184,7 @@ ReplayBuffer::CRLBatch ReplayBuffer::sample_crl_batch(int batch_size, int sequen
   batch.masks   = ep_masks_.view({-1, action_dim_}).index_select(0, flat_t);
   batch.future_ball_goals = ep_ball_goals_.view({-1, goal_dim_}).index_select(0, flat_tp);
   batch.future_car_goals  = ep_car_goals_.view({-1, car_goal_dim_}).index_select(0, flat_tp);
+  batch.agent_ids = ep_agent_ids_.index_select(0, ep_indices.to(torch::kInt64));
   return batch;
 }
 

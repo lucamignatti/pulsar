@@ -21,7 +21,8 @@ torch::Tensor goal_actor_critic_loss(
     const torch::Tensor& logits,
     const torch::Tensor& masks,
     const torch::Tensor& future_goals,
-    int contrastive_batch_size);
+    int contrastive_batch_size,
+    const torch::Tensor& loss_weights = {});
 
 class GCRLTrainer {
  public:
@@ -41,7 +42,8 @@ class GCRLTrainer {
       bool compute_actor_loss,
       torch::Tensor& goal_loss,
       torch::Tensor& actor_goal_loss,
-      torch::Tensor& goal_score);
+      torch::Tensor& goal_score,
+      const torch::Tensor& loss_weights = {});
 
  private:
   GoalCriticConfig config_;

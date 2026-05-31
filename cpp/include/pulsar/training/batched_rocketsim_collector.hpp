@@ -18,6 +18,7 @@
 #include "pulsar/env/rocketsim_engine.hpp"
 #include "pulsar/rl/interfaces.hpp"
 #include "pulsar/training/reward_engine.hpp"
+#include "pulsar/training/reachability_grid.hpp"
 
 namespace pulsar {
 
@@ -113,6 +114,7 @@ class BatchedRocketSimCollector {
   [[nodiscard]] const torch::Tensor& host_env_touched() const;
   [[nodiscard]] const torch::Tensor& host_env_multi_touched() const;
   [[nodiscard]] const torch::Tensor& host_bootstrap_truncated() const;
+  [[nodiscard]] std::vector<std::int8_t> get_active_cell_ids() const;
 
  private:
   struct HostBuffers {

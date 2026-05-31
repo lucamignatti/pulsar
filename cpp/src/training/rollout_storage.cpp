@@ -185,6 +185,18 @@ void RolloutStorage::set_mode_ids_slice(int step, int agent_offset, std::int8_t 
   set_mode_ids_slice(step, agent_offset, remaining, mode_id);
 }
 
+void RolloutStorage::set_mode_ids_slice(int step, int agent_offset, const std::vector<std::int8_t>& mode_ids_vec) {
+  if (step < 0 || step >= rollout_length_) {
+    throw std::out_of_range("RolloutStorage::set_mode_ids_slice step is outside rollout capacity.");
+  }
+  const int agent_count = static_cast<int>(mode_ids_vec.size());
+  if (agent_offset < 0 || agent_count <= 0 || agent_offset + agent_count > num_agents_) {
+    throw std::out_of_range("RolloutStorage::set_mode_ids_slice agent range is outside rollout capacity.");
+  }
+  auto cpu_tensor = torch::from_blob(const_cast<std::int8_t*>(mode_ids_vec.data()), {agent_count}, torch::TensorOptions().dtype(torch::kInt8));
+  mode_ids[step].narrow(0, agent_offset, agent_count).copy_(cpu_tensor, /*non_blocking=*/true);
+}
+
 void RolloutStorage::set_final_values(
     const std::unordered_map<std::string, torch::Tensor>& final_values) {
   for (const auto& [name, tensor] : final_values) {

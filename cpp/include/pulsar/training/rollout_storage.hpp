@@ -95,6 +95,7 @@ class RolloutStorage {
 
   void set_mode_ids_slice(int step, int agent_offset, int agent_count, std::int8_t mode_id);
   void set_mode_ids_slice(int step, int agent_offset, std::int8_t mode_id);
+  void set_mode_ids_slice(int step, int agent_offset, const std::vector<std::int8_t>& mode_ids_vec);
 
  private:
   int rollout_length_ = 0;
