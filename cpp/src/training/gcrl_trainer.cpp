@@ -18,7 +18,18 @@ torch::Tensor sample_masked_gumbel_softmax(
   const torch::Tensor masked_logits = apply_action_mask_to_logits(logits, masks);
   const torch::Tensor uniform = torch::rand_like(masked_logits).clamp(1.0e-6F, 1.0F - 1.0e-6F);
   const torch::Tensor gumbel = -torch::log(-torch::log(uniform));
-  return torch::softmax((masked_logits + gumbel) / std::max(temperature, 1.0e-3F), -1);
+  const torch::Tensor y_soft = torch::softmax((masked_logits + gumbel) / std::max(temperature, 1.0e-3F), -1);
+  // Straight-Through (paper spec): hard one-hot in the forward pass so the critic
+  // sees the same action representation it is trained on (real actions are hard
+  // one-hots), while gradients flow through the soft distribution in the backward
+  // pass. Feeding soft probs forward would be a train/eval mismatch for the critic.
+  const torch::Tensor index = y_soft.argmax(-1, /*keepdim=*/true);
+  // zeros_like is called on the detached soft tensor so scatter_ operates on a
+  // plain non-grad tensor; y_hard has no autograd history.
+  const torch::Tensor y_hard = torch::zeros_like(y_soft.detach()).scatter_(-1, index, 1.0F);
+  // ST: stop gradient through the (y_hard - y_soft) correction so that only
+  // y_soft carries the backward pass (matching the soft distribution gradient).
+  return y_soft + (y_hard - y_soft.detach());
 }
 
 torch::Tensor goal_actor_critic_loss(

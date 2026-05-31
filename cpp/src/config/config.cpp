@@ -428,6 +428,7 @@ void to_json(json& j, const ReplayBufferConfig& value) {
       {"max_episode_length", value.max_episode_length},
       {"min_episodes_before_sampling", value.min_episodes_before_sampling},
       {"max_future_horizon", value.max_future_horizon},
+      {"discount_gamma", value.discount_gamma},
   };
 }
 
@@ -443,6 +444,7 @@ void from_json(const json& j, ReplayBufferConfig& value) {
   value.max_episode_length = j.value("max_episode_length", 300);
   value.min_episodes_before_sampling = j.value("min_episodes_before_sampling", 32);
   value.max_future_horizon = j.value("max_future_horizon", 256);
+  value.discount_gamma = j.value("discount_gamma", 0.99);
 }
 
 void to_json(json& j, const CRLConfig& value) {

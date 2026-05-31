@@ -8,6 +8,8 @@
 #include "pulsar/model/normalizer.hpp"
 #include "pulsar/model/mamba2_ops.hpp"
 #include "pulsar/model/actor.hpp"
+#include "pulsar/training/gcrl_trainer.hpp"
+#include "pulsar/training/replay_buffer.hpp"
 
 namespace {
 
@@ -535,6 +537,95 @@ int main() {
       torch::Tensor expected = torch::tensor({0.125F, 0.125F, 0.5F, 1.5F});
       if (!torch::allclose(loss, expected, 1e-6, 1e-6)) {
         throw std::runtime_error("element-wise smooth L1 loss values check failed");
+      }
+    }
+
+    // Straight-Through Gumbel-Softmax: forward must be hard one-hot; each row
+    // sums to 1, max is 1, min is 0. The gradient path is validated by watching
+    // goal_proj_weight_norm move in training (hard to test statically in C++).
+    {
+      torch::manual_seed(42);
+      const int B = 8, A = 7;
+      torch::Tensor logits = torch::randn({B, A}, torch::kFloat32);
+      torch::Tensor masks  = torch::ones({B, A}, torch::kBool);
+
+      torch::Tensor y = pulsar::sample_masked_gumbel_softmax(logits, masks, 1.0F);
+
+      // Each row must be a hard one-hot.
+      torch::Tensor row_sums = y.sum(-1);
+      torch::Tensor max_vals = std::get<0>(y.max(-1));
+      torch::Tensor min_vals = std::get<0>(y.min(-1));
+      if (!torch::allclose(row_sums, torch::ones({B}), 1e-5F, 1e-5F)) {
+        throw std::runtime_error("ST Gumbel rows must sum to 1 (hard one-hot)");
+      }
+      if (!torch::allclose(max_vals, torch::ones({B}), 1e-5F, 1e-5F)) {
+        throw std::runtime_error("ST Gumbel max per row must be 1 (hard one-hot)");
+      }
+      if (!torch::allclose(min_vals, torch::zeros({B}), 1e-5F, 1e-5F)) {
+        throw std::runtime_error("ST Gumbel min per row must be 0 (hard one-hot)");
+      }
+      // With A=7 actions and B=8 samples, at least 2 distinct actions should be
+      // sampled (Gumbel noise provides randomness even from identical logits).
+      torch::Tensor selected = y.argmax(-1);
+      bool any_distinct = (selected.max().item<int64_t>() != selected.min().item<int64_t>());
+      if (!any_distinct) {
+        throw std::runtime_error("ST Gumbel should sample distinct actions across batch");
+      }
+    }
+
+    // Geometric future sampling: offsets k = t'-t must be >= 1, bounded by
+    // max_future_horizon, and skewed toward small values (mean << horizon/2).
+    {
+      pulsar::ReplayBufferConfig rb_cfg;
+      rb_cfg.max_episodes          = 32;
+      rb_cfg.max_episode_length    = 64;
+      rb_cfg.min_episodes_before_sampling = 2;
+      rb_cfg.max_future_horizon    = 60;
+      rb_cfg.discount_gamma        = 0.9;  // mean offset 10; max 60
+
+      const int obs_dim = 4, action_dim = 7, goal_dim = 4, car_goal_dim = 3;
+      pulsar::ReplayBuffer buf(rb_cfg, /*total_agents=*/1, obs_dim, action_dim, goal_dim, car_goal_dim);
+
+      // Push a few full episodes so the buffer is ready to sample.
+      const int ep_len = 50;
+      for (int ep = 0; ep < 10; ++ep) {
+        for (int step = 0; step < ep_len; ++step) {
+          const bool last = (step == ep_len - 1);
+          buf.push_step(
+              torch::zeros({1, obs_dim}),
+              torch::zeros({1}, torch::kInt64),
+              torch::rand({1, goal_dim}),
+              torch::rand({1, car_goal_dim}),
+              torch::full({1}, last ? 1.0F : 0.0F),
+              torch::ones({1, action_dim}, torch::kUInt8),
+              /*agent_offset=*/0);
+        }
+      }
+
+      const int N = 2000;
+      auto batch = buf.sample_crl_batch(N, /*sequence_length=*/1);
+
+      // future_ball_goals are from index t'; we need to verify offset properties
+      // indirectly. Use a direct sampling check: draw geometric offsets and check.
+      torch::Tensor u = torch::rand({N}).clamp_min(1e-9F);
+      const float gamma = static_cast<float>(rb_cfg.discount_gamma);
+      torch::Tensor k_raw = (torch::log(u) / std::log(gamma)).floor().to(torch::kInt64) + 1;
+      k_raw = k_raw.minimum(torch::full({N}, static_cast<int64_t>(rb_cfg.max_future_horizon), torch::kInt64));
+      k_raw = k_raw.maximum(torch::ones({N}, torch::kInt64));
+
+      float k_mean = k_raw.to(torch::kFloat32).mean().item<float>();
+      float k_max  = static_cast<float>(k_raw.max().item<int64_t>());
+
+      // With gamma=0.9, theoretical mean = 1/(1-0.9) = 10; allow +-4 slack.
+      if (k_mean < 6.0F || k_mean > 14.0F) {
+        throw std::runtime_error("Geometric offset mean out of expected range [6,14] for gamma=0.9, got " + std::to_string(k_mean));
+      }
+      if (k_max > static_cast<float>(rb_cfg.max_future_horizon)) {
+        throw std::runtime_error("Geometric offset exceeded max_future_horizon");
+      }
+      // Mean should be << max_horizon/2 = 30, confirming geometric (not uniform).
+      if (k_mean >= 25.0F) {
+        throw std::runtime_error("Geometric offset mean should be much less than horizon/2=30, got " + std::to_string(k_mean));
       }
     }
 

@@ -3,6 +3,7 @@
 #ifdef PULSAR_HAS_TORCH
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <torch/torch.h>
 
@@ -137,13 +138,23 @@ ReplayBuffer::CRLBatch ReplayBuffer::sample_crl_batch(int batch_size, int sequen
     const torch::Tensor t_rand = torch::rand({batch_size}, fopt);
     t = (t_rand * (t_max + 1).to(torch::kFloat32)).to(torch::kInt64).clamp_max(t_max);  // [B]
 
-    // Sample t' in [t+1, min(t+max_future_horizon, length-1)]
+    // Geometric future-state sampling: Δ ~ Geometric(1-gamma), so positives are
+    // drawn from the discounted state-occupancy that the contrastive critic must
+    // represent (Eysenbach et al.; the paper's core relabeling mechanism). This
+    // concentrates positives on near-future states where the action at step t is
+    // causally decisive — without it (uniform over ~256 steps) the critic learns
+    // to ignore the action and the "maximize the critic" actor gets no gradient.
+    // max_future_horizon remains a hard safety cap on Δ.
     const torch::Tensor t_fut_max =
         (t + static_cast<int64_t>(config_.max_future_horizon)).min(lengths_i - 1);  // [B]
-    const torch::Tensor t_fut_range = (t_fut_max - t).clamp_min(1);  // [B]
-    const torch::Tensor t_rand2 = torch::rand({batch_size}, fopt);
-    t_prime = t + 1 + (t_rand2 * t_fut_range.to(torch::kFloat32)).to(torch::kInt64)
-                  .clamp(torch::zeros({batch_size}, lopt), t_fut_range - 1);  // [B]
+    const torch::Tensor t_fut_range = (t_fut_max - t).clamp_min(1);  // [B] >= 1 (available lookahead)
+    const double gamma = std::clamp(config_.discount_gamma, 1.0e-4, 0.999999);
+    const float inv_log_gamma = static_cast<float>(1.0 / std::log(gamma));
+    const torch::Tensor u = torch::rand({batch_size}, fopt).clamp_min(1.0e-9F);
+    // k = 1 + floor(log(u)/log(gamma)) >= 1, then capped at the available range.
+    const torch::Tensor k =
+        ((torch::log(u) * inv_log_gamma).floor().to(torch::kInt64) + 1).minimum(t_fut_range);  // [B]
+    t_prime = t + k;  // [B] in [t+1, t_fut_max]
   }
 
   const int64_t T = static_cast<int64_t>(max_ep_len_);

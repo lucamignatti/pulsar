@@ -2,7 +2,7 @@
   "schema_version": 7,
   "obs_schema_version": 2,
   "env": {
-    "mode": "soccar",
+    "mode": "soccar_random",
     "collision_meshes_path": "collision_meshes",
     "team_size": 1,
     "tick_skip": 8,
@@ -115,7 +115,8 @@
     "max_episodes": 2048,
     "max_episode_length": 300,
     "min_episodes_before_sampling": 32,
-    "max_future_horizon": 256
+    "max_future_horizon": 256,
+    "discount_gamma": 0.99
   },
   "crl": {
     "enabled": true,

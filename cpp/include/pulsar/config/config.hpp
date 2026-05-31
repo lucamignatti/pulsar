@@ -189,6 +189,10 @@ struct ReplayBufferConfig {
   int max_episode_length = 300;
   int min_episodes_before_sampling = 32;
   int max_future_horizon = 256;
+  // Discount for geometric future-state sampling. Positives are drawn as
+  // Δ~Geometric(1-gamma) so the contrastive critic represents the discounted
+  // state-occupancy (a valid Q-function). Should match ppo.gamma.
+  double discount_gamma = 0.99;
 };
 
 struct SACCriticConfig {
