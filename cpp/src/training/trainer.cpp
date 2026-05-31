@@ -1123,11 +1123,19 @@ TrainerMetrics Trainer::update_actor(RolloutStorage& rollout, int /*update_index
     const torch::Tensor ball_goals    = batch.future_ball_goals.to(device_);
     const torch::Tensor car_goals     = batch.future_car_goals.to(device_);
 
-    // Forward actor (no goal conditioning needed for InfoNCE update;
-    // features encode obs, critic evaluates obs×action×goal similarity)
-    const auto out = actor_->forward_step(obs_dev, {}, /*compute_value=*/false);
-    const torch::Tensor features = out.features;   // [B, feat_dim]
-    const torch::Tensor logits   = out.policy_logits; // [B, action_dim]
+    // Critic features must stay goal-AGNOSTIC: the contrastive structure is
+    // φ(o,a) vs ψ(g); leaking the goal into φ lets InfoNCE trivially collapse.
+    const auto base = actor_->forward_step(obs_dev, {}, /*compute_value=*/false);
+    const torch::Tensor features = base.features;   // [B, feat_dim] goal-agnostic
+
+    // Policy logits MUST be goal-conditioned. The DDPG-style actor loss trains
+    // π(a|o,g) to reach the hindsight goal; without conditioning, goal_proj_
+    // never receives gradient and the policy stays blind to its commanded goal.
+    // ball_goals[i] and car_goals[i] are the ball/car components of the SAME
+    // future state t', so conditioning on the (terminal) ball goal is coherent
+    // for both heads' actor losses.
+    const auto cond = actor_->forward_step(obs_dev, ball_goals, /*compute_value=*/false);
+    const torch::Tensor logits = cond.policy_logits; // [B, action_dim] goal-conditioned
     // Uniform mask — no env masks stored in replay buffer
     const torch::Tensor masks = torch::ones({B, config_.model.action_dim}, fopt);
 

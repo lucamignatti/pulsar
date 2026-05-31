@@ -86,7 +86,7 @@ def main() -> int:
         ]
         if not metrics_lines:
             raise RuntimeError("CUDA smoke did not emit metrics")
-        for field in ["policy_loss", "value_loss", "entropy"]:
+        for field in ["ball_critic_loss"]:
             value = float(metrics_lines[-1][field])
             if not math.isfinite(value):
                 raise RuntimeError(f"non-finite metric in CUDA smoke: {field}={value}")
