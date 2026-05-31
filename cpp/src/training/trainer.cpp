@@ -507,6 +507,8 @@ std::vector<MetricItem> get_all_metrics(
   items.push_back({"car_critic_loss", metrics.car_critic_loss, "CRL"});
   items.push_back({"car_actor_loss", metrics.car_actor_loss, "CRL"});
   items.push_back({"car_head_weight", metrics.car_head_weight, "CRL"});
+  items.push_back({"goal_proj_weight_norm", metrics.goal_proj_weight_norm, "CRL"});
+  items.push_back({"goal_conditioning_kl", metrics.goal_conditioning_kl, "CRL"});
 
   return items;
 }
@@ -1111,6 +1113,8 @@ TrainerMetrics Trainer::update_actor(RolloutStorage& rollout, int /*update_index
   double car_actor_loss_sum   = 0.0;
   double grad_norm_sum        = 0.0;
   std::int64_t grad_norm_steps = 0;
+  double goal_cond_kl_sum     = 0.0;
+  std::int64_t goal_cond_kl_steps = 0;
 
   const auto lopt = torch::TensorOptions().dtype(torch::kInt64).device(device_);
   const auto fopt = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
@@ -1153,6 +1157,28 @@ TrainerMetrics Trainer::update_actor(RolloutStorage& rollout, int /*update_index
         obs_seq, ball_goals_seq, /*episode_starts=*/{}, /*compute_value=*/false);
     const torch::Tensor features = seq_out.features[L - 1];        // [B, feat_dim] goal-agnostic
     const torch::Tensor logits   = seq_out.policy_logits[L - 1];   // [B, action_dim] goal-conditioned
+
+    // Goal-conditioning diagnostic: re-run the policy on the SAME obs window but
+    // with goals permuted across the batch, then measure how much the policy
+    // distribution shifts. If goal_proj_ is dead (~0), KL stays ~0 → the policy
+    // is goal-blind and the "actor maximizes the contrastive critic" step cannot
+    // change behavior regardless of how well the critic learns.
+    {
+      torch::NoGradGuard no_grad;
+      const torch::Tensor perm = torch::randperm(
+          B, torch::TensorOptions().dtype(torch::kInt64).device(device_));
+      const torch::Tensor other_goals_seq =
+          ball_goals.index({perm}).unsqueeze(0)
+              .expand({L, B, config_.goal_critic.goal_dim}).contiguous();
+      const auto other_out = actor_->forward_sequence(
+          obs_seq, other_goals_seq, /*episode_starts=*/{}, /*compute_value=*/false);
+      const torch::Tensor other_logits = other_out.policy_logits[L - 1];
+      const torch::Tensor logp = torch::log_softmax(logits, -1);
+      const torch::Tensor logq = torch::log_softmax(other_logits, -1);
+      const torch::Tensor kl = (logp.exp() * (logp - logq)).sum(-1).mean();
+      goal_cond_kl_sum += kl.item<double>();
+      ++goal_cond_kl_steps;
+    }
 
     actor_optimizer_.zero_grad();
     if (car_goal_critic_optimizer_) car_goal_critic_optimizer_->zero_grad();
@@ -1211,6 +1237,13 @@ TrainerMetrics Trainer::update_actor(RolloutStorage& rollout, int /*update_index
     metrics.grad_norm = grad_norm_steps > 0 ? grad_norm_sum / static_cast<double>(grad_norm_steps) : 0.0;
     metrics.grad_norm_valid_steps = grad_norm_steps;
     metrics.optimizer_steps = grad_norm_steps;
+    metrics.goal_conditioning_kl = goal_cond_kl_steps > 0
+        ? goal_cond_kl_sum / static_cast<double>(goal_cond_kl_steps) : 0.0;
+  }
+
+  {
+    torch::NoGradGuard no_grad;
+    metrics.goal_proj_weight_norm = actor_->goal_proj_->weight.norm().item<double>();
   }
   metrics.update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - update_start).count();
   sanitize_actor_parameters();
@@ -3255,6 +3288,8 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
     coll_metrics.car_critic_loss = train_metrics.car_critic_loss;
     coll_metrics.car_actor_loss  = train_metrics.car_actor_loss;
     coll_metrics.car_head_weight = train_metrics.car_head_weight;
+    coll_metrics.goal_proj_weight_norm = train_metrics.goal_proj_weight_norm;
+    coll_metrics.goal_conditioning_kl  = train_metrics.goal_conditioning_kl;
 
     coll_metrics.update_agent_steps_per_second =
         next_coll_steps > 0 ? static_cast<double>(next_coll_steps) / std::max(train_metrics.update_seconds, 1.0e-9) : 0.0;
@@ -3303,6 +3338,8 @@ void Trainer::train(int updates, const std::string& checkpoint_dir, const std::s
               << " ball_critic_loss=" << coll_metrics.policy_loss
               << " car_critic_loss=" << coll_metrics.car_critic_loss
               << " car_head_weight=" << coll_metrics.car_head_weight
+              << " goal_proj_norm=" << coll_metrics.goal_proj_weight_norm
+              << " goal_cond_kl=" << coll_metrics.goal_conditioning_kl
               << " grad_norm=" << coll_metrics.grad_norm
               << " optimizer_steps=" << coll_metrics.optimizer_steps
               << " nonfinite_loss_skips=" << coll_metrics.nonfinite_loss_skips

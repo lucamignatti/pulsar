@@ -2,7 +2,7 @@
   "schema_version": 7,
   "obs_schema_version": 2,
   "env": {
-    "mode": "soccar_random",
+    "mode": "soccar",
     "collision_meshes_path": "collision_meshes",
     "team_size": 1,
     "tick_skip": 8,

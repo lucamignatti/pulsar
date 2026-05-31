@@ -120,6 +120,9 @@ struct TrainerMetrics {
   double car_critic_loss = 0.0;
   double car_actor_loss = 0.0;
   double car_head_weight = 0.0;
+  // Goal-conditioning diagnostics: if the policy is goal-blind both stay ~0.
+  double goal_proj_weight_norm = 0.0;  // L2 norm of goal_proj_ weight matrix
+  double goal_conditioning_kl = 0.0;   // mean KL between policy under two different goals
 };
 
 struct TrainerBenchmarkMetrics {
