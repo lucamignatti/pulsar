@@ -1,117 +1,89 @@
 # Pulsar
 
-Rocket League bot training with **Variance-Reduced Policy Optimization (VRPO)**, **contrastive goal-conditioned auxiliary learning (GCRL)**, **all-mode self-play**, **PCGrad**, and **EGGROLL Evolutionary Sampling**.
+Rocket League bot trained from sparse scoring rewards only — no hand-crafted reward shaping.
 
-The training loop combines three complementary signals:
+The training system uses **PPO with a quasimetric contrastive critic** to learn goal-conditioned policies entirely from ±1 terminal rewards, combined with a **reachability-grid curriculum** that automatically expands the bot's competence outward from easy positions to full-field play.
 
-1. **VRPO**: The main local optimizer using variance-reduced centralized Q-critic Expected SARSA($\lambda$) advantage estimation. This mitigates the extreme noise of GAE in self-play reinforcement learning, averaging out action-sampling noise to stably converge to game-theoretic equilibria.
-2. **Contrastive goal-conditioned critic (GCRL)**: Self-supervised future-goal encoders (state-action and goal) trained with a symmetric InfoNCE loss. Provides a representation-learning signal that never shapes the environment reward.
-3. **Evolutionary Sampling (EGGROLL)**: Periodic global parameter-space search using low-rank ($A \times B$) LoRA adapters on the final policy layer, driven by rollout reward with a KL divergence constraint.
+## How it works
 
-The production setup trains 1v1, 2v2, and 3v3 using curriculum learning. It achieves 188k collection SPS, 155k update SPS, and 133k overall SPS on a 7900x + 6800xt. 
+Three components work together:
+
+**Quasimetric contrastive critic** — A two-tower network (`φ` over state-action, `ψ` over goal) trained with symmetric InfoNCE on hindsight-relabeled goals. The asymmetric softplus distance `softplus(φ − ψ).sum(−1)` gives a directed reachability signal: how hard is it to get from this state to that goal? This critic's output drives the PPO advantage rather than the environment reward, providing a dense learning signal even when goals are rarely reached.
+
+**PPO update** — Standard clipped surrogate with GAE baseline, separate offense/defense weighting (1.0 / 0.85), and advantage sign-flip for the defending Orange agent. Three Adam optimisers (actor, value, critic) updated jointly each rollout.
+
+**Reachability-grid curriculum** — The field is partitioned into a 12 × 16 grid of ball positions. Training starts from the center cell (scorer behind ball, stationary). When the policy's per-cell KL divergence EWMA drops below a mastery threshold, neighboring cells open up. Four velocity tiers progressively add ball and car speed. Once the full field is mastered at the highest tier, resets switch to standard kickoff.
 
 ## Architecture
 
-- **Encoder**: **SSD (Structured State Space Duality)** Mamba-2 sequential backbone.
-- **Contrastive goal-conditioned encoder pair (GCRL)**: State-action encoder and goal encoder trained with symmetric InfoNCE.
-- **Evolutionary Sampling** via **EGGROLL** on the final policy layer.
-- **Multi-mode training** with Projecting Conflicting Gradients (PCGrad) over per-mode minibatch groups.
-- **Loss of Plasticity (LoP) Mitigation**: Active optimizer state resets upon parameter repair, coupled with periodic EGGROLL structured parameter rejuvenation.
-- **Custom CUDA/HIP kernels** for Mamba-2, VRPO, and other custom operators.
-- **Sharded collection** and **Distributed micro-batches** for efficient multi-GPU scaling.
-- **Overlap** between collection and update.
-- **Half-stepping** per-shard for simultaneous action computation and environment stepping during collection.
-  
-## Repository Layout
+- **Policy**: 128 × 128 tanh MLP with a Gaussian head and a goal residual connection — the goal vector (opponent-net position) is projected and added to the hidden state
+- **Value**: 128 × 128 × 1 MLP over `[obs | goal]`
+- **Critic**: Quasimetric two-tower MLP (`φ`: 128 → 32, `ψ`: 128 → 32), L2-normalised embeddings
+- **Observation**: 47-dim symmetric team-relative — ego car (19) | ball (9) | opponent (19). Orange perspective mirrors X/Y. No reward shaping, no hand-crafted features.
+- **Actions**: Continuous 8-dim Gaussian (throttle, steer, pitch, yaw, roll, jump, boost, handbrake). Orange steering/yaw/roll mirrored automatically.
+- **Environment**: RocketSim 1v1 self-play, `tick_skip = 8`, up to 200 steps per episode
 
-- `cpp/`: C++20 runtime, neural network models, VRPO training loops, modular sub-systems (PredictorTrainer, GCRLTrainer, GradientSurgery), batched collector, reward engine, curriculum, tests, benchmarks.
-- `configs/`: Experiment config files (JSON).
-- `scripts/`: Smoke tests, collision mesh downloader, W&B streaming, development setup.
-- `docs/`: Platform setup guides (CUDA and AMD/HIP ROCm).
-- `external/RocketSim/`: Vendored RocketSim submodule.
-- `python/pulsar_viz/`: Python visualization and evaluation package.
-- `cmake/`: CMake dependency finders.
+## Repository layout
+
+```
+cpp/
+  pulsar/          # Training system (models, collector, update loop, curriculum)
+  src/             # Core infrastructure (RocketSim engine, config, checkpoint, W&B logging)
+  include/pulsar/  # Core headers (types, interfaces, env, training utilities)
+configs/
+  desktop.json     # Tuned for 7900X + 6800 XT
+external/
+  RocketSim/       # Physics simulation
+```
 
 ## Requirements
 
 - CMake 3.25+
-- C++20 compiler
-- Python 3.10 – 3.13
-- `torch` and `pybind11` for the trainer and Python bindings
-- `.[viz]` extras for visualization
+- C++20 compiler (GCC 12+ or Clang 15+)
+- PyTorch (CPU, CUDA, or ROCm build)
+- RocketSim collision meshes (included as a submodule)
 
-## Setup
+## Build
 
 ```bash
 git clone --recurse-submodules https://github.com/lucamignatti/pulsar.git
 cd pulsar
-python3 -m venv .venv
-. .venv/bin/activate
-pip install torch pybind11
-pip install -e '.[viz]'
-python3 scripts/collision_mesh_downloader.py
-```
 
-Build:
-
-```bash
-cmake -S . -B build/release \
+cmake -S . -B build/pulsar \
   -DCMAKE_PREFIX_PATH="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')" \
-  -Dpybind11_DIR="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')" \
-  -DPython3_EXECUTABLE="$(which python)"
-cmake --build build/release --parallel
+  -DPULSAR_ENABLE_PYTHON=OFF \
+  -DPULSAR_ENABLE_BENCHMARKS=OFF \
+  -DPULSAR_ENABLE_ROCKETSIM=ON \
+  -DPULSAR_ENABLE_TRAINING=ON
+
+cmake --build build/pulsar --parallel
 ```
 
-For CUDA setup, see [docs/cuda_linux.md](docs/cuda_linux.md). For AMD ROCm/HIP setup, see [docs/hip_linux.md](docs/hip_linux.md).
+For AMD ROCm/HIP setup see [docs/hip_linux.md](docs/hip_linux.md). For CUDA see [docs/cuda_linux.md](docs/cuda_linux.md).
 
-## Validation
+## Train
 
 ```bash
-ctest --test-dir build/release --output-on-failure
-./build/release/pulsar_bench 20 configs/2v2_vrpo.json cpu
+# Run indefinitely (Ctrl+C to stop)
+./build/pulsar/pulsar_train configs/desktop.json
+
+# Bounded run
+./build/pulsar/pulsar_train configs/desktop.json /path/to/output 1000
 ```
 
-## Training
+The device is selected automatically: ROCm/CUDA if available, MPS on Apple Silicon, otherwise CPU.
 
-```bash
-./build/release/pulsar_vrpo_train configs/2v2_vrpo.json /path/to/run_outputs
-```
+## Config
 
-To run a bounded number of updates:
+Key parameters in `configs/desktop.json` (tuned for 7900X + 6800 XT):
 
-```bash
-./build/release/pulsar_vrpo_train configs/2v2_vrpo.json /path/to/run_outputs 100
-```
-
-## Visualizing a Checkpoint
-
-```bash
-pulsar-viz --config /path/to/checkpoint/config.json --checkpoint /path/to/checkpoint --device cpu
-```
-
-Additional options:
-
-```bash
-pulsar-viz \
-  --config /path/to/checkpoint/config.json \
-  --checkpoint /path/to/checkpoint \
-  --device cuda \
-  --seed 42 \
-  --renderer rlviser        # or rocketsimvis (needs external viewer)
-  --policy deterministic     # or stochastic
-  --udp-ip 127.0.0.1 \
-  --udp-port 9273 \
-  --video-out ./recording.mp4  # macOS screen capture of RLViser window
-```
-
-
-## Works Cited
-
-- [Transformers are SSMs: Generalized Models and Efficient Algorithms Through Structured State Space Duality](https://arxiv.org/abs/2405.21060)
-- [Loss of plasticity in deep continual learning](https://www.nature.com/articles/s41586-024-07711-7)
-- [Self-Supervised Goal-Reaching Results in Multi-Agent Cooperation and Exploration](https://arxiv.org/abs/2509.10656v1)
-- [Evolution Strategies at Scale: LLM Fine-Tuning Beyond Reinforcement Learning](https://arxiv.org/abs/2509.10656v1)
-- [Evolution Strategies at the Hyperscale](https://arxiv.org/abs/2511.16652)
-- [Gradient Surgery for Multi-Task Learning](https://arxiv.org/abs/2001.06782)
-- [GAE Falls Short in Imperfect-Information Self-Play Reinforcement Learning](https://arxiv.org/abs/2605.19235)
-
+| Key | Default | Notes |
+|---|---|---|
+| `num_envs` | 32 | Parallel 1v1 arenas |
+| `num_workers` | 11 | CPU threads for env stepping (= physical cores − 1) |
+| `num_steps` | 256 | Rollout length per update |
+| `minibatch_size` | 4096 | PPO minibatch |
+| `lr` | 3e-4 | Adam learning rate (all three optimisers) |
+| `tick_skip` | 8 | Physics ticks per action |
+| `max_steps` | 200 | Max steps per episode before truncation |
+| `collision_meshes_path` | `collision_meshes` | Path to RocketSim mesh files |
