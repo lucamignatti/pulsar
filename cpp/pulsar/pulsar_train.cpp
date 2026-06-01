@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <future>
 #include <string>
@@ -88,8 +89,9 @@ int main(int argc, char** argv) {
   const float  lr          = static_cast<float>(json_double(config_json, "lr",         3e-4));
   const int    tick_skip   = json_int   (config_json, "tick_skip",   8);
   const int    max_steps   = json_int   (config_json, "max_steps",   200);
-  const int    log_interval = json_int  (config_json, "log_interval",10);
-  const std::string meshes = json_str   (config_json, "collision_meshes_path", "collision_meshes");
+  const int    log_interval        = json_int(config_json, "log_interval",        10);
+  const int    checkpoint_interval = json_int(config_json, "checkpoint_interval", 100);
+  const std::string meshes = json_str(config_json, "collision_meshes_path", "collision_meshes");
   // num_workers: defaults to num_envs/2 if not specified.
   // Tune to physical core count minus 1 (e.g. 11 for a 12-core CPU).
   const int    num_workers  = json_int  (config_json, "num_workers",  std::max(1, num_envs / 2));
@@ -128,12 +130,35 @@ int main(int argc, char** argv) {
     }
   }
 
+  // ---- Output dir ----------------------------------------------------------
+  namespace fs = std::filesystem;
+  if (!output_dir.empty()) fs::create_directories(output_dir);
+
   // ---- Models + update loop ------------------------------------------------
   torch::manual_seed(42);
   PulsarActor   actor;
   PulsarValue   value;
   PulsarQuasimetricCritic critic;
   actor->to(dev);  value->to(dev);  critic->to(dev);
+
+  // ---- Resume from checkpoint if one exists --------------------------------
+  int start_update = 1;
+  if (!output_dir.empty()) {
+    std::ifstream latest_f(output_dir + "/latest.txt");
+    if (latest_f) {
+      int latest_upd = 0;
+      latest_f >> latest_upd;
+      if (latest_upd > 0) {
+        const std::string ckpt = output_dir + "/ckpt_" + std::to_string(latest_upd);
+        torch::load(actor,  ckpt + "/actor.pt");
+        torch::load(value,  ckpt + "/value.pt");
+        torch::load(critic, ckpt + "/critic.pt");
+        actor->to(dev);  value->to(dev);  critic->to(dev);
+        start_update = latest_upd + 1;
+        std::printf("[pulsar_train] resumed from update %d (%s)\n", latest_upd, ckpt.c_str());
+      }
+    }
+  }
 
   PulsarUpdateLoop update_loop(actor, value, critic, lr);
 
@@ -149,8 +174,9 @@ int main(int argc, char** argv) {
 
   // Per-env episode stats
   std::vector<float> env_rewards(N_agents, 0.0f);  // cumulative episode reward
+  bool curriculum_done = false;
 
-  for (int update = 1; max_updates <= 0 || update <= max_updates; ++update) {
+  for (int update = start_update; max_updates <= 0 || update <= max_updates; ++update) {
     actor->eval();
     value->eval();
     critic->eval();
@@ -261,7 +287,8 @@ int main(int argc, char** argv) {
       grid.update_frontiers();
 
       // When the full field is mastered at tier 3, switch to standard kickoff.
-      if (grid.is_complete()) {
+      if (!curriculum_done && grid.is_complete()) {
+        curriculum_done = true;
         std::printf("[pulsar_train] Curriculum complete! Switching to kickoff resets.\n");
         collector.switch_to_kickoff(static_cast<std::uint64_t>(update) * 100);
       }
@@ -296,6 +323,17 @@ int main(int argc, char** argv) {
           {"curriculum/tier",       static_cast<double>(grid.current_tier())},
           {"perf/ticks_per_sec",    fps},
       });
+    }
+
+    // ---- Checkpoint ----------------------------------------------------------
+    if (!output_dir.empty() && checkpoint_interval > 0 && update % checkpoint_interval == 0) {
+      const std::string ckpt = output_dir + "/ckpt_" + std::to_string(update);
+      fs::create_directories(ckpt);
+      torch::save(actor,  ckpt + "/actor.pt");
+      torch::save(value,  ckpt + "/value.pt");
+      torch::save(critic, ckpt + "/critic.pt");
+      std::ofstream(output_dir + "/latest.txt") << update << "\n";
+      std::printf("[pulsar_train] checkpoint → %s\n", ckpt.c_str());
     }
   }
 

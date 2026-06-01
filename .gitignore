@@ -25,3 +25,4 @@ cache/
 .serena/
 CLAUDE.md
 parity/ref/
+wandb/

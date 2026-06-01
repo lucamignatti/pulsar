@@ -55,7 +55,7 @@ static int check(const std::string& ref_dir, const std::string& name,
     std::printf("  FAIL %-38s max_abs_diff=%.2e (tol=%.2e)\n", name.c_str(), diff, tol);
     // Print first few mismatches
     const auto diff_t = (got_c.reshape(-1) - ref_t.reshape(-1)).abs();
-    for (int i = 0; i < std::min(3LL, diff_t.numel()); ++i) {
+    for (int i = 0; i < std::min(static_cast<int64_t>(3), diff_t.numel()); ++i) {
       if (diff_t[i].item<float>() > tol)
         std::printf("    [%d] ref=%.6f got=%.6f\n", i,
                     ref_t.reshape(-1)[i].item<float>(),

@@ -81,6 +81,20 @@ add_executable(pulsar_train cpp/pulsar/pulsar_train.cpp)
 target_link_libraries(pulsar_train PRIVATE pulsar_training)
 target_compile_definitions(pulsar_train PRIVATE PULSAR_HAS_TORCH=1)
 
+# ── Python bindings (pybind11) ────────────────────────────────────────────────
+option(PULSAR_ENABLE_PYTHON "Build pybind11 Python bindings (pulsar_py)" OFF)
+if(PULSAR_ENABLE_PYTHON)
+  set(PYBIND11_FINDPYTHON ON)
+  find_package(pybind11 CONFIG QUIET)
+  if(pybind11_FOUND)
+    pybind11_add_module(pulsar_py MODULE cpp/pulsar/pulsar_bind.cpp)
+    target_link_libraries(pulsar_py PRIVATE pulsar_headers)
+    message(STATUS "pulsar_py: pybind11 ${pybind11_VERSION}")
+  else()
+    message(WARNING "PULSAR_ENABLE_PYTHON=ON but pybind11 not found — skipping")
+  endif()
+endif()
+
 # ── Parity gates ──────────────────────────────────────────────────────────────
 add_executable(pulsar_parity_check cpp/pulsar/parity_check.cpp)
 target_link_libraries(pulsar_parity_check PRIVATE pulsar_headers)
