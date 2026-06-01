@@ -34,6 +34,7 @@
 #include "pulsar/pulsar_models.hpp"
 #include "pulsar/pulsar_rollout_storage.hpp"
 #include "pulsar/pulsar_update.hpp"
+#include "pulsar/pulsar_wandb.hpp"
 
 using namespace pulsar;
 
@@ -92,6 +93,9 @@ int main(int argc, char** argv) {
   // num_workers: defaults to num_envs/2 if not specified.
   // Tune to physical core count minus 1 (e.g. 11 for a 12-core CPU).
   const int    num_workers  = json_int  (config_json, "num_workers",  std::max(1, num_envs / 2));
+  const std::string wb_project = json_str(config_json, "wandb_project", "");
+  const std::string wb_run     = json_str(config_json, "wandb_run",     "");
+  const std::string wb_entity  = json_str(config_json, "wandb_entity",  "");
 
   const int N_agents = num_envs * 2;
 
@@ -113,6 +117,16 @@ int main(int argc, char** argv) {
                           /*curriculum_grid=*/&grid);
   collector.initialize(/*base_seed=*/42);
   std::printf("[pulsar_train] collector initialized\n");
+
+  // ---- WandB ---------------------------------------------------------------
+  PulsarWandB wandb;
+  if (!wb_project.empty()) {
+    if (wandb.init(wb_project, wb_run, wb_entity)) {
+      std::printf("[pulsar_train] wandb → project '%s'\n", wb_project.c_str());
+    } else {
+      std::printf("[pulsar_train] wandb unavailable (wandb not installed?)\n");
+    }
+  }
 
   // ---- Models + update loop ------------------------------------------------
   torch::manual_seed(42);
@@ -269,6 +283,19 @@ int main(int argc, char** argv) {
                   update, wr,
                   result.pg_loss, result.value_loss, result.entropy, result.infonce_loss,
                   mast, front, unk, grid.current_tier(), fps);
+
+      wandb.log(update, {
+          {"train/win_rate",        static_cast<double>(wr)},
+          {"train/pg_loss",         static_cast<double>(result.pg_loss)},
+          {"train/value_loss",      static_cast<double>(result.value_loss)},
+          {"train/entropy",         static_cast<double>(result.entropy)},
+          {"train/infonce_loss",    static_cast<double>(result.infonce_loss)},
+          {"curriculum/mastered",   static_cast<double>(mast)},
+          {"curriculum/frontier",   static_cast<double>(front)},
+          {"curriculum/unknown",    static_cast<double>(unk)},
+          {"curriculum/tier",       static_cast<double>(grid.current_tier())},
+          {"perf/ticks_per_sec",    fps},
+      });
     }
   }
 

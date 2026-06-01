@@ -21,7 +21,6 @@ EnvConfig make_pulsar_env_config(std::uint64_t seed, int tick_skip, int max_epis
   EnvConfig cfg;
   cfg.team_size          = 1;
   cfg.tick_skip          = tick_skip;
-  cfg.max_episode_ticks  = max_episode_ticks;
   // "random" in mode triggers the engine's mutator path (applies snapshot to arena).
   // Anything else triggers arena_->ResetToRandomKickoff() — used post-curriculum.
   cfg.mode               = use_kickoff ? "kickoff" : "random_pulsar";

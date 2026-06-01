@@ -11,8 +11,6 @@
 #include <utility>
 #include <vector>
 
-#include "pulsar/tracing/tracing.hpp"
-
 namespace pulsar {
 
 class ParallelExecutor {

@@ -12,5 +12,9 @@
   "max_steps":      200,
 
   "log_interval":    10,
-  "collision_meshes_path": "collision_meshes"
+  "collision_meshes_path": "collision_meshes",
+
+  "wandb_project": "pulsar",
+  "wandb_entity":  "lucamignatti-personal",
+  "wandb_run":     ""
 }
